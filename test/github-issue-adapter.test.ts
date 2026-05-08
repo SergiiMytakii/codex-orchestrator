@@ -36,6 +36,7 @@ test('gh issue adapter lists once per label and normalizes missing arrays', asyn
         {
           number: 1,
           title: 'One',
+          body: 'Body',
           url: 'https://github.com/example/repo/issues/1',
           state: 'OPEN',
         },
@@ -62,7 +63,7 @@ test('gh issue adapter lists once per label and normalizes missing arrays', asyn
     '--limit',
     '100',
     '--json',
-    'number,title,url,state,labels,comments,closedByPullRequestsReferences',
+    'number,title,body,url,state,labels,comments,closedByPullRequestsReferences',
   ]);
 });
 

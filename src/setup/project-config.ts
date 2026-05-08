@@ -39,6 +39,10 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
     },
     codex: {
       adapter: 'codex-cli',
+      command: 'codex',
+      args: ['exec', '--cd', '${worktreePath}', '--sandbox', 'workspace-write', '--ignore-user-config', '-'],
+      promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
+      reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
     },
     project: {
       configDir: '.codex-orchestrator',
@@ -56,6 +60,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       additionalPathGlobs: [],
     },
     branches: {
+      base: 'main',
       scopedIssue: 'codex/issue-${issueNumber}',
       issueTree: 'codex/tree-${parentIssueNumber}',
     },

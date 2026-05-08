@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   InMemoryGitHubIssueAdapter,
+  InMemoryGitHubPullRequestAdapter,
   RunnerStateStore,
+  buildScopedImplementationPrompt,
+  runScopedAutoCommand,
   discoverIssueWork,
   reconcileRunnerState,
   runSetupCommand,
@@ -24,7 +27,10 @@ test('exports setup command from the package entrypoint', () => {
 test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof InMemoryGitHubIssueAdapter, 'function');
   assert.equal(typeof RunnerStateStore, 'function');
+  assert.equal(typeof InMemoryGitHubPullRequestAdapter, 'function');
   assert.equal(typeof discoverIssueWork, 'function');
+  assert.equal(typeof buildScopedImplementationPrompt, 'function');
+  assert.equal(typeof runScopedAutoCommand, 'function');
   assert.equal(typeof reconcileRunnerState, 'function');
   assert.equal(typeof runStatusCommand, 'function');
 });

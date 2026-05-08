@@ -1,0 +1,69 @@
+import type { CodexOrchestratorConfig } from '../config/schema.js';
+import type { ProcessExecutor } from '../process/command.js';
+import { defaultProcessExecutor } from '../process/command.js';
+
+export interface CodexCommandRunInput {
+  targetRoot: string;
+  config: CodexOrchestratorConfig;
+  worktreePath: string;
+  promptPath: string;
+  promptText: string;
+  reportPath: string;
+  isolatedHomePath: string;
+  issueNumber: number;
+  sessionId: string;
+  branchName: string;
+}
+
+export interface CodexCommandRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export class CodexCommandAdapter {
+  public constructor(
+    private readonly config: CodexOrchestratorConfig,
+    private readonly executor: ProcessExecutor = defaultProcessExecutor,
+  ) {}
+
+  public async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+    const args = this.config.codex.args.map((arg) => renderCodexArg(arg, input));
+    const result = await this.executor(this.config.codex.command, args, {
+      cwd: input.worktreePath,
+      stdin: input.promptText,
+      env: buildCodexProcessEnv(input, process.env),
+    });
+    return result;
+  }
+}
+
+export function buildCodexProcessEnv(
+  input: CodexCommandRunInput,
+  sourceEnv: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const allowed = ['PATH', 'CODEX_HOME', 'LANG', 'LC_ALL', 'TMPDIR'];
+  const env: Record<string, string> = {};
+  for (const key of allowed) {
+    const value = sourceEnv[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+  env.HOME = input.isolatedHomePath;
+  env[input.config.codex.promptFileEnv] = input.promptPath;
+  env[input.config.codex.reportFileEnv] = input.reportPath;
+  return env;
+}
+
+function renderCodexArg(arg: string, input: CodexCommandRunInput): string {
+  return arg
+    .replaceAll('${worktreePath}', input.worktreePath)
+    .replaceAll('${promptFile}', input.promptPath)
+    .replaceAll('${promptPath}', input.promptPath)
+    .replaceAll('${reportFile}', input.reportPath)
+    .replaceAll('${reportPath}', input.reportPath)
+    .replaceAll('${issueNumber}', String(input.issueNumber))
+    .replaceAll('${sessionId}', input.sessionId)
+    .replaceAll('${branchName}', input.branchName);
+}

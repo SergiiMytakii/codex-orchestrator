@@ -120,6 +120,20 @@ test('status missing target exits with usage error', async () => {
   assert.match(result.stderr, /status requires --target <path>/);
 });
 
+test('run command validates required arguments', async () => {
+  const missingTarget = await runCli(['run', '--issue', '155']);
+  assert.equal(missingTarget.status, 2);
+  assert.match(missingTarget.stderr, /run requires --target <path>/);
+
+  const missingIssue = await runCli(['run', '--target', '/tmp/repo']);
+  assert.equal(missingIssue.status, 2);
+  assert.match(missingIssue.stderr, /run requires --issue <number>/);
+
+  const invalidIssue = await runCli(['run', '--target', '/tmp/repo', '--issue', '0']);
+  assert.equal(invalidIssue.status, 2);
+  assert.match(invalidIssue.stderr, /run requires --issue <number>/);
+});
+
 test('runs status dry-run without launching Codex', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-status-target-'));
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
