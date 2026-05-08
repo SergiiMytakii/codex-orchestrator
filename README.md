@@ -12,8 +12,9 @@ The first package contract supports:
 - A local runner boundary.
 - A Codex adapter boundary, starting with `codex-cli`.
 - Project-local `.codex-orchestrator/` config.
+- Setup, status, scoped issue execution, and parent issue-tree planning.
 
-Live GitHub polling, Codex execution, issue planning, worktree orchestration, pull request handoff, and setup commands are not implemented in this first scaffold.
+Always-on polling, child wave execution, integration pull request handoff for issue trees, auto-merge, and npm publication are not implemented in this scope.
 
 ## CLI
 
@@ -44,7 +45,20 @@ By default, setup reports missing labels only and never overwrites existing prom
 The `status` command reads configured GitHub issues and local runner metadata, then prints eligible work, skipped issues with reason codes, and restart recovery state.
 Use `--dry-run` to make the read-only intent explicit. Status and dry-run modes do not launch Codex or mutate GitHub labels/comments.
 
-The `run` command executes one scoped `agent:auto` issue. It mutates GitHub labels/comments, creates a worktree and branch, runs the configured Codex command with a durable prompt, commits/pushes runner-owned changes, and opens one draft pull request. The runner never auto-merges and rejects configured secret file changes, reported secret reads/changes, reported destructive database/cache actions, reported production deploy/release actions, and Codex-owned git commits.
+The `run` command executes one authorized issue:
+
+- `agent:auto` runs one scoped implementation issue. It mutates GitHub labels/comments, creates a worktree and branch, runs the configured Codex command with a durable prompt, commits/pushes runner-owned changes, and opens one draft pull request.
+- `agent:plan-auto` runs planning only for one parent issue tree. It claims the parent, sends the PRD, issue-breakdown, breakdown-review, and triage workflow prompts to Codex, requires a structured planning report, updates the parent PRD, and creates or updates marked child issues. It does not execute child waves, push branches, open integration PRs, merge, publish, or run a live autonomous loop.
+
+Autonomous child membership is explicit. A child belongs to a parent tree only when it has the configured `agent:child` label and its body contains:
+
+```md
+<!-- codex-orchestrator:autonomous-child parent=#<parentIssueNumber> -->
+```
+
+Arbitrary issue links, milestones, projects, comments, and generic parent references do not authorize child membership. `agent:auto` is added to generated child issues only when the planning report marks that child as AFK-ready and the runner has persisted and verified the explicit child marker for the parent.
+
+The runner never auto-merges and rejects configured secret file changes, reported secret reads/changes, reported destructive database/cache actions, reported production deploy/release actions, Codex-owned git commits, incoherent planning graphs, and planning sessions that modify repository files.
 
 ## Project config
 

@@ -32,18 +32,34 @@ export type {
   RunnerMode,
   SkipReasonCode,
 } from './runner/issue-state-machine.js';
+export {
+  ensureAutonomousChildBody,
+  isAutonomousChildOfParent,
+  renderAutonomousChildMarker,
+  validatePlanGraph,
+} from './runner/issue-tree.js';
+export type { PlanChildNode, PlanDependencyEdge, PlanGraph, PlanGraphValidationResult } from './runner/issue-tree.js';
 export { RunnerStateStore } from './runner/local-state.js';
 export type { RunnerProcessMetadata, RunnerStateFile } from './runner/local-state.js';
 export {
+  buildPlanAutoPrompt,
   buildScopedImplementationPrompt,
+  readPlanAutoCompletionReport,
   readScopedCompletionReport,
   sessionPromptPath,
   sessionReportPath,
   writeDurablePrompt,
 } from './runner/prompt.js';
-export type { ScopedCompletionReport, ScopedPromptInput } from './runner/prompt.js';
+export type {
+  PlanAutoCompletionReport,
+  PlanAutoPromptInput,
+  ScopedCompletionReport,
+  ScopedPromptInput,
+} from './runner/prompt.js';
 export { reconcileRunnerState } from './runner/recovery.js';
 export type { ReconcileRunnerStateInput, RecoveryEntry, RecoveryStatus } from './runner/recovery.js';
+export { runPlanAutoCommand } from './runner/plan-auto-command.js';
+export type { PlanAutoCommandOptions, PlanAutoCommandResult } from './runner/plan-auto-command.js';
 export { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 export type { ScopedAutoCommandOptions, ScopedAutoCommandResult } from './runner/scoped-auto-command.js';
 export {

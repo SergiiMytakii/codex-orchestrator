@@ -4,12 +4,18 @@ import {
   InMemoryGitHubIssueAdapter,
   InMemoryGitHubPullRequestAdapter,
   RunnerStateStore,
+  buildPlanAutoPrompt,
   buildScopedImplementationPrompt,
   runScopedAutoCommand,
+  runPlanAutoCommand,
   discoverIssueWork,
+  ensureAutonomousChildBody,
+  isAutonomousChildOfParent,
   reconcileRunnerState,
+  renderAutonomousChildMarker,
   runSetupCommand,
   runStatusCommand,
+  validatePlanGraph,
   validateConfig,
 } from '../src/index.js';
 import { validConfig } from './fixtures/config.js';
@@ -30,7 +36,13 @@ test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof InMemoryGitHubPullRequestAdapter, 'function');
   assert.equal(typeof discoverIssueWork, 'function');
   assert.equal(typeof buildScopedImplementationPrompt, 'function');
+  assert.equal(typeof buildPlanAutoPrompt, 'function');
   assert.equal(typeof runScopedAutoCommand, 'function');
+  assert.equal(typeof runPlanAutoCommand, 'function');
+  assert.equal(typeof renderAutonomousChildMarker, 'function');
+  assert.equal(typeof ensureAutonomousChildBody, 'function');
+  assert.equal(typeof isAutonomousChildOfParent, 'function');
+  assert.equal(typeof validatePlanGraph, 'function');
   assert.equal(typeof reconcileRunnerState, 'function');
   assert.equal(typeof runStatusCommand, 'function');
 });

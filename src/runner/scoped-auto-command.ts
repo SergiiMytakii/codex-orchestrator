@@ -2,14 +2,14 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
-import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
+import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
-import { projectConfigPath } from '../setup/project-config.js';
+import { bulletList, formatSessionTimestamp, readRunnerConfig } from './command-utils.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import { RunnerStateStore } from './local-state.js';
 import {
@@ -57,7 +57,7 @@ interface ValidationLine {
 export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): Promise<ScopedAutoCommandResult> {
   const targetRoot = resolve(options.targetRoot);
   const now = options.now ?? new Date();
-  const config = await readConfig(targetRoot);
+  const config = await readRunnerConfig(targetRoot);
   const issueAdapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter = options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
   const git = options.git ?? new GitWorktreeManager();
@@ -225,16 +225,6 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   }
 }
 
-async function readConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
-  const content = await readFile(projectConfigPath(targetRoot), 'utf8');
-  const parsed = JSON.parse(content) as unknown;
-  const validation = validateConfig(parsed);
-  if (!validation.ok) {
-    throw new Error(`Invalid config: ${validation.errors.join('; ')}`);
-  }
-  return validation.value;
-}
-
 async function readWorkflowPrompt(path: string): Promise<string> {
   try {
     return await readFile(path, 'utf8');
@@ -362,10 +352,6 @@ function buildPullRequestBody(
   ].join('\n');
 }
 
-function bulletList(items: string[]): string[] {
-  return items.length > 0 ? items.map((item) => `- ${item}`) : ['- none'];
-}
-
 function baseResult(
   issueNumber: number,
   branchName: string,
@@ -374,10 +360,6 @@ function baseResult(
   reportPath: string,
 ): Omit<ScopedAutoCommandResult, 'status' | 'reportComment'> {
   return { issueNumber, branchName, worktreePath, promptPath, reportPath };
-}
-
-function formatSessionTimestamp(now: Date): string {
-  return now.toISOString().replace(/\D/g, '').slice(0, 14);
 }
 
 function renderTemplate(template: string, issueNumber: number): string {
