@@ -1,7 +1,7 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 
-export type RunnerMode = 'scoped-issue' | 'plan-parent';
+export type RunnerMode = 'scoped-issue' | 'plan-parent' | 'tree-child';
 
 export type SkipReasonCode =
   | 'manual-label'

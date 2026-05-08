@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { GitWorktreeManager } from '../src/git/worktree.js';
+import { promisify } from 'node:util';
+import { GitMergeConflictError, GitWorktreeManager } from '../src/git/worktree.js';
 import type { ProcessExecutor } from '../src/process/command.js';
+
+const execFileAsync = promisify(execFile);
 
 test('runner-owned commit and push disable git hooks', async () => {
   const calls: string[][] = [];
@@ -38,5 +45,97 @@ test('runner-owned commit and push disable git hooks', async () => {
     '-u',
     'origin',
     'codex/issue-155',
+  ]);
+});
+
+async function tempGitProject(): Promise<{ root: string; repo: string; remote: string }> {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-worktree-'));
+  const remote = join(root, 'remote.git');
+  const repo = join(root, 'repo');
+  await execFileAsync('git', ['init', '--bare', remote]);
+  await execFileAsync('git', ['init', '-b', 'main', repo]);
+  await execFileAsync('git', ['-C', repo, 'config', 'user.name', 'Test User']);
+  await execFileAsync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+  await writeFile(join(repo, 'README.md'), '# fixture\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Initial']);
+  await execFileAsync('git', ['-C', repo, 'remote', 'add', 'origin', remote]);
+  await execFileAsync('git', ['-C', repo, 'push', '-u', 'origin', 'main']);
+  return { root, repo, remote };
+}
+
+test('mergeBranch creates a no-ff merge commit that can be pushed from parent worktree', async () => {
+  const { root, repo, remote } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parent = join(root, 'parent');
+  const child = join(root, 'child');
+  await git.createIssueWorktree({ targetRoot: repo, workspacePath: parent, branchName: 'codex/tree-1', baseBranch: 'main' });
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: child,
+    branchName: 'codex/tree-1-issue-2',
+    baseBranch: 'codex/tree-1',
+  });
+  await writeFile(join(child, 'child.txt'), 'done\n', 'utf8');
+  await git.commitAll({ worktreePath: child, message: 'Codex: implement issue #2 for parent #1' });
+
+  await git.mergeBranch({
+    worktreePath: parent,
+    branchName: 'codex/tree-1-issue-2',
+    message: 'Codex: merge issue #2 into parent #1',
+  });
+  await git.pushBranch({ worktreePath: parent, branchName: 'codex/tree-1' });
+
+  const log = await execFileAsync('git', ['--git-dir', remote, 'log', '--oneline', 'codex/tree-1', '-1']);
+  assert.match(log.stdout, /Codex: merge issue #2 into parent #1/);
+});
+
+test('mergeBranch throws GitMergeConflictError and abortMerge cleans the merge state', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parent = join(root, 'parent');
+  const child = join(root, 'child');
+  await git.createIssueWorktree({ targetRoot: repo, workspacePath: parent, branchName: 'codex/tree-1', baseBranch: 'main' });
+  await writeFile(join(parent, 'conflict.txt'), 'parent\n', 'utf8');
+  await git.commitAll({ worktreePath: parent, message: 'parent change' });
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: child,
+    branchName: 'codex/tree-1-issue-2',
+    baseBranch: 'main',
+  });
+  await writeFile(join(child, 'conflict.txt'), 'child\n', 'utf8');
+  await git.commitAll({ worktreePath: child, message: 'child change' });
+
+  await assert.rejects(
+    git.mergeBranch({
+      worktreePath: parent,
+      branchName: 'codex/tree-1-issue-2',
+      message: 'Codex: merge issue #2 into parent #1',
+    }),
+    (error) => error instanceof GitMergeConflictError && error.branchName === 'codex/tree-1-issue-2',
+  );
+
+  await git.abortMerge(parent);
+  const status = await execFileAsync('git', ['-C', parent, 'status', '--porcelain']);
+  assert.equal(status.stdout, '');
+});
+
+test('removeWorktree uses git worktree remove from target root', async () => {
+  const calls: string[][] = [];
+  const executor: ProcessExecutor = async (_file, args) => {
+    calls.push(args);
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const git = new GitWorktreeManager(executor);
+
+  await git.removeWorktree({ targetRoot: '/repo', worktreePath: '/repo/.codex-orchestrator/workspaces/child' });
+
+  assert.deepEqual(calls[0], [
+    '-C',
+    '/repo',
+    'worktree',
+    'remove',
+    '/repo/.codex-orchestrator/workspaces/child',
   ]);
 });

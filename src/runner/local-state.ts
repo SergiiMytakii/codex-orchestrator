@@ -7,6 +7,7 @@ import type { RunnerMode } from './issue-state-machine.js';
 export interface RunnerProcessMetadata {
   issueNumber: number;
   mode: RunnerMode;
+  parentIssueNumber?: number;
   workspacePath: string;
   sessionId: string;
   retryCount: number;
@@ -82,6 +83,7 @@ const stateFileKeys = new Set(['version', 'runs']);
 const runKeys = new Set([
   'issueNumber',
   'mode',
+  'parentIssueNumber',
   'workspacePath',
   'sessionId',
   'retryCount',
@@ -119,8 +121,11 @@ function assertValidRun(value: unknown): asserts value is RunnerProcessMetadata 
   if (!Number.isInteger(record.issueNumber)) {
     throw new Error('runner metadata issueNumber must be an integer');
   }
-  if (record.mode !== 'scoped-issue' && record.mode !== 'plan-parent') {
-    throw new Error('runner metadata mode must be scoped-issue or plan-parent');
+  if (record.mode !== 'scoped-issue' && record.mode !== 'plan-parent' && record.mode !== 'tree-child') {
+    throw new Error('runner metadata mode must be scoped-issue, plan-parent, or tree-child');
+  }
+  if ('parentIssueNumber' in record && !Number.isInteger(record.parentIssueNumber)) {
+    throw new Error('runner metadata parentIssueNumber must be an integer');
   }
   for (const key of ['workspacePath', 'sessionId', 'createdAt', 'updatedAt']) {
     if (typeof record[key] !== 'string' || record[key].length === 0) {

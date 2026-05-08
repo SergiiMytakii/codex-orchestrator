@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  collectExecutableChildBatches,
   ensureAutonomousChildBody,
   isAutonomousChildOfParent,
+  parseAutonomousChildMetadata,
   renderAutonomousChildMarker,
   validatePlanGraph,
+  validatePlanGraphStructure,
   type PlanGraph,
 } from '../src/runner/issue-tree.js';
 import { validConfig } from './fixtures/config.js';
@@ -141,4 +144,159 @@ test('plan graph validation rejects wrong spec gate and same-wave ownership over
   }));
   assert.equal(overlap.ok, false);
   assert.match(overlap.ok ? '' : overlap.errors.join('\n'), /same-wave ownership overlap/);
+});
+
+function childBody(input: {
+  parentIssueNumber?: number;
+  stableId?: string;
+  afkHitl?: 'afk' | 'hitl';
+  dependsOn?: string[];
+  ownershipScope?: string[];
+  verification?: string[];
+  specGate?: string;
+} = {}): string {
+  return [
+    renderAutonomousChildMarker(input.parentIssueNumber ?? 151),
+    'Child body',
+    '',
+    '## codex-orchestrator metadata',
+    `Stable ID: ${input.stableId ?? 'a'}`,
+    `AFK/HITL: ${input.afkHitl ?? 'afk'}`,
+    `Depends on: ${(input.dependsOn ?? []).length > 0 ? (input.dependsOn ?? []).join(', ') : 'none'}`,
+    'Ownership:',
+    ...(input.ownershipScope ?? ['src/a.ts']).map((scope) => `- ${scope}`),
+    `Spec gate: ${input.specGate ?? 'wave-level'}`,
+    'Verification:',
+    ...(input.verification ?? ['npm test']).map((check) => `- ${check}`),
+  ].join('\n');
+}
+
+test('autonomous child metadata parses only marked children with required fields', () => {
+  const issue = issueFixture({
+    number: 20,
+    labels: [labels.child.name, labels.auto.name],
+    body: childBody({ stableId: 'child-a', dependsOn: ['base'], ownershipScope: ['src/a.ts', 'test/a.test.ts'] }),
+  });
+
+  const parsed = parseAutonomousChildMetadata(issue, validConfig, 151);
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.ok ? parsed.node.metadata.stableId : '', 'child-a');
+  assert.deepEqual(parsed.ok ? parsed.node.metadata.dependsOn : [], ['base']);
+  assert.deepEqual(parsed.ok ? parsed.node.metadata.ownershipScope : [], ['src/a.ts', 'test/a.test.ts']);
+
+  const unmarked = parseAutonomousChildMetadata(
+    issueFixture({ number: 21, labels: [labels.auto.name], body: childBody() }),
+    validConfig,
+    151,
+  );
+  assert.equal(unmarked.ok, false);
+  assert.match(unmarked.ok ? '' : unmarked.errors.join('\n'), /not an autonomous child/);
+
+  const malformed = parseAutonomousChildMetadata(
+    issueFixture({
+      number: 22,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: '', ownershipScope: [], verification: [], specGate: 'issue-level' }),
+    }),
+    validConfig,
+    151,
+  );
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Stable ID/);
+  assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Ownership/);
+  assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Verification/);
+  assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Spec gate/);
+});
+
+test('structural plan validation allows serializable ownership overlap while strict validation rejects same-wave overlap', () => {
+  const graph = validGraph({
+    nodes: [
+      validGraph().nodes[0]!,
+      { ...validGraph().nodes[1]!, dependsOn: [], ownershipScope: ['src/a.ts'] },
+    ],
+    edges: [],
+  });
+
+  assert.deepEqual(validatePlanGraphStructure(graph), { ok: true });
+  const strict = validatePlanGraph(graph);
+  assert.equal(strict.ok, false);
+  assert.match(strict.ok ? '' : strict.errors.join('\n'), /same-wave ownership overlap/);
+});
+
+test('executable child batches enforce state, dependencies, max concurrency, and ownership separation', () => {
+  const nodes = [
+    issueFixture({
+      number: 31,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'a', ownershipScope: ['src/shared.ts'] }),
+    }),
+    issueFixture({
+      number: 32,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'b', ownershipScope: ['src/shared.ts'] }),
+    }),
+    issueFixture({
+      number: 33,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'c', ownershipScope: ['src/c.ts'] }),
+    }),
+    issueFixture({
+      number: 34,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'd', dependsOn: ['a', 'b'], ownershipScope: ['src/d.ts'] }),
+    }),
+  ].map((issue) => {
+    const parsed = parseAutonomousChildMetadata(issue, validConfig, 151);
+    assert.equal(parsed.ok, true);
+    return parsed.ok ? parsed.node : undefined;
+  }).filter((node) => node !== undefined);
+
+  const batches = collectExecutableChildBatches(nodes, validConfig);
+
+  assert.equal(batches.ok, true);
+  assert.deepEqual(
+    batches.ok ? batches.batches.map((batch) => batch.map((node) => node.metadata.stableId)) : [],
+    [['a', 'c'], ['b'], ['d']],
+  );
+  assert.equal((batches.ok ? batches.batches : []).every((batch) => batch.length <= 3), true);
+});
+
+test('executable child batches reject hitl, blocked state, missing auto, malformed graph, and closed issues', () => {
+  const issues = [
+    issueFixture({
+      number: 41,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'hitl', afkHitl: 'hitl' }),
+    }),
+    issueFixture({
+      number: 42,
+      labels: [labels.child.name, labels.auto.name, labels.blocked.name],
+      body: childBody({ stableId: 'blocked' }),
+    }),
+    issueFixture({
+      number: 43,
+      labels: [labels.child.name],
+      body: childBody({ stableId: 'missing-auto' }),
+    }),
+    issueFixture({
+      number: 44,
+      labels: [labels.child.name, labels.auto.name],
+      body: childBody({ stableId: 'closed' }),
+      state: 'CLOSED',
+    }),
+  ];
+  const nodes = issues.map((issue) => {
+    const parsed = parseAutonomousChildMetadata(issue, validConfig, 151);
+    assert.equal(parsed.ok, true);
+    return parsed.ok ? parsed.node : undefined;
+  }).filter((node) => node !== undefined);
+
+  const result = collectExecutableChildBatches(nodes, validConfig);
+
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? '' : result.errors.join('\n'), /#41.*hitl/);
+  assert.match(result.ok ? '' : result.errors.join('\n'), /#42.*blocked/);
+  assert.match(result.ok ? '' : result.errors.join('\n'), /#43.*agent:auto/);
+  assert.match(result.ok ? '' : result.errors.join('\n'), /#44.*closed/);
 });

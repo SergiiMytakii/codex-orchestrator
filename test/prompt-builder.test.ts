@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import {
+  buildIssueTreeChildPrompt,
   buildPlanAutoPrompt,
   buildScopedImplementationPrompt,
   readPlanAutoCompletionReport,
@@ -74,6 +75,63 @@ test('plan-auto prompt includes parent context and all planning workflows', () =
   assert.match(prompt, /Autonomous Child Contract/);
   assert.match(prompt, /Arbitrary links, milestones, projects, and comments do not grant membership/);
   assert.match(prompt, /Schema: \{ "status": "completed"/);
+  assert.match(prompt, /\/report\.json/);
+});
+
+test('issue-tree child prompt includes parent, child, dependencies, workflow, safety, and scoped report contract', () => {
+  const prompt = buildIssueTreeChildPrompt({
+    parentIssue: issueFixture({
+      number: 151,
+      labels: ['agent:plan-auto'],
+      body: 'Parent feature',
+    }),
+    childIssue: issueFixture({
+      number: 157,
+      labels: ['agent:auto', 'agent:child'],
+      body: 'Implement child',
+      comments: [
+        commentFixture({ body: 'Second note', createdAt: '2026-05-08T11:00:00.000Z' }),
+        commentFixture({ body: 'First note', createdAt: '2026-05-08T10:00:00.000Z' }),
+      ],
+    }),
+    config: validConfig,
+    workflowPromptText: 'Issue tree workflow',
+    childMetadata: {
+      stableId: 'child-execution',
+      afkHitl: 'afk',
+      dependsOn: ['planning'],
+      ownershipScope: ['src/runner/plan-auto-command.ts'],
+      verification: ['npm test'],
+    },
+    dependencyIssues: [
+      issueFixture({
+        number: 156,
+        labels: ['agent:review'],
+        body: 'Dependency child',
+      }),
+    ],
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/tree-151-issue-157',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /# Codex Orchestrator Issue-Tree Child Implementation/);
+  assert.match(prompt, /## Parent Issue Context/);
+  assert.match(prompt, /Parent feature/);
+  assert.match(prompt, /## Child Issue Context/);
+  assert.match(prompt, /Issue: #157/);
+  assert.match(prompt, /Stable ID: child-execution/);
+  assert.match(prompt, /src\/runner\/plan-auto-command\.ts/);
+  assert.match(prompt, /First note[\s\S]*Second note/);
+  assert.match(prompt, /## Dependency Context/);
+  assert.match(prompt, /#156 Issue 156/);
+  assert.match(prompt, /merged into the parent integration branch/);
+  assert.match(prompt, /## Project Workflow\n\nIssue tree workflow/);
+  assert.match(prompt, /Runner-Owned Publication Contract/);
+  assert.match(prompt, /must not commit, push, merge, open pull requests/);
+  assert.match(prompt, /Safety Contract/);
+  assert.match(prompt, /Completion Report Contract/);
   assert.match(prompt, /\/report\.json/);
 });
 
