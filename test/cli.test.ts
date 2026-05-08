@@ -60,6 +60,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
   assert.match(result.stdout, /status/);
+  assert.match(result.stdout, /daemon/);
   assert.match(result.stdout, /agent:auto/);
   assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--prepare-labels/);
@@ -137,6 +138,20 @@ test('run command validates required arguments', async () => {
   assert.match(invalidIssue.stderr, /run requires --issue <number>/);
 });
 
+test('daemon command validates required arguments', async () => {
+  const missingTarget = await runCli(['daemon', '--once']);
+  assert.equal(missingTarget.status, 2);
+  assert.match(missingTarget.stderr, /daemon requires --target <path>/);
+
+  const invalidInterval = await runCli(['daemon', '--target', '/tmp/repo', '--interval-seconds', '0']);
+  assert.equal(invalidInterval.status, 2);
+  assert.match(invalidInterval.stderr, /daemon requires --interval-seconds <positive integer>/);
+
+  const invalidMaxRuns = await runCli(['daemon', '--target', '/tmp/repo', '--max-runs', '0']);
+  assert.equal(invalidMaxRuns.status, 2);
+  assert.match(invalidMaxRuns.stderr, /daemon requires --max-runs <positive integer>/);
+});
+
 test('runs status dry-run without launching Codex', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-status-target-'));
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
@@ -160,4 +175,29 @@ test('runs status dry-run without launching Codex', async () => {
   assert.match(result.stdout, /codex-orchestrator status/);
   assert.match(result.stdout, /mode: dry-run/);
   assert.match(result.stdout, /eligible:\n  - none/);
+});
+
+test('runs daemon once without eligible work', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-daemon-target-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    `${JSON.stringify(validConfig, null, 2)}\n`,
+    'utf8',
+  );
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+
+  const result = await runCli(['daemon', '--target', targetRoot, '--once'], {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /codex-orchestrator daemon/);
+  assert.match(result.stdout, /intervalMs: 300000/);
+  assert.match(result.stdout, /no eligible issues/);
 });
