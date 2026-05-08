@@ -24,31 +24,25 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
-    const byNumber = new Map<number, GitHubIssue>();
+    const wanted = new Set(labels);
+    const result = await this.executor('gh', [
+      'issue',
+      'list',
+      '--repo',
+      this.repo,
+      '--state',
+      'open',
+      '--limit',
+      '1000',
+      '--json',
+      issueJsonFields,
+    ]);
+    const parsed = JSON.parse(result.stdout) as unknown[];
 
-    for (const label of labels) {
-      const result = await this.executor('gh', [
-        'issue',
-        'list',
-        '--repo',
-        this.repo,
-        '--state',
-        'open',
-        '--label',
-        label,
-        '--limit',
-        '100',
-        '--json',
-        issueJsonFields,
-      ]);
-      const parsed = JSON.parse(result.stdout) as unknown[];
-      for (const item of parsed) {
-        const issue = normalizeIssue(item);
-        byNumber.set(issue.number, issue);
-      }
-    }
-
-    return Array.from(byNumber.values()).sort((left, right) => left.number - right.number);
+    return parsed
+      .map(normalizeIssue)
+      .filter((issue) => issue.labels.some((label) => wanted.has(label.name)))
+      .sort((left, right) => left.number - right.number);
   }
 
   public async getIssue(number: number): Promise<GitHubIssue | undefined> {

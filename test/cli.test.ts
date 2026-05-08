@@ -62,6 +62,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /status/);
   assert.match(result.stdout, /agent:auto/);
   assert.match(result.stdout, /agent:plan-auto/);
+  assert.match(result.stdout, /--prepare-labels/);
   assert.match(result.stdout, /--version/);
   assert.match(result.stdout, /--help/);
 });
