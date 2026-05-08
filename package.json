@@ -21,6 +21,7 @@
   },
   "files": [
     "dist/src",
+    "prompts",
     "README.md",
     "LICENSE"
   ],
