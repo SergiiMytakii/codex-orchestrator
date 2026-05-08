@@ -25,7 +25,7 @@ Commands:
   health       Run a no-op local health check.
   setup        Create or dry-run project-local orchestrator config.
   status       Show eligible/skipped issue work and local recovery state.
-  run          Execute one authorized issue: scoped agent:auto or planning-only agent:plan-auto.
+  run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
 
 Options:
   --help, -h      Show this help.

@@ -26,6 +26,29 @@ export interface PushBranchInput {
   branchName: string;
 }
 
+export interface MergeBranchInput {
+  worktreePath: string;
+  branchName: string;
+  message: string;
+}
+
+export interface RemoveWorktreeInput {
+  targetRoot: string;
+  worktreePath: string;
+}
+
+export class GitMergeConflictError extends Error {
+  public constructor(
+    public readonly worktreePath: string,
+    public readonly branchName: string,
+    public readonly stdout: string,
+    public readonly stderr: string,
+  ) {
+    super(`git merge failed for ${branchName} in ${worktreePath}`);
+    this.name = 'GitMergeConflictError';
+  }
+}
+
 export class GitWorktreeManager {
   public constructor(private readonly executor: ProcessExecutor = defaultProcessExecutor) {}
 
@@ -83,6 +106,35 @@ export class GitWorktreeManager {
       'origin',
       input.branchName,
     ]);
+  }
+
+  public async mergeBranch(input: MergeBranchInput): Promise<void> {
+    const result = await this.executor('git', [
+      '-C',
+      input.worktreePath,
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'user.name=codex-orchestrator',
+      '-c',
+      'user.email=codex-orchestrator@users.noreply.github.com',
+      'merge',
+      '--no-ff',
+      input.branchName,
+      '-m',
+      input.message,
+    ]);
+    if (result.exitCode !== 0) {
+      throw new GitMergeConflictError(input.worktreePath, input.branchName, result.stdout, result.stderr);
+    }
+  }
+
+  public async abortMerge(worktreePath: string): Promise<void> {
+    await this.git(['-C', worktreePath, 'merge', '--abort']);
+  }
+
+  public async removeWorktree(input: RemoveWorktreeInput): Promise<void> {
+    await this.git(['-C', input.targetRoot, 'worktree', 'remove', input.worktreePath]);
   }
 
   private async git(args: string[]): Promise<{ stdout: string; stderr: string }> {

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import type { AutonomousChildMetadata } from './issue-tree.js';
 import type { PlanGraph } from './issue-tree.js';
 import { validatePlanGraph } from './issue-tree.js';
 
@@ -25,6 +26,19 @@ export interface PlanAutoPromptInput {
     breakdownReview: string;
     triage: string;
   };
+  promptPath: string;
+  reportPath: string;
+  branchName: string;
+  worktreePath: string;
+}
+
+export interface IssueTreeChildPromptInput {
+  parentIssue: GitHubIssue;
+  childIssue: GitHubIssue;
+  config: CodexOrchestratorConfig;
+  workflowPromptText: string;
+  childMetadata: AutonomousChildMetadata;
+  dependencyIssues: GitHubIssue[];
   promptPath: string;
   reportPath: string;
   branchName: string;
@@ -141,6 +155,53 @@ export function buildPlanAutoPrompt(input: PlanAutoPromptInput): string {
       `Branch: ${input.branchName}`,
       `Worktree: ${input.worktreePath}`,
     ].join('\n'),
+  ].join('\n\n');
+}
+
+export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): string {
+  const labels = input.childIssue.labels.map((label) => label.name).join(', ') || 'none';
+  const comments = [...input.childIssue.comments]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .map((comment) => `- ${comment.createdAt} ${comment.author.login} (${comment.authorAssociation}): ${comment.body}`)
+    .join('\n') || 'none';
+  const dependencies = input.dependencyIssues.length > 0
+    ? input.dependencyIssues.map((issue) => `- #${issue.number} ${issue.title}`).join('\n')
+    : 'none';
+
+  return [
+    '# Codex Orchestrator Issue-Tree Child Implementation',
+    '## Parent Issue Context',
+    `Issue: #${input.parentIssue.number}`,
+    `Title: ${input.parentIssue.title}`,
+    `URL: ${input.parentIssue.url}`,
+    `Body:\n${input.parentIssue.body}`,
+    '## Child Issue Context',
+    `Issue: #${input.childIssue.number}`,
+    `Title: ${input.childIssue.title}`,
+    `URL: ${input.childIssue.url}`,
+    `Body:\n${input.childIssue.body}`,
+    `Labels: ${labels}`,
+    `Comments:\n${comments}`,
+    `Stable ID: ${input.childMetadata.stableId}`,
+    `Ownership Scope: ${input.childMetadata.ownershipScope.join(', ')}`,
+    `Dependencies: ${input.childMetadata.dependsOn.length > 0 ? input.childMetadata.dependsOn.join(', ') : 'none'}`,
+    `Verification Expectations: ${input.childMetadata.verification.join(', ')}`,
+    '## Dependency Context',
+    dependencies,
+    'Dependency child issues listed here were merged into the parent integration branch before this child starts.',
+    '## Project Workflow',
+    input.workflowPromptText,
+    '## Runner-Owned Publication Contract',
+    'Change files only. You must not commit, push, merge, open pull requests, merge pull requests, publish, deploy, or edit GitHub labels/comments. The runner owns publication.',
+    '## Safety Contract',
+    `Do not read or modify configured secret file patterns: ${input.config.deny.secretFiles.join(', ')}.`,
+    'Do not run destructive database/cache actions.',
+    'Do not run production deploy/release actions.',
+    '## Completion Report Contract',
+    `Write the existing ScopedCompletionReport JSON to ${input.reportPath} with: status, changes, validation, skippedChecks, residualRisks, prohibitedActions, and optional promotion.`,
+    `Prompt file: ${input.promptPath}`,
+    `Branch: ${input.branchName}`,
+    `Worktree: ${input.worktreePath}`,
   ].join('\n\n');
 }
 
