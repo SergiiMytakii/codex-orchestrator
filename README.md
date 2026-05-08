@@ -23,6 +23,7 @@ codex-orchestrator --version
 codex-orchestrator health
 codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> --dry-run
 codex-orchestrator status --target <path> --dry-run
+codex-orchestrator run --target <path> --issue <number>
 ```
 
 The `health` command is a no-op local check for the initial CLI boot contract.
@@ -42,6 +43,8 @@ By default, setup reports missing labels only and never overwrites existing prom
 
 The `status` command reads configured GitHub issues and local runner metadata, then prints eligible work, skipped issues with reason codes, and restart recovery state.
 Use `--dry-run` to make the read-only intent explicit. Status and dry-run modes do not launch Codex or mutate GitHub labels/comments.
+
+The `run` command executes one scoped `agent:auto` issue. It mutates GitHub labels/comments, creates a worktree and branch, runs the configured Codex command with a durable prompt, commits/pushes runner-owned changes, and opens one draft pull request. The runner never auto-merges and rejects configured secret file changes, reported secret reads/changes, reported destructive database/cache actions, reported production deploy/release actions, and Codex-owned git commits.
 
 ## Project config
 

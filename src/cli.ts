@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readPackageInfo } from './package-info.js';
+import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
 
@@ -12,11 +13,13 @@ Usage:
   codex-orchestrator health
   codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run]
   codex-orchestrator status --target <path> [--dry-run]
+  codex-orchestrator run --target <path> --issue <number>
 
 Commands:
   health       Run a no-op local health check.
   setup        Create or dry-run project-local orchestrator config.
   status       Show eligible/skipped issue work and local recovery state.
+  run          Execute one scoped agent:auto issue and open a draft PR.
 
 Options:
   --help, -h      Show this help.
@@ -36,6 +39,11 @@ interface SetupCliArgs {
 interface StatusCliArgs {
   target?: string;
   dryRun: boolean;
+}
+
+interface RunCliArgs {
+  target?: string;
+  issue?: number;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -106,8 +114,69 @@ async function main(args: string[]): Promise<number> {
     }
   }
 
+  if (command === 'run') {
+    const parsed = parseRunArgs(args.slice(1));
+
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+
+    try {
+      const result = await runScopedAutoCommand({
+        targetRoot: parsed.value.target,
+        issueNumber: parsed.value.issue,
+      });
+      process.stdout.write(`${result.reportComment}\n`);
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'run failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+function parseRunArgs(
+  args: string[],
+): { ok: true; value: RunCliArgs & { target: string; issue: number } } | { ok: false; error: string } {
+  const parsed: RunCliArgs = {};
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--target':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.target = next;
+        index += 1;
+        break;
+      case '--issue':
+        if (!next || next.startsWith('--') || !Number.isInteger(Number(next)) || Number(next) < 1) {
+          return { ok: false, error: 'run requires --issue <number>' };
+        }
+        parsed.issue = Number(next);
+        index += 1;
+        break;
+      default:
+        return { ok: false, error: `Unknown run option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.target) {
+    return { ok: false, error: 'run requires --target <path>' };
+  }
+  if (!parsed.issue) {
+    return { ok: false, error: 'run requires --issue <number>' };
+  }
+
+  return { ok: true, value: { ...parsed, target: parsed.target, issue: parsed.issue } };
 }
 
 function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { target: string } } | { ok: false; error: string } {

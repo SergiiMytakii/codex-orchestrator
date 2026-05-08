@@ -1,5 +1,8 @@
 export type { CodexOrchestratorConfig, ConfigValidationResult } from './config/schema.js';
 export { validateConfig } from './config/schema.js';
+export { CodexCommandAdapter, buildCodexProcessEnv } from './codex/command-adapter.js';
+export type { CodexCommandRunInput, CodexCommandRunResult } from './codex/command-adapter.js';
+export { GhCliPullRequestAdapter } from './github/gh-pull-request-adapter.js';
 export type {
   GitHubIssue,
   GitHubIssueAdapter,
@@ -10,6 +13,9 @@ export type {
   PullRequestState,
 } from './github/issues.js';
 export { InMemoryGitHubIssueAdapter } from './github/issues.js';
+export type { CreateDraftPullRequestInput, GitHubPullRequest, GitHubPullRequestAdapter } from './github/pull-requests.js';
+export { InMemoryGitHubPullRequestAdapter } from './github/pull-requests.js';
+export { GitWorktreeManager, renderBranchTemplate } from './git/worktree.js';
 export {
   applyClarificationGate,
   applyCodexSessionResult,
@@ -28,8 +34,24 @@ export type {
 } from './runner/issue-state-machine.js';
 export { RunnerStateStore } from './runner/local-state.js';
 export type { RunnerProcessMetadata, RunnerStateFile } from './runner/local-state.js';
+export {
+  buildScopedImplementationPrompt,
+  readScopedCompletionReport,
+  sessionPromptPath,
+  sessionReportPath,
+  writeDurablePrompt,
+} from './runner/prompt.js';
+export type { ScopedCompletionReport, ScopedPromptInput } from './runner/prompt.js';
 export { reconcileRunnerState } from './runner/recovery.js';
 export type { ReconcileRunnerStateInput, RecoveryEntry, RecoveryStatus } from './runner/recovery.js';
+export { runScopedAutoCommand } from './runner/scoped-auto-command.js';
+export type { ScopedAutoCommandOptions, ScopedAutoCommandResult } from './runner/scoped-auto-command.js';
+export {
+  validateChangedPaths,
+  validateCompletionReportSafety,
+  validateNoAgentOwnedGitPublication,
+} from './runner/safety.js';
+export type { SafetyViolation, SafetyViolationCode } from './runner/safety.js';
 export { runStatusCommand } from './runner/status-command.js';
 export type { StatusCommandOptions, StatusCommandResult } from './runner/status-command.js';
 export type { SetupCommandOptions, SetupCommandResult } from './setup/setup-command.js';

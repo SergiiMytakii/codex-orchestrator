@@ -10,7 +10,7 @@ import type {
   PullRequestState,
 } from './issues.js';
 
-const issueJsonFields = 'number,title,url,state,labels,comments,closedByPullRequestsReferences';
+const issueJsonFields = 'number,title,body,url,state,labels,comments,closedByPullRequestsReferences';
 
 export class GhCliIssueAdapter implements GitHubIssueAdapter {
   private readonly repo: string;
@@ -101,12 +101,14 @@ function normalizeIssue(input: unknown): GitHubIssue {
   const record = input as Record<string, unknown>;
   const number = readNumber(record, 'number');
   const title = readString(record, 'title');
+  const body = readString(record, 'body');
   const url = readString(record, 'url');
   const state = readIssueState(record.state);
 
   return {
     number,
     title,
+    body,
     url,
     state,
     labels: readArray(record.labels).flatMap(normalizeLabel),

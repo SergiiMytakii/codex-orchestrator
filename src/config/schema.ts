@@ -48,6 +48,10 @@ export interface CodexOrchestratorConfig {
   };
   codex: {
     adapter: 'codex-cli';
+    command: string;
+    args: string[];
+    promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
+    reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
   };
   project: {
     configDir: '.codex-orchestrator';
@@ -69,6 +73,7 @@ export interface CodexOrchestratorConfig {
     additionalPathGlobs: string[];
   };
   branches: {
+    base: string;
     scopedIssue: string;
     issueTree: string;
   };
@@ -135,6 +140,10 @@ export function validateConfig(input: unknown): ConfigValidationResult {
 
   if (codex) {
     expectLiteral(codex, 'codex.adapter', 'codex-cli', errors);
+    expectString(codex, 'codex.command', errors);
+    expectStringArray(codex, 'codex.args', errors);
+    expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
+    expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
   }
 
   if (project) {
@@ -160,6 +169,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   }
 
   if (branches) {
+    expectString(branches, 'branches.base', errors);
     expectString(branches, 'branches.scopedIssue', errors);
     expectString(branches, 'branches.issueTree', errors);
   }

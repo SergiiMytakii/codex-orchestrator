@@ -11,8 +11,40 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.github.labels.auto.name, 'agent:auto');
     assert.equal(result.value.runner.maxParallelChildren, 3);
     assert.equal(result.value.workflows.prd.source, 'package-owned-prompt-fallback');
+    assert.equal(result.value.codex.command, 'codex');
+    assert.deepEqual(result.value.codex.args, [
+      'exec',
+      '--cd',
+      '${worktreePath}',
+      '--sandbox',
+      'workspace-write',
+      '--ignore-user-config',
+      '-',
+    ]);
+    assert.equal(result.value.branches.base, 'main');
     assert.equal(result.value.branches.scopedIssue, 'codex/issue-${issueNumber}');
   }
+});
+
+test('rejects invalid codex command contract', () => {
+  const result = validateConfig({
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      command: '',
+      args: 'exec',
+      promptFileEnv: 'PROMPT',
+      reportFileEnv: 'REPORT',
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'codex.command must be a non-empty string',
+    'codex.args must be an array of non-empty strings',
+    'codex.promptFileEnv must be CODEX_ORCHESTRATOR_PROMPT_FILE',
+    'codex.reportFileEnv must be CODEX_ORCHESTRATOR_REPORT_FILE',
+  ]);
 });
 
 test('rejects invalid workflow source with a dot-path error', () => {
@@ -75,6 +107,7 @@ test('rejects missing branch templates', () => {
   const result = validateConfig({
     ...validConfig,
     branches: {
+      base: validConfig.branches.base,
       scopedIssue: '',
       issueTree: validConfig.branches.issueTree,
     },

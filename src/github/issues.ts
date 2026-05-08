@@ -25,6 +25,7 @@ export interface GitHubPullRequestLink {
 export interface GitHubIssue {
   number: number;
   title: string;
+  body: string;
   url: string;
   state: IssueState;
   labels: GitHubIssueLabel[];
