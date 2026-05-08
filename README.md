@@ -22,6 +22,7 @@ codex-orchestrator --help
 codex-orchestrator --version
 codex-orchestrator health
 codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> --dry-run
+codex-orchestrator status --target <path> --dry-run
 ```
 
 The `health` command is a no-op local check for the initial CLI boot contract.
@@ -38,6 +39,9 @@ Useful setup flags:
 - `--replace-package-skills` allows package-owned prompt files under `.codex-orchestrator/prompts/` to be replaced.
 
 By default, setup reports missing labels only and never overwrites existing prompt files.
+
+The `status` command reads configured GitHub issues and local runner metadata, then prints eligible work, skipped issues with reason codes, and restart recovery state.
+Use `--dry-run` to make the read-only intent explicit. Status and dry-run modes do not launch Codex or mutate GitHub labels/comments.
 
 ## Project config
 

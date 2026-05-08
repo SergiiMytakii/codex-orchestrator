@@ -1,24 +1,13 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import type { LabelDefinition } from '../config/schema.js';
+import type { CommandExecutor } from '../github/gh-cli.js';
+import { defaultGhExecutor } from '../github/gh-cli.js';
 import type { GitHubLabelAdapter } from './labels.js';
-
-const execFileAsync = promisify(execFile);
-
-export type CommandExecutor = (
-  file: string,
-  args: readonly string[],
-) => Promise<{
-  stdout: string;
-  stderr: string;
-}>;
 
 export class GhCliLabelAdapter implements GitHubLabelAdapter {
   private readonly repo: string;
   private readonly executor: CommandExecutor;
 
-  public constructor(owner: string, repo: string, executor: CommandExecutor = defaultExecutor) {
+  public constructor(owner: string, repo: string, executor: CommandExecutor = defaultGhExecutor) {
     this.repo = `${owner}/${repo}`;
     this.executor = executor;
   }
@@ -42,18 +31,5 @@ export class GhCliLabelAdapter implements GitHubLabelAdapter {
       '--description',
       label.description,
     ]);
-  }
-}
-
-async function defaultExecutor(file: string, args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
-  try {
-    const result = await execFileAsync(file, [...args]);
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error';
-    throw new Error(`Failed to run ${file} ${args.join(' ')}: ${message}`);
   }
 }
