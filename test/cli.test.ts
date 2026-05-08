@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { validConfig } from './fixtures/config.js';
 
 interface CliResult {
   status: number | null;
@@ -58,6 +59,7 @@ test('prints help', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
+  assert.match(result.stdout, /status/);
   assert.match(result.stdout, /--version/);
   assert.match(result.stdout, /--help/);
 });
@@ -109,4 +111,36 @@ test('runs setup dry-run without launching Codex', async () => {
   assert.match(result.stdout, /prd: package-owned-prompt-fallback/);
   assert.match(result.stdout, /Codex will not be launched/);
   assert.match(result.stdout, /setup will not commit or open a pull request/);
+});
+
+test('status missing target exits with usage error', async () => {
+  const result = await runCli(['status', '--dry-run']);
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /status requires --target <path>/);
+});
+
+test('runs status dry-run without launching Codex', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-status-target-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    `${JSON.stringify(validConfig, null, 2)}\n`,
+    'utf8',
+  );
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+
+  const result = await runCli(['status', '--target', targetRoot, '--dry-run'], {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /codex-orchestrator status/);
+  assert.match(result.stdout, /mode: dry-run/);
+  assert.match(result.stdout, /eligible:\n  - none/);
 });

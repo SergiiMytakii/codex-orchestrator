@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readPackageInfo } from './package-info.js';
+import { runStatusCommand } from './runner/status-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
 
 const helpText = `codex-orchestrator
@@ -10,10 +11,12 @@ Usage:
   codex-orchestrator --version
   codex-orchestrator health
   codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run]
+  codex-orchestrator status --target <path> [--dry-run]
 
 Commands:
   health       Run a no-op local health check.
   setup        Create or dry-run project-local orchestrator config.
+  status       Show eligible/skipped issue work and local recovery state.
 
 Options:
   --help, -h      Show this help.
@@ -28,6 +31,11 @@ interface SetupCliArgs {
   dryRun: boolean;
   prepareLabels: boolean;
   replacePackageSkills: boolean;
+}
+
+interface StatusCliArgs {
+  target?: string;
+  dryRun: boolean;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -76,8 +84,62 @@ async function main(args: string[]): Promise<number> {
     }
   }
 
+  if (command === 'status') {
+    const parsed = parseStatusArgs(args.slice(1));
+
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+
+    try {
+      const result = await runStatusCommand({
+        targetRoot: parsed.value.target,
+        dryRun: parsed.value.dryRun,
+      });
+      process.stdout.write(`${result.output}\n`);
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'status failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { target: string } } | { ok: false; error: string } {
+  const parsed: StatusCliArgs = {
+    dryRun: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--target':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.target = next;
+        index += 1;
+        break;
+      case '--dry-run':
+        parsed.dryRun = true;
+        break;
+      default:
+        return { ok: false, error: `Unknown status option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.target) {
+    return { ok: false, error: 'status requires --target <path>' };
+  }
+
+  return { ok: true, value: { ...parsed, target: parsed.target } };
 }
 
 function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { target: string } } | { ok: false; error: string } {
