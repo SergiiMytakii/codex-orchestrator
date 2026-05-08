@@ -17,13 +17,13 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
-  codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run]
+  codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run] [--prepare-labels]
   codex-orchestrator status --target <path> [--dry-run]
   codex-orchestrator run --target <path> --issue <number>
 
 Commands:
   health       Run a no-op local health check.
-  setup        Create or dry-run project-local orchestrator config.
+  setup        Create or dry-run project-local orchestrator config. Use --prepare-labels to create missing agent labels.
   status       Show eligible/skipped issue work and local recovery state.
   run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
 

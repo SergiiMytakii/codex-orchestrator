@@ -50,7 +50,7 @@ test('in-memory issue adapter creates and updates issues deterministically', asy
   assert.equal(updated.comments[0]?.body, 'comment');
 });
 
-test('gh issue adapter lists once per label and normalizes missing arrays', async () => {
+test('gh issue adapter lists open issues once and filters matching labels locally', async () => {
   const calls: Array<{ file: string; args: string[] }> = [];
   const executor: CommandExecutor = async (file, args) => {
     calls.push({ file, args });
@@ -62,6 +62,15 @@ test('gh issue adapter lists once per label and normalizes missing arrays', asyn
           body: 'Body',
           url: 'https://github.com/example/repo/issues/1',
           state: 'OPEN',
+          labels: [{ name: 'agent:auto' }],
+        },
+        {
+          number: 2,
+          title: 'Two',
+          body: 'Body',
+          url: 'https://github.com/example/repo/issues/2',
+          state: 'OPEN',
+          labels: [{ name: 'agent:review' }],
         },
       ]),
       stderr: '',
@@ -72,8 +81,8 @@ test('gh issue adapter lists once per label and normalizes missing arrays', asyn
   const issues = await adapter.listOpenIssuesWithAnyLabel(['agent:auto', 'agent:manual']);
 
   assert.deepEqual(issues.map((issue) => issue.number), [1]);
-  assert.deepEqual(issues[0]?.labels, []);
-  assert.equal(calls.length, 2);
+  assert.deepEqual(issues[0]?.labels.map((label) => label.name), ['agent:auto']);
+  assert.equal(calls.length, 1);
   assert.deepEqual(calls[0]?.args, [
     'issue',
     'list',
@@ -81,10 +90,8 @@ test('gh issue adapter lists once per label and normalizes missing arrays', asyn
     'example/repo',
     '--state',
     'open',
-    '--label',
-    'agent:auto',
     '--limit',
-    '100',
+    '1000',
     '--json',
     'number,title,body,url,state,labels,comments,closedByPullRequestsReferences',
   ]);
