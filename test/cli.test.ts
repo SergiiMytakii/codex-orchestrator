@@ -60,6 +60,8 @@ test('prints help', async () => {
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
   assert.match(result.stdout, /status/);
+  assert.match(result.stdout, /agent:auto/);
+  assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--version/);
   assert.match(result.stdout, /--help/);
 });

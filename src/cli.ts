@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
+import { resolve } from 'node:path';
+
+import { GhCliIssueAdapter } from './github/gh-issue-adapter.js';
 import { readPackageInfo } from './package-info.js';
+import { readRunnerConfig } from './runner/command-utils.js';
+import { discoverIssueWork } from './runner/issue-state-machine.js';
+import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
@@ -19,7 +25,7 @@ Commands:
   health       Run a no-op local health check.
   setup        Create or dry-run project-local orchestrator config.
   status       Show eligible/skipped issue work and local recovery state.
-  run          Execute one scoped agent:auto issue and open a draft PR.
+  run          Execute one authorized issue: scoped agent:auto or planning-only agent:plan-auto.
 
 Options:
   --help, -h      Show this help.
@@ -123,10 +129,7 @@ async function main(args: string[]): Promise<number> {
     }
 
     try {
-      const result = await runScopedAutoCommand({
-        targetRoot: parsed.value.target,
-        issueNumber: parsed.value.issue,
-      });
+      const result = await runIssueCommand(parsed.value.target, parsed.value.issue);
       process.stdout.write(`${result.reportComment}\n`);
       return 0;
     } catch (error) {
@@ -138,6 +141,25 @@ async function main(args: string[]): Promise<number> {
 
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+async function runIssueCommand(targetRootInput: string, issueNumber: number): Promise<{ reportComment: string }> {
+  const targetRoot = resolve(targetRootInput);
+  const config = await readRunnerConfig(targetRoot);
+  const issueAdapter = new GhCliIssueAdapter(config.github.owner, config.github.repo);
+  const issue = await issueAdapter.getIssue(issueNumber);
+  if (!issue) {
+    throw new Error(`Issue #${issueNumber} was not found`);
+  }
+  const decision = discoverIssueWork([issue], config)[0];
+  if (!decision || decision.kind !== 'eligible') {
+    const reason = decision?.kind === 'skipped' ? decision.reason : 'not eligible';
+    throw new Error(`Issue #${issueNumber} is not eligible for autonomous work: ${reason}`);
+  }
+  if (decision.mode === 'plan-parent') {
+    return runPlanAutoCommand({ targetRoot, issueNumber });
+  }
+  return runScopedAutoCommand({ targetRoot, issueNumber });
 }
 
 function parseRunArgs(

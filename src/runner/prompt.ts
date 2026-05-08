@@ -3,11 +3,28 @@ import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import type { PlanGraph } from './issue-tree.js';
+import { validatePlanGraph } from './issue-tree.js';
 
 export interface ScopedPromptInput {
   issue: GitHubIssue;
   config: CodexOrchestratorConfig;
   workflowPromptText: string;
+  promptPath: string;
+  reportPath: string;
+  branchName: string;
+  worktreePath: string;
+}
+
+export interface PlanAutoPromptInput {
+  parentIssue: GitHubIssue;
+  config: CodexOrchestratorConfig;
+  prompts: {
+    prd: string;
+    issueBreakdown: string;
+    breakdownReview: string;
+    triage: string;
+  };
   promptPath: string;
   reportPath: string;
   branchName: string;
@@ -36,9 +53,23 @@ export interface ScopedCompletionReport {
   };
 }
 
+export interface PlanAutoCompletionReport {
+  status: 'completed';
+  parent: {
+    title?: string;
+    body: string;
+  };
+  graph: PlanGraph;
+  residualRisks: string[];
+}
+
 export type ScopedCompletionReportReadResult =
   | { kind: 'missing' }
   | { kind: 'valid'; report: ScopedCompletionReport };
+
+export type PlanAutoCompletionReportReadResult =
+  | { kind: 'missing' }
+  | { kind: 'valid'; report: PlanAutoCompletionReport };
 
 export function buildScopedImplementationPrompt(input: ScopedPromptInput): string {
   const labels = input.issue.labels.map((label) => label.name).join(', ') || 'none';
@@ -72,6 +103,47 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
   ].join('\n\n');
 }
 
+export function buildPlanAutoPrompt(input: PlanAutoPromptInput): string {
+  const labels = input.parentIssue.labels.map((label) => label.name).join(', ') || 'none';
+  const comments = [...input.parentIssue.comments]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .map((comment) => `- ${comment.createdAt} ${comment.author.login} (${comment.authorAssociation}): ${comment.body}`)
+    .join('\n') || 'none';
+
+  return [
+    '# Codex Orchestrator Parent Planning',
+    '## Parent Issue Context',
+    `Issue: #${input.parentIssue.number}`,
+    `Title: ${input.parentIssue.title}`,
+    `URL: ${input.parentIssue.url}`,
+    `Body:\n${input.parentIssue.body}`,
+    `Labels: ${labels}`,
+    `Comments:\n${comments}`,
+    '## PRD Workflow',
+    input.prompts.prd,
+    '## Issue Breakdown Workflow',
+    input.prompts.issueBreakdown,
+    '## Breakdown Review Workflow',
+    input.prompts.breakdownReview,
+    '## Triage Workflow',
+    input.prompts.triage,
+    '## Runner-Owned GitHub Contract',
+    'Return structured output only. Do not create/edit GitHub issues, labels, comments, milestones, projects, branches, commits, pushes, pull requests, merges, publishes, deploys, or execute child waves. The runner owns all GitHub mutations.',
+    '## Autonomous Child Contract',
+    'Every child must be represented in the JSON report. Autonomous membership requires the explicit runner marker plus parent reference. Arbitrary links, milestones, projects, and comments do not grant membership or inherited authorization.',
+    '## Planning Report Contract',
+    [
+      `Write JSON to ${input.reportPath}.`,
+      'Schema: { "status": "completed", "parent": { "title"?: string, "body": string }, "graph": { "nodes": PlanChildNode[], "edges": PlanDependencyEdge[], "specGate": "wave-level" }, "residualRisks": string[] }.',
+      'PlanChildNode: { stableId, issueNumber?, title, body, afkHitl: "afk" | "hitl", ownershipScope: string[], dependsOn: string[], verification: string[] }.',
+      'PlanDependencyEdge: { from, to, reason } where from is the dependency and to depends on it.',
+      `Prompt file: ${input.promptPath}`,
+      `Branch: ${input.branchName}`,
+      `Worktree: ${input.worktreePath}`,
+    ].join('\n'),
+  ].join('\n\n');
+}
+
 export async function readScopedCompletionReport(reportPath: string): Promise<ScopedCompletionReportReadResult> {
   let content: string;
   try {
@@ -90,6 +162,27 @@ export async function readScopedCompletionReport(reportPath: string): Promise<Sc
     throw new Error('Invalid scoped completion report: report must be valid JSON');
   }
   assertScopedCompletionReport(parsed);
+  return { kind: 'valid', report: parsed };
+}
+
+export async function readPlanAutoCompletionReport(reportPath: string): Promise<PlanAutoCompletionReportReadResult> {
+  let content: string;
+  try {
+    content = await readFile(reportPath, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return { kind: 'missing' };
+    }
+    throw error;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    throw new Error('Invalid plan-auto completion report: report must be valid JSON');
+  }
+  assertPlanAutoCompletionReport(parsed);
   return { kind: 'valid', report: parsed };
 }
 
@@ -152,9 +245,94 @@ function assertScopedCompletionReport(value: unknown): asserts value is ScopedCo
   }
 }
 
-function assertStringArray(value: unknown, key: string): asserts value is string[] {
+function assertPlanAutoCompletionReport(value: unknown): asserts value is PlanAutoCompletionReport {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: report must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.status !== 'completed') {
+    throw new Error('Invalid plan-auto completion report: status must be completed');
+  }
+  assertPlanParent(record.parent);
+  assertPlanGraph(record.graph);
+  assertStringArray(record.residualRisks, 'residualRisks', 'Invalid plan-auto completion report');
+  const graphValidation = validatePlanGraph(record.graph);
+  if (!graphValidation.ok) {
+    throw new Error(`Invalid plan-auto completion report: ${graphValidation.errors.join('; ')}`);
+  }
+}
+
+function assertPlanParent(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: parent must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if ('title' in record && typeof record.title !== 'string') {
+    throw new Error('Invalid plan-auto completion report: parent.title must be a string');
+  }
+  if (typeof record.body !== 'string' || record.body.trim().length === 0) {
+    throw new Error('Invalid plan-auto completion report: parent.body must be a non-empty string');
+  }
+}
+
+function assertPlanGraph(value: unknown): asserts value is PlanGraph {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: graph must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.nodes)) {
+    throw new Error('Invalid plan-auto completion report: graph.nodes must be an array');
+  }
+  if (!Array.isArray(record.edges)) {
+    throw new Error('Invalid plan-auto completion report: graph.edges must be an array');
+  }
+  if (record.specGate !== 'wave-level') {
+    throw new Error('Invalid plan-auto completion report: graph.specGate must be wave-level');
+  }
+  for (const item of record.nodes) {
+    assertPlanChildNode(item);
+  }
+  for (const item of record.edges) {
+    assertPlanDependencyEdge(item);
+  }
+}
+
+function assertPlanChildNode(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: graph node must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['stableId', 'title', 'body']) {
+    if (typeof record[key] !== 'string' || record[key].length === 0) {
+      throw new Error(`Invalid plan-auto completion report: graph node ${key} must be a non-empty string`);
+    }
+  }
+  if ('issueNumber' in record && !Number.isInteger(record.issueNumber)) {
+    throw new Error('Invalid plan-auto completion report: graph node issueNumber must be an integer');
+  }
+  if (record.afkHitl !== 'afk' && record.afkHitl !== 'hitl') {
+    throw new Error('Invalid plan-auto completion report: graph node afkHitl must be afk or hitl');
+  }
+  assertStringArray(record.ownershipScope, 'ownershipScope', 'Invalid plan-auto completion report');
+  assertStringArray(record.dependsOn, 'dependsOn', 'Invalid plan-auto completion report');
+  assertStringArray(record.verification, 'verification', 'Invalid plan-auto completion report');
+}
+
+function assertPlanDependencyEdge(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: graph edge must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['from', 'to', 'reason']) {
+    if (typeof record[key] !== 'string' || record[key].length === 0) {
+      throw new Error(`Invalid plan-auto completion report: graph edge ${key} must be a non-empty string`);
+    }
+  }
+}
+
+function assertStringArray(value: unknown, key: string, prefix = 'Invalid scoped completion report'): asserts value is string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error(`Invalid scoped completion report: ${key} must be a string array`);
+    throw new Error(`${prefix}: ${key} must be a string array`);
   }
 }
 

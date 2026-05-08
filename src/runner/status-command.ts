@@ -1,10 +1,9 @@
-import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
+import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import type { GitHubIssueAdapter } from '../github/issues.js';
-import { projectConfigPath } from '../setup/project-config.js';
+import { readRunnerConfig } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { RunnerStateStore } from './local-state.js';
 import { reconcileRunnerState, type RecoveryEntry } from './recovery.js';
@@ -25,7 +24,7 @@ export interface StatusCommandResult {
 
 export async function runStatusCommand(options: StatusCommandOptions): Promise<StatusCommandResult> {
   const targetRoot = resolve(options.targetRoot);
-  const config = await readProjectConfig(targetRoot);
+  const config = await readRunnerConfig(targetRoot);
   const adapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const discoveryLabels = [
     config.github.labels.auto.name,
@@ -60,16 +59,6 @@ export async function runStatusCommand(options: StatusCommandOptions): Promise<S
     skipped,
     recovery,
   };
-}
-
-async function readProjectConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
-  const content = await readFile(projectConfigPath(targetRoot), 'utf8');
-  const parsed = JSON.parse(content) as unknown;
-  const validation = validateConfig(parsed);
-  if (!validation.ok) {
-    throw new Error(`Invalid config: ${validation.errors.join('; ')}`);
-  }
-  return validation.value;
 }
 
 function formatStatusOutput(

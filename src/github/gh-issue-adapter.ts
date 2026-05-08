@@ -1,6 +1,7 @@
 import type { CommandExecutionError, CommandExecutor } from './gh-cli.js';
 import { defaultGhExecutor } from './gh-cli.js';
 import type {
+  CreateIssueInput,
   GitHubIssue,
   GitHubIssueAdapter,
   GitHubIssueComment,
@@ -8,6 +9,7 @@ import type {
   GitHubPullRequestLink,
   IssueState,
   PullRequestState,
+  UpdateIssueInput,
 } from './issues.js';
 
 const issueJsonFields = 'number,title,body,url,state,labels,comments,closedByPullRequestsReferences';
@@ -67,6 +69,46 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
       }
       throw error;
     }
+  }
+
+  public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
+    const args = ['issue', 'create', '--repo', this.repo, '--title', input.title, '--body', input.body];
+    for (const label of input.labels) {
+      args.push('--label', label);
+    }
+    const result = await this.executor('gh', args);
+    const match = result.stdout.match(/\/issues\/(\d+)/);
+    if (!match?.[1]) {
+      throw new Error('gh issue create did not return an issue URL');
+    }
+    const issueNumber = Number(match[1]);
+    const issue = await this.getIssue(issueNumber);
+    if (!issue) {
+      throw new Error(`Created issue #${issueNumber} was not found`);
+    }
+    return issue;
+  }
+
+  public async updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue> {
+    const args = ['issue', 'edit', String(issueNumber), '--repo', this.repo];
+    if (input.title !== undefined) {
+      args.push('--title', input.title);
+    }
+    if (input.body !== undefined) {
+      args.push('--body', input.body);
+    }
+    for (const label of input.addLabels ?? []) {
+      args.push('--add-label', label);
+    }
+    for (const label of input.removeLabels ?? []) {
+      args.push('--remove-label', label);
+    }
+    await this.executor('gh', args);
+    const issue = await this.getIssue(issueNumber);
+    if (!issue) {
+      throw new Error(`Updated issue #${issueNumber} was not found`);
+    }
+    return issue;
   }
 
   public async addLabels(issueNumber: number, labels: string[]): Promise<void> {

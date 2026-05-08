@@ -33,9 +33,24 @@ export interface GitHubIssue {
   closedByPullRequestsReferences: GitHubPullRequestLink[];
 }
 
+export interface CreateIssueInput {
+  title: string;
+  body: string;
+  labels: string[];
+}
+
+export interface UpdateIssueInput {
+  title?: string;
+  body?: string;
+  addLabels?: string[];
+  removeLabels?: string[];
+}
+
 export interface GitHubIssueAdapter {
   listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   getIssue(number: number): Promise<GitHubIssue | undefined>;
+  createIssue(input: CreateIssueInput): Promise<GitHubIssue>;
+  updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue>;
   addLabels(issueNumber: number, labels: string[]): Promise<void>;
   removeLabels(issueNumber: number, labels: string[]): Promise<void>;
   postComment(issueNumber: number, body: string): Promise<void>;
@@ -47,6 +62,8 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
   public addedLabels: Array<{ issueNumber: number; labels: string[] }> = [];
   public removedLabels: Array<{ issueNumber: number; labels: string[] }> = [];
   public postedComments: Array<{ issueNumber: number; body: string }> = [];
+  public createdIssues: CreateIssueInput[] = [];
+  public updatedIssues: Array<{ issueNumber: number; input: UpdateIssueInput }> = [];
 
   public constructor(issues: GitHubIssue[] = []) {
     for (const issue of issues) {
@@ -65,6 +82,55 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
   public async getIssue(number: number): Promise<GitHubIssue | undefined> {
     const issue = this.issues.get(number);
     return issue ? cloneIssue(issue) : undefined;
+  }
+
+  public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
+    const nextNumber = Math.max(0, ...this.issues.keys()) + 1;
+    const issue: GitHubIssue = {
+      number: nextNumber,
+      title: input.title,
+      body: input.body,
+      url: `https://github.com/example/repo/issues/${nextNumber}`,
+      state: 'OPEN',
+      labels: uniqueLabels(input.labels),
+      comments: [],
+      closedByPullRequestsReferences: [],
+    };
+    this.issues.set(nextNumber, issue);
+    this.createdIssues.push({ title: input.title, body: input.body, labels: [...input.labels] });
+    return cloneIssue(issue);
+  }
+
+  public async updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue> {
+    const issue = this.requireIssue(issueNumber);
+    if (input.title !== undefined) {
+      issue.title = input.title;
+    }
+    if (input.body !== undefined) {
+      issue.body = input.body;
+    }
+    if (input.addLabels) {
+      const existing = new Set(issue.labels.map((label) => label.name));
+      for (const label of input.addLabels) {
+        if (!existing.has(label)) {
+          issue.labels.push({ name: label });
+          existing.add(label);
+        }
+      }
+    }
+    if (input.removeLabels) {
+      const remove = new Set(input.removeLabels);
+      issue.labels = issue.labels.filter((label) => !remove.has(label.name));
+    }
+    this.updatedIssues.push({
+      issueNumber,
+      input: {
+        ...input,
+        addLabels: input.addLabels ? [...input.addLabels] : undefined,
+        removeLabels: input.removeLabels ? [...input.removeLabels] : undefined,
+      },
+    });
+    return cloneIssue(issue);
   }
 
   public async addLabels(issueNumber: number, labels: string[]): Promise<void> {
@@ -106,6 +172,10 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
     }
     return issue;
   }
+}
+
+function uniqueLabels(labels: string[]): GitHubIssueLabel[] {
+  return Array.from(new Set(labels)).map((name) => ({ name }));
 }
 
 function cloneIssue(issue: GitHubIssue): GitHubIssue {
