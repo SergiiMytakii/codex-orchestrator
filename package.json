@@ -17,7 +17,7 @@
     }
   },
   "bin": {
-    "codex-orchestrator": "./dist/src/cli.js"
+    "codex-orchestrator": "dist/src/cli.js"
   },
   "files": [
     "dist/src",
