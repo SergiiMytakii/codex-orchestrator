@@ -1,21 +1,84 @@
+import {
+  forbiddenRuntimeKeys,
+  labelKeys,
+  labelPreparationPolicies,
+  workflowKeys,
+  workflowSources,
+} from './constants.js';
+
+export type LabelKey = (typeof labelKeys)[number];
+export type LabelPreparationPolicy = 'report-only' | 'create-missing';
+export type WorkflowId = (typeof workflowKeys)[number];
+export type WorkflowSource = (typeof workflowSources)[number];
+export type ClarificationGate = 'block-and-comment';
+
+export interface LabelDefinition {
+  name: string;
+  color: string;
+  description: string;
+}
+
+export interface WorkflowConfig {
+  skillName: string;
+  source: WorkflowSource;
+  promptPath?: string;
+  skillPath?: string;
+}
+
 export interface CodexOrchestratorConfig {
+  version: 1;
   github: {
     owner: string;
     repo: string;
-    issueLabels: {
-      auto: string;
-      planAuto: string;
+    prepareLabels: LabelPreparationPolicy;
+    labels: {
+      auto: LabelDefinition;
+      planAuto: LabelDefinition;
+      running: LabelDefinition;
+      blocked: LabelDefinition;
+      manual: LabelDefinition;
+      review: LabelDefinition;
+      child: LabelDefinition;
     };
   };
   runner: {
     workspaceRoot: string;
     maxParallelChildren: number;
+    stateDir: string;
   };
   codex: {
     adapter: 'codex-cli';
   };
   project: {
     configDir: '.codex-orchestrator';
+    promptsDir: '.codex-orchestrator/prompts';
+  };
+  workflows: {
+    prd: WorkflowConfig;
+    issueBreakdown: WorkflowConfig;
+    breakdownReview: WorkflowConfig;
+    triage: WorkflowConfig;
+    scopedImplementation: WorkflowConfig;
+    issueTreeOrchestration: WorkflowConfig;
+  };
+  checks: Record<string, string>;
+  deny: {
+    secretFiles: string[];
+    destructiveDbOrCache: boolean;
+    productionDeployOrRelease: boolean;
+    additionalPathGlobs: string[];
+  };
+  branches: {
+    scopedIssue: string;
+    issueTree: string;
+  };
+  pullRequests: {
+    scopedIssueTitle: string;
+    issueTreeTitle: string;
+  };
+  issueClassification: {
+    promotionCriteria: string[];
+    clarificationGate: ClarificationGate;
   };
 }
 
@@ -33,48 +96,89 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     return { ok: false, errors: ['config must be an object'] };
   }
 
+  for (const forbiddenKey of forbiddenRuntimeKeys) {
+    if (forbiddenKey in root) {
+      errors.push(`${forbiddenKey} is runtime state and must not be committed config`);
+    }
+  }
+
+  expectLiteral(root, 'version', 1, errors);
+
   const github = expectObject(root, 'github', errors);
   const runner = expectObject(root, 'runner', errors);
   const codex = expectObject(root, 'codex', errors);
   const project = expectObject(root, 'project', errors);
-  const issueLabels = github ? expectObject(github, 'github.issueLabels', errors) : undefined;
+  const workflows = expectObject(root, 'workflows', errors);
+  const checks = expectObject(root, 'checks', errors);
+  const deny = expectObject(root, 'deny', errors);
+  const branches = expectObject(root, 'branches', errors);
+  const pullRequests = expectObject(root, 'pullRequests', errors);
+  const issueClassification = expectObject(root, 'issueClassification', errors);
 
-  const owner = github ? expectString(github, 'github.owner', errors) : undefined;
-  const repo = github ? expectString(github, 'github.repo', errors) : undefined;
-  const auto = issueLabels ? expectString(issueLabels, 'github.issueLabels.auto', errors) : undefined;
-  const planAuto = issueLabels ? expectString(issueLabels, 'github.issueLabels.planAuto', errors) : undefined;
-  const workspaceRoot = runner ? expectString(runner, 'runner.workspaceRoot', errors) : undefined;
-  const maxParallelChildren = runner ? expectParallelLimit(runner, errors) : undefined;
-  const adapter = codex ? expectLiteral(codex, 'codex.adapter', 'codex-cli', errors) : undefined;
-  const configDir = project ? expectLiteral(project, 'project.configDir', '.codex-orchestrator', errors) : undefined;
+  if (github) {
+    expectString(github, 'github.owner', errors);
+    expectString(github, 'github.repo', errors);
+    expectUnion(github, 'github.prepareLabels', labelPreparationPolicies, errors);
+    const labels = expectObject(github, 'github.labels', errors);
+    if (labels) {
+      for (const labelKey of labelKeys) {
+        validateLabel(labels, `github.labels.${labelKey}`, errors);
+      }
+    }
+  }
+
+  if (runner) {
+    expectString(runner, 'runner.workspaceRoot', errors);
+    expectParallelLimit(runner, errors);
+    expectString(runner, 'runner.stateDir', errors);
+  }
+
+  if (codex) {
+    expectLiteral(codex, 'codex.adapter', 'codex-cli', errors);
+  }
+
+  if (project) {
+    expectLiteral(project, 'project.configDir', '.codex-orchestrator', errors);
+    expectLiteral(project, 'project.promptsDir', '.codex-orchestrator/prompts', errors);
+  }
+
+  if (workflows) {
+    for (const workflowKey of workflowKeys) {
+      validateWorkflow(workflows, `workflows.${workflowKey}`, errors);
+    }
+  }
+
+  if (checks) {
+    validateChecks(checks, errors);
+  }
+
+  if (deny) {
+    expectStringArray(deny, 'deny.secretFiles', errors);
+    expectBoolean(deny, 'deny.destructiveDbOrCache', errors);
+    expectBoolean(deny, 'deny.productionDeployOrRelease', errors);
+    expectStringArray(deny, 'deny.additionalPathGlobs', errors);
+  }
+
+  if (branches) {
+    expectString(branches, 'branches.scopedIssue', errors);
+    expectString(branches, 'branches.issueTree', errors);
+  }
+
+  if (pullRequests) {
+    expectString(pullRequests, 'pullRequests.scopedIssueTitle', errors);
+    expectString(pullRequests, 'pullRequests.issueTreeTitle', errors);
+  }
+
+  if (issueClassification) {
+    expectStringArray(issueClassification, 'issueClassification.promotionCriteria', errors);
+    expectLiteral(issueClassification, 'issueClassification.clarificationGate', 'block-and-comment', errors);
+  }
 
   if (errors.length > 0) {
     return { ok: false, errors };
   }
 
-  return {
-    ok: true,
-    value: {
-      github: {
-        owner: owner as string,
-        repo: repo as string,
-        issueLabels: {
-          auto: auto as string,
-          planAuto: planAuto as string,
-        },
-      },
-      runner: {
-        workspaceRoot: workspaceRoot as string,
-        maxParallelChildren: maxParallelChildren as number,
-      },
-      codex: {
-        adapter: adapter as 'codex-cli',
-      },
-      project: {
-        configDir: configDir as '.codex-orchestrator',
-      },
-    },
-  };
+  return { ok: true, value: input as CodexOrchestratorConfig };
 }
 
 function asObject(value: unknown): ObjectRecord | undefined {
@@ -83,6 +187,11 @@ function asObject(value: unknown): ObjectRecord | undefined {
   }
 
   return value as ObjectRecord;
+}
+
+function readPath(parent: ObjectRecord, path: string): unknown {
+  const lastKey = path.split('.').at(-1);
+  return lastKey ? parent[lastKey] : undefined;
 }
 
 function expectObject(parent: ObjectRecord, path: string, errors: string[]): ObjectRecord | undefined {
@@ -108,7 +217,18 @@ function expectString(parent: ObjectRecord, path: string, errors: string[]): str
   return value;
 }
 
-function expectLiteral<TLiteral extends string>(
+function expectBoolean(parent: ObjectRecord, path: string, errors: string[]): boolean | undefined {
+  const value = readPath(parent, path);
+
+  if (typeof value !== 'boolean') {
+    errors.push(`${path} must be a boolean`);
+    return undefined;
+  }
+
+  return value;
+}
+
+function expectLiteral<TLiteral extends string | number>(
   parent: ObjectRecord,
   path: string,
   expected: TLiteral,
@@ -124,6 +244,22 @@ function expectLiteral<TLiteral extends string>(
   return expected;
 }
 
+function expectUnion<TLiteral extends string>(
+  parent: ObjectRecord,
+  path: string,
+  expected: readonly TLiteral[],
+  errors: string[],
+): TLiteral | undefined {
+  const value = readPath(parent, path);
+
+  if (typeof value !== 'string' || !expected.includes(value as TLiteral)) {
+    errors.push(`${path} must be one of ${expected.join(', ')}`);
+    return undefined;
+  }
+
+  return value as TLiteral;
+}
+
 function expectParallelLimit(parent: ObjectRecord, errors: string[]): number | undefined {
   const value = readPath(parent, 'runner.maxParallelChildren');
 
@@ -135,13 +271,58 @@ function expectParallelLimit(parent: ObjectRecord, errors: string[]): number | u
   return value;
 }
 
-function readPath(parent: ObjectRecord, path: string): unknown {
-  const keys = path.split('.');
-  const lastKey = keys[keys.length - 1];
+function expectStringArray(parent: ObjectRecord, path: string, errors: string[]): string[] | undefined {
+  const value = readPath(parent, path);
 
-  if (lastKey === undefined) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) {
+    errors.push(`${path} must be an array of non-empty strings`);
     return undefined;
   }
 
-  return parent[lastKey];
+  return value as string[];
+}
+
+function validateLabel(parent: ObjectRecord, path: string, errors: string[]): void {
+  const label = expectObject(parent, path, errors);
+
+  if (!label) {
+    return;
+  }
+
+  expectString(label, `${path}.name`, errors);
+  expectString(label, `${path}.color`, errors);
+  expectString(label, `${path}.description`, errors);
+}
+
+function validateWorkflow(parent: ObjectRecord, path: string, errors: string[]): void {
+  const workflow = expectObject(parent, path, errors);
+
+  if (!workflow) {
+    return;
+  }
+
+  const source = expectUnion(
+    workflow,
+    `${path}.source`,
+    workflowSources,
+    errors,
+  );
+
+  expectString(workflow, `${path}.skillName`, errors);
+
+  if (source === 'existing-skill' || source === 'package-owned-skill') {
+    expectString(workflow, `${path}.skillPath`, errors);
+  }
+
+  if (source === 'package-owned-prompt-fallback') {
+    expectString(workflow, `${path}.promptPath`, errors);
+  }
+}
+
+function validateChecks(checks: ObjectRecord, errors: string[]): void {
+  for (const [name, command] of Object.entries(checks)) {
+    if (name.length === 0 || typeof command !== 'string' || command.length === 0) {
+      errors.push('checks must map non-empty names to non-empty shell commands');
+    }
+  }
 }

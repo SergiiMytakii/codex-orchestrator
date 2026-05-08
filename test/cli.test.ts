@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 interface CliResult {
@@ -24,10 +26,11 @@ async function readExpectedPackageVersion(): Promise<string> {
   return `${packageJson.name} ${packageJson.version}\n`;
 }
 
-function runCli(args: string[]): Promise<CliResult> {
+function runCli(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['dist/src/cli.js', ...args], {
       cwd: new URL('../..', import.meta.url),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -73,4 +76,37 @@ test('runs no-op health command', async () => {
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
   assert.equal(result.stdout, 'codex-orchestrator health: ok\n');
+});
+
+test('runs setup dry-run without launching Codex', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-target-'));
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[{"name":"agent:auto"}]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+
+  const result = await runCli(
+    [
+      'setup',
+      '--target',
+      targetRoot,
+      '--github-owner',
+      'SergiiMytakii',
+      '--github-repo',
+      'IntelleReach',
+      '--dry-run',
+    ],
+    {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+    },
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /.codex-orchestrator\/config.json/);
+  assert.match(result.stdout, /labels: report-only/);
+  assert.match(result.stdout, /prd: package-owned-prompt-fallback/);
+  assert.match(result.stdout, /Codex will not be launched/);
+  assert.match(result.stdout, /setup will not commit or open a pull request/);
 });

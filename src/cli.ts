@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readPackageInfo } from './package-info.js';
+import { runSetupCommand } from './setup/setup-command.js';
 
 const helpText = `codex-orchestrator
 
@@ -8,14 +9,26 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
+  codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run]
 
 Commands:
   health       Run a no-op local health check.
+  setup        Create or dry-run project-local orchestrator config.
 
 Options:
   --help, -h      Show this help.
   --version, -v   Show package version.
 `;
+
+interface SetupCliArgs {
+  target?: string;
+  githubOwner?: string;
+  githubRepo?: string;
+  skillsRoot?: string;
+  dryRun: boolean;
+  prepareLabels: boolean;
+  replacePackageSkills: boolean;
+}
 
 async function main(args: string[]): Promise<number> {
   const [command] = args;
@@ -36,8 +49,96 @@ async function main(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (command === 'setup') {
+    const parsed = parseSetupArgs(args.slice(1));
+
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+
+    try {
+      const result = await runSetupCommand({
+        targetRoot: parsed.value.target,
+        githubOwner: parsed.value.githubOwner,
+        githubRepo: parsed.value.githubRepo,
+        dryRun: parsed.value.dryRun,
+        prepareLabels: parsed.value.prepareLabels,
+        skillsRoot: parsed.value.skillsRoot,
+        replacePackageSkills: parsed.value.replacePackageSkills,
+      });
+      process.stdout.write(`${result.output}\n`);
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'setup failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { target: string } } | { ok: false; error: string } {
+  const parsed: SetupCliArgs = {
+    dryRun: false,
+    prepareLabels: false,
+    replacePackageSkills: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--target':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.target = next;
+        index += 1;
+        break;
+      case '--github-owner':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.githubOwner = next;
+        index += 1;
+        break;
+      case '--github-repo':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.githubRepo = next;
+        index += 1;
+        break;
+      case '--skills-root':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.skillsRoot = next;
+        index += 1;
+        break;
+      case '--dry-run':
+        parsed.dryRun = true;
+        break;
+      case '--prepare-labels':
+        parsed.prepareLabels = true;
+        break;
+      case '--replace-package-skills':
+        parsed.replacePackageSkills = true;
+        break;
+      default:
+        return { ok: false, error: `Unknown setup option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.target) {
+    return { ok: false, error: 'setup requires --target <path>' };
+  }
+
+  return { ok: true, value: { ...parsed, target: parsed.target } };
 }
 
 main(process.argv.slice(2))
