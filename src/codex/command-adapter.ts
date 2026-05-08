@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
@@ -50,6 +53,7 @@ export function buildCodexProcessEnv(
       env[key] = value;
     }
   }
+  env.CODEX_HOME = env.CODEX_HOME || join(homedir(), '.codex');
   env.HOME = input.isolatedHomePath;
   env[input.config.codex.promptFileEnv] = input.promptPath;
   env[input.config.codex.reportFileEnv] = input.reportPath;
@@ -58,6 +62,8 @@ export function buildCodexProcessEnv(
 
 function renderCodexArg(arg: string, input: CodexCommandRunInput): string {
   return arg
+    .replaceAll('${targetRoot}', input.targetRoot)
+    .replaceAll('${stateDir}', join(input.targetRoot, input.config.runner.stateDir))
     .replaceAll('${worktreePath}', input.worktreePath)
     .replaceAll('${promptFile}', input.promptPath)
     .replaceAll('${promptPath}', input.promptPath)

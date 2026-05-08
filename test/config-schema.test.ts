@@ -18,7 +18,11 @@ test('accepts the expanded valid config contract', () => {
       '${worktreePath}',
       '--sandbox',
       'workspace-write',
+      '--add-dir',
+      '${stateDir}',
       '--ignore-user-config',
+      '--output-last-message',
+      '${reportPath}',
       '-',
     ]);
     assert.equal(result.value.branches.base, 'main');
