@@ -35,13 +35,24 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
     input.worktreePath,
     '--sandbox',
     'workspace-write',
+    '--add-dir',
+    '/repo/.codex-orchestrator/state',
     '--ignore-user-config',
+    '--output-last-message',
+    input.reportPath,
     '-',
   ]);
   assert.equal(options?.cwd, input.worktreePath);
   assert.equal(options?.stdin, 'Prompt text');
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROMPT_FILE, input.promptPath);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
+});
+
+test('codex env defaults CODEX_HOME to the user codex home for authentication', () => {
+  const env = buildCodexProcessEnv(input, {});
+
+  assert.match(env.CODEX_HOME, /\/\.codex$/);
+  assert.equal(env.HOME, input.isolatedHomePath);
 });
 
 test('codex env keeps only allowed values and drops GitHub/SSH auth', () => {
