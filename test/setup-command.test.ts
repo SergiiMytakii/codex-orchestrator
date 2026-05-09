@@ -1,14 +1,23 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { validateConfig } from '../src/config/schema.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
 import { runSetupCommand } from '../src/setup/setup-command.js';
 
+const execFileAsync = promisify(execFile);
+
 async function tempRepo(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'codex-orchestrator-test-'));
+}
+
+async function initGitHubRemote(targetRoot: string, remoteUrl: string): Promise<void> {
+  await execFileAsync('git', ['-C', targetRoot, 'init']);
+  await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteUrl]);
 }
 
 test('setup creates project config and package prompt fallbacks', async () => {
@@ -33,6 +42,19 @@ test('setup creates project config and package prompt fallbacks', async () => {
     await readFile(join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows', 'prd.md'), 'utf8'),
     /PRD/,
   );
+});
+
+test('setup infers GitHub owner and repo from origin remote', async () => {
+  const targetRoot = await tempRepo();
+  await initGitHubRemote(targetRoot, 'git@github.com:SergiiMytakii/IntelleReach.git');
+
+  const result = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(result.config.github.owner, 'SergiiMytakii');
+  assert.equal(result.config.github.repo, 'IntelleReach');
 });
 
 test('setup updates existing config without accepting runtime state', async () => {

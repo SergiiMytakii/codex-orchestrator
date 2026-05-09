@@ -18,7 +18,7 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
-  codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run] [--prepare-labels]
+  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
   codex-orchestrator status --target <path> [--dry-run]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>]
@@ -372,11 +372,7 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
     }
   }
 
-  if (!parsed.target) {
-    return { ok: false, error: 'setup requires --target <path>' };
-  }
-
-  return { ok: true, value: { ...parsed, target: parsed.target } };
+  return { ok: true, value: { ...parsed, target: parsed.target ?? process.cwd() } };
 }
 
 main(process.argv.slice(2))

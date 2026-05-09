@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { validConfig } from './fixtures/config.js';
 
 interface CliResult {
@@ -27,10 +28,11 @@ async function readExpectedPackageVersion(): Promise<string> {
   return `${packageJson.name} ${packageJson.version}\n`;
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<CliResult> {
+function runCli(args: string[], env: NodeJS.ProcessEnv = process.env, cwd: string | URL = new URL('../..', import.meta.url)): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['dist/src/cli.js', ...args], {
-      cwd: new URL('../..', import.meta.url),
+    const cliPath = fileURLToPath(new URL('../../dist/src/cli.js', import.meta.url));
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -115,6 +117,54 @@ test('runs setup dry-run without launching Codex', async () => {
   assert.match(result.stdout, /prd: package-owned-prompt-fallback/);
   assert.match(result.stdout, /Codex will not be launched/);
   assert.match(result.stdout, /setup will not commit or open a pull request/);
+});
+
+test('runs setup with repository inferred from git origin', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-target-'));
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[{"name":"agent:auto"}]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['-C', targetRoot, 'init'], { stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      status === 0 ? resolve() : reject(new Error(`git init exited with ${status}`));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['-C', targetRoot, 'remote', 'add', 'origin', 'https://github.com/SergiiMytakii/IntelleReach.git'], {
+      stdio: 'ignore',
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      status === 0 ? resolve() : reject(new Error(`git remote add exited with ${status}`));
+    });
+  });
+
+  const result = await runCli(
+    [
+      'setup',
+      '--prepare-labels',
+    ],
+    {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+    },
+    targetRoot,
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /mode: write/);
+  assert.match(result.stdout, /labels: create-missing/);
+
+  const config = JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')) as Record<
+    string,
+    Record<string, string>
+  >;
+  assert.equal(config.github.owner, 'SergiiMytakii');
+  assert.equal(config.github.repo, 'IntelleReach');
 });
 
 test('status missing target exits with usage error', async () => {

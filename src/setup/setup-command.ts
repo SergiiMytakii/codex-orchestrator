@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { validateConfig } from '../config/schema.js';
@@ -14,6 +16,8 @@ import {
   writeProjectConfig,
 } from './project-config.js';
 import { defaultSkillsRoot, resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface SetupCommandOptions {
   targetRoot: string;
@@ -42,11 +46,12 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
 
   assertNoRuntimeState(existingConfig);
 
-  const owner = options.githubOwner ?? readExistingString(existingConfig, 'github', 'owner');
-  const repo = options.githubRepo ?? readExistingString(existingConfig, 'github', 'repo');
+  const inferredGitHubRepo = await inferGitHubRepoFromOrigin(options.targetRoot);
+  const owner = options.githubOwner ?? readExistingString(existingConfig, 'github', 'owner') ?? inferredGitHubRepo?.owner;
+  const repo = options.githubRepo ?? readExistingString(existingConfig, 'github', 'repo') ?? inferredGitHubRepo?.repo;
 
   if (!owner || !repo) {
-    throw new Error('setup requires --github-owner and --github-repo unless existing config provides them');
+    throw new Error('setup requires --github-owner and --github-repo unless existing config or git origin remote provides them');
   }
 
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
@@ -162,4 +167,30 @@ function readExistingString(
 
   const value = (sectionValue as Record<string, unknown>)[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+async function inferGitHubRepoFromOrigin(targetRoot: string): Promise<{ owner: string; repo: string } | undefined> {
+  try {
+    const result = await execFileAsync('git', ['-C', targetRoot, 'remote', 'get-url', 'origin']);
+    return parseGitHubRemoteUrl(result.stdout.trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function parseGitHubRemoteUrl(remoteUrl: string): { owner: string; repo: string } | undefined {
+  const patterns = [
+    /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/,
+    /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
+    /^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = remoteUrl.match(pattern);
+    if (match?.[1] && match[2]) {
+      return { owner: match[1], repo: match[2] };
+    }
+  }
+
+  return undefined;
 }

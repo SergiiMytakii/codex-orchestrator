@@ -1,85 +1,297 @@
 # codex-orchestrator
 
-`codex-orchestrator` is a reusable npm package and CLI for coordinating Codex work from GitHub Issues.
+`codex-orchestrator` is a reusable runner for Codex work driven by GitHub
+Issues.
 
-This repository is intentionally separate from IntelliOutreach. It is not an IntelliOutreach workspace package, and installed projects should keep their own policy under `.codex-orchestrator/`.
+It lets a maintainer mark an issue as safe for autonomous work, run Codex in an
+isolated workspace, and receive the result as a reviewable draft pull request.
+For larger features, it can turn one parent issue into a planned issue tree,
+execute safe child issues in dependency-aware waves, and open one integration
+draft PR.
 
-## Initial scope
+The package is designed to be installed into any repository. The generic
+orchestration lives in this npm package; each target repository keeps its own
+policy in `.codex-orchestrator/`.
 
-The first package contract supports:
+## The Problem
 
-- GitHub Issues as the work source.
-- A local runner boundary.
-- A Codex adapter boundary, starting with `codex-cli`.
-- Project-local `.codex-orchestrator/` config.
-- Setup, status, scoped issue execution, parent issue-tree planning, and parent issue-tree execution.
+Codex is useful for implementation work, but coordinating it manually does not
+scale well:
 
-Always-on polling, auto-merge, hosted runner infrastructure, and npm publication are not implemented in this scope.
+- a maintainer has to start a new chat for every small issue;
+- large features need PRD, issue breakdown, triage, child issue execution, and
+  final integration;
+- concurrent agent work can conflict if multiple tasks touch the same files;
+- agents should not decide by themselves which linked issues are authorized;
+- publication should be consistent: branch, commit, push, and pull request
+  creation should follow one project policy;
+- humans still need review control before anything is merged.
 
-## CLI
+`codex-orchestrator` solves the coordination layer. GitHub Issues become the
+work queue, GitHub labels become the state machine, and draft pull requests
+become the handoff point back to humans.
+
+## What It Does
+
+`codex-orchestrator` coordinates the full path from issue to draft PR:
+
+- finds GitHub Issues that are explicitly authorized for autonomous work;
+- blocks issues that are manual, already running, under review, or unsafe;
+- creates isolated git worktrees and branches for Codex sessions;
+- gives Codex project-local prompts and the current issue context;
+- validates Codex's completion report and changed files;
+- runs the configured project checks;
+- owns commit, push, merge, labels, comments, and pull request creation;
+- opens draft PRs instead of merging automatically;
+- keeps local runner state so interrupted work can be inspected or recovered.
+
+Codex edits files. The runner owns publication.
+
+## Authorization Modes
+
+There are two main labels.
+
+### `agent:auto`
+
+Use `agent:auto` for one scoped implementation issue.
+
+Example:
+
+```sh
+codex-orchestrator run --target . --issue 123
+```
+
+The runner checks that issue `#123` is eligible, creates a worktree and branch,
+runs Codex, validates the result, commits the changes, pushes the branch, and
+opens one draft PR.
+
+### `agent:plan-auto`
+
+Use `agent:plan-auto` for a larger parent issue.
+
+This mode is for work that should be planned before implementation. The runner
+asks Codex to produce or update the PRD, break the work into child issues,
+review the breakdown, triage the children, and execute the autonomous children
+in waves.
+
+Only explicitly marked child issues belong to the autonomous tree. A child issue
+must have the configured child label and the runner-owned parent marker. A link,
+milestone, project, or casual reference is not enough.
+
+Successful tree execution opens one integration draft PR.
+
+## How It Works
+
+1. Install the package.
+2. Run `setup` in the repository you want to automate.
+3. Commit the generated `.codex-orchestrator/` policy into that repository.
+4. Add `agent:auto` or `agent:plan-auto` to a GitHub Issue.
+5. Run `status` to see what is eligible or blocked.
+6. Run one selected issue with `run`.
+7. Review the draft PR created by the runner.
+
+The runner does not auto-merge.
+
+## Installation
+
+Requirements:
+
+- Node.js 18 or newer;
+- `git`;
+- GitHub CLI `gh`, authenticated for the target repository;
+- Codex CLI, installed and authenticated;
+- write access to the target GitHub repository.
+
+Install globally:
+
+```sh
+npm install -g codex-orchestrator
+```
+
+Check the CLI:
+
+```sh
+codex-orchestrator --version
+codex-orchestrator health
+```
+
+You can also run it with `npx`:
+
+```sh
+npx codex-orchestrator --help
+```
+
+## Quick Start
+
+Open the repository that should receive autonomous Codex work:
+
+```sh
+cd /path/to/your/repo
+```
+
+Run setup and create missing labels:
+
+```sh
+codex-orchestrator setup --prepare-labels
+```
+
+By default, setup reads the GitHub owner and repository name from `git remote
+origin` and uses the current directory as the target repository. Use `--target`,
+`--github-owner`, and `--github-repo` only when you need to override those
+defaults.
+
+Commit the generated `.codex-orchestrator/` directory to your repository. It is
+the repository-owned policy for how autonomous work should run.
+
+Check eligible work:
+
+```sh
+codex-orchestrator status --target .
+```
+
+Run one issue:
+
+```sh
+codex-orchestrator run --target . --issue 123
+```
+
+## Agent-Assisted Setup
+
+A user does not need a long prompt. They can ask an agent:
+
+```text
+Set up codex-orchestrator for this repo.
+```
+
+The agent should inspect the repository, confirm it has a GitHub `origin`
+remote, and run:
+
+```sh
+codex-orchestrator setup --prepare-labels
+```
+
+If needed, the agent can discover the exact setup behavior from:
+
+```sh
+codex-orchestrator --help
+```
+
+The package also ships a setup prompt in `prompts/setup-skill.md`. Setup copies
+that prompt into `.codex-orchestrator/prompts/setup-skill.md`, so future agents
+working in the repository can find the repository-local setup guidance.
+
+Use `--dry-run` only when you want a preview without writing files or creating
+labels.
+
+## Project Policy
+
+Every installed repository owns its own config:
+
+```sh
+.codex-orchestrator/config.json
+```
+
+That config controls:
+
+- GitHub owner and repo;
+- labels used for the runner state machine;
+- base branch and branch name templates;
+- validation checks such as `npm test`;
+- deny rules for secrets and unsafe actions;
+- concurrency for child issue execution;
+- pull request title templates;
+- prompts used for PRD, issue breakdown, triage, scoped implementation, and
+  issue-tree orchestration.
+
+The package ships fallback prompts so a user does not need to already have a
+local Codex skill pack installed. During setup, compatible existing local skills
+can be reused; missing workflows fall back to package-owned prompts.
+
+## Labels
+
+Default labels:
+
+- `agent:auto` - a scoped issue is authorized for autonomous implementation;
+- `agent:plan-auto` - a parent issue is authorized for planning and issue-tree
+  execution;
+- `agent:child` - a child issue belongs to an autonomous parent tree;
+- `agent:running` - the runner is currently working on the issue;
+- `agent:blocked` - the runner needs maintainer input;
+- `agent:manual` - the issue is reserved for human work;
+- `agent:review` - the result is ready for human review.
+
+`setup --prepare-labels` creates missing labels through `gh`.
+
+## Safety Model
+
+The package is intentionally PR-first and human-reviewed.
+
+Important guardrails:
+
+- no automatic merge;
+- draft PRs only;
+- Codex changes files, but the runner owns git and GitHub publication;
+- child issues are never inferred from ordinary links or references;
+- manual, blocked, running, review, and closed issues are not started;
+- child implementations run in isolated worktrees;
+- parallel child work is limited and avoids overlapping ownership scopes;
+- secret files are blocked by policy;
+- destructive database/cache actions and production deploy/release actions are
+  blocked by default;
+- underspecified work can be blocked for maintainer clarification instead of
+  letting Codex invent product decisions.
+
+## CLI Reference
 
 ```sh
 codex-orchestrator --help
 codex-orchestrator --version
 codex-orchestrator health
-codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> --dry-run
-codex-orchestrator status --target <path> --dry-run
+codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
+codex-orchestrator status --target <path> [--dry-run]
 codex-orchestrator run --target <path> --issue <number>
 ```
 
-The `health` command is a no-op local check for the initial CLI boot contract.
+### `setup`
 
-The `setup` command creates project-local configuration under `.codex-orchestrator/`.
-Use `--dry-run` to validate the config plan, label status, workflow sources, checks, branch naming, and pull request policy without writing files or launching Codex.
+Creates project-local config and prompt files under `.codex-orchestrator/`.
 
-Setup never commits changes and never opens a setup pull request.
+Useful flags:
 
-Useful setup flags:
+- `--dry-run` - show the setup plan without writing files or creating labels;
+- `--prepare-labels` - create missing GitHub labels;
+- `--target <path>` - override the target directory, which defaults to the current directory;
+- `--github-owner <owner>` - override the GitHub owner inferred from `origin`;
+- `--github-repo <repo>` - override the GitHub repo inferred from `origin`;
+- `--skills-root <path>` - choose where setup looks for existing Codex skills;
+- `--replace-package-skills` - refresh package-owned prompt files.
 
-- `--prepare-labels` creates missing GitHub labels through the local `gh` CLI when not in dry-run mode.
-- `--skills-root <path>` changes where existing local Codex skills are detected.
-- `--replace-package-skills` allows package-owned prompt files under `.codex-orchestrator/prompts/` to be replaced.
+Setup does not launch Codex, commit changes, or open pull requests.
 
-By default, setup reports missing labels only and never overwrites existing prompt files.
+### `status`
 
-The `status` command reads configured GitHub issues and local runner metadata, then prints eligible work, skipped issues with reason codes, and restart recovery state.
-Use `--dry-run` to make the read-only intent explicit. Status and dry-run modes do not launch Codex or mutate GitHub labels/comments.
+Shows eligible issues, skipped issues with reasons, and local recovery state.
 
-The `run` command executes one authorized issue:
+`status` is read-only. It does not launch Codex and does not mutate GitHub.
 
-- `agent:auto` runs one scoped implementation issue. It mutates GitHub labels/comments, creates a worktree and branch, runs the configured Codex command with a durable prompt, commits/pushes runner-owned changes, and opens one draft pull request.
-- `agent:plan-auto` runs one parent issue tree. It claims the parent, sends the PRD, issue-breakdown, breakdown-review, and triage workflow prompts to Codex, requires a structured planning report, updates the parent PRD, creates or updates marked child issues, executes AFK-ready children in dependency-aware waves, merges child commits into one parent integration branch, pushes that branch, and opens one integration draft pull request.
+### `run`
 
-Autonomous child membership is explicit. A child belongs to a parent tree only when it has the configured `agent:child` label and its body contains:
+Executes one selected issue if its labels and state authorize autonomous work.
 
-```md
-<!-- codex-orchestrator:autonomous-child parent=#<parentIssueNumber> -->
-```
+For `agent:auto`, it runs one scoped implementation and opens one draft PR.
 
-Arbitrary issue links, milestones, projects, comments, and generic parent references do not authorize child membership. `agent:auto` is added to generated child issues only when the planning report marks that child as AFK-ready and the runner has persisted and verified the explicit child marker for the parent.
+For `agent:plan-auto`, it runs parent planning, child issue management,
+dependency-aware child waves, final validation, and one integration draft PR.
 
-Child execution is deliberately constrained:
+## Current Scope
 
-- Only children with both `agent:child` and the exact parent marker are considered.
-- Children marked HITL, manual, blocked, running, review, closed, malformed, or missing `agent:auto` block the parent tree before execution.
-- At most three child implementations run in parallel, and children with overlapping ownership scopes are serialized into later batches.
-- Every parallel child runs in its own temporary worktree and branch. Codex changes files only; the runner owns commits, merges, pushes, labels, comments, and pull requests.
-- Completed child commits merge sequentially into the parent integration branch. Merge conflicts block the parent tree, preserve relevant worktrees/branches for inspection, and do not push or open a PR.
-- Successful issue trees open one integration draft PR. The runner does not create separate child PRs in this POC.
+The package currently focuses on explicit CLI-driven runs and project-local
+configuration. The state machine and runner boundaries are designed for
+always-on local runner workflows, but hosted infrastructure and automatic
+polling are not part of this package today.
 
-The runner never auto-merges and rejects configured secret file changes, reported secret reads/changes, reported destructive database/cache actions, reported production deploy/release actions, Codex-owned git commits, incoherent planning graphs, planning sessions that modify repository files, and child safety violations.
-
-## Project config
-
-Generated config is written to `.codex-orchestrator/config.json`. It records labels, workflow prompt paths, validation checks, deny rules, concurrency, branch naming, pull request templates, and issue classification settings.
-
-Runtime process state is excluded from committed config. State directories may be configured as policy paths, but active sessions, locks, retries, worktrees, and cache snapshots are not valid config.
-
-## Workflow prompts
-
-The package ships original setup and workflow fallback prompts under `prompts/`. Setup copies them into `.codex-orchestrator/prompts/` when a target repository does not already provide prompt files.
-
-If compatible local skills exist, setup records them as `existing-skill`. Missing workflow capabilities use package-owned prompt fallbacks.
+Non-GitHub trackers and non-Codex agents are also out of scope for the current
+version, although the code keeps adapter boundaries for future expansion.
 
 ## Development
 
@@ -89,6 +301,6 @@ npm run build
 npm run typecheck
 ```
 
-## npm publication
-
-Publishing to npm is out of scope until separately approved. This scaffold establishes the package contract, tests, and repository boundary only.
+Publishing is configured through GitHub Actions. A push to `main` runs tests and
+publishes the package to npm only when the current package version is not already
+published. The repository must provide the GitHub secret `NPM_KEY`.
