@@ -8,6 +8,7 @@ import {
   buildScopedImplementationPrompt,
   runScopedAutoCommand,
   runPlanAutoCommand,
+  runDaemonCommand,
   discoverIssueWork,
   ensureAutonomousChildBody,
   isAutonomousChildOfParent,
@@ -45,4 +46,5 @@ test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof validatePlanGraph, 'function');
   assert.equal(typeof reconcileRunnerState, 'function');
   assert.equal(typeof runStatusCommand, 'function');
+  assert.equal(typeof runDaemonCommand, 'function');
 });

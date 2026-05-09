@@ -6,6 +6,7 @@ import { GhCliIssueAdapter } from './github/gh-issue-adapter.js';
 import { readPackageInfo } from './package-info.js';
 import { readRunnerConfig } from './runner/command-utils.js';
 import { discoverIssueWork } from './runner/issue-state-machine.js';
+import { runDaemonCommand } from './runner/daemon-command.js';
 import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
@@ -17,15 +18,17 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
-  codex-orchestrator setup --target <path> --github-owner <owner> --github-repo <repo> [--dry-run] [--prepare-labels]
+  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
   codex-orchestrator status --target <path> [--dry-run]
   codex-orchestrator run --target <path> --issue <number>
+  codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>]
 
 Commands:
   health       Run a no-op local health check.
   setup        Create or dry-run project-local orchestrator config. Use --prepare-labels to create missing agent labels.
   status       Show eligible/skipped issue work and local recovery state.
   run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
+  daemon       Poll GitHub Issues and execute eligible autonomous work until stopped.
 
 Options:
   --help, -h      Show this help.
@@ -50,6 +53,13 @@ interface StatusCliArgs {
 interface RunCliArgs {
   target?: string;
   issue?: number;
+}
+
+interface DaemonCliArgs {
+  target?: string;
+  intervalSeconds?: number;
+  once: boolean;
+  maxRuns?: number;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -134,6 +144,32 @@ async function main(args: string[]): Promise<number> {
       return 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'run failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === 'daemon') {
+    const parsed = parseDaemonArgs(args.slice(1));
+
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+
+    try {
+      await runDaemonCommand({
+        targetRoot: parsed.value.target,
+        intervalMs: parsed.value.intervalSeconds * 1000,
+        once: parsed.value.once,
+        maxRuns: parsed.value.maxRuns,
+        onEvent: (line) => {
+          process.stdout.write(`${line}\n`);
+        },
+      });
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'daemon failed';
       process.stderr.write(`${message}\n`);
       return 1;
     }
@@ -233,6 +269,55 @@ function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { t
   return { ok: true, value: { ...parsed, target: parsed.target } };
 }
 
+function parseDaemonArgs(
+  args: string[],
+): { ok: true; value: DaemonCliArgs & { target: string; intervalSeconds: number } } | { ok: false; error: string } {
+  const parsed: DaemonCliArgs = {
+    intervalSeconds: 300,
+    once: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--target':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.target = next;
+        index += 1;
+        break;
+      case '--interval-seconds':
+        if (!next || next.startsWith('--') || !Number.isInteger(Number(next)) || Number(next) < 1) {
+          return { ok: false, error: 'daemon requires --interval-seconds <positive integer>' };
+        }
+        parsed.intervalSeconds = Number(next);
+        index += 1;
+        break;
+      case '--once':
+        parsed.once = true;
+        break;
+      case '--max-runs':
+        if (!next || next.startsWith('--') || !Number.isInteger(Number(next)) || Number(next) < 1) {
+          return { ok: false, error: 'daemon requires --max-runs <positive integer>' };
+        }
+        parsed.maxRuns = Number(next);
+        index += 1;
+        break;
+      default:
+        return { ok: false, error: `Unknown daemon option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.target) {
+    return { ok: false, error: 'daemon requires --target <path>' };
+  }
+
+  return { ok: true, value: { ...parsed, target: parsed.target, intervalSeconds: parsed.intervalSeconds ?? 300 } };
+}
+
 function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { target: string } } | { ok: false; error: string } {
   const parsed: SetupCliArgs = {
     dryRun: false,
@@ -287,11 +372,7 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
     }
   }
 
-  if (!parsed.target) {
-    return { ok: false, error: 'setup requires --target <path>' };
-  }
-
-  return { ok: true, value: { ...parsed, target: parsed.target } };
+  return { ok: true, value: { ...parsed, target: parsed.target ?? process.cwd() } };
 }
 
 main(process.argv.slice(2))

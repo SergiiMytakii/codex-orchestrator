@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { validConfig } from './fixtures/config.js';
 
 interface CliResult {
@@ -27,10 +28,11 @@ async function readExpectedPackageVersion(): Promise<string> {
   return `${packageJson.name} ${packageJson.version}\n`;
 }
 
-function runCli(args: string[], env: NodeJS.ProcessEnv = process.env): Promise<CliResult> {
+function runCli(args: string[], env: NodeJS.ProcessEnv = process.env, cwd: string | URL = new URL('../..', import.meta.url)): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['dist/src/cli.js', ...args], {
-      cwd: new URL('../..', import.meta.url),
+    const cliPath = fileURLToPath(new URL('../../dist/src/cli.js', import.meta.url));
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -60,6 +62,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
   assert.match(result.stdout, /status/);
+  assert.match(result.stdout, /daemon/);
   assert.match(result.stdout, /agent:auto/);
   assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--prepare-labels/);
@@ -116,6 +119,54 @@ test('runs setup dry-run without launching Codex', async () => {
   assert.match(result.stdout, /setup will not commit or open a pull request/);
 });
 
+test('runs setup with repository inferred from git origin', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-target-'));
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[{"name":"agent:auto"}]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['-C', targetRoot, 'init'], { stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      status === 0 ? resolve() : reject(new Error(`git init exited with ${status}`));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('git', ['-C', targetRoot, 'remote', 'add', 'origin', 'https://github.com/SergiiMytakii/IntelleReach.git'], {
+      stdio: 'ignore',
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      status === 0 ? resolve() : reject(new Error(`git remote add exited with ${status}`));
+    });
+  });
+
+  const result = await runCli(
+    [
+      'setup',
+      '--prepare-labels',
+    ],
+    {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+    },
+    targetRoot,
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /mode: write/);
+  assert.match(result.stdout, /labels: create-missing/);
+
+  const config = JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')) as Record<
+    string,
+    Record<string, string>
+  >;
+  assert.equal(config.github.owner, 'SergiiMytakii');
+  assert.equal(config.github.repo, 'IntelleReach');
+});
+
 test('status missing target exits with usage error', async () => {
   const result = await runCli(['status', '--dry-run']);
 
@@ -135,6 +186,20 @@ test('run command validates required arguments', async () => {
   const invalidIssue = await runCli(['run', '--target', '/tmp/repo', '--issue', '0']);
   assert.equal(invalidIssue.status, 2);
   assert.match(invalidIssue.stderr, /run requires --issue <number>/);
+});
+
+test('daemon command validates required arguments', async () => {
+  const missingTarget = await runCli(['daemon', '--once']);
+  assert.equal(missingTarget.status, 2);
+  assert.match(missingTarget.stderr, /daemon requires --target <path>/);
+
+  const invalidInterval = await runCli(['daemon', '--target', '/tmp/repo', '--interval-seconds', '0']);
+  assert.equal(invalidInterval.status, 2);
+  assert.match(invalidInterval.stderr, /daemon requires --interval-seconds <positive integer>/);
+
+  const invalidMaxRuns = await runCli(['daemon', '--target', '/tmp/repo', '--max-runs', '0']);
+  assert.equal(invalidMaxRuns.status, 2);
+  assert.match(invalidMaxRuns.stderr, /daemon requires --max-runs <positive integer>/);
 });
 
 test('runs status dry-run without launching Codex', async () => {
@@ -160,4 +225,29 @@ test('runs status dry-run without launching Codex', async () => {
   assert.match(result.stdout, /codex-orchestrator status/);
   assert.match(result.stdout, /mode: dry-run/);
   assert.match(result.stdout, /eligible:\n  - none/);
+});
+
+test('runs daemon once without eligible work', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-daemon-target-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    `${JSON.stringify(validConfig, null, 2)}\n`,
+    'utf8',
+  );
+  const fakeBin = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-bin-'));
+  const fakeGh = join(fakeBin, 'gh');
+  await writeFile(fakeGh, '#!/bin/sh\nprintf \'[]\'\n', 'utf8');
+  await chmod(fakeGh, 0o755);
+
+  const result = await runCli(['daemon', '--target', targetRoot, '--once'], {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /codex-orchestrator daemon/);
+  assert.match(result.stdout, /intervalMs: 300000/);
+  assert.match(result.stdout, /no eligible issues/);
 });
