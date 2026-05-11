@@ -12,7 +12,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.runner.maxParallelChildren, 3);
     assert.equal(result.value.workflows.prd.source, 'package-owned-prompt-fallback');
     assert.equal(result.value.codex.command, 'codex');
-    assert.equal(result.value.codex.timeoutMs, 600_000);
+    assert.equal(result.value.codex.timeoutMs, 1_800_000);
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.deepEqual(result.value.codex.args, [
