@@ -50,6 +50,7 @@ export interface CodexOrchestratorConfig {
     adapter: 'codex-cli';
     command: string;
     args: string[];
+    timeoutMs?: number;
     promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
     reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
   };
@@ -155,6 +156,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectLiteral(codex, 'codex.adapter', 'codex-cli', errors);
     expectString(codex, 'codex.command', errors);
     expectStringArray(codex, 'codex.args', errors);
+    expectOptionalPositiveInteger(codex, 'codex.timeoutMs', errors);
     expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
     expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
   }
@@ -393,6 +395,21 @@ function expectPositiveInteger(parent: ObjectRecord, path: string, errors: strin
 
   if (!Number.isInteger(value) || typeof value !== 'number' || value < 1) {
     errors.push(`${path} must be a positive integer`);
+    return undefined;
+  }
+
+  return value;
+}
+
+function expectOptionalPositiveInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {
+  const value = readPath(parent, path);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isInteger(value) || typeof value !== 'number' || value < 1) {
+    errors.push(`${path} must be a positive integer when provided`);
     return undefined;
   }
 

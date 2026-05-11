@@ -45,6 +45,7 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
   ]);
   assert.equal(options?.cwd, input.worktreePath);
   assert.equal(options?.stdin, 'Prompt text');
+  assert.equal(options?.timeoutMs, 600_000);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROMPT_FILE, input.promptPath);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
 });

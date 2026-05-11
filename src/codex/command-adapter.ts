@@ -36,6 +36,7 @@ export class CodexCommandAdapter {
       cwd: input.worktreePath,
       stdin: input.promptText,
       env: buildCodexProcessEnv(input, process.env),
+      timeoutMs: this.config.codex.timeoutMs,
     });
     return result;
   }

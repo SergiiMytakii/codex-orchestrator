@@ -12,6 +12,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.runner.maxParallelChildren, 3);
     assert.equal(result.value.workflows.prd.source, 'package-owned-prompt-fallback');
     assert.equal(result.value.codex.command, 'codex');
+    assert.equal(result.value.codex.timeoutMs, 600_000);
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.deepEqual(result.value.codex.args, [
@@ -40,6 +41,7 @@ test('rejects invalid codex command contract', () => {
       ...validConfig.codex,
       command: '',
       args: 'exec',
+      timeoutMs: 0,
       promptFileEnv: 'PROMPT',
       reportFileEnv: 'REPORT',
     },
@@ -49,6 +51,7 @@ test('rejects invalid codex command contract', () => {
   assert.deepEqual(result.ok ? [] : result.errors, [
     'codex.command must be a non-empty string',
     'codex.args must be an array of non-empty strings',
+    'codex.timeoutMs must be a positive integer when provided',
     'codex.promptFileEnv must be CODEX_ORCHESTRATOR_PROMPT_FILE',
     'codex.reportFileEnv must be CODEX_ORCHESTRATOR_REPORT_FILE',
   ]);
