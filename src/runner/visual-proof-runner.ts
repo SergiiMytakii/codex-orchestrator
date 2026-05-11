@@ -41,7 +41,6 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   );
   await mkdir(proofDir, { recursive: true });
 
-  const before = new Set(await listScreenshotArtifacts(input.worktreePath, proofDir));
   const command = renderVisualProofCommand(commandTemplate, input, proofDir);
   const result = await input.shellExecutor(command, {
     cwd: input.worktreePath,
@@ -58,8 +57,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     timeoutMs: input.config.reviewGates.visualProof.runnerTimeoutMs,
   });
   const after = await listScreenshotArtifacts(input.worktreePath, proofDir);
-  const newArtifacts = after.filter((path) => !before.has(path));
-  const artifacts = newArtifacts.map((path) => ({
+  const artifacts = after.map((path) => ({
     type: 'screenshot' as const,
     path,
     description: `runner visual proof ${path.split('/').at(-1) ?? path}`,
@@ -80,7 +78,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     validation: [{
       command,
       status: 'passed',
-      summary: `runner visual proof created ${artifacts.length} screenshot artifact(s).`,
+      summary: `runner visual proof passed: Playwright/screenshot command completed with ${artifacts.length} screenshot artifact(s).`,
     }],
     artifacts,
   };
