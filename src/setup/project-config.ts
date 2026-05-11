@@ -36,6 +36,9 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       workspaceRoot: '.codex-orchestrator/workspaces',
       maxParallelChildren: 3,
       stateDir: '.codex-orchestrator/state',
+      worktreeCleanup: {
+        enabled: true,
+      },
     },
     codex: {
       adapter: 'codex-cli',

@@ -41,4 +41,34 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
       baseRefName: input.baseBranch,
     };
   }
+
+  public async findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined> {
+    const result = await this.executor('gh', [
+      'pr',
+      'list',
+      '--repo',
+      this.repo,
+      '--head',
+      headBranch,
+      '--state',
+      'merged',
+      '--json',
+      'number,url,isDraft,headRefName,baseRefName',
+      '--limit',
+      '1',
+    ]);
+    const pullRequests = JSON.parse(result.stdout) as Array<{
+      number: number;
+      url: string;
+      isDraft: boolean;
+      headRefName: string;
+      baseRefName: string;
+    }>;
+    const [pullRequest] = pullRequests;
+    if (!pullRequest) {
+      return undefined;
+    }
+
+    return pullRequest;
+  }
 }

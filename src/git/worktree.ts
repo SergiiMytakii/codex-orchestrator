@@ -37,6 +37,11 @@ export interface RemoveWorktreeInput {
   worktreePath: string;
 }
 
+export interface GitWorktreeInfo {
+  path: string;
+  branch?: string;
+}
+
 export class GitMergeConflictError extends Error {
   public constructor(
     public readonly worktreePath: string,
@@ -147,6 +152,19 @@ export class GitWorktreeManager {
     await this.git(['-C', input.targetRoot, 'worktree', 'remove', input.worktreePath]);
   }
 
+  public async pruneWorktrees(targetRoot: string): Promise<void> {
+    await this.git(['-C', targetRoot, 'worktree', 'prune']);
+  }
+
+  public async listWorktrees(targetRoot: string): Promise<GitWorktreeInfo[]> {
+    return parseWorktreeList((await this.git(['-C', targetRoot, 'worktree', 'list', '--porcelain'])).stdout);
+  }
+
+  public async isWorktreeClean(worktreePath: string): Promise<boolean> {
+    const status = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all']);
+    return status.stdout.trim().length === 0;
+  }
+
   private async git(args: string[]): Promise<{ stdout: string; stderr: string }> {
     const result = await this.executor('git', args);
     if (result.exitCode !== 0) {
@@ -221,8 +239,8 @@ function normalizePath(path: string): string {
   return path.replaceAll('\\', '/');
 }
 
-function parseWorktreeList(output: string): Array<{ path: string; branch?: string }> {
-  const worktrees: Array<{ path: string; branch?: string }> = [];
+function parseWorktreeList(output: string): GitWorktreeInfo[] {
+  const worktrees: GitWorktreeInfo[] = [];
   let current: { path: string; branch?: string } | undefined;
 
   for (const line of output.split('\n')) {

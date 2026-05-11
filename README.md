@@ -307,6 +307,7 @@ codex-orchestrator health
 codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
 codex-orchestrator status --target <path> [--dry-run]
 codex-orchestrator run --target <path> --issue <number>
+codex-orchestrator daemon --target <path> [--once] [--interval-seconds <seconds>] [--max-runs <count>]
 ```
 
 ### `setup`
@@ -340,12 +341,28 @@ For `agent:auto`, it runs one scoped implementation and opens one draft PR.
 For `agent:plan-auto`, it runs parent planning, child issue management,
 dependency-aware child waves, final validation, and one integration draft PR.
 
+### `daemon`
+
+Polls GitHub Issues for eligible `agent:auto` or `agent:plan-auto` work and runs
+one issue at a time.
+
+After each polling cycle, the daemon also cleans up runner-owned worktrees when
+all of these are true:
+
+- the worktree is under `runner.workspaceRoot`;
+- the worktree is not listed in local runner state as active;
+- the worktree branch has a merged GitHub pull request;
+- the worktree has no uncommitted or untracked changes.
+
+Dirty, blocked, active, or unpublished worktrees are preserved for maintainer
+inspection. Cleanup is built into the daemon; there is intentionally no separate
+cleanup CLI command.
+
 ## Current Scope
 
-The package currently focuses on explicit CLI-driven runs and project-local
-configuration. The state machine and runner boundaries are designed for
-always-on local runner workflows, but hosted infrastructure and automatic
-polling are not part of this package today.
+The package focuses on local runner workflows: explicit one-off runs, daemon
+polling, project-local configuration, and runner-owned worktree cleanup. Hosted
+infrastructure is not part of this package today.
 
 Non-GitHub trackers and non-Codex agents are also out of scope for the current
 version, although the code keeps adapter boundaries for future expansion.

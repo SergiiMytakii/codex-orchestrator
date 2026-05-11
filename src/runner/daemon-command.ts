@@ -3,19 +3,26 @@ import { resolve } from 'node:path';
 
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import type { GitHubIssueAdapter } from '../github/issues.js';
+import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
+import type { GitHubPullRequestAdapter } from '../github/pull-requests.js';
+import { GitWorktreeManager } from '../git/worktree.js';
 import { readRunnerConfig } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { runPlanAutoCommand } from './plan-auto-command.js';
 import { runScopedAutoCommand } from './scoped-auto-command.js';
+import { cleanupMergedWorktrees, type WorktreeCleanupResult } from './worktree-cleanup.js';
 
 export interface DaemonCommandOptions {
   targetRoot: string;
   issueAdapter?: GitHubIssueAdapter;
+  pullRequestAdapter?: GitHubPullRequestAdapter;
+  git?: GitWorktreeManager;
   intervalMs?: number;
   once?: boolean;
   maxRuns?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   executeIssue?: (issueNumber: number) => Promise<{ reportComment: string }>;
+  cleanupWorktrees?: () => Promise<WorktreeCleanupResult>;
   onEvent?: (line: string) => void;
   now?: () => Date;
 }
@@ -32,6 +39,9 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
   const targetRoot = resolve(options.targetRoot);
   const config = await readRunnerConfig(targetRoot);
   const adapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
+  const pullRequestAdapter =
+    options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
+  const git = options.git ?? new GitWorktreeManager();
   const intervalMs = options.intervalMs ?? defaultIntervalMs;
   const once = options.once ?? false;
   const maxRuns = options.maxRuns;
@@ -68,6 +78,24 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
         const message = error instanceof Error ? error.message : 'issue execution failed';
         emit(`[${now().toISOString()}] failed #${decision.issueNumber}: ${message}`);
       }
+    }
+
+    try {
+      const cleanup =
+        options.cleanupWorktrees ??
+        (() => cleanupMergedWorktrees({ targetRoot, config, git, pullRequestAdapter }));
+      const cleanupResult = await cleanup();
+      for (const removed of cleanupResult.removed) {
+        emit(
+          `[${now().toISOString()}] cleaned worktree ${removed.worktreePath} for PR #${removed.pullRequest.number}`,
+        );
+      }
+      for (const skipped of cleanupResult.skipped.filter((entry) => entry.reason === 'dirty')) {
+        emit(`[${now().toISOString()}] skipped dirty worktree ${skipped.worktreePath}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'worktree cleanup failed';
+      emit(`[${now().toISOString()}] worktree cleanup failed: ${message}`);
     }
 
     if (once || (maxRuns !== undefined && executed.length >= maxRuns)) {

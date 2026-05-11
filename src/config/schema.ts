@@ -45,6 +45,9 @@ export interface CodexOrchestratorConfig {
     workspaceRoot: string;
     maxParallelChildren: number;
     stateDir: string;
+    worktreeCleanup?: {
+      enabled: boolean;
+    };
   };
   codex: {
     adapter: 'codex-cli';
@@ -171,6 +174,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectString(runner, 'runner.workspaceRoot', errors);
     expectParallelLimit(runner, errors);
     expectString(runner, 'runner.stateDir', errors);
+    validateWorktreeCleanup(runner, errors);
   }
 
   if (codex) {
@@ -446,6 +450,21 @@ function validateQualityGate(parent: ObjectRecord, errors: string[]): void {
     expectStringArray(codeReview, 'reviewGates.quality.codeReview.requiredValidationPatterns', errors);
     validateRegexArray(codeReview, 'reviewGates.quality.codeReview.requiredValidationPatterns', errors);
   }
+}
+
+function validateWorktreeCleanup(parent: ObjectRecord, errors: string[]): void {
+  const value = readPath(parent, 'runner.worktreeCleanup');
+  if (value === undefined) {
+    return;
+  }
+
+  const worktreeCleanup = asObject(value);
+  if (!worktreeCleanup) {
+    errors.push('runner.worktreeCleanup must be an object when provided');
+    return;
+  }
+
+  expectBoolean(worktreeCleanup, 'runner.worktreeCleanup.enabled', errors);
 }
 
 function expectOptionalString(parent: ObjectRecord, path: string, errors: string[]): string | undefined {

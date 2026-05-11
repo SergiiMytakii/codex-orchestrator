@@ -15,10 +15,12 @@ export interface CreateDraftPullRequestInput {
 
 export interface GitHubPullRequestAdapter {
   createDraftPullRequest(input: CreateDraftPullRequestInput): Promise<GitHubPullRequest>;
+  findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined>;
 }
 
 export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapter {
   public createdPullRequests: CreateDraftPullRequestInput[] = [];
+  public mergedPullRequests: GitHubPullRequest[] = [];
 
   public constructor(
     private readonly owner = 'SergiiMytakii',
@@ -35,5 +37,9 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
       headRefName: input.headBranch,
       baseRefName: input.baseBranch,
     };
+  }
+
+  public async findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined> {
+    return this.mergedPullRequests.find((pullRequest) => pullRequest.headRefName === headBranch);
   }
 }

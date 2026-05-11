@@ -58,6 +58,13 @@ export type {
 } from './runner/prompt.js';
 export { runDaemonCommand } from './runner/daemon-command.js';
 export type { DaemonCommandOptions, DaemonCommandResult } from './runner/daemon-command.js';
+export { cleanupMergedWorktrees } from './runner/worktree-cleanup.js';
+export type {
+  CleanupMergedWorktreesInput,
+  WorktreeCleanupEntry,
+  WorktreeCleanupResult,
+  WorktreeCleanupSkip,
+} from './runner/worktree-cleanup.js';
 export { reconcileRunnerState } from './runner/recovery.js';
 export type { ReconcileRunnerStateInput, RecoveryEntry, RecoveryStatus } from './runner/recovery.js';
 export { runPlanAutoCommand } from './runner/plan-auto-command.js';
