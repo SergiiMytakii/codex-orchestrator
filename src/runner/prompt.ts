@@ -110,6 +110,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     `Do not read or modify configured secret file patterns: ${input.config.deny.secretFiles.join(', ')}.`,
     'Do not run destructive database/cache actions.',
     'Do not run production deploy/release actions.',
+    ...qualityGatePromptLines(input.config),
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
@@ -202,6 +203,7 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     `Do not read or modify configured secret file patterns: ${input.config.deny.secretFiles.join(', ')}.`,
     'Do not run destructive database/cache actions.',
     'Do not run production deploy/release actions.',
+    ...qualityGatePromptLines(input.config),
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
@@ -234,6 +236,23 @@ function visualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: nu
     'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
+  ];
+}
+
+function qualityGatePromptLines(config: CodexOrchestratorConfig): string[] {
+  const quality = config.reviewGates.quality;
+  if (!quality.enabled) {
+    return [];
+  }
+
+  return [
+    '## Quality Gate Contract',
+    'For runtime behavior changes, use strict TDD red-to-green: write one focused behavior test first, prove the test fails before implementation, then make the smallest implementation that passes after implementation.',
+    'Report TDD as a passed validation line that includes failing/red and passing/green evidence. Do not batch many tests before implementation.',
+    `Runtime files are detected with these globs: ${quality.runtimeChangedPathGlobs.join(', ')}.`,
+    `Test files are detected with these globs: ${quality.testChangedPathGlobs.join(', ')}.`,
+    'Run code-review before completion for runtime changes and report it as a passed validation line.',
+    `Run cleanup-review before code-review when the runtime change touches at least ${quality.cleanupReview.runtimeFileThreshold} runtime files, and report it as a passed validation line.`,
   ];
 }
 

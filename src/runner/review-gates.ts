@@ -44,12 +44,14 @@ export function shouldApplyVisualProofGate(
 }
 
 export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
+  const reasons: string[] = [];
+  reasons.push(...evaluateQualityGate(input));
+
   const visualProof = input.config.reviewGates.visualProof;
   if (!shouldApplyVisualProofGate(input)) {
-    return { ok: true, reasons: [] };
+    return { ok: reasons.length === 0, reasons };
   }
 
-  const reasons: string[] = [];
   const matchingValidation = input.validation.filter((line) =>
     visualProof.requiredValidationPatterns.some((pattern) => regexMatches(pattern, validationText(line)))
       && isStrongVisualValidation(line),
@@ -93,6 +95,58 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
   }
 
   return { ok: reasons.length === 0, reasons };
+}
+
+function evaluateQualityGate(input: ReviewGateInput): string[] {
+  const quality = input.config.reviewGates.quality;
+  if (!quality.enabled) {
+    return [];
+  }
+
+  const runtimeFiles = input.changedFiles
+    .map(normalizePath)
+    .filter((path) => quality.runtimeChangedPathGlobs.some((pattern) => globMatches(pattern, path)))
+    .filter((path) => !quality.testChangedPathGlobs.some((pattern) => globMatches(pattern, path)));
+  if (runtimeFiles.length === 0) {
+    return [];
+  }
+
+  const reasons: string[] = [];
+  const testFiles = input.changedFiles
+    .map(normalizePath)
+    .filter((path) => quality.testChangedPathGlobs.some((pattern) => globMatches(pattern, path)));
+
+  if (quality.tdd.enabled) {
+    const hasTddValidation = hasPassedValidation(input.validation, quality.tdd.requiredValidationPatterns);
+    if (quality.tdd.requireTestChange && testFiles.length === 0) {
+      reasons.push('Quality gate requires TDD test file change for runtime changes.');
+    }
+    if (!hasTddValidation) {
+      reasons.push('Quality gate requires TDD red-to-green proof in validation.');
+    }
+  }
+
+  if (quality.cleanupReview.enabled && runtimeFiles.length >= quality.cleanupReview.runtimeFileThreshold) {
+    const hasCleanupReview = hasPassedValidation(input.validation, quality.cleanupReview.requiredValidationPatterns);
+    if (!hasCleanupReview) {
+      reasons.push('Quality gate requires passed cleanup-review validation for medium or large runtime changes.');
+    }
+  }
+
+  if (quality.codeReview.enabled) {
+    const hasCodeReview = hasPassedValidation(input.validation, quality.codeReview.requiredValidationPatterns);
+    if (!hasCodeReview) {
+      reasons.push('Quality gate requires passed code-review validation for runtime changes.');
+    }
+  }
+
+  return reasons;
+}
+
+function hasPassedValidation(validation: ValidationLine[], patterns: string[]): boolean {
+  return validation.some((line) =>
+    line.status === 'passed' && patterns.some((pattern) => regexMatches(pattern, validationText(line))),
+  );
 }
 
 function validationText(line: ValidationLine): string {

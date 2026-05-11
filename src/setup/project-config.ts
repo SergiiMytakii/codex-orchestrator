@@ -113,6 +113,56 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         runnerTimeoutMs: 900_000,
         envPassthrough: [],
       },
+      quality: {
+        enabled: true,
+        runtimeChangedPathGlobs: [
+          'src/**',
+          'app/**',
+          'pages/**',
+          'components/**',
+          'lib/**',
+          'packages/**',
+          '*.js',
+          '*.jsx',
+          '*.ts',
+          '*.tsx',
+          '*.mjs',
+          '*.cjs',
+        ],
+        testChangedPathGlobs: [
+          'test/**',
+          'tests/**',
+          '__tests__/**',
+          '*.test.*',
+          '*.spec.*',
+          'src/**/*.test.*',
+          'src/**/*.spec.*',
+        ],
+        tdd: {
+          enabled: true,
+          requireTestChange: true,
+          requiredValidationPatterns: [
+            'red.*green',
+            'fail(?:ed|ing)?.*pass(?:ed|ing)?',
+            'test.*fail(?:ed|ing)?.*test.*pass(?:ed|ing)?',
+          ],
+        },
+        cleanupReview: {
+          enabled: true,
+          runtimeFileThreshold: 3,
+          requiredValidationPatterns: [
+            '\\$?cleanup-review',
+            'cleanup review',
+          ],
+        },
+        codeReview: {
+          enabled: true,
+          requiredValidationPatterns: [
+            '\\$?code-review',
+            'code review',
+          ],
+        },
+      },
     },
     deny: {
       secretFiles: ['.env', '.env.*'],
@@ -162,6 +212,7 @@ export function mergeExistingProjectConfig(
   const existingChecks = readStringRecord(existing.checks);
   const existingReviewGates = readObject(existing.reviewGates);
   const existingVisualProof = readObject(existingReviewGates?.visualProof);
+  const existingQuality = readObject(existingReviewGates?.quality);
   const existingDeny = readObject(existing.deny);
   const existingBranches = readObject(existing.branches);
   const existingPullRequests = readObject(existing.pullRequests);
@@ -208,6 +259,22 @@ export function mergeExistingProjectConfig(
       visualProof: {
         ...defaults.reviewGates.visualProof,
         ...existingVisualProof,
+      },
+      quality: {
+        ...defaults.reviewGates.quality,
+        ...existingQuality,
+        tdd: {
+          ...defaults.reviewGates.quality.tdd,
+          ...readObject(existingQuality?.tdd),
+        },
+        cleanupReview: {
+          ...defaults.reviewGates.quality.cleanupReview,
+          ...readObject(existingQuality?.cleanupReview),
+        },
+        codeReview: {
+          ...defaults.reviewGates.quality.codeReview,
+          ...readObject(existingQuality?.codeReview),
+        },
       },
     },
     deny: {

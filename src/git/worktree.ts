@@ -82,7 +82,7 @@ export class GitWorktreeManager {
   }
 
   public async listChangedFiles(worktreePath: string): Promise<string[]> {
-    const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '-z']);
+    const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
     return parsePorcelainChangedFiles(result.stdout);
   }
 

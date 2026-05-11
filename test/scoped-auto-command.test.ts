@@ -195,6 +195,146 @@ test('scoped auto command blocks when completion report is missing before PR pub
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
+test('scoped auto command blocks runtime changes without strict TDD red-to-green proof', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const fixed = true;\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/feature.ts'],
+          validation: [{ command: 'npm test', status: 'passed', summary: 'all tests passed' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Quality gate requires TDD red-to-green proof/);
+});
+
+test('scoped auto command blocks runtime changes without code-review proof', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const fixed = true;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(fixed, true);\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/feature.ts', 'test/feature.test.ts'],
+          validation: [{
+            command: 'TDD red-to-green',
+            status: 'passed',
+            summary: 'Focused behavior test failed before implementation and passed after implementation.',
+          }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Quality gate requires passed code-review validation/);
+});
+
+test('scoped auto command blocks medium runtime changes without cleanup-review proof', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Implement runtime feature', body: 'Feature.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature-a.ts'), 'export const a = true;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'src', 'feature-b.ts'), 'export const b = true;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'src', 'feature-c.ts'), 'export const c = true;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(a && b && c, true);\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/feature-a.ts', 'src/feature-b.ts', 'src/feature-c.ts', 'test/feature.test.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Quality gate requires passed cleanup-review validation/);
+});
+
 test('scoped auto command blocks UI work without visual proof artifacts', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
@@ -304,13 +444,23 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
       await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'CampaignList.test.ts'), 'assert.equal(x, 1);\n', 'utf8');
       await writeFile(
         input.reportPath,
         JSON.stringify({
           status: 'completed',
-          changes: ['src/frontend/CampaignList.tsx'],
-          validation: [{ command: 'BrowserUse visual verification', status: 'skipped', summary: 'tool unavailable' }],
+          changes: ['src/frontend/CampaignList.tsx', 'test/CampaignList.test.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+            { command: 'BrowserUse visual verification', status: 'skipped', summary: 'tool unavailable' },
+          ],
           artifacts: [],
           skippedChecks: ['BrowserUse visual verification was not run because no BrowserUse tool is available.'],
           residualRisks: [],
@@ -371,15 +521,25 @@ test('scoped auto command includes screenshot proof artifacts in review report',
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
       await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
       await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'CampaignList.test.ts'), 'assert.equal(x, 1);\n', 'utf8');
       await writeFile(join(input.worktreePath, proofPath), 'png-fixture\n', 'utf8');
       await writeFile(
         input.reportPath,
         JSON.stringify({
           status: 'completed',
-          changes: ['src/frontend/CampaignList.tsx'],
-          validation: [{ command: 'Playwright screenshots', status: 'passed', summary: '390px viewport has no overlap' }],
+          changes: ['src/frontend/CampaignList.tsx', 'test/CampaignList.test.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+            { command: 'Playwright screenshots', status: 'passed', summary: '390px viewport has no overlap' },
+          ],
           artifacts: [{ type: 'screenshot', path: proofPath, description: '390px campaign layout' }],
           skippedChecks: [],
           residualRisks: [],

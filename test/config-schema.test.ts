@@ -17,6 +17,9 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.equal(result.value.reviewGates.visualProof.runnerTimeoutMs, 900_000);
     assert.deepEqual(result.value.reviewGates.visualProof.envPassthrough, []);
+    assert.equal(result.value.reviewGates.quality.enabled, true);
+    assert.equal(result.value.reviewGates.quality.tdd.requireTestChange, true);
+    assert.equal(result.value.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
     assert.deepEqual(result.value.codex.args, [
       'exec',
       '--cd',
@@ -93,6 +96,7 @@ test('rejects invalid visual proof gate config', () => {
   const result = validateConfig({
     ...validConfig,
     reviewGates: {
+      ...validConfig.reviewGates,
       visualProof: {
         ...validConfig.reviewGates.visualProof,
         issueTextPatterns: ['['],
@@ -109,6 +113,36 @@ test('rejects invalid visual proof gate config', () => {
     'reviewGates.visualProof.runnerTimeoutMs must be a positive integer when provided',
     'reviewGates.visualProof.envPassthrough must contain valid environment variable names',
     'reviewGates.visualProof.issueTextPatterns contains invalid regular expression [',
+  ]);
+});
+
+test('rejects invalid quality gate config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        runtimeChangedPathGlobs: ['src/**', ''],
+        tdd: {
+          ...validConfig.reviewGates.quality.tdd,
+          requireTestChange: 'yes',
+          requiredValidationPatterns: ['['],
+        },
+        cleanupReview: {
+          ...validConfig.reviewGates.quality.cleanupReview,
+          runtimeFileThreshold: 0,
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'reviewGates.quality.runtimeChangedPathGlobs must be an array of non-empty strings',
+    'reviewGates.quality.tdd.requireTestChange must be a boolean',
+    'reviewGates.quality.tdd.requiredValidationPatterns contains invalid regular expression [',
+    'reviewGates.quality.cleanupReview.runtimeFileThreshold must be a positive integer',
   ]);
 });
 

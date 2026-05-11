@@ -197,7 +197,8 @@ That config controls:
 - labels used for the runner state machine;
 - base branch and branch name templates;
 - validation checks such as `npm test`;
-- review gates, including visual proof requirements for UI/frontend work;
+- review gates, including strict TDD, code review, cleanup review, and visual
+  proof requirements;
 - deny rules for secrets and unsafe actions;
 - concurrency for child issue execution;
 - pull request title templates;
@@ -207,6 +208,19 @@ That config controls:
 The package ships fallback prompts so a user does not need to already have a
 local Codex skill pack installed. During setup, compatible existing local skills
 can be reused; missing workflows fall back to package-owned prompts.
+
+For runtime code changes, the default quality gate blocks `agent:review` unless
+the completion report contains passed validation for:
+
+- strict TDD red-to-green evidence: a focused behavior test failed before the
+  implementation and passed after the implementation;
+- a changed test file for the runtime change;
+- `code-review` for every runtime change;
+- `cleanup-review` when the change touches at least three runtime files.
+
+These are runner-enforced checks, not only prompt guidance. Runtime and test
+paths are configurable through `reviewGates.quality.runtimeChangedPathGlobs` and
+`reviewGates.quality.testChangedPathGlobs`.
 
 For UI or frontend issues, the default visual proof gate blocks `agent:review`
 unless the agent reports a passed BrowserUse/Playwright/screenshot validation

@@ -80,6 +80,25 @@ export interface CodexOrchestratorConfig {
       runnerTimeoutMs?: number;
       envPassthrough?: string[];
     };
+    quality: {
+      enabled: boolean;
+      runtimeChangedPathGlobs: string[];
+      testChangedPathGlobs: string[];
+      tdd: {
+        enabled: boolean;
+        requireTestChange: boolean;
+        requiredValidationPatterns: string[];
+      };
+      cleanupReview: {
+        enabled: boolean;
+        runtimeFileThreshold: number;
+        requiredValidationPatterns: string[];
+      };
+      codeReview: {
+        enabled: boolean;
+        requiredValidationPatterns: string[];
+      };
+    };
   };
   deny: {
     secretFiles: string[];
@@ -375,24 +394,58 @@ function validateChecks(checks: ObjectRecord, errors: string[]): void {
 
 function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   const visualProof = expectObject(parent, 'reviewGates.visualProof', errors);
-  if (!visualProof) {
+  if (visualProof) {
+    expectBoolean(visualProof, 'reviewGates.visualProof.enabled', errors);
+    expectString(visualProof, 'reviewGates.visualProof.artifactDir', errors);
+    expectStringArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
+    expectStringArray(visualProof, 'reviewGates.visualProof.changedPathGlobs', errors);
+    expectStringArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
+    expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+    expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
+    expectOptionalString(visualProof, 'reviewGates.visualProof.runnerValidationCommand', errors);
+    expectOptionalPositiveInteger(visualProof, 'reviewGates.visualProof.runnerTimeoutMs', errors);
+    expectOptionalStringArray(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
+    validateEnvironmentVariableNames(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
+    validateRegexArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
+    validateRegexArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
+    validateRegexArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+  }
+
+  validateQualityGate(parent, errors);
+}
+
+function validateQualityGate(parent: ObjectRecord, errors: string[]): void {
+  const quality = expectObject(parent, 'reviewGates.quality', errors);
+  if (!quality) {
     return;
   }
 
-  expectBoolean(visualProof, 'reviewGates.visualProof.enabled', errors);
-  expectString(visualProof, 'reviewGates.visualProof.artifactDir', errors);
-  expectStringArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
-  expectStringArray(visualProof, 'reviewGates.visualProof.changedPathGlobs', errors);
-  expectStringArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
-  expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
-  expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
-  expectOptionalString(visualProof, 'reviewGates.visualProof.runnerValidationCommand', errors);
-  expectOptionalPositiveInteger(visualProof, 'reviewGates.visualProof.runnerTimeoutMs', errors);
-  expectOptionalStringArray(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
-  validateEnvironmentVariableNames(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
-  validateRegexArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
-  validateRegexArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
-  validateRegexArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+  expectBoolean(quality, 'reviewGates.quality.enabled', errors);
+  expectStringArray(quality, 'reviewGates.quality.runtimeChangedPathGlobs', errors);
+  expectStringArray(quality, 'reviewGates.quality.testChangedPathGlobs', errors);
+
+  const tdd = expectObject(quality, 'reviewGates.quality.tdd', errors);
+  if (tdd) {
+    expectBoolean(tdd, 'reviewGates.quality.tdd.enabled', errors);
+    expectBoolean(tdd, 'reviewGates.quality.tdd.requireTestChange', errors);
+    expectStringArray(tdd, 'reviewGates.quality.tdd.requiredValidationPatterns', errors);
+    validateRegexArray(tdd, 'reviewGates.quality.tdd.requiredValidationPatterns', errors);
+  }
+
+  const cleanupReview = expectObject(quality, 'reviewGates.quality.cleanupReview', errors);
+  if (cleanupReview) {
+    expectBoolean(cleanupReview, 'reviewGates.quality.cleanupReview.enabled', errors);
+    expectPositiveInteger(cleanupReview, 'reviewGates.quality.cleanupReview.runtimeFileThreshold', errors);
+    expectStringArray(cleanupReview, 'reviewGates.quality.cleanupReview.requiredValidationPatterns', errors);
+    validateRegexArray(cleanupReview, 'reviewGates.quality.cleanupReview.requiredValidationPatterns', errors);
+  }
+
+  const codeReview = expectObject(quality, 'reviewGates.quality.codeReview', errors);
+  if (codeReview) {
+    expectBoolean(codeReview, 'reviewGates.quality.codeReview.enabled', errors);
+    expectStringArray(codeReview, 'reviewGates.quality.codeReview.requiredValidationPatterns', errors);
+    validateRegexArray(codeReview, 'reviewGates.quality.codeReview.requiredValidationPatterns', errors);
+  }
 }
 
 function expectOptionalString(parent: ObjectRecord, path: string, errors: string[]): string | undefined {

@@ -40,6 +40,10 @@ test('prompt builder includes issue context, workflow, publication, safety, and 
   assert.match(prompt, /Runner-Owned Publication Contract/);
   assert.match(prompt, /Safety Contract/);
   assert.match(prompt, /Completion Report Contract/);
+  assert.match(prompt, /Quality Gate Contract/);
+  assert.match(prompt, /TDD red-to-green/);
+  assert.match(prompt, /cleanup-review/);
+  assert.match(prompt, /code-review/);
 });
 
 test('prompt builder tells child Codex to prepare runner-owned visual proof without running it', () => {
@@ -72,6 +76,16 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
   assert.match(prompt, /Do not claim the runner-owned visual proof passed/);
   assert.match(prompt, /CODEX_ORCHESTRATOR_LOGIN_EMAIL, CODEX_ORCHESTRATOR_LOGIN_PASSWORD/);
   assert.match(prompt, /never hardcode credentials/);
+});
+
+test('package scoped workflow prompt requires strict TDD and review gates', async () => {
+  const prompt = await readFile('prompts/workflows/scoped-implementation.md', 'utf8');
+
+  assert.match(prompt, /TDD red-to-green/);
+  assert.match(prompt, /test fails before implementation/);
+  assert.match(prompt, /passes after implementation/);
+  assert.match(prompt, /cleanup-review/);
+  assert.match(prompt, /code-review/);
 });
 
 test('plan-auto prompt includes parent context and all planning workflows', () => {

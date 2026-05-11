@@ -124,6 +124,13 @@ test('setup migrates existing config defaults without overwriting project policy
       checks: {
         architecture: 'npm run test:architecture',
       },
+      reviewGates: {
+        quality: {
+          tdd: {
+            requireTestChange: false,
+          },
+        },
+      },
       branches: {
         base: 'dev',
       },
@@ -145,6 +152,10 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.reviewGates.visualProof.enabled, true);
   assert.equal(result.config.reviewGates.visualProof.runnerTimeoutMs, 900_000);
   assert.deepEqual(result.config.reviewGates.visualProof.envPassthrough, []);
+  assert.equal(result.config.reviewGates.quality.enabled, true);
+  assert.equal(result.config.reviewGates.quality.tdd.requireTestChange, false);
+  assert.equal(result.config.reviewGates.quality.tdd.enabled, true);
+  assert.equal(result.config.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
   assert.equal(validateConfig(result.config).ok, true);
 });
 
