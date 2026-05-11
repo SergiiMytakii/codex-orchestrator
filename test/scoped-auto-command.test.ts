@@ -6,8 +6,10 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/command-adapter.js';
+import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
+import type { ShellCommandExecutor } from '../src/process/command.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
@@ -18,7 +20,7 @@ const execFileAsync = promisify(execFile);
 const labels = validConfig.github.labels;
 const now = new Date('2026-05-08T12:00:00.000Z');
 
-async function tempGitProject(): Promise<string> {
+async function tempGitProject(configOverride?: (config: CodexOrchestratorConfig) => CodexOrchestratorConfig): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-scoped-'));
   const remote = join(root, 'remote.git');
   const repo = join(root, 'repo');
@@ -31,7 +33,7 @@ async function tempGitProject(): Promise<string> {
   await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Initial']);
   await execFileAsync('git', ['-C', repo, 'remote', 'add', 'origin', remote]);
   await execFileAsync('git', ['-C', repo, 'push', '-u', 'origin', 'main']);
-  await writeProjectConfig(repo);
+  await writeProjectConfig(repo, configOverride);
   await mkdir(join(repo, '.codex-orchestrator', 'prompts', 'workflows'), { recursive: true });
   await writeFile(
     join(repo, '.codex-orchestrator', 'prompts', 'workflows', 'scoped-implementation.md'),
@@ -41,17 +43,21 @@ async function tempGitProject(): Promise<string> {
   return repo;
 }
 
-async function writeProjectConfig(repo: string): Promise<void> {
+async function writeProjectConfig(
+  repo: string,
+  configOverride?: (config: CodexOrchestratorConfig) => CodexOrchestratorConfig,
+): Promise<void> {
   const config = buildProjectConfig({
     owner: 'example',
     repo: 'repo',
     prepareLabels: 'report-only',
     workflows: fallbackWorkflows,
   });
+  const finalConfig = configOverride ? configOverride(config) : config;
   await mkdir(join(repo, '.codex-orchestrator'), { recursive: true });
   await writeFile(
     join(repo, '.codex-orchestrator', 'config.json'),
-    `${JSON.stringify({ ...config, checks: { smoke: 'true' } }, null, 2)}\n`,
+    `${JSON.stringify({ ...finalConfig, checks: { smoke: 'true' } }, null, 2)}\n`,
     'utf8',
   );
 }
@@ -230,6 +236,70 @@ test('scoped auto command blocks UI work without visual proof artifacts', async 
   assert.match(result.reportComment, /Visual proof gate requires a passed BrowserUse\/Playwright\/screenshot validation line/);
   assert.match(result.reportComment, /Visual proof gate requires at least 1 screenshot artifact/);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
+});
+
+test('scoped auto command can satisfy UI proof gate with runner-owned visual validation command', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    reviewGates: {
+      ...config.reviewGates,
+      visualProof: {
+        ...config.reviewGates.visualProof,
+        runnerValidationCommand: 'npm run visual-proof -- --issue ${issueNumber}',
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires responsive screenshots.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/frontend/CampaignList.tsx'],
+          validation: [{ command: 'BrowserUse visual verification', status: 'skipped', summary: 'tool unavailable' }],
+          artifacts: [],
+          skippedChecks: ['BrowserUse visual verification was not run because no BrowserUse tool is available.'],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+  const shellExecutor: ShellCommandExecutor = async (command, options) => {
+    if (command === 'true') {
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
+    assert.equal(command, 'npm run visual-proof -- --issue 155');
+    assert.equal(options?.cwd, join(repo, '.codex-orchestrator', 'workspaces', 'issue-155'));
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_ISSUE_NUMBER, '155');
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.match(result.reportComment, /npm run visual-proof -- --issue 155: passed/);
+  assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
 });
 
 test('scoped auto command includes screenshot proof artifacts in review report', async () => {

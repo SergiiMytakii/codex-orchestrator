@@ -108,6 +108,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'dev server',
         ],
         minScreenshotArtifacts: 1,
+        runnerValidationCommand: '',
       },
     },
     deny: {

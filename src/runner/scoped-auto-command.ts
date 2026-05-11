@@ -26,6 +26,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
+import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -171,7 +172,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       return finishPromotionRequested(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, report);
     }
 
-    const changedFiles = await git.listChangedFiles(worktreePath);
+    let changedFiles = await git.listChangedFiles(worktreePath);
     if (changedFiles.length === 0) {
       return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, ['Codex completed without file changes'], [], report.skippedChecks, report.residualRisks);
     }
@@ -184,7 +185,24 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, violations.map((violation) => violation.message), changedFiles, report.skippedChecks, report.residualRisks);
     }
 
-    const validation = await runConfiguredChecks(config, worktreePath, shellExecutor, report.validation);
+    let validation = await runConfiguredChecks(config, worktreePath, shellExecutor, report.validation);
+    const runnerVisualProof = await runRunnerVisualProof({
+      config,
+      issue,
+      issueNumber: options.issueNumber,
+      worktreePath,
+      changedFiles,
+      report,
+      shellExecutor,
+    });
+    validation = [...validation, ...runnerVisualProof.validation];
+    report = {
+      ...report,
+      artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
+    };
+    if (runnerVisualProof.artifacts.length > 0) {
+      changedFiles = await git.listChangedFiles(worktreePath);
+    }
     const residualRisks = [...report.residualRisks];
     if (validation.some((line) => line.status === 'failed')) {
       residualRisks.push('One or more configured checks failed.');
@@ -410,6 +428,23 @@ function renderProofArtifacts(
     const label = `${artifact.type}: ${artifact.description}`;
     return artifact.type === 'screenshot' ? `- ![${escapeMarkdownAlt(label)}](${target})` : `- ${label}: ${target}`;
   });
+}
+
+function mergeArtifacts(
+  existing: ScopedCompletionReport['artifacts'],
+  additions: ScopedCompletionReport['artifacts'],
+): ScopedCompletionReport['artifacts'] {
+  const seen = new Set(existing.map((artifact) => artifact.url ?? artifact.path ?? artifact.description));
+  const merged = [...existing];
+  for (const artifact of additions) {
+    const key = artifact.url ?? artifact.path ?? artifact.description;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(artifact);
+  }
+  return merged;
 }
 
 function rawGitHubUrl(config: CodexOrchestratorConfig, branchName: string, path: string): string {

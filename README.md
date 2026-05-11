@@ -214,6 +214,27 @@ line and at least one screenshot artifact. Screenshot artifacts should be saved
 under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in
 the PR and issue review report.
 
+If BrowserUse or browser launch is unavailable inside the child Codex sandbox,
+configure a runner-owned command:
+
+```json
+{
+  "reviewGates": {
+    "visualProof": {
+      "runnerValidationCommand": "npm run visual-proof -- --issue ${issueNumber}"
+    }
+  }
+}
+```
+
+The runner executes this command from the issue worktree after Codex finishes and
+before review-gate evaluation. It also sets
+`CODEX_ORCHESTRATOR_ISSUE_NUMBER`, `CODEX_ORCHESTRATOR_ARTIFACT_DIR`,
+`CODEX_ORCHESTRATOR_PROOF_DIR`, `CODEX_ORCHESTRATOR_WORKTREE_PATH`, and
+`CODEX_ORCHESTRATOR_CHANGED_FILES`. Screenshot files written under
+`CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
+runner-owned proof artifacts.
+
 The default Codex command loads the user's Codex config so installed plugins,
 including BrowserUse/browser, remain available to the child agent. It also
 enables network access for the `workspace-write` sandbox so local dev servers can

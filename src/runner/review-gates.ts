@@ -22,10 +22,12 @@ export interface ReviewGateResult {
   reasons: string[];
 }
 
-export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
+export function shouldApplyVisualProofGate(
+  input: Pick<ReviewGateInput, 'config' | 'issue' | 'changedFiles'>,
+): boolean {
   const visualProof = input.config.reviewGates.visualProof;
   if (!visualProof.enabled) {
-    return { ok: true, reasons: [] };
+    return false;
   }
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
@@ -34,7 +36,12 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, normalizePath(path))),
   );
 
-  if (!issueLooksVisual && changedUiFiles.length === 0) {
+  return issueLooksVisual || changedUiFiles.length > 0;
+}
+
+export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
+  const visualProof = input.config.reviewGates.visualProof;
+  if (!shouldApplyVisualProofGate(input)) {
     return { ok: true, reasons: [] };
   }
 
@@ -64,12 +71,12 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
 
   if (!hasPassedVisualValidation) {
     reasons.push('Visual proof gate requires a passed BrowserUse/Playwright/screenshot validation line.');
-  }
-  for (const line of failedVisualValidation) {
-    reasons.push(`Visual proof validation is ${line.status}: ${line.command} - ${line.summary}`);
-  }
-  for (const line of skippedVisualChecks) {
-    reasons.push(`Visual proof check was skipped: ${line}`);
+    for (const line of failedVisualValidation) {
+      reasons.push(`Visual proof validation is ${line.status}: ${line.command} - ${line.summary}`);
+    }
+    for (const line of skippedVisualChecks) {
+      reasons.push(`Visual proof check was skipped: ${line}`);
+    }
   }
   if (screenshotArtifacts.length < visualProof.minScreenshotArtifacts) {
     reasons.push(

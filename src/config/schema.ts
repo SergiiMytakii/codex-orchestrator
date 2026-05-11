@@ -75,6 +75,7 @@ export interface CodexOrchestratorConfig {
       requiredValidationPatterns: string[];
       blockOnSkippedPatterns: string[];
       minScreenshotArtifacts: number;
+      runnerValidationCommand?: string;
     };
   };
   deny: {
@@ -366,9 +367,25 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   expectStringArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
   expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
   expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
+  expectOptionalString(visualProof, 'reviewGates.visualProof.runnerValidationCommand', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+}
+
+function expectOptionalString(parent: ObjectRecord, path: string, errors: string[]): string | undefined {
+  const value = readPath(parent, path);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    errors.push(`${path} must be a string when provided`);
+    return undefined;
+  }
+
+  return value;
 }
 
 function expectPositiveInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {

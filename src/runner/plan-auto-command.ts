@@ -38,6 +38,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
+import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface PlanAutoCommandOptions {
   targetRoot: string;
@@ -595,7 +596,7 @@ async function executeChild(input: {
       ].filter(Boolean).join(' '),
     );
   }
-  const changedFiles = await input.git.listChangedFiles(worktreePath);
+  let changedFiles = await input.git.listChangedFiles(worktreePath);
   if (changedFiles.length === 0) {
     throw new Error('Codex completed without file changes');
   }
@@ -607,7 +608,21 @@ async function executeChild(input: {
     throw new Error(violations.map((violation) => violation.message).join('; '));
   }
 
-  const validation = await runConfiguredChecks(input.config, worktreePath, input.shellExecutor, report.validation);
+  let validation = await runConfiguredChecks(input.config, worktreePath, input.shellExecutor, report.validation);
+  const runnerVisualProof = await runRunnerVisualProof({
+    config: input.config,
+    issue: input.child.issue,
+    issueNumber: childIssueNumber,
+    worktreePath,
+    changedFiles,
+    report,
+    shellExecutor: input.shellExecutor,
+  });
+  validation = [...validation, ...runnerVisualProof.validation];
+  const artifacts = mergeArtifacts(report.artifacts, runnerVisualProof.artifacts);
+  if (runnerVisualProof.artifacts.length > 0) {
+    changedFiles = await input.git.listChangedFiles(worktreePath);
+  }
   const residualRisks = [...report.residualRisks];
   if (validation.some((line) => line.status === 'failed')) {
     residualRisks.push('One or more configured checks failed.');
@@ -618,7 +633,7 @@ async function executeChild(input: {
     changedFiles,
     validation,
     skippedChecks: report.skippedChecks,
-    report,
+    report: { ...report, artifacts },
   });
   if (!reviewGate.ok) {
     throw new Error(reviewGate.reasons.join('; '));
@@ -636,7 +651,7 @@ async function executeChild(input: {
     reportPath,
     changedFiles,
     validation,
-    artifacts: report.artifacts,
+    artifacts,
     skippedChecks: report.skippedChecks,
     residualRisks,
   };
@@ -666,6 +681,23 @@ async function runConfiguredChecks(
     });
   }
   return lines;
+}
+
+function mergeArtifacts(
+  existing: ScopedCompletionReport['artifacts'],
+  additions: ScopedCompletionReport['artifacts'],
+): ScopedCompletionReport['artifacts'] {
+  const seen = new Set(existing.map((artifact) => artifact.url ?? artifact.path ?? artifact.description));
+  const merged = [...existing];
+  for (const artifact of additions) {
+    const key = artifact.url ?? artifact.path ?? artifact.description;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(artifact);
+  }
+  return merged;
 }
 
 async function blockFailedBatch(
