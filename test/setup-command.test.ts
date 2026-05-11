@@ -141,8 +141,55 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.branches.base, 'dev');
   assert.equal(result.config.codex.args.includes('--ignore-user-config'), false);
   assert.equal(result.config.codex.args.includes('sandbox_workspace_write.network_access=true'), true);
+  assert.equal(result.config.codex.timeoutMs, 1_800_000);
   assert.equal(result.config.reviewGates.visualProof.enabled, true);
   assert.equal(validateConfig(result.config).ok, true);
+});
+
+test('setup migrates the old default codex timeout but preserves custom values', async () => {
+  const targetRoot = await tempRepo();
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+      },
+      codex: {
+        timeoutMs: 600_000,
+      },
+    }),
+    'utf8',
+  );
+
+  const migratedDefault = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(migratedDefault.config.codex.timeoutMs, 1_800_000);
+
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+      },
+      codex: {
+        timeoutMs: 900_000,
+      },
+    }),
+    'utf8',
+  );
+
+  const custom = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(custom.config.codex.timeoutMs, 900_000);
 });
 
 test('setup rejects existing runtime state without writing', async () => {

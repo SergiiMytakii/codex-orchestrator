@@ -54,7 +54,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         '${reportPath}',
         '-',
       ],
-      timeoutMs: 600_000,
+      timeoutMs: 1_800_000,
       promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
       reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
     },
@@ -186,7 +186,7 @@ export function mergeExistingProjectConfig(
       ...defaults.codex,
       ...existingCodex,
       args: migrateCodexArgs(readStringArray(existingCodex?.args), defaults.codex.args),
-      timeoutMs: readPositiveInteger(existingCodex?.timeoutMs) ?? defaults.codex.timeoutMs,
+      timeoutMs: migrateCodexTimeout(readPositiveInteger(existingCodex?.timeoutMs), defaults.codex.timeoutMs ?? 1_800_000),
       promptFileEnv: defaults.codex.promptFileEnv,
       reportFileEnv: defaults.codex.reportFileEnv,
       adapter: defaults.codex.adapter,
@@ -315,4 +315,11 @@ function readStringRecord(value: unknown): Record<string, string> | undefined {
 
 function readPositiveInteger(value: unknown): number | undefined {
   return Number.isInteger(value) && typeof value === 'number' && value > 0 ? value : undefined;
+}
+
+function migrateCodexTimeout(existingTimeoutMs: number | undefined, defaultTimeoutMs: number): number {
+  if (existingTimeoutMs === undefined || existingTimeoutMs === 600_000) {
+    return defaultTimeoutMs;
+  }
+  return existingTimeoutMs;
 }

@@ -129,6 +129,21 @@ test('gh issue adapter uses exact mutation commands', async () => {
   ]);
 });
 
+test('gh issue adapter truncates oversized comments before posting', async () => {
+  const calls: string[][] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    calls.push(args);
+    return { stdout: '{}', stderr: '' };
+  };
+  const adapter = new GhCliIssueAdapter('example', 'repo', executor);
+
+  await adapter.postComment(1, 'x'.repeat(70_000));
+
+  const body = calls[0]?.at(-1) ?? '';
+  assert.equal(body.length, 60_000);
+  assert.match(body, /truncated by codex-orchestrator/);
+});
+
 test('gh issue adapter creates issues and reads them back', async () => {
   const calls: string[][] = [];
   const executor: CommandExecutor = async (_file, args) => {

@@ -118,8 +118,19 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async postComment(issueNumber: number, body: string): Promise<void> {
-    await this.executor('gh', ['issue', 'comment', String(issueNumber), '--repo', this.repo, '--body', body]);
+    await this.executor('gh', ['issue', 'comment', String(issueNumber), '--repo', this.repo, '--body', truncateCommentBody(body)]);
   }
+}
+
+const maxGitHubCommentBodyLength = 60_000;
+
+function truncateCommentBody(body: string): string {
+  if (body.length <= maxGitHubCommentBodyLength) {
+    return body;
+  }
+
+  const suffix = `\n\n[truncated by codex-orchestrator: original comment was ${body.length} characters]`;
+  return `${body.slice(0, maxGitHubCommentBodyLength - suffix.length)}${suffix}`;
 }
 
 function isIssueNotFound(error: unknown): boolean {

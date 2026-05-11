@@ -52,6 +52,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
+      PLAYWRIGHT_BROWSERS_PATH: join(proofDir, 'ms-playwright'),
     },
   });
   const after = await listScreenshotArtifacts(input.worktreePath, proofDir);
