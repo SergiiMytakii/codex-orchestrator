@@ -142,6 +142,88 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
   };
 }
 
+export function mergeExistingProjectConfig(
+  defaults: CodexOrchestratorConfig,
+  existing: Record<string, unknown> | undefined,
+): CodexOrchestratorConfig {
+  if (!existing) {
+    return defaults;
+  }
+
+  const existingGithub = readObject(existing.github);
+  const existingRunner = readObject(existing.runner);
+  const existingCodex = readObject(existing.codex);
+  const existingProject = readObject(existing.project);
+  const existingWorkflows = readObject(existing.workflows);
+  const existingChecks = readStringRecord(existing.checks);
+  const existingReviewGates = readObject(existing.reviewGates);
+  const existingVisualProof = readObject(existingReviewGates?.visualProof);
+  const existingDeny = readObject(existing.deny);
+  const existingBranches = readObject(existing.branches);
+  const existingPullRequests = readObject(existing.pullRequests);
+  const existingIssueClassification = readObject(existing.issueClassification);
+
+  return {
+    ...defaults,
+    github: {
+      ...defaults.github,
+      ...existingGithub,
+      owner: defaults.github.owner,
+      repo: defaults.github.repo,
+      prepareLabels: defaults.github.prepareLabels,
+      labels: {
+        ...defaults.github.labels,
+        ...readObject(existingGithub?.labels),
+      },
+    },
+    runner: {
+      ...defaults.runner,
+      ...existingRunner,
+    },
+    codex: {
+      ...defaults.codex,
+      ...existingCodex,
+      args: migrateCodexArgs(readStringArray(existingCodex?.args), defaults.codex.args),
+      promptFileEnv: defaults.codex.promptFileEnv,
+      reportFileEnv: defaults.codex.reportFileEnv,
+      adapter: defaults.codex.adapter,
+    },
+    project: {
+      ...defaults.project,
+      ...existingProject,
+    },
+    workflows: {
+      ...defaults.workflows,
+      ...existingWorkflows,
+    },
+    checks: existingChecks ?? defaults.checks,
+    reviewGates: {
+      ...defaults.reviewGates,
+      ...existingReviewGates,
+      visualProof: {
+        ...defaults.reviewGates.visualProof,
+        ...existingVisualProof,
+      },
+    },
+    deny: {
+      ...defaults.deny,
+      ...existingDeny,
+    },
+    branches: {
+      ...defaults.branches,
+      ...existingBranches,
+    },
+    pullRequests: {
+      ...defaults.pullRequests,
+      ...existingPullRequests,
+    },
+    issueClassification: {
+      ...defaults.issueClassification,
+      ...existingIssueClassification,
+    },
+  } as CodexOrchestratorConfig;
+}
+
 export async function readExistingConfig(configPath: string): Promise<Record<string, unknown> | undefined> {
   try {
     const content = await readFile(configPath, 'utf8');
@@ -185,4 +267,45 @@ export function projectConfigPath(targetRoot: string): string {
 
 function label(name: string, color: string, description: string): LabelDefinition {
   return { name, color, description };
+}
+
+function migrateCodexArgs(existingArgs: string[] | undefined, defaultArgs: string[]): string[] {
+  if (!existingArgs) {
+    return defaultArgs;
+  }
+
+  if (!existingArgs.includes('--ignore-user-config')) {
+    return existingArgs;
+  }
+
+  const migrated: string[] = [];
+  for (let index = 0; index < existingArgs.length; index += 1) {
+    const arg = existingArgs[index];
+    if (arg === '--ignore-user-config') {
+      if (!migrated.includes('-c') && !existingArgs.includes('sandbox_workspace_write.network_access=true')) {
+        migrated.push('-c', 'sandbox_workspace_write.network_access=true');
+      }
+      continue;
+    }
+    migrated.push(arg);
+  }
+  return migrated;
+}
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : undefined;
+}
+
+function readStringRecord(value: unknown): Record<string, string> | undefined {
+  const object = readObject(value);
+  if (!object || Object.values(object).some((item) => typeof item !== 'string')) {
+    return undefined;
+  }
+  return object as Record<string, string>;
 }

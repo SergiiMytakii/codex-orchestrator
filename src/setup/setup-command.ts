@@ -11,6 +11,7 @@ import { planLabels } from './labels.js';
 import {
   assertNoRuntimeState,
   buildProjectConfig,
+  mergeExistingProjectConfig,
   projectConfigPath,
   readExistingConfig,
   writeProjectConfig,
@@ -56,12 +57,13 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
 
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
   const workflows = await resolveWorkflowConfigs(options.skillsRoot ?? defaultSkillsRoot());
-  const config = buildProjectConfig({
+  const defaultConfig = buildProjectConfig({
     owner,
     repo,
     prepareLabels,
     workflows,
   });
+  const config = mergeExistingProjectConfig(defaultConfig, existingConfig);
   const validation = validateConfig(config);
 
   if (!validation.ok) {

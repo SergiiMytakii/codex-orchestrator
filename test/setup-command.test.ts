@@ -85,6 +85,66 @@ test('setup updates existing config without accepting runtime state', async () =
   assert.equal(validateConfig(config).ok, true);
 });
 
+test('setup migrates existing config defaults without overwriting project policy', async () => {
+  const targetRoot = await tempRepo();
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      version: 1,
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+        prepareLabels: 'report-only',
+      },
+      runner: {
+        workspaceRoot: '.codex-orchestrator/workspaces',
+        maxParallelChildren: 2,
+        stateDir: '.codex-orchestrator/state',
+      },
+      codex: {
+        adapter: 'codex-cli',
+        command: 'codex',
+        args: [
+          'exec',
+          '--cd',
+          '${worktreePath}',
+          '--sandbox',
+          'workspace-write',
+          '--add-dir',
+          '${stateDir}',
+          '--ignore-user-config',
+          '--output-last-message',
+          '${reportPath}',
+          '-',
+        ],
+        promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
+        reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
+      },
+      checks: {
+        architecture: 'npm run test:architecture',
+      },
+      branches: {
+        base: 'dev',
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(result.config.runner.maxParallelChildren, 2);
+  assert.deepEqual(result.config.checks, { architecture: 'npm run test:architecture' });
+  assert.equal(result.config.branches.base, 'dev');
+  assert.equal(result.config.codex.args.includes('--ignore-user-config'), false);
+  assert.equal(result.config.codex.args.includes('sandbox_workspace_write.network_access=true'), true);
+  assert.equal(result.config.reviewGates.visualProof.enabled, true);
+  assert.equal(validateConfig(result.config).ok, true);
+});
+
 test('setup rejects existing runtime state without writing', async () => {
   const targetRoot = await tempRepo();
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
