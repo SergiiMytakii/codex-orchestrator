@@ -59,7 +59,7 @@ export class GitWorktreeManager {
 
   public async createIssueWorktree(input: CreateIssueWorktreeInput): Promise<void> {
     await mkdir(dirname(input.workspacePath), { recursive: true });
-    await this.git([
+    const args = [
       '-C',
       input.targetRoot,
       'worktree',
@@ -68,7 +68,17 @@ export class GitWorktreeManager {
       input.branchName,
       input.workspacePath,
       input.baseBranch,
-    ]);
+    ];
+    const result = await this.executor('git', args);
+    if (result.exitCode === 0) {
+      return;
+    }
+    if (!/a branch named .+ already exists/i.test(result.stderr)) {
+      throw new Error(`git command failed: git ${args.join(' ')}\n${result.stderr}`);
+    }
+
+    await this.removeMergedStaleBranchWorktree(input);
+    await this.git(args);
   }
 
   public async listChangedFiles(worktreePath: string): Promise<string[]> {
@@ -144,6 +154,36 @@ export class GitWorktreeManager {
     }
     return result;
   }
+
+  private async removeMergedStaleBranchWorktree(input: CreateIssueWorktreeInput): Promise<void> {
+    const ancestor = await this.executor('git', [
+      '-C',
+      input.targetRoot,
+      'merge-base',
+      '--is-ancestor',
+      input.branchName,
+      input.baseBranch,
+    ]);
+    if (ancestor.exitCode !== 0) {
+      throw new Error(
+        `Existing branch ${input.branchName} is not merged into ${input.baseBranch}; refusing to remove it automatically.`,
+      );
+    }
+
+    const worktrees = parseWorktreeList((await this.git(['-C', input.targetRoot, 'worktree', 'list', '--porcelain'])).stdout);
+    const staleWorktree = worktrees.find((worktree) => worktree.branch === `refs/heads/${input.branchName}`);
+    if (staleWorktree) {
+      const status = await this.git(['-C', staleWorktree.path, 'status', '--porcelain=v1']);
+      if (status.stdout.trim().length > 0) {
+        throw new Error(
+          `Existing worktree for ${input.branchName} has uncommitted changes at ${staleWorktree.path}; refusing to remove it automatically.`,
+        );
+      }
+      await this.removeWorktree({ targetRoot: input.targetRoot, worktreePath: staleWorktree.path });
+    }
+
+    await this.git(['-C', input.targetRoot, 'branch', '-d', input.branchName]);
+  }
 }
 
 export function renderBranchTemplate(template: string, values: BranchTemplateValues): string {
@@ -179,4 +219,22 @@ function parsePorcelainChangedFiles(output: string): string[] {
 
 function normalizePath(path: string): string {
   return path.replaceAll('\\', '/');
+}
+
+function parseWorktreeList(output: string): Array<{ path: string; branch?: string }> {
+  const worktrees: Array<{ path: string; branch?: string }> = [];
+  let current: { path: string; branch?: string } | undefined;
+
+  for (const line of output.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      current = { path: line.slice('worktree '.length) };
+      worktrees.push(current);
+      continue;
+    }
+    if (current && line.startsWith('branch ')) {
+      current.branch = line.slice('branch '.length);
+    }
+  }
+
+  return worktrees;
 }

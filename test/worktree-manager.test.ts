@@ -90,6 +90,59 @@ test('mergeBranch creates a no-ff merge commit that can be pushed from parent wo
   assert.match(log.stdout, /Codex: merge issue #2 into parent #1/);
 });
 
+test('createIssueWorktree removes clean merged stale branch worktree before retrying', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const stale = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: stale,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+  await writeFile(join(stale, 'feature.txt'), 'done\n', 'utf8');
+  await git.commitAll({ worktreePath: stale, message: 'Codex: implement issue #1' });
+  await execFileAsync('git', ['-C', repo, 'merge', '--no-ff', 'codex/issue-1', '-m', 'Merge issue #1']);
+
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: stale,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+
+  const branch = await execFileAsync('git', ['-C', stale, 'branch', '--show-current']);
+  const status = await execFileAsync('git', ['-C', stale, 'status', '--porcelain']);
+  assert.equal(branch.stdout.trim(), 'codex/issue-1');
+  assert.equal(status.stdout, '');
+});
+
+test('createIssueWorktree refuses to remove dirty stale branch worktree', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const stale = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: stale,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+  await writeFile(join(stale, 'feature.txt'), 'done\n', 'utf8');
+  await git.commitAll({ worktreePath: stale, message: 'Codex: implement issue #1' });
+  await execFileAsync('git', ['-C', repo, 'merge', '--no-ff', 'codex/issue-1', '-m', 'Merge issue #1']);
+  await writeFile(join(stale, 'dirty.txt'), 'dirty\n', 'utf8');
+
+  await assert.rejects(
+    git.createIssueWorktree({
+      targetRoot: repo,
+      workspacePath: stale,
+      branchName: 'codex/issue-1',
+      baseBranch: 'main',
+    }),
+    /has uncommitted changes/,
+  );
+});
+
 test('mergeBranch throws GitMergeConflictError and abortMerge cleans the merge state', async () => {
   const { root, repo } = await tempGitProject();
   const git = new GitWorktreeManager();
