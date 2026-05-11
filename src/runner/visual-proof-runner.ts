@@ -46,7 +46,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   const result = await input.shellExecutor(command, {
     cwd: input.worktreePath,
     env: {
-      ...process.env,
+      ...runnerCommandBaseEnv(),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: input.config.reviewGates.visualProof.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
@@ -81,6 +81,18 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     }],
     artifacts,
   };
+}
+
+function runnerCommandBaseEnv(): Record<string, string> {
+  const keys = ['PATH', 'HOME', 'USER', 'TMPDIR', 'SHELL'];
+  const env: Record<string, string> = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
 }
 
 function renderVisualProofCommand(command: string, input: RunnerVisualProofInput, proofDir: string): string {
