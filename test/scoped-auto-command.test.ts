@@ -189,6 +189,94 @@ test('scoped auto command blocks when completion report is missing before PR pub
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
+test('scoped auto command blocks UI work without visual proof artifacts', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshots at responsive viewports.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/frontend/CampaignList.tsx'],
+          validation: [{ command: 'Playwright screenshots', status: 'skipped', summary: 'browser launch failed' }],
+          artifacts: [],
+          skippedChecks: ['BrowserUse visual verification was not run because no BrowserUse tool is available.'],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Visual proof gate requires a passed BrowserUse\/Playwright\/screenshot validation line/);
+  assert.match(result.reportComment, /Visual proof gate requires at least 1 screenshot artifact/);
+  assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
+});
+
+test('scoped auto command includes screenshot proof artifacts in review report', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshot proof.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const proofPath = '.codex-orchestrator/proofs/issue-155/390.png';
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(join(input.worktreePath, proofPath), 'png-fixture\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/frontend/CampaignList.tsx'],
+          validation: [{ command: 'Playwright screenshots', status: 'passed', summary: '390px viewport has no overlap' }],
+          artifacts: [{ type: 'screenshot', path: proofPath, description: '390px campaign layout' }],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.match(result.reportComment, /Proof Artifacts/);
+  assert.match(result.reportComment, /!\[screenshot: 390px campaign layout\]/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts/);
+});
+
 test('scoped auto command rejects ineligible manual issue before claim', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([

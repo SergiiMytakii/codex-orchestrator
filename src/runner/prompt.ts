@@ -57,6 +57,7 @@ export interface ScopedCompletionReport {
   status: CompletionStatus;
   changes: string[];
   validation: Array<{ command: string; status: ValidationStatus; summary: string }>;
+  artifacts: Array<{ type: 'screenshot' | 'log' | 'other'; path?: string; url?: string; description: string }>;
   skippedChecks: string[];
   residualRisks: string[];
   prohibitedActions: Array<{ type: ProhibitedActionType; description: string }>;
@@ -112,7 +113,8 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.issue.number}/ and include them as screenshot artifacts.`,
+    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
@@ -203,7 +205,8 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.childIssue.number}/ and include them as screenshot artifacts.`,
+    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
@@ -226,6 +229,9 @@ export async function readScopedCompletionReport(reportPath: string): Promise<Sc
     parsed = JSON.parse(content) as unknown;
   } catch {
     throw new Error('Invalid scoped completion report: report must be valid JSON');
+  }
+  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && !('artifacts' in parsed)) {
+    (parsed as Record<string, unknown>).artifacts = [];
   }
   assertScopedCompletionReport(parsed);
   return { kind: 'valid', report: parsed };
@@ -303,6 +309,7 @@ function assertScopedCompletionReport(value: unknown): asserts value is ScopedCo
   }
   assertStringArray(record.changes, 'changes');
   assertValidation(record.validation);
+  assertArtifacts(record.artifacts);
   assertStringArray(record.skippedChecks, 'skippedChecks');
   assertStringArray(record.residualRisks, 'residualRisks');
   assertProhibitedActions(record.prohibitedActions);
@@ -413,6 +420,35 @@ function assertValidation(value: unknown): void {
     const record = item as Record<string, unknown>;
     if (typeof record.command !== 'string' || !['passed', 'failed', 'skipped'].includes(String(record.status)) || typeof record.summary !== 'string') {
       throw new Error('Invalid scoped completion report: validation item is malformed');
+    }
+  }
+}
+
+function assertArtifacts(value: unknown): void {
+  if (!Array.isArray(value)) {
+    throw new Error('Invalid scoped completion report: artifacts must be an array');
+  }
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('Invalid scoped completion report: artifacts item must be an object');
+    }
+    const record = item as Record<string, unknown>;
+    if (
+      typeof record.type !== 'string'
+      || !['screenshot', 'log', 'other'].includes(record.type)
+      || typeof record.description !== 'string'
+      || record.description.trim().length === 0
+    ) {
+      throw new Error('Invalid scoped completion report: artifacts item is malformed');
+    }
+    if ('path' in record && typeof record.path !== 'string') {
+      throw new Error('Invalid scoped completion report: artifacts path must be a string');
+    }
+    if ('url' in record && typeof record.url !== 'string') {
+      throw new Error('Invalid scoped completion report: artifacts url must be a string');
+    }
+    if (!record.path && !record.url) {
+      throw new Error('Invalid scoped completion report: artifacts item must include path or url');
     }
   }
 }

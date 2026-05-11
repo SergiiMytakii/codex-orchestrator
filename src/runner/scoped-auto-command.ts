@@ -20,6 +20,7 @@ import {
   type ScopedCompletionReport,
   writeDurablePrompt,
 } from './prompt.js';
+import { evaluateReviewGates } from './review-gates.js';
 import {
   validateChangedPaths,
   validateCompletionReportSafety,
@@ -188,15 +189,34 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     if (validation.some((line) => line.status === 'failed')) {
       residualRisks.push('One or more configured checks failed.');
     }
+    const reviewGate = evaluateReviewGates({
+      config,
+      issue,
+      changedFiles,
+      validation,
+      skippedChecks: report.skippedChecks,
+      report,
+    });
+    if (!reviewGate.ok) {
+      return finishBlocked(
+        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath),
+        issueAdapter,
+        config,
+        reviewGate.reasons,
+        changedFiles,
+        report.skippedChecks,
+        residualRisks,
+      );
+    }
     await git.commitAll({ worktreePath, message: `Codex: implement issue #${options.issueNumber}` });
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderTemplate(config.pullRequests.scopedIssueTitle, options.issueNumber),
-      body: buildPullRequestBody(options.issueNumber, changedFiles, validation, report.skippedChecks, residualRisks),
+      body: buildPullRequestBody(config, branchName, options.issueNumber, changedFiles, validation, report.artifacts, report.skippedChecks, residualRisks),
       headBranch: branchName,
       baseBranch: config.branches.base,
     });
-    const reportComment = buildReviewReport(options.issueNumber, pullRequest, changedFiles, validation, report.skippedChecks, residualRisks);
+    const reportComment = buildReviewReport(config, branchName, options.issueNumber, pullRequest, changedFiles, validation, report.artifacts, report.skippedChecks, residualRisks);
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
@@ -306,10 +326,13 @@ async function finishPromotionRequested(
 }
 
 function buildReviewReport(
+  config: CodexOrchestratorConfig,
+  branchName: string,
   issueNumber: number,
   pullRequest: GitHubPullRequest,
   changedFiles: string[],
   validation: ValidationLine[],
+  artifacts: ScopedCompletionReport['artifacts'],
   skippedChecks: string[],
   residualRisks: string[],
 ): string {
@@ -321,6 +344,8 @@ function buildReviewReport(
     ...bulletList(changedFiles),
     'Validation',
     ...validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
+    'Proof Artifacts',
+    ...renderProofArtifacts(config, branchName, artifacts),
     'Skipped Checks',
     ...bulletList(skippedChecks),
     'Residual Risks',
@@ -329,9 +354,12 @@ function buildReviewReport(
 }
 
 function buildPullRequestBody(
+  config: CodexOrchestratorConfig,
+  branchName: string,
   issueNumber: number,
   changedFiles: string[],
   validation: ValidationLine[],
+  artifacts: ScopedCompletionReport['artifacts'],
   skippedChecks: string[],
   residualRisks: string[],
 ): string {
@@ -343,6 +371,9 @@ function buildPullRequestBody(
     '',
     'Validation:',
     ...validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
+    '',
+    'Proof artifacts:',
+    ...renderProofArtifacts(config, branchName, artifacts),
     '',
     'Skipped checks:',
     ...bulletList(skippedChecks),
@@ -364,4 +395,28 @@ function baseResult(
 
 function renderTemplate(template: string, issueNumber: number): string {
   return template.replaceAll('${issueNumber}', String(issueNumber));
+}
+
+function renderProofArtifacts(
+  config: CodexOrchestratorConfig,
+  branchName: string,
+  artifacts: ScopedCompletionReport['artifacts'],
+): string[] {
+  if (artifacts.length === 0) {
+    return ['- none'];
+  }
+  return artifacts.map((artifact) => {
+    const target = artifact.url ?? rawGitHubUrl(config, branchName, artifact.path ?? '');
+    const label = `${artifact.type}: ${artifact.description}`;
+    return artifact.type === 'screenshot' ? `- ![${escapeMarkdownAlt(label)}](${target})` : `- ${label}: ${target}`;
+  });
+}
+
+function rawGitHubUrl(config: CodexOrchestratorConfig, branchName: string, path: string): string {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  return `https://raw.githubusercontent.com/${encodeURIComponent(config.github.owner)}/${encodeURIComponent(config.github.repo)}/${encodeURIComponent(branchName)}/${encodedPath}`;
+}
+
+function escapeMarkdownAlt(value: string): string {
+  return value.replace(/[\[\]]/g, '');
 }

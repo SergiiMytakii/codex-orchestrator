@@ -32,6 +32,7 @@ import {
   type ScopedCompletionReport,
   writeDurablePrompt,
 } from './prompt.js';
+import { evaluateReviewGates } from './review-gates.js';
 import {
   validateChangedPaths,
   validateCompletionReportSafety,
@@ -91,6 +92,7 @@ interface ChildExecutionResult {
   reportPath: string;
   changedFiles: string[];
   validation: ValidationLine[];
+  artifacts: ScopedCompletionReport['artifacts'];
   skippedChecks: string[];
   residualRisks: string[];
 }
@@ -610,6 +612,17 @@ async function executeChild(input: {
   if (validation.some((line) => line.status === 'failed')) {
     residualRisks.push('One or more configured checks failed.');
   }
+  const reviewGate = evaluateReviewGates({
+    config: input.config,
+    issue: input.child.issue,
+    changedFiles,
+    validation,
+    skippedChecks: report.skippedChecks,
+    report,
+  });
+  if (!reviewGate.ok) {
+    throw new Error(reviewGate.reasons.join('; '));
+  }
   await input.git.commitAll({
     worktreePath,
     message: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
@@ -623,6 +636,7 @@ async function executeChild(input: {
     reportPath,
     changedFiles,
     validation,
+    artifacts: report.artifacts,
     skippedChecks: report.skippedChecks,
     residualRisks,
   };
@@ -785,6 +799,8 @@ function buildChildReviewReport(parentIssueNumber: number, result: ChildExecutio
     ...bulletList(result.changedFiles),
     'Validation',
     ...result.validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
+    'Proof Artifacts',
+    ...renderProofArtifacts(result.artifacts),
     'Skipped Checks',
     ...bulletList(result.skippedChecks),
     'Residual Risks',
@@ -812,6 +828,8 @@ function buildIssueTreeReviewReport(
     ...finalValidation.map((line) => `- final ${line.command}: ${line.status} - ${line.summary}`),
     'Skipped Checks',
     ...bulletList(childResults.flatMap((result) => result.skippedChecks)),
+    'Proof Artifacts',
+    ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
     'Residual Risks',
     ...bulletList(childResults.flatMap((result) => result.residualRisks)),
   ].join('\n');
@@ -842,6 +860,9 @@ function buildIssueTreePullRequestBody(
     'Skipped checks:',
     ...bulletList(childResults.flatMap((result) => result.skippedChecks)),
     '',
+    'Proof artifacts:',
+    ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
+    '',
     'Residual risks:',
     ...bulletList(childResults.flatMap((result) => result.residualRisks)),
     '',
@@ -854,6 +875,17 @@ function buildIssueTreePullRequestBody(
 
 function renderParentTemplate(template: string, parentIssueNumber: number): string {
   return template.replaceAll('${parentIssueNumber}', String(parentIssueNumber));
+}
+
+function renderProofArtifacts(artifacts: ScopedCompletionReport['artifacts']): string[] {
+  if (artifacts.length === 0) {
+    return ['- none'];
+  }
+  return artifacts.map((artifact) => {
+    const target = artifact.url ?? artifact.path ?? 'missing-target';
+    const label = `${artifact.type}: ${artifact.description}`;
+    return artifact.type === 'screenshot' ? `- ![${label.replace(/[\[\]]/g, '')}](${target})` : `- ${label}: ${target}`;
+  });
 }
 
 function baseResult(

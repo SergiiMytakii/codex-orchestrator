@@ -40,6 +40,7 @@ test('safety maps prohibited report actions and changed HEAD', () => {
       status: 'completed',
       changes: [],
       validation: [],
+      artifacts: [],
       skippedChecks: [],
       residualRisks: [],
       prohibitedActions: [

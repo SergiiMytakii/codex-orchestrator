@@ -66,6 +66,17 @@ export interface CodexOrchestratorConfig {
     issueTreeOrchestration: WorkflowConfig;
   };
   checks: Record<string, string>;
+  reviewGates: {
+    visualProof: {
+      enabled: boolean;
+      artifactDir: string;
+      issueTextPatterns: string[];
+      changedPathGlobs: string[];
+      requiredValidationPatterns: string[];
+      blockOnSkippedPatterns: string[];
+      minScreenshotArtifacts: number;
+    };
+  };
   deny: {
     secretFiles: string[];
     destructiveDbOrCache: boolean;
@@ -115,6 +126,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   const project = expectObject(root, 'project', errors);
   const workflows = expectObject(root, 'workflows', errors);
   const checks = expectObject(root, 'checks', errors);
+  const reviewGates = expectObject(root, 'reviewGates', errors);
   const deny = expectObject(root, 'deny', errors);
   const branches = expectObject(root, 'branches', errors);
   const pullRequests = expectObject(root, 'pullRequests', errors);
@@ -159,6 +171,10 @@ export function validateConfig(input: unknown): ConfigValidationResult {
 
   if (checks) {
     validateChecks(checks, errors);
+  }
+
+  if (reviewGates) {
+    validateReviewGates(reviewGates, errors);
   }
 
   if (deny) {
@@ -333,6 +349,53 @@ function validateChecks(checks: ObjectRecord, errors: string[]): void {
   for (const [name, command] of Object.entries(checks)) {
     if (name.length === 0 || typeof command !== 'string' || command.length === 0) {
       errors.push('checks must map non-empty names to non-empty shell commands');
+    }
+  }
+}
+
+function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
+  const visualProof = expectObject(parent, 'reviewGates.visualProof', errors);
+  if (!visualProof) {
+    return;
+  }
+
+  expectBoolean(visualProof, 'reviewGates.visualProof.enabled', errors);
+  expectString(visualProof, 'reviewGates.visualProof.artifactDir', errors);
+  expectStringArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
+  expectStringArray(visualProof, 'reviewGates.visualProof.changedPathGlobs', errors);
+  expectStringArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
+  expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+  expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
+  validateRegexArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
+  validateRegexArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
+  validateRegexArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
+}
+
+function expectPositiveInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {
+  const value = readPath(parent, path);
+
+  if (!Number.isInteger(value) || typeof value !== 'number' || value < 1) {
+    errors.push(`${path} must be a positive integer`);
+    return undefined;
+  }
+
+  return value;
+}
+
+function validateRegexArray(parent: ObjectRecord, path: string, errors: string[]): void {
+  const value = readPath(parent, path);
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  for (const pattern of value) {
+    if (typeof pattern !== 'string') {
+      continue;
+    }
+    try {
+      new RegExp(pattern, 'iu');
+    } catch {
+      errors.push(`${path} contains invalid regular expression ${pattern}`);
     }
   }
 }

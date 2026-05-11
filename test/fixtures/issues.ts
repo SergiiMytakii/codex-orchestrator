@@ -2,6 +2,7 @@ import type { GitHubIssue, GitHubIssueComment, GitHubPullRequestLink, IssueState
 
 export function issueFixture(input: {
   number: number;
+  title?: string;
   labels?: string[];
   body?: string;
   state?: IssueState;
@@ -10,7 +11,7 @@ export function issueFixture(input: {
 }): GitHubIssue {
   return {
     number: input.number,
-    title: `Issue ${input.number}`,
+    title: input.title ?? `Issue ${input.number}`,
     body: input.body ?? `Body ${input.number}`,
     url: `https://github.com/example/repo/issues/${input.number}`,
     state: input.state ?? 'OPEN',

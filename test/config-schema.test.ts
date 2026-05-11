@@ -12,6 +12,8 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.runner.maxParallelChildren, 3);
     assert.equal(result.value.workflows.prd.source, 'package-owned-prompt-fallback');
     assert.equal(result.value.codex.command, 'codex');
+    assert.equal(result.value.reviewGates.visualProof.enabled, true);
+    assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.deepEqual(result.value.codex.args, [
       'exec',
       '--cd',
@@ -79,6 +81,25 @@ test('rejects invalid check commands', () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok ? [] : result.errors, ['checks must map non-empty names to non-empty shell commands']);
+});
+
+test('rejects invalid visual proof gate config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    reviewGates: {
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        issueTextPatterns: ['['],
+        minScreenshotArtifacts: 0,
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'reviewGates.visualProof.minScreenshotArtifacts must be a positive integer',
+    'reviewGates.visualProof.issueTextPatterns contains invalid regular expression [',
+  ]);
 });
 
 test('rejects invalid label preparation policy', () => {

@@ -197,6 +197,7 @@ That config controls:
 - labels used for the runner state machine;
 - base branch and branch name templates;
 - validation checks such as `npm test`;
+- review gates, including visual proof requirements for UI/frontend work;
 - deny rules for secrets and unsafe actions;
 - concurrency for child issue execution;
 - pull request title templates;
@@ -206,6 +207,12 @@ That config controls:
 The package ships fallback prompts so a user does not need to already have a
 local Codex skill pack installed. During setup, compatible existing local skills
 can be reused; missing workflows fall back to package-owned prompts.
+
+For UI or frontend issues, the default visual proof gate blocks `agent:review`
+unless the agent reports a passed BrowserUse/Playwright/screenshot validation
+line and at least one screenshot artifact. Screenshot artifacts should be saved
+under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in
+the PR and issue review report.
 
 ## Labels
 
