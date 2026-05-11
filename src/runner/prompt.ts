@@ -115,6 +115,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
     'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
     `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.issue.number}/ and include them as screenshot artifacts.`,
+    ...runnerVisualProofPromptLines(input.config),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -208,11 +209,24 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
     'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
     `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.childIssue.number}/ and include them as screenshot artifacts.`,
+    ...runnerVisualProofPromptLines(input.config),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
   ].join('\n\n');
+}
+
+function runnerVisualProofPromptLines(config: CodexOrchestratorConfig): string[] {
+  const command = config.reviewGates.visualProof.runnerValidationCommand?.trim();
+  if (!command) {
+    return [];
+  }
+
+  return [
+    `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
+    'Prepare any project files this command needs, but do not claim this runner-owned command passed unless you actually ran it yourself.',
+  ];
 }
 
 export async function readScopedCompletionReport(reportPath: string): Promise<ScopedCompletionReportReadResult> {
