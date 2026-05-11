@@ -56,8 +56,13 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     visualProof.requiredValidationPatterns.some((pattern) => regexMatches(pattern, validationText(line)))
       && isStrongVisualValidation(line),
   );
+  const runnerVisualValidation = input.validation.filter(isRunnerVisualValidation);
   const hasPassedVisualValidation = matchingValidation.some((line) => line.status === 'passed');
+  const hasPassedRunnerVisualValidation = runnerVisualValidation.some((line) =>
+    line.status === 'passed' && isStrongVisualValidation(line),
+  );
   const failedVisualValidation = matchingValidation.filter((line) => line.status !== 'passed');
+  const failedRunnerVisualValidation = runnerVisualValidation.filter((line) => line.status === 'failed');
   const skippedVisualChecks = input.skippedChecks.filter((line) =>
     visualProof.blockOnSkippedPatterns.some((pattern) => regexMatches(pattern, line)),
   );
@@ -76,7 +81,10 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
       return false;
     }
     return globMatches(`${normalizePath(visualProof.artifactDir)}/**`, path)
-      && input.changedFiles.some((file) => changedPathCovers(normalizePath(file), path));
+      && (
+        hasPassedRunnerVisualValidation
+        || input.changedFiles.some((file) => changedPathCovers(normalizePath(file), path))
+      );
   });
 
   if (!hasPassedVisualValidation) {
@@ -87,6 +95,9 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     for (const line of skippedVisualChecks) {
       reasons.push(`Visual proof check was skipped: ${line}`);
     }
+  }
+  for (const line of failedRunnerVisualValidation) {
+    reasons.push(`Visual proof validation is failed: ${line.command} - ${line.summary}`);
   }
   if (screenshotArtifacts.length < visualProof.minScreenshotArtifacts) {
     reasons.push(
@@ -118,10 +129,11 @@ function evaluateQualityGate(input: ReviewGateInput): string[] {
 
   if (quality.tdd.enabled) {
     const hasTddValidation = hasPassedValidation(input.validation, quality.tdd.requiredValidationPatterns);
-    if (quality.tdd.requireTestChange && testFiles.length === 0) {
+    const hasRunnerVisualProofEvidence = hasPassedRunnerVisualProofEvidence(input);
+    if (quality.tdd.requireTestChange && testFiles.length === 0 && !hasRunnerVisualProofEvidence) {
       reasons.push('Quality gate requires TDD test file change for runtime changes.');
     }
-    if (!hasTddValidation) {
+    if (!hasTddValidation && !hasRunnerVisualProofEvidence) {
       reasons.push('Quality gate requires TDD red-to-green proof in validation.');
     }
   }
@@ -155,6 +167,31 @@ function validationText(line: ValidationLine): string {
 
 function isStrongVisualValidation(line: ValidationLine): boolean {
   return /(BrowserUse|Playwright|screenshot|viewport)/iu.test(validationText(line));
+}
+
+function isRunnerVisualValidation(line: ValidationLine): boolean {
+  return /runner visual proof/iu.test(validationText(line));
+}
+
+function hasPassedRunnerVisualProofEvidence(input: ReviewGateInput): boolean {
+  if (!shouldApplyVisualProofGate(input)) {
+    return false;
+  }
+
+  const hasPassedRunnerProof = input.validation.some((line) =>
+    line.status === 'passed'
+      && isRunnerVisualValidation(line)
+      && isStrongVisualValidation(line),
+  );
+  if (!hasPassedRunnerProof) {
+    return false;
+  }
+
+  const artifactDir = normalizePath(input.config.reviewGates.visualProof.artifactDir);
+  return input.changedFiles.some((file) => {
+    const path = normalizePath(file);
+    return globMatches(`${artifactDir}/**`, path) && /\.(?:cjs|js|mjs|ts|tsx)$/iu.test(path);
+  });
 }
 
 function regexMatches(pattern: string, text: string): boolean {

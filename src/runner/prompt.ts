@@ -233,6 +233,8 @@ function visualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: nu
     `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
+    'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path instead of reporting BrowserUse/tool unavailability as a skipped check or residual risk.',
+    'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
     'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',

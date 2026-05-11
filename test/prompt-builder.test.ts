@@ -73,6 +73,8 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
 
   assert.match(prompt, /runner will execute this visual proof command outside the child Codex sandbox/);
   assert.match(prompt, /do not execute this runner-owned command yourself/);
+  assert.match(prompt, /primary visual proof path/);
+  assert.match(prompt, /focused visual proof script with concrete assertions can be the TDD evidence/);
   assert.match(prompt, /Do not claim the runner-owned visual proof passed/);
   assert.match(prompt, /CODEX_ORCHESTRATOR_LOGIN_EMAIL, CODEX_ORCHESTRATOR_LOGIN_PASSWORD/);
   assert.match(prompt, /never hardcode credentials/);
