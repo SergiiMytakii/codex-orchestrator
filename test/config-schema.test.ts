@@ -15,6 +15,8 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.codex.timeoutMs, 1_800_000);
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
+    assert.equal(result.value.reviewGates.visualProof.runnerTimeoutMs, 900_000);
+    assert.deepEqual(result.value.reviewGates.visualProof.envPassthrough, []);
     assert.deepEqual(result.value.codex.args, [
       'exec',
       '--cd',
@@ -95,6 +97,8 @@ test('rejects invalid visual proof gate config', () => {
         ...validConfig.reviewGates.visualProof,
         issueTextPatterns: ['['],
         minScreenshotArtifacts: 0,
+        runnerTimeoutMs: 0,
+        envPassthrough: ['CODEX_ORCHESTRATOR_LOGIN_EMAIL', 'bad-name'],
       },
     },
   });
@@ -102,6 +106,8 @@ test('rejects invalid visual proof gate config', () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok ? [] : result.errors, [
     'reviewGates.visualProof.minScreenshotArtifacts must be a positive integer',
+    'reviewGates.visualProof.runnerTimeoutMs must be a positive integer when provided',
+    'reviewGates.visualProof.envPassthrough must contain valid environment variable names',
     'reviewGates.visualProof.issueTextPatterns contains invalid regular expression [',
   ]);
 });

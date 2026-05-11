@@ -47,6 +47,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     cwd: input.worktreePath,
     env: {
       ...runnerCommandBaseEnv(),
+      ...runnerPassthroughEnv(input.config.reviewGates.visualProof.envPassthrough ?? []),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: input.config.reviewGates.visualProof.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
@@ -54,6 +55,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
       PLAYWRIGHT_BROWSERS_PATH: join(proofDir, 'ms-playwright'),
     },
+    timeoutMs: input.config.reviewGates.visualProof.runnerTimeoutMs,
   });
   const after = await listScreenshotArtifacts(input.worktreePath, proofDir);
   const newArtifacts = after.filter((path) => !before.has(path));
@@ -91,6 +93,17 @@ function runnerCommandBaseEnv(): Record<string, string> {
     const value = process.env[key];
     if (value !== undefined) {
       env[key] = value;
+    }
+  }
+  return env;
+}
+
+function runnerPassthroughEnv(names: string[]): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined) {
+      env[name] = value;
     }
   }
   return env;

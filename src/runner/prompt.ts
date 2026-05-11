@@ -113,9 +113,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
-    `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.issue.number}/ and include them as screenshot artifacts.`,
-    ...runnerVisualProofPromptLines(input.config),
+    ...visualProofPromptLines(input.config, input.issue.number),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -207,9 +205,7 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
-    `For visual/UI work, save screenshot proof files under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.childIssue.number}/ and include them as screenshot artifacts.`,
-    ...runnerVisualProofPromptLines(input.config),
+    ...visualProofPromptLines(input.config, input.childIssue.number),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -217,15 +213,27 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
   ].join('\n\n');
 }
 
-function runnerVisualProofPromptLines(config: CodexOrchestratorConfig): string[] {
+function visualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
   const command = config.reviewGates.visualProof.runnerValidationCommand?.trim();
   if (!command) {
-    return [];
+    return [
+      'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
+      `For visual/UI work, save screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts.`,
+    ];
   }
 
+  const envNames = config.reviewGates.visualProof.envPassthrough ?? [];
+  const loginEnvLine = envNames.length > 0
+    ? `The runner visual proof command will receive these project environment variables when they exist: ${envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
+    : 'If authentication is required, make the visual proof script read credentials from environment variables configured in reviewGates.visualProof.envPassthrough; never hardcode credentials.';
+
   return [
+    `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
-    'Prepare any project files this command needs, but do not claim this runner-owned command passed unless you actually ran it yourself.',
+    'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
+    'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
+    loginEnvLine,
+    'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
   ];
 }
 

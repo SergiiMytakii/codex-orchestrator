@@ -290,9 +290,13 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
       visualProof: {
         ...config.reviewGates.visualProof,
         runnerValidationCommand: 'npm run visual-proof -- --issue ${issueNumber}',
+        runnerTimeoutMs: 1_234,
+        envPassthrough: ['CODEX_ORCHESTRATOR_TEST_LOGIN'],
       },
     },
   }));
+  const previousLoginEnv = process.env.CODEX_ORCHESTRATOR_TEST_LOGIN;
+  process.env.CODEX_ORCHESTRATOR_TEST_LOGIN = 'login-fixture';
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires responsive screenshots.' }),
   ]);
@@ -325,26 +329,36 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.equal(options?.cwd, join(repo, '.codex-orchestrator', 'workspaces', 'issue-155'));
     const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_ISSUE_NUMBER, '155');
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_TEST_LOGIN, 'login-fixture');
+    assert.equal(options?.timeoutMs, 1_234);
     assert.ok(proofDir);
     assert.equal(options?.env?.PLAYWRIGHT_BROWSERS_PATH, join(proofDir, 'ms-playwright'));
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };
 
-  const result = await runScopedAutoCommand({
-    targetRoot: repo,
-    issueNumber: 155,
-    issueAdapter,
-    pullRequestAdapter,
-    codexAdapter,
-    shellExecutor,
-    now,
-  });
+  try {
+    const result = await runScopedAutoCommand({
+      targetRoot: repo,
+      issueNumber: 155,
+      issueAdapter,
+      pullRequestAdapter,
+      codexAdapter,
+      shellExecutor,
+      now,
+    });
 
-  assert.equal(result.status, 'review-ready');
-  assert.match(result.reportComment, /npm run visual-proof -- --issue 155: passed/);
-  assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
-  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+    assert.equal(result.status, 'review-ready');
+    assert.match(result.reportComment, /npm run visual-proof -- --issue 155: passed/);
+    assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
+    assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+  } finally {
+    if (previousLoginEnv === undefined) {
+      delete process.env.CODEX_ORCHESTRATOR_TEST_LOGIN;
+    } else {
+      process.env.CODEX_ORCHESTRATOR_TEST_LOGIN = previousLoginEnv;
+    }
+  }
 });
 
 test('scoped auto command includes screenshot proof artifacts in review report', async () => {

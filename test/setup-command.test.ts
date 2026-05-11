@@ -143,6 +143,8 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.codex.args.includes('sandbox_workspace_write.network_access=true'), true);
   assert.equal(result.config.codex.timeoutMs, 1_800_000);
   assert.equal(result.config.reviewGates.visualProof.enabled, true);
+  assert.equal(result.config.reviewGates.visualProof.runnerTimeoutMs, 900_000);
+  assert.deepEqual(result.config.reviewGates.visualProof.envPassthrough, []);
   assert.equal(validateConfig(result.config).ok, true);
 });
 

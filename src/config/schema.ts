@@ -77,6 +77,8 @@ export interface CodexOrchestratorConfig {
       blockOnSkippedPatterns: string[];
       minScreenshotArtifacts: number;
       runnerValidationCommand?: string;
+      runnerTimeoutMs?: number;
+      envPassthrough?: string[];
     };
   };
   deny: {
@@ -311,6 +313,21 @@ function expectStringArray(parent: ObjectRecord, path: string, errors: string[])
   return value as string[];
 }
 
+function expectOptionalStringArray(parent: ObjectRecord, path: string, errors: string[]): string[] | undefined {
+  const value = readPath(parent, path);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) {
+    errors.push(`${path} must be an array of non-empty strings when provided`);
+    return undefined;
+  }
+
+  return value as string[];
+}
+
 function validateLabel(parent: ObjectRecord, path: string, errors: string[]): void {
   const label = expectObject(parent, path, errors);
 
@@ -370,6 +387,9 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
   expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
   expectOptionalString(visualProof, 'reviewGates.visualProof.runnerValidationCommand', errors);
+  expectOptionalPositiveInteger(visualProof, 'reviewGates.visualProof.runnerTimeoutMs', errors);
+  expectOptionalStringArray(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
+  validateEnvironmentVariableNames(visualProof, 'reviewGates.visualProof.envPassthrough', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.issueTextPatterns', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
   validateRegexArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
@@ -431,5 +451,17 @@ function validateRegexArray(parent: ObjectRecord, path: string, errors: string[]
     } catch {
       errors.push(`${path} contains invalid regular expression ${pattern}`);
     }
+  }
+}
+
+function validateEnvironmentVariableNames(parent: ObjectRecord, path: string, errors: string[]): void {
+  const value = readPath(parent, path);
+  if (!Array.isArray(value)) {
+    return;
+  }
+
+  const hasInvalidName = value.some((name) => typeof name === 'string' && !/^[A-Z_][A-Z0-9_]*$/u.test(name));
+  if (hasInvalidName) {
+    errors.push(`${path} must contain valid environment variable names`);
   }
 }

@@ -42,6 +42,38 @@ test('prompt builder includes issue context, workflow, publication, safety, and 
   assert.match(prompt, /Completion Report Contract/);
 });
 
+test('prompt builder tells child Codex to prepare runner-owned visual proof without running it', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 155,
+      labels: ['agent:auto'],
+      body: 'Fix UI overlap',
+    }),
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        visualProof: {
+          ...validConfig.reviewGates.visualProof,
+          runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
+          envPassthrough: ['CODEX_ORCHESTRATOR_LOGIN_EMAIL', 'CODEX_ORCHESTRATOR_LOGIN_PASSWORD'],
+        },
+      },
+    },
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-155',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /runner will execute this visual proof command outside the child Codex sandbox/);
+  assert.match(prompt, /do not execute this runner-owned command yourself/);
+  assert.match(prompt, /Do not claim the runner-owned visual proof passed/);
+  assert.match(prompt, /CODEX_ORCHESTRATOR_LOGIN_EMAIL, CODEX_ORCHESTRATOR_LOGIN_PASSWORD/);
+  assert.match(prompt, /never hardcode credentials/);
+});
+
 test('plan-auto prompt includes parent context and all planning workflows', () => {
   const prompt = buildPlanAutoPrompt({
     parentIssue: issueFixture({

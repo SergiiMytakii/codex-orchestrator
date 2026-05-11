@@ -110,6 +110,8 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         ],
         minScreenshotArtifacts: 1,
         runnerValidationCommand: '',
+        runnerTimeoutMs: 900_000,
+        envPassthrough: [],
       },
     },
     deny: {

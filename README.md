@@ -221,7 +221,12 @@ configure a runner-owned command:
 {
   "reviewGates": {
     "visualProof": {
-      "runnerValidationCommand": "npm run visual-proof -- --issue ${issueNumber}"
+      "runnerValidationCommand": "npm run visual-proof -- --issue ${issueNumber}",
+      "runnerTimeoutMs": 900000,
+      "envPassthrough": [
+        "CODEX_ORCHESTRATOR_LOGIN_EMAIL",
+        "CODEX_ORCHESTRATOR_LOGIN_PASSWORD"
+      ]
     }
   }
 }
@@ -234,6 +239,11 @@ before review-gate evaluation. It also sets
 `CODEX_ORCHESTRATOR_CHANGED_FILES`. Screenshot files written under
 `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
 runner-owned proof artifacts.
+
+If the target UI requires login, keep credentials outside the config and expose
+only their variable names through `envPassthrough`. The visual proof script can
+read those values, sign in with the browser automation tool it uses, and fail
+with a clear message when a required login variable is missing.
 
 The default Codex command loads the user's Codex config so installed plugins,
 including BrowserUse/browser, remain available to the child agent. It also
