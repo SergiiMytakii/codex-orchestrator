@@ -214,6 +214,11 @@ line and at least one screenshot artifact. Screenshot artifacts should be saved
 under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in
 the PR and issue review report.
 
+The default Codex command loads the user's Codex config so installed plugins,
+including BrowserUse/browser, remain available to the child agent. It also
+enables network access for the `workspace-write` sandbox so local dev servers can
+bind to `localhost` during browser validation.
+
 ## Labels
 
 Default labels:
