@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -52,7 +53,7 @@ export class RunnerStateStore {
     assertValidStateFile(state);
     const path = this.statePath();
     await mkdir(dirname(path), { recursive: true });
-    const tempPath = join(dirname(path), `.runner-state.json.${process.pid}.${Date.now()}.tmp`);
+    const tempPath = join(dirname(path), `.runner-state.json.${process.pid}.${Date.now()}.${randomUUID()}.tmp`);
     await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
     await rename(tempPath, path);
   }

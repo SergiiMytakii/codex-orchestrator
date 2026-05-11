@@ -50,6 +50,20 @@ test('local state upserts, removes, and persists metadata-only shape', async () 
   assert.deepEqual(Object.keys(persisted).sort(), ['runs', 'version']);
 });
 
+test('local state concurrent saves do not collide on temp file names', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+
+  await Promise.all([
+    store.save({ version: 1, runs: [metadata(1)] }),
+    store.save({ version: 1, runs: [metadata(2)] }),
+  ]);
+
+  const persisted = JSON.parse(await readFile(store.statePath(), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(persisted).sort(), ['runs', 'version']);
+  assert.ok(Array.isArray(persisted.runs));
+});
+
 test('local state rejects forbidden GitHub snapshot keys', async () => {
   const targetRoot = await tempRepo();
   const store = new RunnerStateStore(targetRoot, validConfig);
