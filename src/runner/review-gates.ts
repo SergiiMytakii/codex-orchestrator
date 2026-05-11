@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ScopedCompletionReport } from './prompt.js';
@@ -15,6 +18,7 @@ export interface ReviewGateInput {
   validation: ValidationLine[];
   skippedChecks: string[];
   report: ScopedCompletionReport;
+  worktreePath?: string;
 }
 
 export interface ReviewGateResult {
@@ -47,7 +51,8 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
 
   const reasons: string[] = [];
   const matchingValidation = input.validation.filter((line) =>
-    visualProof.requiredValidationPatterns.some((pattern) => regexMatches(pattern, validationText(line))),
+    visualProof.requiredValidationPatterns.some((pattern) => regexMatches(pattern, validationText(line)))
+      && isStrongVisualValidation(line),
   );
   const hasPassedVisualValidation = matchingValidation.some((line) => line.status === 'passed');
   const failedVisualValidation = matchingValidation.filter((line) => line.status !== 'passed');
@@ -65,6 +70,9 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
       return false;
     }
     const path = normalizePath(artifact.path);
+    if (input.worktreePath && !existsSync(join(input.worktreePath, path))) {
+      return false;
+    }
     return globMatches(`${normalizePath(visualProof.artifactDir)}/**`, path)
       && input.changedFiles.some((file) => changedPathCovers(normalizePath(file), path));
   });
@@ -89,6 +97,10 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
 
 function validationText(line: ValidationLine): string {
   return `${line.command}\n${line.summary}`;
+}
+
+function isStrongVisualValidation(line: ValidationLine): boolean {
+  return /(BrowserUse|Playwright|screenshot|viewport)/iu.test(validationText(line));
 }
 
 function regexMatches(pattern: string, text: string): boolean {

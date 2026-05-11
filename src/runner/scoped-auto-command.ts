@@ -214,6 +214,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       validation,
       skippedChecks: report.skippedChecks,
       report,
+      worktreePath,
     });
     if (!reviewGate.ok) {
       return finishBlocked(

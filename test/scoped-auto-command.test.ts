@@ -238,6 +238,50 @@ test('scoped auto command blocks UI work without visual proof artifacts', async 
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
+test('scoped auto command rejects claimed screenshot artifacts that do not exist', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshot proof.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155', 'visual-proof.mjs'), 'console.log("syntax only");\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/frontend/CampaignList.tsx'],
+          validation: [{ command: 'node --check .codex-orchestrator/proofs/issue-155/visual-proof.mjs', status: 'passed', summary: 'Visual proof script syntax is valid.' }],
+          artifacts: [{ type: 'screenshot', path: '.codex-orchestrator/proofs/issue-155/missing.png', description: 'Expected screenshot output' }],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Visual proof gate requires a passed BrowserUse\/Playwright\/screenshot validation line/);
+  assert.match(result.reportComment, /Visual proof gate requires at least 1 screenshot artifact/);
+});
+
 test('scoped auto command can satisfy UI proof gate with runner-owned visual validation command', async () => {
   const repo = await tempGitProject((config) => ({
     ...config,

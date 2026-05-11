@@ -634,6 +634,7 @@ async function executeChild(input: {
     validation,
     skippedChecks: report.skippedChecks,
     report: { ...report, artifacts },
+    worktreePath,
   });
   if (!reviewGate.ok) {
     throw new Error(reviewGate.reasons.join('; '));
