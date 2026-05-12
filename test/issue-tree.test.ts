@@ -5,11 +5,15 @@ import {
   ensureAutonomousChildBody,
   isAutonomousChildOfParent,
   parseAutonomousChildMetadata,
+  persistAutonomousChildNode,
+  readAutonomousChildNodes,
+  renderAutonomousChildBody,
   renderAutonomousChildMarker,
   validatePlanGraph,
   validatePlanGraphStructure,
   type PlanGraph,
 } from '../src/runner/issue-tree.js';
+import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { validConfig } from './fixtures/config.js';
 import { commentFixture, issueFixture } from './fixtures/issues.js';
 
@@ -59,6 +63,56 @@ test('autonomous child marker is exact and body normalization keeps it first', (
     ),
     '<!-- codex-orchestrator:autonomous-child parent=#151 -->\nBody',
   );
+});
+
+test('autonomous child lifecycle creates marked children and reads metadata', async () => {
+  const adapter = new InMemoryGitHubIssueAdapter();
+  const node = validGraph().nodes[0]!;
+
+  const issue = await persistAutonomousChildNode(adapter, validConfig, 151, node);
+  const readback = await readAutonomousChildNodes(adapter, validConfig, 151, [issue]);
+
+  assert.equal(issue.title, 'A');
+  assert.deepEqual(issue.labels.map((label) => label.name), [labels.child.name, labels.auto.name]);
+  assert.match(issue.body, /codex-orchestrator:autonomous-child parent=#151/);
+  assert.match(issue.body, /Stable ID: a/);
+  assert.equal(readback.length, 1);
+  assert.deepEqual(readback[0]?.metadata, {
+    stableId: 'a',
+    afkHitl: 'afk',
+    dependsOn: [],
+    ownershipScope: ['src/a.ts'],
+    verification: ['npm test'],
+  });
+});
+
+test('autonomous child lifecycle updates only existing children of parent and rejects arbitrary issue before mutation', async () => {
+  const existing = issueFixture({
+    number: 12,
+    labels: [labels.child.name, labels.auto.name],
+    body: renderAutonomousChildBody(validGraph().nodes[0]!, 151),
+  });
+  const arbitrary = issueFixture({
+    number: 13,
+    labels: [],
+    body: 'Existing issue body',
+  });
+  const adapter = new InMemoryGitHubIssueAdapter([existing, arbitrary]);
+
+  const updated = await persistAutonomousChildNode(adapter, validConfig, 151, {
+    ...validGraph().nodes[1]!,
+    issueNumber: 12,
+    title: 'Updated child',
+  });
+
+  assert.equal(updated.number, 12);
+  assert.equal(updated.title, 'Updated child');
+  assert.match(updated.body, /Stable ID: b/);
+  await assert.rejects(
+    persistAutonomousChildNode(adapter, validConfig, 151, { ...validGraph().nodes[0]!, issueNumber: 13 }),
+    /refusing to update arbitrary issue/,
+  );
+  assert.equal((await adapter.getIssue(13))?.body, 'Existing issue body');
 });
 
 test('autonomous child membership requires child label and exact parent marker', () => {

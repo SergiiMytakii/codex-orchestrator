@@ -9,6 +9,7 @@ import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/c
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
+import type { CreateDraftPullRequestInput, GitHubPullRequest } from '../src/github/pull-requests.js';
 import { renderAutonomousChildMarker } from '../src/runner/issue-tree.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runPlanAutoCommand } from '../src/runner/plan-auto-command.js';
@@ -236,6 +237,127 @@ test('plan-auto command integrates validated child local commits when policy all
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Agent child checkpoint/);
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156']);
   assert.match(pushed.stdout, /Agent child checkpoint/);
+});
+
+test('plan-auto command blocks child failed configured checks before merge or publication', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    checks: { tests: 'npm test' },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: codexAdapterForReport(report),
+    shellExecutor: async () => ({ stdout: '', stderr: 'test failed', exitCode: 1 }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /configured checks failed/i);
+  assert.match(result.reportComment, /test failed/);
+  assert.deepEqual(
+    issueAdapter.addedLabels.filter((entry) => entry.labels.includes(labels.blocked.name)).map((entry) => entry.issueNumber),
+    [157, 156],
+  );
+  await assert.rejects(
+    execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'rev-parse', 'codex/tree-156']),
+    /unknown revision|ambiguous argument|Needed a single revision/,
+  );
+});
+
+test('plan-auto command blocks failed parent integration checks before publication', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    checks: { tests: 'npm test' },
+  }));
+  const parentWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156');
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: codexAdapterForReport(report),
+    shellExecutor: async (_command, options) => (
+      options?.cwd === parentWorktree
+        ? { stdout: '', stderr: 'integration failed', exitCode: 1 }
+        : { stdout: '', stderr: '', exitCode: 0 }
+    ),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /configured checks failed/i);
+  assert.match(result.reportComment, /integration failed/);
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) => entry.issueNumber === 157 && entry.labels.includes(labels.review.name)),
+    false,
+  );
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) => entry.issueNumber === 157 && entry.labels.includes(labels.blocked.name)),
+    true,
+  );
+  await assert.rejects(
+    execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'rev-parse', 'codex/tree-156']),
+    /unknown revision|ambiguous argument|Needed a single revision/,
+  );
+});
+
+test('plan-auto command blocks completed children when parent PR creation fails', async () => {
+  class FailingPullRequestAdapter extends InMemoryGitHubPullRequestAdapter {
+    public override async createDraftPullRequest(_input: CreateDraftPullRequestInput): Promise<GitHubPullRequest> {
+      throw new Error('pr create failed');
+    }
+  }
+
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new FailingPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: codexAdapterForReport(report),
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.reportComment, /pr create failed/);
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) => entry.issueNumber === 157 && entry.labels.includes(labels.review.name)),
+    false,
+  );
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) => entry.issueNumber === 157 && entry.labels.includes(labels.blocked.name)),
+    true,
+  );
 });
 
 test('plan-auto command updates only existing marked autonomous children', async () => {

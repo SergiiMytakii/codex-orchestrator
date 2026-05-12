@@ -1,5 +1,6 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import type { GitHubIssue } from '../github/issues.js';
+import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
+import { bulletList } from './command-utils.js';
 
 export interface PlanChildNode {
   stableId: string;
@@ -57,6 +58,25 @@ export function ensureAutonomousChildBody(body: string, parentIssueNumber: numbe
   const marker = renderAutonomousChildMarker(parentIssueNumber);
   const lines = body.split(/\r?\n/).filter((line) => !markerPattern.test(line.trim()));
   return [marker, ...lines].join('\n').trimEnd();
+}
+
+export function renderAutonomousChildBody(node: PlanChildNode, parentIssueNumber: number): string {
+  return ensureAutonomousChildBody(
+    [
+      node.body,
+      '',
+      '## codex-orchestrator metadata',
+      `Stable ID: ${node.stableId}`,
+      `AFK/HITL: ${node.afkHitl}`,
+      `Depends on: ${node.dependsOn.length > 0 ? node.dependsOn.join(', ') : 'none'}`,
+      'Ownership:',
+      ...bulletList(node.ownershipScope),
+      'Spec gate: wave-level',
+      'Verification:',
+      ...bulletList(node.verification),
+    ].join('\n'),
+    parentIssueNumber,
+  );
 }
 
 export function isAutonomousChildOfParent(
@@ -308,6 +328,82 @@ export function topologicalPlanNodes(graph: PlanGraph): PlanChildNode[] {
     const node = nodesById.get(id);
     return node ? [node] : [];
   }));
+}
+
+export async function persistAutonomousChildNode(
+  issueAdapter: GitHubIssueAdapter,
+  config: CodexOrchestratorConfig,
+  parentIssueNumber: number,
+  node: PlanChildNode,
+): Promise<GitHubIssue> {
+  const body = renderAutonomousChildBody(node, parentIssueNumber);
+  const childLabel = config.github.labels.child.name;
+  const autoLabel = config.github.labels.auto.name;
+
+  let issue: GitHubIssue;
+  if (node.issueNumber !== undefined) {
+    const existing = await issueAdapter.getIssue(node.issueNumber);
+    if (!existing) {
+      throw new Error(`Existing issue #${node.issueNumber} was not found`);
+    }
+    if (!isAutonomousChildOfParent(existing, config, parentIssueNumber)) {
+      throw new Error(
+        `Existing issue #${node.issueNumber} is not an autonomous child of #${parentIssueNumber}; refusing to update arbitrary issue.`,
+      );
+    }
+    issue = await issueAdapter.updateIssue(node.issueNumber, {
+      title: node.title,
+      body,
+      addLabels: [childLabel],
+      removeLabels: node.afkHitl === 'hitl' ? [autoLabel] : undefined,
+    });
+  } else {
+    issue = await issueAdapter.createIssue({
+      title: node.title,
+      body,
+      labels: [childLabel],
+    });
+  }
+
+  if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
+    throw new Error(`Child issue #${issue.number} was not persisted with the autonomous marker for #${parentIssueNumber}.`);
+  }
+  if (node.afkHitl === 'afk') {
+    issue = await issueAdapter.updateIssue(issue.number, { addLabels: [autoLabel] });
+    if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
+      throw new Error(
+        `Child issue #${issue.number} lost the autonomous marker for #${parentIssueNumber} while enabling agent:auto.`,
+      );
+    }
+  }
+  return issue;
+}
+
+export async function readAutonomousChildNodes(
+  issueAdapter: GitHubIssueAdapter,
+  config: CodexOrchestratorConfig,
+  parentIssueNumber: number,
+  childIssues: GitHubIssue[],
+): Promise<AutonomousChildNode[]> {
+  const nodes: AutonomousChildNode[] = [];
+  const errors: string[] = [];
+  for (const child of childIssues) {
+    const current = await issueAdapter.getIssue(child.number);
+    if (!current) {
+      errors.push(`Child issue #${child.number} was not found during execution readback`);
+      continue;
+    }
+    const parsed = parseAutonomousChildMetadata(current, config, parentIssueNumber);
+    if (!parsed.ok) {
+      errors.push(...parsed.errors);
+      continue;
+    }
+    nodes.push(parsed.node);
+  }
+  if (errors.length > 0) {
+    throw new Error(errors.join('; '));
+  }
+  return nodes;
 }
 
 function computeTopologicalWaves(

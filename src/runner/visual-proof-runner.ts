@@ -6,14 +6,9 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ShellCommandExecutor } from '../process/command.js';
+import type { RunnerValidationLine } from './command-utils.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import { shouldApplyVisualProofGate } from './review-gates.js';
-
-interface ValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
-}
 
 interface ScreenshotArtifactSnapshot {
   path: string;
@@ -33,7 +28,7 @@ export interface RunnerVisualProofInput {
 }
 
 export interface RunnerVisualProofResult {
-  validation: ValidationLine[];
+  validation: RunnerValidationLine[];
   artifacts: ScopedCompletionReport['artifacts'];
 }
 
