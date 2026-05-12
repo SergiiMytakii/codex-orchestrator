@@ -48,6 +48,86 @@ test('runner-owned commit and push disable git hooks', async () => {
   ]);
 });
 
+test('createIssueWorktree disables branch tracking setup to avoid git config lock races', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-worktree-args-'));
+  const repo = join(root, 'repo');
+  const worktreePath = join(root, 'worktrees', 'issue-18');
+  const calls: string[][] = [];
+  const executor: ProcessExecutor = async (_file, args) => {
+    calls.push(args);
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const git = new GitWorktreeManager(executor);
+
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-18',
+    baseBranch: 'main',
+  });
+
+  assert.deepEqual(calls[0], [
+    '-C',
+    repo,
+    'worktree',
+    'add',
+    '--no-track',
+    '-b',
+    'codex/issue-18',
+    worktreePath,
+    'main',
+  ]);
+});
+
+test('collectSessionChangeSet reports committed-only session changes', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(root, 'issue-12');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-12',
+    baseBranch: 'main',
+  });
+  const baseHead = await git.getHead(worktreePath);
+  await writeFile(join(worktreePath, 'committed.txt'), 'committed\n', 'utf8');
+  await git.commitAll({ worktreePath, message: 'Agent checkpoint' });
+
+  const changeSet = await git.collectSessionChangeSet({ worktreePath, baseHead });
+
+  assert.equal(changeSet.hasChanges, true);
+  assert.deepEqual(changeSet.changedPaths, ['committed.txt']);
+  assert.equal(changeSet.commits.length, 1);
+  assert.equal(changeSet.commits[0]?.subject, 'Agent checkpoint');
+});
+
+test('collectSessionChangeSet reports committed, staged, unstaged, and untracked paths together', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(root, 'issue-12');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-12',
+    baseBranch: 'main',
+  });
+  await writeFile(join(worktreePath, 'tracked.txt'), 'before\n', 'utf8');
+  await git.commitAll({ worktreePath, message: 'Add tracked file' });
+  const baseHead = await git.getHead(worktreePath);
+  await writeFile(join(worktreePath, 'committed.txt'), 'committed\n', 'utf8');
+  await git.commitAll({ worktreePath, message: 'Agent checkpoint' });
+  await writeFile(join(worktreePath, 'staged.txt'), 'staged\n', 'utf8');
+  await execFileAsync('git', ['-C', worktreePath, 'add', 'staged.txt']);
+  await writeFile(join(worktreePath, 'tracked.txt'), 'after\n', 'utf8');
+  await writeFile(join(worktreePath, 'untracked.txt'), 'untracked\n', 'utf8');
+
+  const changeSet = await git.collectSessionChangeSet({ worktreePath, baseHead });
+
+  assert.equal(changeSet.hasChanges, true);
+  assert.deepEqual(changeSet.changedPaths, ['committed.txt', 'staged.txt', 'tracked.txt', 'untracked.txt']);
+  assert.equal(changeSet.commits.length, 1);
+});
+
 async function tempGitProject(): Promise<{ root: string; repo: string; remote: string }> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-worktree-'));
   const remote = join(root, 'remote.git');

@@ -3,13 +3,19 @@ import { dirname, join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import { GitMergeConflictError, GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
+import { GitMergeConflictError, GitWorktreeManager, renderBranchTemplate, type SessionCommitInfo } from '../git/worktree.js';
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
-import { bulletList, formatSessionTimestamp, readRunnerConfig } from './command-utils.js';
+import { bulletList, formatSessionTimestamp, mergeArtifacts, readRunnerConfig, renderCommitEvidence } from './command-utils.js';
+import {
+  readPlanAutoCompletionReport,
+  readScopedCompletionReport,
+  type PlanAutoCompletionReport,
+  type ScopedCompletionReport,
+} from './completion-report.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import {
   collectExecutableChildBatches,
@@ -24,15 +30,12 @@ import { RunnerStateStore } from './local-state.js';
 import {
   buildIssueTreeChildPrompt,
   buildPlanAutoPrompt,
-  readScopedCompletionReport,
-  readPlanAutoCompletionReport,
   sessionPromptPath,
   sessionReportPath,
-  type PlanAutoCompletionReport,
-  type ScopedCompletionReport,
   writeDurablePrompt,
 } from './prompt.js';
 import { evaluateReviewGates } from './review-gates.js';
+import { sessionLogPath } from './run-log.js';
 import {
   validateChangedPaths,
   validateCompletionReportSafety,
@@ -58,6 +61,7 @@ export interface PlanAutoCommandResult {
   worktreePath: string;
   promptPath: string;
   reportPath: string;
+  logPath: string;
   childIssues: GitHubIssue[];
   pullRequest?: GitHubPullRequest;
   status: 'review-ready' | 'blocked';
@@ -77,6 +81,7 @@ interface PlanBlockedContext {
   worktreePath: string;
   promptPath: string;
   reportPath: string;
+  logPath: string;
   childIssues: GitHubIssue[];
 }
 
@@ -92,9 +97,11 @@ interface ChildExecutionResult {
   worktreePath: string;
   promptPath: string;
   reportPath: string;
+  logPath: string;
   changedFiles: string[];
   validation: ValidationLine[];
   artifacts: ScopedCompletionReport['artifacts'];
+  commits: SessionCommitInfo[];
   skippedChecks: string[];
   residualRisks: string[];
 }
@@ -126,6 +133,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `tree-${options.issueNumber}`);
   let promptPath = '';
   let reportPath = '';
+  let logPath = '';
   const childIssues: GitHubIssue[] = [];
   let pullRequest: GitHubPullRequest | undefined;
 
@@ -141,6 +149,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     const sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
+    logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
     await mkdir(dirname(reportPath), { recursive: true });
     await mkdir(isolatedHomePath, { recursive: true });
@@ -169,6 +178,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       branchName,
       promptPath,
       reportPath,
+      logPath,
       retryCount: 0,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -188,12 +198,13 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         issueNumber: options.issueNumber,
         sessionId,
         branchName,
+        logPath,
       });
     } finally {
       await cleanupSessionCodexHome(isolatedHomePath);
     }
     const afterHead = await git.getHead(worktreePath);
-    const base = baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues);
+    const base = baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues);
 
     if (beforeHead !== afterHead) {
       return finishPlanBlocked(issueAdapter, config, base, ['Planning session changed git HEAD; planning must not commit.'], []);
@@ -280,7 +291,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         return finishPlanBlocked(
           issueAdapter,
           config,
-          baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues),
+          baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
           [
             'Child batch failed before merge; no child from the failed batch was merged, pushed, or published.',
             ...failures.map((failure) => failure.child ? `#${failure.child.issue.number}: ${failure.message}` : failure.message),
@@ -304,7 +315,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
             return finishPlanBlocked(
               issueAdapter,
               config,
-              baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues),
+              baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
               [
                 `Merge conflict while merging #${childResult.child.issue.number} from ${childResult.branchName}.`,
                 error.stderr || error.stdout,
@@ -350,7 +361,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     await store.removeRun(options.issueNumber);
 
     return {
-      ...baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues),
+      ...baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
       status: 'review-ready',
       pullRequest,
       reportComment,
@@ -363,7 +374,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     return finishPlanBlocked(
       issueAdapter,
       config,
-      baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues),
+      baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
       [message],
       childIssues,
     );
@@ -520,6 +531,12 @@ async function executeChild(input: {
     issueNumber: childIssueNumber,
     sessionId,
   });
+  const logPath = sessionLogPath({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issueNumber: childIssueNumber,
+    sessionId,
+  });
   const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
   const store = new RunnerStateStore(input.targetRoot, input.config);
 
@@ -564,6 +581,7 @@ async function executeChild(input: {
     branchName,
     promptPath,
     reportPath,
+    logPath,
     retryCount: 0,
     createdAt: input.now.toISOString(),
     updatedAt: input.now.toISOString(),
@@ -583,12 +601,15 @@ async function executeChild(input: {
       issueNumber: childIssueNumber,
       sessionId,
       branchName,
+      logPath,
     });
   } finally {
     await cleanupSessionCodexHome(isolatedHomePath);
   }
   const afterHead = await input.git.getHead(worktreePath);
-  const publicationViolations = validateNoAgentOwnedGitPublication(beforeHead, afterHead);
+  const publicationViolations = input.config.runner.allowAgentLocalCommits
+    ? []
+    : validateNoAgentOwnedGitPublication(beforeHead, afterHead);
   if (publicationViolations.length > 0) {
     throw new Error(publicationViolations.map((violation) => violation.message).join('; '));
   }
@@ -607,7 +628,8 @@ async function executeChild(input: {
       ].filter(Boolean).join(' '),
     );
   }
-  let changedFiles = await input.git.listChangedFiles(worktreePath);
+  let changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
+  let changedFiles = changeSet.changedPaths;
   if (changedFiles.length === 0) {
     throw new Error('Codex completed without file changes');
   }
@@ -632,7 +654,8 @@ async function executeChild(input: {
   validation = [...validation, ...runnerVisualProof.validation];
   const artifacts = mergeArtifacts(report.artifacts, runnerVisualProof.artifacts);
   if (runnerVisualProof.artifacts.length > 0) {
-    changedFiles = await input.git.listChangedFiles(worktreePath);
+    changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
+    changedFiles = changeSet.changedPaths;
   }
   const residualRisks = [...report.residualRisks];
   if (validation.some((line) => line.status === 'failed')) {
@@ -650,10 +673,13 @@ async function executeChild(input: {
   if (!reviewGate.ok) {
     throw new Error(reviewGate.reasons.join('; '));
   }
-  await input.git.commitAll({
-    worktreePath,
-    message: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
-  });
+  if (!(await input.git.isWorktreeClean(worktreePath))) {
+    await input.git.commitAll({
+      worktreePath,
+      message: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
+    });
+    changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
+  }
 
   return {
     child: input.child,
@@ -661,9 +687,11 @@ async function executeChild(input: {
     worktreePath,
     promptPath,
     reportPath,
+    logPath,
     changedFiles,
     validation,
     artifacts,
+    commits: changeSet.commits,
     skippedChecks: report.skippedChecks,
     residualRisks,
   };
@@ -693,23 +721,6 @@ async function runConfiguredChecks(
     });
   }
   return lines;
-}
-
-function mergeArtifacts(
-  existing: ScopedCompletionReport['artifacts'],
-  additions: ScopedCompletionReport['artifacts'],
-): ScopedCompletionReport['artifacts'] {
-  const seen = new Set(existing.map((artifact) => artifact.url ?? artifact.path ?? artifact.description));
-  const merged = [...existing];
-  for (const artifact of additions) {
-    const key = artifact.url ?? artifact.path ?? artifact.description;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    merged.push(artifact);
-  }
-  return merged;
 }
 
 async function blockFailedBatch(
@@ -801,6 +812,8 @@ async function finishPlanBlocked(
     `codex-orchestrator blocked parent issue-tree execution for #${result.parentIssueNumber}`,
     'Reasons',
     ...bulletList(reasons),
+    'Log',
+    ...bulletList([result.logPath]),
     'Mutated Child Issues',
     ...bulletList(mutatedChildren.map((issue) => `#${issue.number} ${issue.title}`)),
   ].join('\n');
@@ -845,6 +858,10 @@ function buildChildReviewReport(parentIssueNumber: number, result: ChildExecutio
     ...result.validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
     'Proof Artifacts',
     ...renderProofArtifacts(result.artifacts),
+    'Local Commits',
+    ...renderCommitEvidence(result.commits),
+    'Log',
+    ...bulletList([result.logPath]),
     'Skipped Checks',
     ...bulletList(result.skippedChecks),
     'Residual Risks',
@@ -874,6 +891,10 @@ function buildIssueTreeReviewReport(
     ...bulletList(childResults.flatMap((result) => result.skippedChecks)),
     'Proof Artifacts',
     ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
+    'Logs',
+    ...childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
+    'Local Commits',
+    ...childResults.flatMap((result) => renderCommitEvidence(result.commits).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
     'Residual Risks',
     ...bulletList(childResults.flatMap((result) => result.residualRisks)),
   ].join('\n');
@@ -907,6 +928,12 @@ function buildIssueTreePullRequestBody(
     'Proof artifacts:',
     ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
     '',
+    'Logs:',
+    ...childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
+    '',
+    'Local commits:',
+    ...childResults.flatMap((result) => renderCommitEvidence(result.commits).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
+    '',
     'Residual risks:',
     ...bulletList(childResults.flatMap((result) => result.residualRisks)),
     '',
@@ -938,7 +965,8 @@ function baseResult(
   worktreePath: string,
   promptPath: string,
   reportPath: string,
+  logPath: string,
   childIssues: GitHubIssue[],
 ): PlanBlockedContext {
-  return { parentIssueNumber, branchName, worktreePath, promptPath, reportPath, childIssues };
+  return { parentIssueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues };
 }

@@ -21,6 +21,27 @@ test('safety rejects configured secret and deny glob changes', () => {
   assert.equal(validateChangedPaths(['secrets/nested/value.txt'], config)[0]?.code, 'secret-file-change');
 });
 
+test('safety validates denied paths from a combined session change set', () => {
+  const config = {
+    ...validConfig,
+    deny: {
+      ...validConfig.deny,
+      additionalPathGlobs: ['secrets/**'],
+    },
+  };
+
+  const violations = validateChangedPaths([
+    'secrets/committed.txt',
+    'src/index.ts',
+    'secrets/untracked.txt',
+  ], config);
+
+  assert.deepEqual(violations.map((violation) => violation.message), [
+    'Changed path secrets/committed.txt matches denied pattern secrets/**',
+    'Changed path secrets/untracked.txt matches denied pattern secrets/**',
+  ]);
+});
+
 test('safety preserves one-character top-level directories while normalizing relative paths', () => {
   const config = {
     ...validConfig,

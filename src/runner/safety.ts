@@ -1,5 +1,5 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import type { ScopedCompletionReport } from './prompt.js';
+import type { ScopedCompletionReport } from './completion-report.js';
 
 export type SafetyViolationCode =
   | 'secret-file-change'
