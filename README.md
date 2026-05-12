@@ -249,8 +249,12 @@ configure a runner-owned command:
 The runner executes this command from the issue worktree after Codex finishes and
 before review-gate evaluation. It also sets
 `CODEX_ORCHESTRATOR_ISSUE_NUMBER`, `CODEX_ORCHESTRATOR_ARTIFACT_DIR`,
-`CODEX_ORCHESTRATOR_PROOF_DIR`, `CODEX_ORCHESTRATOR_WORKTREE_PATH`, and
-`CODEX_ORCHESTRATOR_CHANGED_FILES`. Screenshot files written under
+`CODEX_ORCHESTRATOR_PROOF_DIR`,
+`CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR`,
+`CODEX_ORCHESTRATOR_WORKTREE_PATH`, and `CODEX_ORCHESTRATOR_CHANGED_FILES`.
+Use `CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR` as the Playwright user data
+directory when proof scripts need a stable browser profile. Screenshot files
+written under
 `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
 runner-owned proof artifacts.
 

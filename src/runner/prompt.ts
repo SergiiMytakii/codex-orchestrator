@@ -233,9 +233,12 @@ function visualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: nu
     `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
-    'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path instead of reporting BrowserUse/tool unavailability as a skipped check or residual risk.',
+    'Do not open BrowserUse, Playwright, or any other browser from the child Codex session when this runner-owned visual proof command is configured.',
+    'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
+    'Do not report BrowserUse or browser unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
     'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
     'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
+    'The runner will expose CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR for proof scripts that need a stable Playwright user data directory.',
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
   ];

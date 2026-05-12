@@ -482,6 +482,7 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_TEST_LOGIN, 'login-fixture');
     assert.equal(options?.timeoutMs, 1_234);
     assert.ok(proofDir);
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR, join(proofDir, 'playwright-profile'));
     assert.equal(options?.env?.PLAYWRIGHT_BROWSERS_PATH, join(proofDir, 'ms-playwright'));
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
     return { stdout: 'ok', stderr: '', exitCode: 0 };

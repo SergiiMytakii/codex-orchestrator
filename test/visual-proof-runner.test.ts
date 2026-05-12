@@ -17,6 +17,7 @@ test('runner visual proof reports screenshots that were already present before t
 
   const shellExecutor: ShellCommandExecutor = async (_command, options) => {
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR, proofDir);
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR, join(proofDir, 'playwright-profile'));
     await writeFile(join(proofDir, '390.png'), 'fresh screenshot\n', 'utf8');
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };

@@ -39,7 +39,9 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     input.config.reviewGates.visualProof.artifactDir,
     `issue-${input.issueNumber}`,
   );
+  const playwrightProfileDir = join(proofDir, 'playwright-profile');
   await mkdir(proofDir, { recursive: true });
+  await mkdir(playwrightProfileDir, { recursive: true });
 
   const command = renderVisualProofCommand(commandTemplate, input, proofDir);
   const result = await input.shellExecutor(command, {
@@ -50,6 +52,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: input.config.reviewGates.visualProof.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
+      CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR: playwrightProfileDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
       PLAYWRIGHT_BROWSERS_PATH: join(proofDir, 'ms-playwright'),
