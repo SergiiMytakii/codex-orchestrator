@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -15,6 +16,10 @@ export function sessionCodexHomePath(input: SessionCodexHomePathInput): string {
   const projectName = sanitizePathSegment(basename(input.targetRoot)) || 'project';
 
   return join(root, `${projectName}-${projectHash}`, input.sessionId);
+}
+
+export async function cleanupSessionCodexHome(path: string): Promise<void> {
+  await rm(path, { recursive: true, force: true });
 }
 
 function sanitizePathSegment(value: string): string {

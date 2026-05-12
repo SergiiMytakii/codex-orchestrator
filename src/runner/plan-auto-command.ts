@@ -38,7 +38,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
-import { sessionCodexHomePath } from './session-home.js';
+import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface PlanAutoCommandOptions {
@@ -175,18 +175,23 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     });
 
     const beforeHead = await git.getHead(worktreePath);
-    const codexResult = await codexAdapter.run({
-      targetRoot,
-      config,
-      worktreePath,
-      promptPath,
-      promptText,
-      reportPath,
-      isolatedHomePath,
-      issueNumber: options.issueNumber,
-      sessionId,
-      branchName,
-    });
+    let codexResult: CodexCommandRunResult;
+    try {
+      codexResult = await codexAdapter.run({
+        targetRoot,
+        config,
+        worktreePath,
+        promptPath,
+        promptText,
+        reportPath,
+        isolatedHomePath,
+        issueNumber: options.issueNumber,
+        sessionId,
+        branchName,
+      });
+    } finally {
+      await cleanupSessionCodexHome(isolatedHomePath);
+    }
     const afterHead = await git.getHead(worktreePath);
     const base = baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, childIssues);
 
@@ -565,18 +570,23 @@ async function executeChild(input: {
   });
 
   const beforeHead = await input.git.getHead(worktreePath);
-  const codexResult = await input.codexAdapter.run({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    worktreePath,
-    promptPath,
-    promptText,
-    reportPath,
-    isolatedHomePath,
-    issueNumber: childIssueNumber,
-    sessionId,
-    branchName,
-  });
+  let codexResult: CodexCommandRunResult;
+  try {
+    codexResult = await input.codexAdapter.run({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      worktreePath,
+      promptPath,
+      promptText,
+      reportPath,
+      isolatedHomePath,
+      issueNumber: childIssueNumber,
+      sessionId,
+      branchName,
+    });
+  } finally {
+    await cleanupSessionCodexHome(isolatedHomePath);
+  }
   const afterHead = await input.git.getHead(worktreePath);
   const publicationViolations = validateNoAgentOwnedGitPublication(beforeHead, afterHead);
   if (publicationViolations.length > 0) {

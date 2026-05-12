@@ -73,6 +73,7 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       codexInput = input;
+      await writeFile(join(input.isolatedHomePath, 'cache-fixture.txt'), 'cache\n', 'utf8');
       await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
       await writeFile(
         input.reportPath,
@@ -114,6 +115,7 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   }));
   assert.ok(codexInput?.isolatedHomePath);
   assert.equal(codexInput.isolatedHomePath.startsWith(repo), false);
+  await assert.rejects(stat(codexInput.isolatedHomePath), /ENOENT/);
   await assert.rejects(stat(join(repo, '.codex-orchestrator', 'state', 'codex-home')), /ENOENT/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Closes #155/);

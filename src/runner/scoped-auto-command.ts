@@ -26,7 +26,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
-import { sessionCodexHomePath } from './session-home.js';
+import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface ScopedAutoCommandOptions {
@@ -136,18 +136,23 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     });
 
     const beforeHead = await git.getHead(worktreePath);
-    const codexResult = await codexAdapter.run({
-      targetRoot,
-      config,
-      worktreePath,
-      promptPath,
-      promptText,
-      reportPath,
-      isolatedHomePath,
-      issueNumber: options.issueNumber,
-      sessionId,
-      branchName,
-    });
+    let codexResult: CodexCommandRunResult;
+    try {
+      codexResult = await codexAdapter.run({
+        targetRoot,
+        config,
+        worktreePath,
+        promptPath,
+        promptText,
+        reportPath,
+        isolatedHomePath,
+        issueNumber: options.issueNumber,
+        sessionId,
+        branchName,
+      });
+    } finally {
+      await cleanupSessionCodexHome(isolatedHomePath);
+    }
     const afterHead = await git.getHead(worktreePath);
     const publicationViolations = validateNoAgentOwnedGitPublication(beforeHead, afterHead);
     if (publicationViolations.length > 0) {
