@@ -12,6 +12,7 @@ import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js
 import type { ShellCommandExecutor } from '../src/process/command.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
+import { sessionCodexHomePath } from '../src/runner/session-home.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -107,7 +108,13 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.equal(await readFile(join(result.worktreePath, 'feature.txt'), 'utf8'), 'done\n');
   assert.equal(codexInput?.promptPath, result.promptPath);
   assert.equal(codexInput?.reportPath, result.reportPath);
-  assert.equal(codexInput?.isolatedHomePath, join(repo, '.codex-orchestrator', 'state', 'codex-home', 'issue-155-20260508120000'));
+  assert.equal(codexInput?.isolatedHomePath, sessionCodexHomePath({
+    targetRoot: repo,
+    sessionId: 'issue-155-20260508120000',
+  }));
+  assert.ok(codexInput?.isolatedHomePath);
+  assert.equal(codexInput.isolatedHomePath.startsWith(repo), false);
+  await assert.rejects(stat(join(repo, '.codex-orchestrator', 'state', 'codex-home')), /ENOENT/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Closes #155/);
   assert.deepEqual(issueAdapter.removedLabels.at(-1), { issueNumber: 155, labels: [labels.running.name] });

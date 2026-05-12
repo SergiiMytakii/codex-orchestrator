@@ -38,6 +38,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
+import { sessionCodexHomePath } from './session-home.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface PlanAutoCommandOptions {
@@ -140,7 +141,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     const sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    const isolatedHomePath = join(targetRoot, config.runner.stateDir, 'codex-home', sessionId);
+    const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
     await mkdir(dirname(reportPath), { recursive: true });
     await mkdir(isolatedHomePath, { recursive: true });
     const promptText = buildPlanAutoPrompt({
@@ -514,7 +515,7 @@ async function executeChild(input: {
     issueNumber: childIssueNumber,
     sessionId,
   });
-  const isolatedHomePath = join(input.targetRoot, input.config.runner.stateDir, 'codex-home', sessionId);
+  const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
   const store = new RunnerStateStore(input.targetRoot, input.config);
 
   await input.git.createIssueWorktree({

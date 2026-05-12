@@ -26,6 +26,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
+import { sessionCodexHomePath } from './session-home.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface ScopedAutoCommandOptions {
@@ -101,7 +102,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     const sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    const isolatedHomePath = join(targetRoot, config.runner.stateDir, 'codex-home', sessionId);
+    const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
     await mkdir(dirname(reportPath), { recursive: true });
     await mkdir(isolatedHomePath, { recursive: true });
     const promptText = buildScopedImplementationPrompt({
