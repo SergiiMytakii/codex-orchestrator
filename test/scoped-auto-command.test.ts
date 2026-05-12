@@ -309,6 +309,80 @@ test('scoped auto command blocks when completion report is missing before PR pub
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
+test('scoped auto command uses mobile codex timeout for Flutter and Android issues', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({
+      number: 155,
+      labels: [labels.auto.name],
+      title: 'Flutter refresh after resume',
+      body: 'Requires Android emulator proof.',
+    }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let codexInput: CodexCommandRunInput | undefined;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      codexInput = input;
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(codexInput?.timeoutMs, 3_600_000);
+});
+
+test('scoped auto command keeps timeout blocked comments concise', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const hugeTranscript = `${'prompt transcript '.repeat(500)}\nCommand timed out after 1800000ms.\n${'extra output '.repeat(500)}`;
+  const codexAdapter = {
+    async run(): Promise<CodexCommandRunResult> {
+      return { stdout: hugeTranscript, stderr: '', exitCode: 124 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.reportComment, /Codex exited with code 124: Command timed out after 1800000ms\./);
+  assert.equal(result.reportComment.includes('prompt transcript prompt transcript prompt transcript'), false);
+  assert.ok(result.reportComment.length < 1_000);
+});
+
 test('scoped auto command blocks invalid structured completion output before PR publication', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 155, labels: [labels.auto.name] })]);
@@ -671,8 +745,12 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_TEST_LOGIN, 'login-fixture');
     assert.equal(options?.timeoutMs, 1_234);
     assert.ok(proofDir);
-    assert.equal(options?.env?.CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR, join(proofDir, 'playwright-profile'));
-    assert.equal(options?.env?.PLAYWRIGHT_BROWSERS_PATH, join(proofDir, 'ms-playwright'));
+    const profileDir = options?.env?.CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR;
+    const browsersDir = options?.env?.PLAYWRIGHT_BROWSERS_PATH;
+    assert.ok(profileDir);
+    assert.ok(browsersDir);
+    assert.equal(profileDir.startsWith(proofDir), false);
+    assert.equal(browsersDir.startsWith(proofDir), false);
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };

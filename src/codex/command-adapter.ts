@@ -17,6 +17,7 @@ export interface CodexCommandRunInput {
   issueNumber: number;
   sessionId: string;
   branchName: string;
+  timeoutMs?: number;
   logPath?: string;
 }
 
@@ -42,7 +43,7 @@ export class CodexCommandAdapter {
         cwd: input.worktreePath,
         stdin: input.promptText,
         env: buildCodexProcessEnv(input, process.env),
-        timeoutMs: this.config.codex.timeoutMs,
+        timeoutMs: input.timeoutMs ?? this.config.codex.timeoutMs,
         idleTimeoutMs: this.config.codex.idleTimeoutMs,
         onStdoutChunk: logWriter ? (chunk) => logWriter.appendStdout(chunk) : undefined,
         onStderrChunk: logWriter ? (chunk) => logWriter.appendStderr(chunk) : undefined,

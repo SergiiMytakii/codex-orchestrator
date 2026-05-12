@@ -39,6 +39,7 @@ test('prompt builder includes issue context, workflow, publication, safety, and 
   assert.match(prompt, /## Project Workflow\n\nWorkflow text/);
   assert.match(prompt, /Runner-Owned Publication Contract/);
   assert.match(prompt, /Safety Contract/);
+  assert.match(prompt, /curl --max-time/);
   assert.match(prompt, /Completion Report Contract/);
   assert.match(prompt, /Quality Gate Contract/);
   assert.match(prompt, /TDD red-to-green/);
