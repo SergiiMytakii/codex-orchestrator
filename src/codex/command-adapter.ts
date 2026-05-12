@@ -16,6 +16,7 @@ export interface CodexCommandRunInput {
   issueNumber: number;
   sessionId: string;
   branchName: string;
+  timeoutMs?: number;
 }
 
 export interface CodexCommandRunResult {
@@ -36,7 +37,7 @@ export class CodexCommandAdapter {
       cwd: input.worktreePath,
       stdin: input.promptText,
       env: buildCodexProcessEnv(input, process.env),
-      timeoutMs: this.config.codex.timeoutMs,
+      timeoutMs: input.timeoutMs ?? this.config.codex.timeoutMs,
     });
     return result;
   }

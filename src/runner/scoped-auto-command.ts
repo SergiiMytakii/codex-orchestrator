@@ -5,7 +5,7 @@ import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunRes
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
-import type { GitHubIssueAdapter } from '../github/issues.js';
+import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
@@ -86,6 +86,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   const workflowPromptText = await readWorkflowPrompt(workflowPromptPath);
   const branchName = renderBranchTemplate(config.branches.scopedIssue, { issueNumber: options.issueNumber });
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `issue-${options.issueNumber}`);
+  const codexTimeoutMs = selectCodexTimeoutMs(config, issue);
   let promptPath = '';
   let reportPath = '';
   let pullRequest: GitHubPullRequest | undefined;
@@ -150,6 +151,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         issueNumber: options.issueNumber,
         sessionId,
         branchName,
+        timeoutMs: codexTimeoutMs,
       });
     } finally {
       await cleanupSessionCodexHome(isolatedHomePath);
@@ -160,7 +162,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, publicationViolations.map((violation) => violation.message), [], [], []);
     }
     if (codexResult.exitCode !== 0) {
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, [`Codex exited with code ${codexResult.exitCode}: ${codexResult.stderr || codexResult.stdout}`], [], [], []);
+      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath), issueAdapter, config, [formatCodexExitReason(codexResult)], [], [], []);
     }
 
     let report: ScopedCompletionReport;
@@ -421,6 +423,42 @@ function baseResult(
 
 function renderTemplate(template: string, issueNumber: number): string {
   return template.replaceAll('${issueNumber}', String(issueNumber));
+}
+
+function selectCodexTimeoutMs(config: CodexOrchestratorConfig, issue: GitHubIssue): number | undefined {
+  if (!config.codex.mobileTimeoutMs || !isMobileIssue(issue)) {
+    return undefined;
+  }
+  return config.codex.mobileTimeoutMs;
+}
+
+function isMobileIssue(issue: GitHubIssue): boolean {
+  const labels = issue.labels.map((label) => label.name).join('\n');
+  const text = `${issue.title}\n${issue.body}\n${labels}`;
+  return /\b(?:android|flutter|ios|iphone|ipad|mobile|emulator|apk|aab|dart)\b/iu.test(text);
+}
+
+function formatCodexExitReason(result: CodexCommandRunResult): string {
+  const output = [result.stderr, result.stdout]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+    .join('\n');
+  const timeoutLine = output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => /timed out|timeout/iu.test(line));
+  const detail = timeoutLine ?? truncate(output, 600);
+  return detail
+    ? `Codex exited with code ${result.exitCode}: ${truncate(detail, 600)}`
+    : `Codex exited with code ${result.exitCode}`;
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 3)}...`;
 }
 
 function renderProofArtifacts(

@@ -54,6 +54,7 @@ export interface CodexOrchestratorConfig {
     command: string;
     args: string[];
     timeoutMs?: number;
+    mobileTimeoutMs?: number;
     promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
     reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
   };
@@ -182,6 +183,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectString(codex, 'codex.command', errors);
     expectStringArray(codex, 'codex.args', errors);
     expectOptionalPositiveInteger(codex, 'codex.timeoutMs', errors);
+    expectOptionalPositiveInteger(codex, 'codex.mobileTimeoutMs', errors);
     expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
     expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
   }

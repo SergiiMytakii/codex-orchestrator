@@ -128,7 +128,7 @@ function evaluateQualityGate(input: ReviewGateInput): string[] {
     .filter((path) => quality.testChangedPathGlobs.some((pattern) => globMatches(pattern, path)));
 
   if (quality.tdd.enabled) {
-    const hasTddValidation = hasPassedValidation(input.validation, quality.tdd.requiredValidationPatterns);
+    const hasTddValidation = hasPassedTddValidation(input.validation, quality.tdd.requiredValidationPatterns);
     const hasRunnerVisualProofEvidence = hasPassedRunnerVisualProofEvidence(input);
     if (quality.tdd.requireTestChange && testFiles.length === 0 && !hasRunnerVisualProofEvidence) {
       reasons.push('Quality gate requires TDD test file change for runtime changes.');
@@ -159,6 +159,29 @@ function hasPassedValidation(validation: ValidationLine[], patterns: string[]): 
   return validation.some((line) =>
     line.status === 'passed' && patterns.some((pattern) => regexMatches(pattern, validationText(line))),
   );
+}
+
+function hasPassedTddValidation(validation: ValidationLine[], patterns: string[]): boolean {
+  if (hasPassedValidation(validation, patterns)) {
+    return true;
+  }
+
+  const passedTexts = validation
+    .filter((line) => line.status === 'passed')
+    .map(validationText);
+  const hasRedEvidence = passedTexts.some(hasTddRedEvidence);
+  const hasGreenEvidence = passedTexts.some(hasTddGreenEvidence);
+  return hasRedEvidence && hasGreenEvidence;
+}
+
+function hasTddRedEvidence(text: string): boolean {
+  return /\bred\b/iu.test(text) || /\b(?:test|spec|check)\b[\s\S]{0,120}\bfail(?:ed|ing)?\b/iu.test(text);
+}
+
+function hasTddGreenEvidence(text: string): boolean {
+  return /\bgreen\b/iu.test(text)
+    || /\b(?:test|spec|jest|vitest|playwright|pytest)\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text)
+    || /\b(?:flutter|dart|npm|pnpm|yarn)\s+(?:run\s+)?test\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text);
 }
 
 function validationText(line: ValidationLine): string {

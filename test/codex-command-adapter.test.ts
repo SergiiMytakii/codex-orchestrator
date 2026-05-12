@@ -50,6 +50,20 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
 });
 
+test('codex command adapter allows a per-run timeout override', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  await adapter.run({ ...input, timeoutMs: 3_600_000 });
+
+  const [, , options] = calls[0] ?? [];
+  assert.equal(options?.timeoutMs, 3_600_000);
+});
+
 test('codex env defaults CODEX_HOME to the user codex home for authentication', () => {
   const env = buildCodexProcessEnv(input, {});
 
