@@ -79,6 +79,25 @@ test('status command prints none for empty sections', async () => {
   assert.match(result.output, /eligible:\n  - none\nskipped:\n  - none\nrecovery:\n  - none/);
 });
 
+test('status command preserves default behavior for configs without local commit policy', async () => {
+  const targetRoot = await tempRepo();
+  const legacyConfig = {
+    ...validConfig,
+    runner: {
+      workspaceRoot: validConfig.runner.workspaceRoot,
+      maxParallelChildren: validConfig.runner.maxParallelChildren,
+      stateDir: validConfig.runner.stateDir,
+      worktreeCleanup: validConfig.runner.worktreeCleanup,
+    },
+  };
+  await writeFile(join(targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(legacyConfig, null, 2)}\n`, 'utf8');
+  const adapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 1, labels: [labels.auto.name] })]);
+
+  const result = await runStatusCommand({ targetRoot, issueAdapter: adapter });
+
+  assert.equal(result.eligible.length, 1);
+});
+
 test('status command fails on invalid config', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-status-invalid-'));
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });

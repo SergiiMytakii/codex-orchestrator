@@ -45,6 +45,7 @@ export interface CodexOrchestratorConfig {
     workspaceRoot: string;
     maxParallelChildren: number;
     stateDir: string;
+    allowAgentLocalCommits: boolean;
     worktreeCleanup?: {
       enabled: boolean;
     };
@@ -55,6 +56,7 @@ export interface CodexOrchestratorConfig {
     args: string[];
     timeoutMs?: number;
     mobileTimeoutMs?: number;
+    idleTimeoutMs?: number;
     promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
     reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
   };
@@ -175,6 +177,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectString(runner, 'runner.workspaceRoot', errors);
     expectParallelLimit(runner, errors);
     expectString(runner, 'runner.stateDir', errors);
+    expectBoolean(runner, 'runner.allowAgentLocalCommits', errors);
     validateWorktreeCleanup(runner, errors);
   }
 
@@ -184,6 +187,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectStringArray(codex, 'codex.args', errors);
     expectOptionalPositiveInteger(codex, 'codex.timeoutMs', errors);
     expectOptionalPositiveInteger(codex, 'codex.mobileTimeoutMs', errors);
+    expectOptionalPositiveInteger(codex, 'codex.idleTimeoutMs', errors);
     expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
     expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
   }

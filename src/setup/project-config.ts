@@ -36,6 +36,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       workspaceRoot: '.codex-orchestrator/workspaces',
       maxParallelChildren: 3,
       stateDir: '.codex-orchestrator/state',
+      allowAgentLocalCommits: false,
       worktreeCleanup: {
         enabled: true,
       },
@@ -59,6 +60,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       ],
       timeoutMs: 1_800_000,
       mobileTimeoutMs: 3_600_000,
+      idleTimeoutMs: 300_000,
       promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
       reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
     },
@@ -245,6 +247,7 @@ export function mergeExistingProjectConfig(
       args: migrateCodexArgs(readStringArray(existingCodex?.args), defaults.codex.args),
       timeoutMs: migrateCodexTimeout(readPositiveInteger(existingCodex?.timeoutMs), defaults.codex.timeoutMs ?? 1_800_000),
       mobileTimeoutMs: readPositiveInteger(existingCodex?.mobileTimeoutMs) ?? defaults.codex.mobileTimeoutMs,
+      idleTimeoutMs: readPositiveInteger(existingCodex?.idleTimeoutMs) ?? defaults.codex.idleTimeoutMs,
       promptFileEnv: defaults.codex.promptFileEnv,
       reportFileEnv: defaults.codex.reportFileEnv,
       adapter: defaults.codex.adapter,

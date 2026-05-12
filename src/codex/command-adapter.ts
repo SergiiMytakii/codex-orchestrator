@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
+import { RunLogWriter } from '../runner/run-log.js';
 
 export interface CodexCommandRunInput {
   targetRoot: string;
@@ -17,12 +18,14 @@ export interface CodexCommandRunInput {
   sessionId: string;
   branchName: string;
   timeoutMs?: number;
+  logPath?: string;
 }
 
 export interface CodexCommandRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  logPath?: string;
 }
 
 export class CodexCommandAdapter {
@@ -33,13 +36,22 @@ export class CodexCommandAdapter {
 
   public async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
     const args = this.config.codex.args.map((arg) => renderCodexArg(arg, input));
-    const result = await this.executor(this.config.codex.command, args, {
-      cwd: input.worktreePath,
-      stdin: input.promptText,
-      env: buildCodexProcessEnv(input, process.env),
-      timeoutMs: input.timeoutMs ?? this.config.codex.timeoutMs,
-    });
-    return result;
+    const logWriter = input.logPath ? new RunLogWriter(input.logPath) : undefined;
+    await logWriter?.appendLifecycle(`starting ${this.config.codex.command} ${args.join(' ')}`);
+    try {
+      const result = await this.executor(this.config.codex.command, args, {
+        cwd: input.worktreePath,
+        stdin: input.promptText,
+        env: buildCodexProcessEnv(input, process.env),
+        timeoutMs: input.timeoutMs ?? this.config.codex.timeoutMs,
+        idleTimeoutMs: this.config.codex.idleTimeoutMs,
+        onStdoutChunk: logWriter ? (chunk) => logWriter.appendStdout(chunk) : undefined,
+        onStderrChunk: logWriter ? (chunk) => logWriter.appendStderr(chunk) : undefined,
+      });
+      return { ...result, logPath: input.logPath };
+    } finally {
+      await logWriter?.close();
+    }
   }
 }
 

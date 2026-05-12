@@ -129,6 +129,57 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.match(pushed.stdout, /Codex: implement issue #155/);
 });
 
+test('scoped auto command publishes validated agent local commits when policy allows', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    runner: {
+      ...config.runner,
+      allowAgentLocalCommits: true,
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled committed change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await execFileAsync('git', ['-C', input.worktreePath, 'add', 'feature.txt']);
+      await execFileAsync('git', ['-C', input.worktreePath, 'commit', '-m', 'Agent checkpoint']);
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.match(result.reportComment, /Local Commits/);
+  assert.match(result.reportComment, /Agent checkpoint/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Agent checkpoint/);
+  const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/issue-155', '-1']);
+  assert.match(pushed.stdout, /Agent checkpoint/);
+});
+
 test('scoped auto command resumes an existing dirty same-issue worktree', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -330,6 +381,81 @@ test('scoped auto command keeps timeout blocked comments concise', async () => {
   assert.match(result.reportComment, /Codex exited with code 124: Command timed out after 1800000ms\./);
   assert.equal(result.reportComment.includes('prompt transcript prompt transcript prompt transcript'), false);
   assert.ok(result.reportComment.length < 1_000);
+});
+
+test('scoped auto command blocks invalid structured completion output before PR publication', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 155, labels: [labels.auto.name] })]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(input.reportPath, '{not-json', 'utf8');
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Invalid scoped completion report: report must be valid JSON/);
+  assert.match(result.reportComment, /Log/);
+});
+
+test('scoped auto command blocks publication when a local follow-up phase fails', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 155, labels: [labels.auto.name] })]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    localPhases: ['cleanup-review'],
+    localPhaseExecutor: async ({ phaseId }) => ({
+      phaseId,
+      status: 'failed',
+      validation: [{ command: '$cleanup-review', status: 'failed', summary: 'cleanup follow-up needed' }],
+      artifacts: [{ type: 'log', path: '/tmp/cleanup-review.log', description: 'cleanup-review log' }],
+      residualRisks: ['cleanup follow-up needed'],
+    }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Local phase cleanup-review failed/);
+  assert.match(result.reportComment, /cleanup follow-up needed/);
+  assert.match(result.reportComment, /feature\.txt/);
 });
 
 test('scoped auto command blocks runtime changes without strict TDD red-to-green proof', async () => {

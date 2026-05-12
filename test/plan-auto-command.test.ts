@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/command-adapter.js';
+import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
 import { renderAutonomousChildMarker } from '../src/runner/issue-tree.js';
@@ -20,7 +21,7 @@ const execFileAsync = promisify(execFile);
 const labels = validConfig.github.labels;
 const now = new Date('2026-05-08T12:00:00.000Z');
 
-async function tempGitProject(): Promise<string> {
+async function tempGitProject(configOverride?: (config: CodexOrchestratorConfig) => CodexOrchestratorConfig): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-plan-'));
   const remote = join(root, 'remote.git');
   const repo = join(root, 'repo');
@@ -33,12 +34,15 @@ async function tempGitProject(): Promise<string> {
   await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Initial']);
   await execFileAsync('git', ['-C', repo, 'remote', 'add', 'origin', remote]);
   await execFileAsync('git', ['-C', repo, 'push', '-u', 'origin', 'main']);
-  await writeProjectConfig(repo);
+  await writeProjectConfig(repo, configOverride);
   await writeWorkflowPrompts(repo);
   return repo;
 }
 
-async function writeProjectConfig(repo: string): Promise<void> {
+async function writeProjectConfig(
+  repo: string,
+  configOverride?: (config: CodexOrchestratorConfig) => CodexOrchestratorConfig,
+): Promise<void> {
   const config = buildProjectConfig({
     owner: 'example',
     repo: 'repo',
@@ -46,7 +50,8 @@ async function writeProjectConfig(repo: string): Promise<void> {
     workflows: fallbackWorkflows,
   });
   await mkdir(join(repo, '.codex-orchestrator'), { recursive: true });
-  await writeFile(join(repo, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  const finalConfig = configOverride ? configOverride(config) : config;
+  await writeFile(join(repo, '.codex-orchestrator', 'config.json'), `${JSON.stringify(finalConfig, null, 2)}\n`, 'utf8');
 }
 
 async function writeWorkflowPrompts(repo: string): Promise<void> {
@@ -173,6 +178,64 @@ test('plan-auto command plans parent, executes marked children, and opens one in
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156', '-1']);
   assert.match(pushed.stdout, /Codex: merge issue/);
+});
+
+test('plan-auto command integrates validated child local commits when policy allows', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    runner: {
+      ...config.runner,
+      allowAgentLocalCommits: true,
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      } else {
+        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        await execFileAsync('git', ['-C', input.worktreePath, 'add', `child-${input.issueNumber}.txt`]);
+        await execFileAsync('git', ['-C', input.worktreePath, 'commit', '-m', 'Agent child checkpoint']);
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: [`child-${input.issueNumber}.txt`],
+            validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.match(result.reportComment, /Agent child checkpoint/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Agent child checkpoint/);
+  const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156']);
+  assert.match(pushed.stdout, /Agent child checkpoint/);
 });
 
 test('plan-auto command updates only existing marked autonomous children', async () => {

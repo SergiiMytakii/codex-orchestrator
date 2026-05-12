@@ -46,6 +46,25 @@ export interface GitWorktreeInfo {
   branch?: string;
 }
 
+export interface CollectSessionChangeSetInput {
+  worktreePath: string;
+  baseHead: string;
+}
+
+export interface SessionCommitInfo {
+  sha: string;
+  subject: string;
+  authorName: string;
+  authorEmail: string;
+  committedAt: string;
+}
+
+export interface SessionChangeSet {
+  changedPaths: string[];
+  commits: SessionCommitInfo[];
+  hasChanges: boolean;
+}
+
 export class GitMergeConflictError extends Error {
   public constructor(
     public readonly worktreePath: string,
@@ -118,6 +137,29 @@ export class GitWorktreeManager {
   public async listChangedFiles(worktreePath: string): Promise<string[]> {
     const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
     return parsePorcelainChangedFiles(result.stdout);
+  }
+
+  public async collectSessionChangeSet(input: CollectSessionChangeSetInput): Promise<SessionChangeSet> {
+    const committedPaths = parseNulPaths(
+      (await this.git(['-C', input.worktreePath, 'diff', '--name-only', '-z', `${input.baseHead}..HEAD`])).stdout,
+    );
+    const workingTreePaths = await this.listChangedFiles(input.worktreePath);
+    const changedPaths = uniqueSortedPaths([...committedPaths, ...workingTreePaths]);
+    const commits = parseSessionCommitLog(
+      (await this.git([
+        '-C',
+        input.worktreePath,
+        'log',
+        '--format=%H%x1f%s%x1f%an%x1f%ae%x1f%ct%x1e',
+        `${input.baseHead}..HEAD`,
+      ])).stdout,
+    );
+
+    return {
+      changedPaths,
+      commits,
+      hasChanges: changedPaths.length > 0 || commits.length > 0,
+    };
   }
 
   public async commitAll(input: CommitAllInput): Promise<void> {
@@ -208,6 +250,7 @@ export class GitWorktreeManager {
       input.targetRoot,
       'worktree',
       'add',
+      '--no-track',
       '-b',
       input.branchName,
       input.workspacePath,
@@ -297,6 +340,29 @@ function parsePorcelainChangedFiles(output: string): string[] {
 
 function normalizePath(path: string): string {
   return path.replaceAll('\\', '/');
+}
+
+function parseNulPaths(output: string): string[] {
+  return output.split('\0').filter(Boolean).map(normalizePath);
+}
+
+function uniqueSortedPaths(paths: string[]): string[] {
+  return Array.from(new Set(paths.map(normalizePath))).sort((left, right) => left.localeCompare(right));
+}
+
+function parseSessionCommitLog(output: string): SessionCommitInfo[] {
+  return output.split('\x1e').filter(Boolean).map((record) => {
+    const [sha = '', subject = '', authorName = '', authorEmail = '', committedAtUnix = ''] = record
+      .replace(/^\n/u, '')
+      .split('\x1f');
+    return {
+      sha,
+      subject,
+      authorName,
+      authorEmail,
+      committedAt: new Date(Number(committedAtUnix) * 1000).toISOString(),
+    };
+  }).filter((commit) => commit.sha.length > 0);
 }
 
 function samePath(left: string, right: string): boolean {

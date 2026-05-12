@@ -18,6 +18,7 @@ export interface RunnerProcessMetadata {
   branchName?: string;
   promptPath?: string;
   reportPath?: string;
+  logPath?: string;
 }
 
 export interface RunnerStateFile {
@@ -94,6 +95,7 @@ const runKeys = new Set([
   'branchName',
   'promptPath',
   'reportPath',
+  'logPath',
 ]);
 
 function assertValidStateFile(value: unknown): asserts value is RunnerStateFile {
@@ -139,7 +141,7 @@ function assertValidRun(value: unknown): asserts value is RunnerProcessMetadata 
   if ('lastRecoveredAt' in record && typeof record.lastRecoveredAt !== 'string') {
     throw new Error('runner metadata lastRecoveredAt must be a string');
   }
-  for (const key of ['branchName', 'promptPath', 'reportPath']) {
+  for (const key of ['branchName', 'promptPath', 'reportPath', 'logPath']) {
     if (key in record && typeof record[key] !== 'string') {
       throw new Error(`runner metadata ${key} must be a string`);
     }

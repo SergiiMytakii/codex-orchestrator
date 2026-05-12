@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { CodexCommandAdapter, buildCodexProcessEnv } from '../src/codex/command-adapter.js';
 import type { ProcessExecutor } from '../src/process/command.js';
@@ -46,8 +49,62 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
   assert.equal(options?.cwd, input.worktreePath);
   assert.equal(options?.stdin, 'Prompt text');
   assert.equal(options?.timeoutMs, 1_800_000);
+  assert.equal(options?.idleTimeoutMs, 300_000);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROMPT_FILE, input.promptPath);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
+});
+
+test('codex command adapter writes durable stdout and stderr stream logs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-codex-log-'));
+  const logPath = join(root, 'run.log');
+  const executor: ProcessExecutor = async (_file, _args, options) => {
+    await options?.onStdoutChunk?.('hello\n');
+    await options?.onStderrChunk?.('warn\n');
+    return { stdout: 'hello\n', stderr: 'warn\n', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  const result = await adapter.run({ ...input, logPath });
+
+  assert.equal(result.logPath, logPath);
+  const log = await readFile(logPath, 'utf8');
+  assert.match(log, /\[lifecycle\] starting codex exec/);
+  assert.match(log, /\[stdout\] hello/);
+  assert.match(log, /\[stderr\] warn/);
+});
+
+test('codex command adapter renders JSON-line events while preserving raw output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-codex-json-log-'));
+  const logPath = join(root, 'run.log');
+  const executor: ProcessExecutor = async (_file, _args, options) => {
+    await options?.onStdoutChunk?.('{"type":"message","message":"working"}\nnot-json\n');
+    return { stdout: 'raw', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  await adapter.run({ ...input, logPath });
+
+  const log = await readFile(logPath, 'utf8');
+  assert.match(log, /\[stdout\] message: working/);
+  assert.match(log, /\[stdout\] not-json/);
+});
+
+test('codex command adapter never renders prompt text into command args', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  await adapter.run({
+    ...input,
+    promptText: 'Issue body says $(touch /tmp/owned) ${reportPath}; gh pr create',
+  });
+
+  const [, args] = calls[0] ?? [];
+  assert.ok(args);
+  assert.equal(args.some((arg) => arg.includes('touch /tmp/owned') || arg.includes('gh pr create')), false);
 });
 
 test('codex command adapter allows a per-run timeout override', async () => {

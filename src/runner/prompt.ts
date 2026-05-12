@@ -1,11 +1,22 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { AutonomousChildMetadata } from './issue-tree.js';
-import type { PlanGraph } from './issue-tree.js';
-import { validatePlanGraph } from './issue-tree.js';
+export {
+  readPlanAutoCompletionReport,
+  readScopedCompletionReport,
+} from './completion-report.js';
+export type {
+  CompletionStatus,
+  PlanAutoCompletionReport,
+  PlanAutoCompletionReportReadResult,
+  ProhibitedActionType,
+  ScopedCompletionReport,
+  ScopedCompletionReportReadResult,
+  ValidationStatus,
+} from './completion-report.js';
 
 export interface ScopedPromptInput {
   issue: GitHubIssue;
@@ -45,47 +56,6 @@ export interface IssueTreeChildPromptInput {
   worktreePath: string;
 }
 
-export type CompletionStatus = 'completed' | 'needs-promotion';
-export type ValidationStatus = 'passed' | 'failed' | 'skipped';
-export type ProhibitedActionType =
-  | 'secret-file-read'
-  | 'secret-file-change'
-  | 'destructive-db-or-cache'
-  | 'production-deploy-or-release';
-
-export interface ScopedCompletionReport {
-  status: CompletionStatus;
-  changes: string[];
-  validation: Array<{ command: string; status: ValidationStatus; summary: string }>;
-  artifacts: Array<{ type: 'screenshot' | 'log' | 'other'; path?: string; url?: string; description: string }>;
-  skippedChecks: string[];
-  residualRisks: string[];
-  prohibitedActions: Array<{ type: ProhibitedActionType; description: string }>;
-  promotion?: {
-    reason: string;
-    criteria: string[];
-    evidence: string[];
-  };
-}
-
-export interface PlanAutoCompletionReport {
-  status: 'completed';
-  parent: {
-    title?: string;
-    body: string;
-  };
-  graph: PlanGraph;
-  residualRisks: string[];
-}
-
-export type ScopedCompletionReportReadResult =
-  | { kind: 'missing' }
-  | { kind: 'valid'; report: ScopedCompletionReport };
-
-export type PlanAutoCompletionReportReadResult =
-  | { kind: 'missing' }
-  | { kind: 'valid'; report: PlanAutoCompletionReport };
-
 export function buildScopedImplementationPrompt(input: ScopedPromptInput): string {
   const labels = input.issue.labels.map((label) => label.name).join(', ') || 'none';
   const comments = [...input.issue.comments]
@@ -105,7 +75,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     '## Project Workflow',
     input.workflowPromptText,
     '## Runner-Owned Publication Contract',
-    'Change files only. Do not commit, push, open pull requests, merge, publish, deploy, or edit GitHub labels/comments. The runner owns publication.',
+    localCommitPublicationLine(input.config, false),
     '## Safety Contract',
     `Do not read or modify configured secret file patterns: ${input.config.deny.secretFiles.join(', ')}.`,
     'Do not run destructive database/cache actions.',
@@ -199,7 +169,7 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     '## Project Workflow',
     input.workflowPromptText,
     '## Runner-Owned Publication Contract',
-    'Change files only. You must not commit, push, merge, open pull requests, merge pull requests, publish, deploy, or edit GitHub labels/comments. The runner owns publication.',
+    localCommitPublicationLine(input.config, true),
     '## Safety Contract',
     `Do not read or modify configured secret file patterns: ${input.config.deny.secretFiles.join(', ')}.`,
     'Do not run destructive database/cache actions.',
@@ -263,49 +233,15 @@ function qualityGatePromptLines(config: CodexOrchestratorConfig): string[] {
   ];
 }
 
-export async function readScopedCompletionReport(reportPath: string): Promise<ScopedCompletionReportReadResult> {
-  let content: string;
-  try {
-    content = await readFile(reportPath, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return { kind: 'missing' };
-    }
-    throw error;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content) as unknown;
-  } catch {
-    throw new Error('Invalid scoped completion report: report must be valid JSON');
-  }
-  if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && !('artifacts' in parsed)) {
-    (parsed as Record<string, unknown>).artifacts = [];
-  }
-  assertScopedCompletionReport(parsed);
-  return { kind: 'valid', report: parsed };
-}
-
-export async function readPlanAutoCompletionReport(reportPath: string): Promise<PlanAutoCompletionReportReadResult> {
-  let content: string;
-  try {
-    content = await readFile(reportPath, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return { kind: 'missing' };
-    }
-    throw error;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content) as unknown;
-  } catch {
-    throw new Error('Invalid plan-auto completion report: report must be valid JSON');
-  }
-  assertPlanAutoCompletionReport(parsed);
-  return { kind: 'valid', report: parsed };
+function localCommitPublicationLine(config: CodexOrchestratorConfig, child: boolean): string {
+  const forbidden = child
+    ? 'push, merge, open pull requests, merge pull requests, publish, deploy, or edit GitHub labels/comments'
+    : 'push, open pull requests, merge, publish, deploy, or edit GitHub labels/comments';
+  return config.runner.allowAgentLocalCommits
+    ? `You may create local commits in this worktree. Do not ${forbidden}. The runner owns external publication.`
+    : child
+      ? `Change files only. You must not commit, ${forbidden}. The runner owns publication.`
+      : `Change files only. Do not commit, ${forbidden}. The runner owns publication.`;
 }
 
 export async function writeDurablePrompt(input: {
@@ -347,189 +283,4 @@ export function sessionReportPath(input: {
     'reports',
     `issue-${input.issueNumber}-${input.sessionId}.json`,
   );
-}
-
-function assertScopedCompletionReport(value: unknown): asserts value is ScopedCompletionReport {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid scoped completion report: report must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if (record.status !== 'completed' && record.status !== 'needs-promotion') {
-    throw new Error('Invalid scoped completion report: status must be completed or needs-promotion');
-  }
-  assertStringArray(record.changes, 'changes');
-  assertValidation(record.validation);
-  assertArtifacts(record.artifacts);
-  assertStringArray(record.skippedChecks, 'skippedChecks');
-  assertStringArray(record.residualRisks, 'residualRisks');
-  assertProhibitedActions(record.prohibitedActions);
-  if (record.status === 'needs-promotion') {
-    assertPromotion(record.promotion);
-  }
-}
-
-function assertPlanAutoCompletionReport(value: unknown): asserts value is PlanAutoCompletionReport {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid plan-auto completion report: report must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if (record.status !== 'completed') {
-    throw new Error('Invalid plan-auto completion report: status must be completed');
-  }
-  assertPlanParent(record.parent);
-  assertPlanGraph(record.graph);
-  assertStringArray(record.residualRisks, 'residualRisks', 'Invalid plan-auto completion report');
-  const graphValidation = validatePlanGraph(record.graph);
-  if (!graphValidation.ok) {
-    throw new Error(`Invalid plan-auto completion report: ${graphValidation.errors.join('; ')}`);
-  }
-}
-
-function assertPlanParent(value: unknown): void {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid plan-auto completion report: parent must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if ('title' in record && typeof record.title !== 'string') {
-    throw new Error('Invalid plan-auto completion report: parent.title must be a string');
-  }
-  if (typeof record.body !== 'string' || record.body.trim().length === 0) {
-    throw new Error('Invalid plan-auto completion report: parent.body must be a non-empty string');
-  }
-}
-
-function assertPlanGraph(value: unknown): asserts value is PlanGraph {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid plan-auto completion report: graph must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  if (!Array.isArray(record.nodes)) {
-    throw new Error('Invalid plan-auto completion report: graph.nodes must be an array');
-  }
-  if (!Array.isArray(record.edges)) {
-    throw new Error('Invalid plan-auto completion report: graph.edges must be an array');
-  }
-  if (record.specGate !== 'wave-level') {
-    throw new Error('Invalid plan-auto completion report: graph.specGate must be wave-level');
-  }
-  for (const item of record.nodes) {
-    assertPlanChildNode(item);
-  }
-  for (const item of record.edges) {
-    assertPlanDependencyEdge(item);
-  }
-}
-
-function assertPlanChildNode(value: unknown): void {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid plan-auto completion report: graph node must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  for (const key of ['stableId', 'title', 'body']) {
-    if (typeof record[key] !== 'string' || record[key].length === 0) {
-      throw new Error(`Invalid plan-auto completion report: graph node ${key} must be a non-empty string`);
-    }
-  }
-  if ('issueNumber' in record && !Number.isInteger(record.issueNumber)) {
-    throw new Error('Invalid plan-auto completion report: graph node issueNumber must be an integer');
-  }
-  if (record.afkHitl !== 'afk' && record.afkHitl !== 'hitl') {
-    throw new Error('Invalid plan-auto completion report: graph node afkHitl must be afk or hitl');
-  }
-  assertStringArray(record.ownershipScope, 'ownershipScope', 'Invalid plan-auto completion report');
-  assertStringArray(record.dependsOn, 'dependsOn', 'Invalid plan-auto completion report');
-  assertStringArray(record.verification, 'verification', 'Invalid plan-auto completion report');
-}
-
-function assertPlanDependencyEdge(value: unknown): void {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid plan-auto completion report: graph edge must be an object');
-  }
-  const record = value as Record<string, unknown>;
-  for (const key of ['from', 'to', 'reason']) {
-    if (typeof record[key] !== 'string' || record[key].length === 0) {
-      throw new Error(`Invalid plan-auto completion report: graph edge ${key} must be a non-empty string`);
-    }
-  }
-}
-
-function assertStringArray(value: unknown, key: string, prefix = 'Invalid scoped completion report'): asserts value is string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error(`${prefix}: ${key} must be a string array`);
-  }
-}
-
-function assertValidation(value: unknown): void {
-  if (!Array.isArray(value)) {
-    throw new Error('Invalid scoped completion report: validation must be an array');
-  }
-  for (const item of value) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error('Invalid scoped completion report: validation item must be an object');
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.command !== 'string' || !['passed', 'failed', 'skipped'].includes(String(record.status)) || typeof record.summary !== 'string') {
-      throw new Error('Invalid scoped completion report: validation item is malformed');
-    }
-  }
-}
-
-function assertArtifacts(value: unknown): void {
-  if (!Array.isArray(value)) {
-    throw new Error('Invalid scoped completion report: artifacts must be an array');
-  }
-  for (const item of value) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error('Invalid scoped completion report: artifacts item must be an object');
-    }
-    const record = item as Record<string, unknown>;
-    if (
-      typeof record.type !== 'string'
-      || !['screenshot', 'log', 'other'].includes(record.type)
-      || typeof record.description !== 'string'
-      || record.description.trim().length === 0
-    ) {
-      throw new Error('Invalid scoped completion report: artifacts item is malformed');
-    }
-    if ('path' in record && typeof record.path !== 'string') {
-      throw new Error('Invalid scoped completion report: artifacts path must be a string');
-    }
-    if ('url' in record && typeof record.url !== 'string') {
-      throw new Error('Invalid scoped completion report: artifacts url must be a string');
-    }
-    if (!record.path && !record.url) {
-      throw new Error('Invalid scoped completion report: artifacts item must include path or url');
-    }
-  }
-}
-
-function assertProhibitedActions(value: unknown): void {
-  const types = new Set(['secret-file-read', 'secret-file-change', 'destructive-db-or-cache', 'production-deploy-or-release']);
-  if (!Array.isArray(value)) {
-    throw new Error('Invalid scoped completion report: prohibitedActions must be an array');
-  }
-  for (const item of value) {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error('Invalid scoped completion report: prohibitedActions item must be an object');
-    }
-    const record = item as Record<string, unknown>;
-    if (typeof record.type !== 'string' || !types.has(record.type) || typeof record.description !== 'string') {
-      throw new Error('Invalid scoped completion report: prohibitedActions item is malformed');
-    }
-  }
-}
-
-function assertPromotion(value: unknown): void {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid scoped completion report: promotion is required for needs-promotion');
-  }
-  const record = value as Record<string, unknown>;
-  if (typeof record.reason !== 'string' || record.reason.trim().length === 0) {
-    throw new Error('Invalid scoped completion report: promotion.reason must be non-empty');
-  }
-  assertStringArray(record.criteria, 'promotion.criteria');
-  assertStringArray(record.evidence, 'promotion.evidence');
-  if ((record.criteria as string[]).length === 0 || (record.evidence as string[]).length === 0) {
-    throw new Error('Invalid scoped completion report: promotion criteria and evidence must be non-empty');
-  }
 }

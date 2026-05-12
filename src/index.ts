@@ -41,19 +41,31 @@ export {
 export type { PlanChildNode, PlanDependencyEdge, PlanGraph, PlanGraphValidationResult } from './runner/issue-tree.js';
 export { RunnerStateStore } from './runner/local-state.js';
 export type { RunnerProcessMetadata, RunnerStateFile } from './runner/local-state.js';
+export { runLocalExecutionSession } from './runner/local-execution-session.js';
+export type {
+  LocalExecutionPhaseExecutor,
+  LocalExecutionPhaseInput,
+  LocalExecutionPhaseResult,
+  LocalExecutionSessionInput,
+  LocalExecutionSessionResult,
+} from './runner/local-execution-session.js';
+export {
+  readPlanAutoCompletionReport,
+  readScopedCompletionReport,
+} from './runner/completion-report.js';
+export type {
+  PlanAutoCompletionReport,
+  ScopedCompletionReport,
+} from './runner/completion-report.js';
 export {
   buildPlanAutoPrompt,
   buildScopedImplementationPrompt,
-  readPlanAutoCompletionReport,
-  readScopedCompletionReport,
   sessionPromptPath,
   sessionReportPath,
   writeDurablePrompt,
 } from './runner/prompt.js';
 export type {
-  PlanAutoCompletionReport,
   PlanAutoPromptInput,
-  ScopedCompletionReport,
   ScopedPromptInput,
 } from './runner/prompt.js';
 export { runDaemonCommand } from './runner/daemon-command.js';

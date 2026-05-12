@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import type { ScopedCompletionReport } from './prompt.js';
+import type { ScopedCompletionReport } from './completion-report.js';
 import { shouldApplyVisualProofGate } from './review-gates.js';
 
 interface ValidationLine {

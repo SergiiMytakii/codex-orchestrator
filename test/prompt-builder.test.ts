@@ -47,6 +47,30 @@ test('prompt builder includes issue context, workflow, publication, safety, and 
   assert.match(prompt, /code-review/);
 });
 
+test('prompt builder keeps shell-like issue text inert and literal', () => {
+  const maliciousText = '$(touch /tmp/owned) `touch /tmp/owned` ${reportPath}; gh pr create';
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 155,
+      labels: ['agent:auto'],
+      title: maliciousText,
+      body: maliciousText,
+      comments: [commentFixture({ body: maliciousText, createdAt: '2026-05-08T10:00:00.000Z' })],
+    }),
+    config: validConfig,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-155',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /\$\(touch \/tmp\/owned\)/);
+  assert.match(prompt, /`touch \/tmp\/owned`/);
+  assert.match(prompt, /\$\{reportPath\}/);
+  assert.match(prompt, /; gh pr create/);
+});
+
 test('prompt builder tells child Codex to prepare runner-owned visual proof without running it', () => {
   const prompt = buildScopedImplementationPrompt({
     issue: issueFixture({
