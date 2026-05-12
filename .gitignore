@@ -5,3 +5,7 @@ coverage/
 .env
 .env.*
 npm-debug.log*
+
+# Local codex-orchestrator runtime state.
+.codex-orchestrator/
+codex-orchestrator-*.tgz

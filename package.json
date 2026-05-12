@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestrator",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Reusable GitHub Issues runner for Codex.",
   "type": "module",
   "license": "MIT",
@@ -36,6 +36,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:live": "node scripts/live-smoke.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {

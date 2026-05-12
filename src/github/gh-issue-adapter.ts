@@ -229,8 +229,11 @@ function readIssueState(value: unknown): IssueState {
 }
 
 function readPullRequestState(value: unknown): PullRequestState {
-  if (value === 'OPEN' || value === 'CLOSED' || value === 'MERGED') {
-    return value;
+  if (typeof value === 'string') {
+    const normalized = value.toUpperCase();
+    if (normalized === 'OPEN' || normalized === 'CLOSED' || normalized === 'MERGED') {
+      return normalized;
+    }
   }
-  throw new Error('GitHub pull request payload state must be OPEN, CLOSED, or MERGED');
+  return 'UNKNOWN';
 }

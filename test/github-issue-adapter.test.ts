@@ -97,6 +97,60 @@ test('gh issue adapter lists open issues once and filters matching labels locall
   ]);
 });
 
+test('gh issue adapter tolerates unknown linked pull request states from GitHub', async () => {
+  const adapter = new GhCliIssueAdapter('example', 'repo', async () => ({
+    stdout: JSON.stringify([
+      {
+        number: 1,
+        title: 'Review issue',
+        body: 'Body',
+        url: 'https://github.com/example/repo/issues/1',
+        state: 'OPEN',
+        labels: [{ name: 'agent:review' }],
+        comments: [],
+        closedByPullRequestsReferences: [
+          {
+            number: 10,
+            url: 'https://github.com/example/repo/pull/10',
+            state: 'DRAFT',
+          },
+        ],
+      },
+    ]),
+    stderr: '',
+  }));
+
+  const issues = await adapter.listOpenIssuesWithAnyLabel(['agent:review']);
+
+  assert.equal(issues[0]?.closedByPullRequestsReferences[0]?.state, 'UNKNOWN');
+});
+
+test('gh issue adapter normalizes lowercase linked pull request states', async () => {
+  const adapter = new GhCliIssueAdapter('example', 'repo', async () => ({
+    stdout: JSON.stringify({
+      number: 1,
+      title: 'Review issue',
+      body: 'Body',
+      url: 'https://github.com/example/repo/issues/1',
+      state: 'OPEN',
+      labels: [{ name: 'agent:review' }],
+      comments: [],
+      closedByPullRequestsReferences: [
+        {
+          number: 10,
+          url: 'https://github.com/example/repo/pull/10',
+          state: 'merged',
+        },
+      ],
+    }),
+    stderr: '',
+  }));
+
+  const issue = await adapter.getIssue(1);
+
+  assert.equal(issue?.closedByPullRequestsReferences[0]?.state, 'MERGED');
+});
+
 test('gh issue adapter handles issue view not-found stderr shapes', async () => {
   const stderrValues = ['issue not found', 'GraphQL: Could not resolve to an issue or pull request with the number of 999.'];
 

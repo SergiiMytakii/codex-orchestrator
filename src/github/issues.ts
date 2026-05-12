@@ -1,5 +1,5 @@
 export type IssueState = 'OPEN' | 'CLOSED';
-export type PullRequestState = 'OPEN' | 'CLOSED' | 'MERGED';
+export type PullRequestState = 'OPEN' | 'CLOSED' | 'MERGED' | 'UNKNOWN';
 
 export interface GitHubIssueLabel {
   name: string;
