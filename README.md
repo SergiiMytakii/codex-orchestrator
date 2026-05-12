@@ -253,10 +253,14 @@ before review-gate evaluation. It also sets
 `CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR`,
 `CODEX_ORCHESTRATOR_WORKTREE_PATH`, and `CODEX_ORCHESTRATOR_CHANGED_FILES`.
 Use `CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR` as the Playwright user data
-directory when proof scripts need a stable browser profile. Screenshot files
-written under
+directory when proof scripts need a stable browser profile; this runtime
+directory and `PLAYWRIGHT_BROWSERS_PATH` are kept outside the worktree so browser
+cache and session files are not committed. Screenshot files
+created or updated under
 `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
-runner-owned proof artifacts.
+runner-owned proof artifacts. A zero-exit proof command that does not create or
+update the configured minimum number of screenshots is treated as failed, so a
+skipped browser run cannot silently satisfy the proof gate.
 
 If the target UI requires login, keep credentials outside the config and expose
 only their variable names through `envPassthrough`. The visual proof script can
