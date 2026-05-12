@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
-import type { ScopedCompletionReport } from './prompt.js';
+import type { ScopedCompletionReport } from './completion-report.js';
 
 interface ValidationLine {
   command: string;

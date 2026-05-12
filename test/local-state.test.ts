@@ -36,12 +36,13 @@ test('local state upserts, removes, and persists metadata-only shape', async () 
 
   await store.upsertRun(metadata(2));
   await store.upsertRun(metadata(1));
-  await store.upsertRun({ ...metadata(2), retryCount: 1 });
+  await store.upsertRun({ ...metadata(2), retryCount: 1, logPath: '.codex-orchestrator/state/logs/issue-2.log' });
 
   assert.deepEqual((await store.load()).runs.map((run) => [run.issueNumber, run.retryCount]), [
     [1, 0],
     [2, 1],
   ]);
+  assert.equal((await store.load()).runs.find((run) => run.issueNumber === 2)?.logPath, '.codex-orchestrator/state/logs/issue-2.log');
 
   await store.removeRun(1);
   assert.deepEqual((await store.load()).runs.map((run) => run.issueNumber), [2]);

@@ -8,6 +8,7 @@ import {
   buildScopedImplementationPrompt,
   runScopedAutoCommand,
   runPlanAutoCommand,
+  runLocalExecutionSession,
   runDaemonCommand,
   discoverIssueWork,
   ensureAutonomousChildBody,
@@ -40,6 +41,7 @@ test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof buildPlanAutoPrompt, 'function');
   assert.equal(typeof runScopedAutoCommand, 'function');
   assert.equal(typeof runPlanAutoCommand, 'function');
+  assert.equal(typeof runLocalExecutionSession, 'function');
   assert.equal(typeof renderAutonomousChildMarker, 'function');
   assert.equal(typeof ensureAutonomousChildBody, 'function');
   assert.equal(typeof isAutonomousChildOfParent, 'function');
