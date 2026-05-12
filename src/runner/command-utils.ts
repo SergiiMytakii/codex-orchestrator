@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
 import type { SessionCommitInfo } from '../git/worktree.js';
+import type { ShellCommandExecutor } from '../process/command.js';
 import { projectConfigPath } from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 
@@ -66,4 +67,28 @@ export function renderCommitEvidence(commits: SessionCommitInfo[]): string[] {
     return ['- none'];
   }
   return commits.map((commit) => `- ${commit.sha.slice(0, 12)} ${commit.subject}`);
+}
+
+export interface RunnerValidationLine {
+  command: string;
+  status: 'passed' | 'failed' | 'skipped';
+  summary: string;
+}
+
+export async function runConfiguredChecks(
+  config: CodexOrchestratorConfig,
+  worktreePath: string,
+  shellExecutor: ShellCommandExecutor,
+  reportValidation: RunnerValidationLine[],
+): Promise<RunnerValidationLine[]> {
+  const lines = [...reportValidation];
+  for (const [name, command] of Object.entries(config.checks)) {
+    const result = await shellExecutor(command, { cwd: worktreePath });
+    lines.push({
+      command,
+      status: result.exitCode === 0 ? 'passed' : 'failed',
+      summary: `${name}: ${result.exitCode === 0 ? 'passed' : result.stderr || result.stdout || `exit ${result.exitCode}`}`,
+    });
+  }
+  return lines;
 }

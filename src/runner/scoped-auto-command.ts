@@ -9,10 +9,19 @@ import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager, renderBranchTemplate, type SessionCommitInfo } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
-import { bulletList, formatSessionTimestamp, mergeArtifacts, readRunnerConfig, renderCommitEvidence } from './command-utils.js';
+import {
+  bulletList,
+  formatSessionTimestamp,
+  readRunnerConfig,
+  renderCommitEvidence,
+  type RunnerValidationLine,
+} from './command-utils.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
-import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
-import { runLocalExecutionSession, type LocalExecutionPhaseExecutor } from './local-execution-session.js';
+import type { ScopedCompletionReport } from './completion-report.js';
+import {
+  runImplementationPublishabilityCheck,
+  type LocalExecutionPhaseExecutor,
+} from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
 import {
   buildScopedImplementationPrompt,
@@ -20,15 +29,8 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { evaluateReviewGates } from './review-gates.js';
 import { sessionLogPath } from './run-log.js';
-import {
-  validateChangedPaths,
-  validateCompletionReportSafety,
-  validateNoAgentOwnedGitPublication,
-} from './safety.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
-import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -53,12 +55,6 @@ export interface ScopedAutoCommandResult {
   pullRequest?: GitHubPullRequest;
   status: 'review-ready' | 'blocked' | 'promotion-requested';
   reportComment: string;
-}
-
-interface ValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
 }
 
 export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): Promise<ScopedAutoCommandResult> {
@@ -165,125 +161,73 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       await cleanupSessionCodexHome(isolatedHomePath);
     }
     const afterHead = await git.getHead(worktreePath);
-    const publicationViolations = config.runner.allowAgentLocalCommits
-      ? []
-      : validateNoAgentOwnedGitPublication(beforeHead, afterHead);
-    if (publicationViolations.length > 0) {
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, publicationViolations.map((violation) => violation.message), [], [], []);
-    }
-    if (codexResult.exitCode !== 0) {
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, [formatCodexExitReason(codexResult)], [], [], []);
-    }
-
-    let report: ScopedCompletionReport;
-    try {
-      const reportResult = await readScopedCompletionReport(reportPath);
-      if (reportResult.kind === 'missing') {
-        return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, ['Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove safety contract.'], [], [], []);
-      }
-      report = reportResult.report;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Invalid scoped completion report';
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, [message], [], [], []);
-    }
-
-    if (report.status === 'needs-promotion') {
-      return finishPromotionRequested(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, report);
-    }
-
-    const localSession = await runLocalExecutionSession({
-      worktreePath,
-      phases: options.localPhases ?? [],
-      executePhase: options.localPhaseExecutor ?? defaultPassingLocalPhaseExecutor,
-    });
-    if (!localSession.publishReady) {
-      const blockedChangeSet = await git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-      return finishBlocked(
-        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
-        issueAdapter,
-        config,
-        localSessionBlockReasons(localSession.phaseResults),
-        blockedChangeSet.changedPaths,
-        report.skippedChecks,
-        [...report.residualRisks, ...localSession.phaseResults.flatMap((phase) => phase.residualRisks)],
-      );
-    }
-    report = {
-      ...report,
-      validation: [...report.validation, ...localSession.phaseResults.flatMap((phase) => phase.validation)],
-      artifacts: mergeArtifacts(report.artifacts, localSession.phaseResults.flatMap((phase) => phase.artifacts)),
-      residualRisks: [...report.residualRisks, ...localSession.phaseResults.flatMap((phase) => phase.residualRisks)],
-    };
-
-    let changeSet = await git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-    let changedFiles = changeSet.changedPaths;
-    if (changedFiles.length === 0) {
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, ['Codex completed without file changes'], [], report.skippedChecks, report.residualRisks);
-    }
-
-    const violations = [
-      ...validateChangedPaths(changedFiles, config),
-      ...validateCompletionReportSafety(report),
-    ];
-    if (violations.length > 0) {
-      return finishBlocked(baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath), issueAdapter, config, violations.map((violation) => violation.message), changedFiles, report.skippedChecks, report.residualRisks);
-    }
-
-    let validation = await runConfiguredChecks(config, worktreePath, shellExecutor, report.validation);
-    const runnerVisualProof = await runRunnerVisualProof({
+    const publishability = await runImplementationPublishabilityCheck({
       config,
       issue,
-      issueNumber: options.issueNumber,
       worktreePath,
-      changedFiles,
-      report,
+      reportPath,
+      beforeHead,
+      afterHead,
+      codexResult,
+      git,
       shellExecutor,
+      commitMessage: `Codex: implement issue #${options.issueNumber}`,
+      localPhases: options.localPhases,
+      localPhaseExecutor: options.localPhaseExecutor,
     });
-    validation = [...validation, ...runnerVisualProof.validation];
-    report = {
-      ...report,
-      artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
-    };
-    if (runnerVisualProof.artifacts.length > 0) {
-      changeSet = await git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-      changedFiles = changeSet.changedPaths;
+
+    if (publishability.status === 'promotion-requested') {
+      return finishPromotionRequested(
+        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
+        issueAdapter,
+        config,
+        publishability.report,
+      );
     }
-    const residualRisks = [...report.residualRisks];
-    if (validation.some((line) => line.status === 'failed')) {
-      residualRisks.push('One or more configured checks failed.');
-    }
-    const reviewGate = evaluateReviewGates({
-      config,
-      issue,
-      changedFiles,
-      validation,
-      skippedChecks: report.skippedChecks,
-      report,
-      worktreePath,
-    });
-    if (!reviewGate.ok) {
+
+    if (publishability.status === 'blocked') {
       return finishBlocked(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
         config,
-        reviewGate.reasons,
-        changedFiles,
-        report.skippedChecks,
-        residualRisks,
+        publishability.reasons,
+        publishability.changedFiles,
+        publishability.skippedChecks,
+        publishability.residualRisks,
       );
     }
-    if (!(await git.isWorktreeClean(worktreePath))) {
-      await git.commitAll({ worktreePath, message: `Codex: implement issue #${options.issueNumber}` });
-      changeSet = await git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-    }
+
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderTemplate(config.pullRequests.scopedIssueTitle, options.issueNumber),
-      body: buildPullRequestBody(config, branchName, options.issueNumber, changedFiles, validation, report.artifacts, report.skippedChecks, residualRisks, logPath, changeSet.commits),
+      body: buildPullRequestBody(
+        config,
+        branchName,
+        options.issueNumber,
+        publishability.changedFiles,
+        publishability.validation,
+        publishability.artifacts,
+        publishability.skippedChecks,
+        publishability.residualRisks,
+        logPath,
+        publishability.commits,
+      ),
       headBranch: branchName,
       baseBranch: config.branches.base,
     });
-    const reportComment = buildReviewReport(config, branchName, options.issueNumber, pullRequest, changedFiles, validation, report.artifacts, report.skippedChecks, residualRisks, logPath, changeSet.commits);
+    const reportComment = buildReviewReport(
+      config,
+      branchName,
+      options.issueNumber,
+      pullRequest,
+      publishability.changedFiles,
+      publishability.validation,
+      publishability.artifacts,
+      publishability.skippedChecks,
+      publishability.residualRisks,
+      logPath,
+      publishability.commits,
+    );
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
@@ -321,47 +265,6 @@ async function readWorkflowPrompt(path: string): Promise<string> {
     }
     throw error;
   }
-}
-
-async function runConfiguredChecks(
-  config: CodexOrchestratorConfig,
-  worktreePath: string,
-  shellExecutor: ShellCommandExecutor,
-  reportValidation: ValidationLine[],
-): Promise<ValidationLine[]> {
-  const lines = [...reportValidation];
-  for (const [name, command] of Object.entries(config.checks)) {
-    const result = await shellExecutor(command, { cwd: worktreePath });
-    lines.push({
-      command,
-      status: result.exitCode === 0 ? 'passed' : 'failed',
-      summary: `${name}: ${result.exitCode === 0 ? 'passed' : result.stderr || result.stdout || `exit ${result.exitCode}`}`,
-    });
-  }
-  return lines;
-}
-
-async function defaultPassingLocalPhaseExecutor(input: { phaseId: string; worktreePath: string }) {
-  return {
-    phaseId: input.phaseId,
-    status: 'passed' as const,
-    validation: [],
-    artifacts: [],
-    residualRisks: [],
-  };
-}
-
-function localSessionBlockReasons(phaseResults: Array<Awaited<ReturnType<LocalExecutionPhaseExecutor>>>): string[] {
-  return phaseResults.flatMap((phase) => {
-    if (phase.status !== 'failed') {
-      return [];
-    }
-    return [
-      `Local phase ${phase.phaseId} failed`,
-      ...phase.validation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
-      ...phase.artifacts.map((artifact) => `${artifact.description}: ${artifact.url ?? artifact.path ?? 'missing-target'}`),
-    ];
-  });
 }
 
 async function finishBlocked(
@@ -423,7 +326,7 @@ function buildReviewReport(
   issueNumber: number,
   pullRequest: GitHubPullRequest,
   changedFiles: string[],
-  validation: ValidationLine[],
+  validation: RunnerValidationLine[],
   artifacts: ScopedCompletionReport['artifacts'],
   skippedChecks: string[],
   residualRisks: string[],
@@ -456,7 +359,7 @@ function buildPullRequestBody(
   branchName: string,
   issueNumber: number,
   changedFiles: string[],
-  validation: ValidationLine[],
+  validation: RunnerValidationLine[],
   artifacts: ScopedCompletionReport['artifacts'],
   skippedChecks: string[],
   residualRisks: string[],
@@ -515,29 +418,6 @@ function isMobileIssue(issue: GitHubIssue): boolean {
   const labels = issue.labels.map((label) => label.name).join('\n');
   const text = `${issue.title}\n${issue.body}\n${labels}`;
   return /\b(?:android|flutter|ios|iphone|ipad|mobile|emulator|apk|aab|dart)\b/iu.test(text);
-}
-
-function formatCodexExitReason(result: CodexCommandRunResult): string {
-  const output = [result.stderr, result.stdout]
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .join('\n');
-  const timeoutLine = output
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .reverse()
-    .find((line) => /timed out|timeout/iu.test(line));
-  const detail = timeoutLine ?? truncate(output, 600);
-  return detail
-    ? `Codex exited with code ${result.exitCode}: ${truncate(detail, 600)}`
-    : `Codex exited with code ${result.exitCode}`;
-}
-
-function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, maxLength - 3)}...`;
 }
 
 function renderProofArtifacts(

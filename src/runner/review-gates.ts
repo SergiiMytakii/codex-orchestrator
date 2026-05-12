@@ -3,19 +3,14 @@ import { join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import type { RunnerValidationLine } from './command-utils.js';
 import type { ScopedCompletionReport } from './completion-report.js';
-
-interface ValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
-}
 
 export interface ReviewGateInput {
   config: CodexOrchestratorConfig;
   issue: GitHubIssue;
   changedFiles: string[];
-  validation: ValidationLine[];
+  validation: RunnerValidationLine[];
   skippedChecks: string[];
   report: ScopedCompletionReport;
   worktreePath?: string;
@@ -155,13 +150,13 @@ function evaluateQualityGate(input: ReviewGateInput): string[] {
   return reasons;
 }
 
-function hasPassedValidation(validation: ValidationLine[], patterns: string[]): boolean {
+function hasPassedValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
   return validation.some((line) =>
     line.status === 'passed' && patterns.some((pattern) => regexMatches(pattern, validationText(line))),
   );
 }
 
-function hasPassedTddValidation(validation: ValidationLine[], patterns: string[]): boolean {
+function hasPassedTddValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
   if (hasPassedValidation(validation, patterns)) {
     return true;
   }
@@ -184,15 +179,15 @@ function hasTddGreenEvidence(text: string): boolean {
     || /\b(?:flutter|dart|npm|pnpm|yarn)\s+(?:run\s+)?test\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text);
 }
 
-function validationText(line: ValidationLine): string {
+function validationText(line: RunnerValidationLine): string {
   return `${line.command}\n${line.summary}`;
 }
 
-function isStrongVisualValidation(line: ValidationLine): boolean {
+function isStrongVisualValidation(line: RunnerValidationLine): boolean {
   return /(BrowserUse|Playwright|screenshot|viewport)/iu.test(validationText(line));
 }
 
-function isRunnerVisualValidation(line: ValidationLine): boolean {
+function isRunnerVisualValidation(line: RunnerValidationLine): boolean {
   return /runner visual proof/iu.test(validationText(line));
 }
 

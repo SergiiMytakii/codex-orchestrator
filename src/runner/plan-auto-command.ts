@@ -9,23 +9,28 @@ import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
-import { bulletList, formatSessionTimestamp, mergeArtifacts, readRunnerConfig, renderCommitEvidence } from './command-utils.js';
+import {
+  bulletList,
+  formatSessionTimestamp,
+  readRunnerConfig,
+  renderCommitEvidence,
+  runConfiguredChecks,
+  type RunnerValidationLine,
+} from './command-utils.js';
 import {
   readPlanAutoCompletionReport,
-  readScopedCompletionReport,
   type PlanAutoCompletionReport,
   type ScopedCompletionReport,
 } from './completion-report.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import {
   collectExecutableChildBatches,
-  ensureAutonomousChildBody,
-  isAutonomousChildOfParent,
-  parseAutonomousChildMetadata,
+  persistAutonomousChildNode,
+  readAutonomousChildNodes,
   topologicalPlanNodes,
   type AutonomousChildNode,
-  type PlanChildNode,
 } from './issue-tree.js';
+import { runImplementationPublishabilityCheck } from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
 import {
   buildIssueTreeChildPrompt,
@@ -34,15 +39,8 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { evaluateReviewGates } from './review-gates.js';
 import { sessionLogPath } from './run-log.js';
-import {
-  validateChangedPaths,
-  validateCompletionReportSafety,
-  validateNoAgentOwnedGitPublication,
-} from './safety.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
-import { runRunnerVisualProof } from './visual-proof-runner.js';
 
 export interface PlanAutoCommandOptions {
   targetRoot: string;
@@ -85,12 +83,6 @@ interface PlanBlockedContext {
   childIssues: GitHubIssue[];
 }
 
-interface ValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
-}
-
 interface ChildExecutionResult {
   child: AutonomousChildNode;
   branchName: string;
@@ -99,7 +91,7 @@ interface ChildExecutionResult {
   reportPath: string;
   logPath: string;
   changedFiles: string[];
-  validation: ValidationLine[];
+  validation: RunnerValidationLine[];
   artifacts: ScopedCompletionReport['artifacts'];
   commits: SessionCommitInfo[];
   skippedChecks: string[];
@@ -136,6 +128,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   let logPath = '';
   const childIssues: GitHubIssue[] = [];
   let pullRequest: GitHubPullRequest | undefined;
+  let store: RunnerStateStore | undefined;
+  const executionResults: ChildExecutionResult[] = [];
 
   await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
 
@@ -169,7 +163,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       sessionId,
       promptText,
     });
-    const store = new RunnerStateStore(targetRoot, config);
+    store = new RunnerStateStore(targetRoot, config);
     await store.upsertRun({
       issueNumber: options.issueNumber,
       mode: 'plan-parent',
@@ -249,17 +243,16 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     });
 
     for (const node of topologicalPlanNodes(report.graph)) {
-      const persisted = await persistChildNode(issueAdapter, config, options.issueNumber, node);
+      const persisted = await persistAutonomousChildNode(issueAdapter, config, options.issueNumber, node);
       childIssues.push(persisted);
     }
 
-    const childNodes = await readExecutableChildren(issueAdapter, config, options.issueNumber, childIssues);
+    const childNodes = await readAutonomousChildNodes(issueAdapter, config, options.issueNumber, childIssues);
     const batches = collectExecutableChildBatches(childNodes, config);
     if (!batches.ok) {
       return finishPlanBlocked(issueAdapter, config, base, batches.errors, childIssues);
     }
 
-    const executionResults: ChildExecutionResult[] = [];
     for (const batch of batches.batches) {
       const settled = await Promise.allSettled(batch.map((child) => executeChild({
         targetRoot,
@@ -288,6 +281,15 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       if (failures.length > 0) {
         const successful = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
         await blockFailedBatch(issueAdapter, config, options.issueNumber, failures, successful);
+        await blockCompletedChildren(
+          issueAdapter,
+          config,
+          store,
+          options.issueNumber,
+          executionResults,
+          'A later child batch failed before parent publication.',
+          worktreePath,
+        );
         return finishPlanBlocked(
           issueAdapter,
           config,
@@ -312,6 +314,15 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         } catch (error) {
           if (error instanceof GitMergeConflictError) {
             await handleMergeConflict(git, issueAdapter, config, options.issueNumber, error, childResult, orderedBatchResults);
+            await blockCompletedChildren(
+              issueAdapter,
+              config,
+              store,
+              options.issueNumber,
+              executionResults,
+              `A later merge conflict stopped parent publication before ${branchName} was pushed.`,
+              worktreePath,
+            );
             return finishPlanBlocked(
               issueAdapter,
               config,
@@ -328,18 +339,33 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       }
       for (const childResult of orderedBatchResults) {
         await git.removeWorktree({ targetRoot, worktreePath: childResult.worktreePath });
-        await issueAdapter.removeLabels(childResult.child.issue.number, [config.github.labels.running.name]);
-        await issueAdapter.addLabels(childResult.child.issue.number, [config.github.labels.review.name]);
-        await issueAdapter.postComment(
-          childResult.child.issue.number,
-          buildChildReviewReport(options.issueNumber, childResult),
-        );
-        await store.removeRun(childResult.child.issue.number);
         executionResults.push(childResult);
       }
     }
 
     const finalValidation = await runConfiguredChecks(config, worktreePath, shellExecutor, []);
+    const failedFinalValidation = finalValidation.filter((line) => line.status === 'failed');
+    if (failedFinalValidation.length > 0) {
+      await blockCompletedChildren(
+        issueAdapter,
+        config,
+        store,
+        options.issueNumber,
+        executionResults,
+        'Parent integration configured checks failed before publication.',
+        worktreePath,
+      );
+      return finishPlanBlocked(
+        issueAdapter,
+        config,
+        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+        [
+          'One or more configured checks failed.',
+          ...failedFinalValidation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
+        ],
+        childIssues,
+      );
+    }
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderParentTemplate(config.pullRequests.issueTreeTitle, options.issueNumber),
@@ -355,6 +381,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       executionResults,
       finalValidation,
     );
+    await markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults);
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
@@ -371,6 +398,17 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     if (pullRequest) {
       throw new Error(`Issue-tree execution failed after draft PR creation (${pullRequest.url}); not marking parent blocked: ${message}`);
     }
+    if (store && executionResults.length > 0) {
+      await blockCompletedChildren(
+        issueAdapter,
+        config,
+        store,
+        options.issueNumber,
+        executionResults,
+        `Parent publication failed before review handoff: ${message}`,
+        worktreePath,
+      );
+    }
     return finishPlanBlocked(
       issueAdapter,
       config,
@@ -379,55 +417,6 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       childIssues,
     );
   }
-}
-
-async function persistChildNode(
-  issueAdapter: GitHubIssueAdapter,
-  config: CodexOrchestratorConfig,
-  parentIssueNumber: number,
-  node: PlanChildNode,
-): Promise<GitHubIssue> {
-  const body = buildChildBody(node, parentIssueNumber);
-  const childLabel = config.github.labels.child.name;
-  const autoLabel = config.github.labels.auto.name;
-
-  let issue: GitHubIssue;
-  if (node.issueNumber !== undefined) {
-    const existing = await issueAdapter.getIssue(node.issueNumber);
-    if (!existing) {
-      throw new Error(`Existing issue #${node.issueNumber} was not found`);
-    }
-    if (!isAutonomousChildOfParent(existing, config, parentIssueNumber)) {
-      throw new Error(
-        `Existing issue #${node.issueNumber} is not an autonomous child of #${parentIssueNumber}; refusing to update arbitrary issue.`,
-      );
-    }
-    issue = await issueAdapter.updateIssue(node.issueNumber, {
-      title: node.title,
-      body,
-      addLabels: [childLabel],
-      removeLabels: node.afkHitl === 'hitl' ? [autoLabel] : undefined,
-    });
-  } else {
-    issue = await issueAdapter.createIssue({
-      title: node.title,
-      body,
-      labels: [childLabel],
-    });
-  }
-
-  if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
-    throw new Error(`Child issue #${issue.number} was not persisted with the autonomous marker for #${parentIssueNumber}.`);
-  }
-  if (node.afkHitl === 'afk') {
-    issue = await issueAdapter.updateIssue(issue.number, { addLabels: [autoLabel] });
-    if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
-      throw new Error(
-        `Child issue #${issue.number} lost the autonomous marker for #${parentIssueNumber} while enabling agent:auto.`,
-      );
-    }
-  }
-  return issue;
 }
 
 async function readPlanReport(
@@ -472,33 +461,6 @@ async function readWorkflowPrompt(targetRoot: string, promptPath: string | undef
     }
     throw error;
   }
-}
-
-async function readExecutableChildren(
-  issueAdapter: GitHubIssueAdapter,
-  config: CodexOrchestratorConfig,
-  parentIssueNumber: number,
-  childIssues: GitHubIssue[],
-): Promise<AutonomousChildNode[]> {
-  const nodes: AutonomousChildNode[] = [];
-  const errors: string[] = [];
-  for (const child of childIssues) {
-    const current = await issueAdapter.getIssue(child.number);
-    if (!current) {
-      errors.push(`Child issue #${child.number} was not found during execution readback`);
-      continue;
-    }
-    const parsed = parseAutonomousChildMetadata(current, config, parentIssueNumber);
-    if (!parsed.ok) {
-      errors.push(...parsed.errors);
-      continue;
-    }
-    nodes.push(parsed.node);
-  }
-  if (errors.length > 0) {
-    throw new Error(errors.join('; '));
-  }
-  return nodes;
 }
 
 async function executeChild(input: {
@@ -607,19 +569,21 @@ async function executeChild(input: {
     await cleanupSessionCodexHome(isolatedHomePath);
   }
   const afterHead = await input.git.getHead(worktreePath);
-  const publicationViolations = input.config.runner.allowAgentLocalCommits
-    ? []
-    : validateNoAgentOwnedGitPublication(beforeHead, afterHead);
-  if (publicationViolations.length > 0) {
-    throw new Error(publicationViolations.map((violation) => violation.message).join('; '));
-  }
-  if (codexResult.exitCode !== 0) {
-    throw new Error(`Codex exited with code ${codexResult.exitCode}: ${codexResult.stderr || codexResult.stdout}`);
-  }
+  const publishability = await runImplementationPublishabilityCheck({
+    config: input.config,
+    issue: input.child.issue,
+    worktreePath,
+    reportPath,
+    beforeHead,
+    afterHead,
+    codexResult,
+    git: input.git,
+    shellExecutor: input.shellExecutor,
+    commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
+  });
 
-  const report = await readRequiredScopedReport(reportPath);
-  if (report.status === 'needs-promotion') {
-    const promotion = report.promotion;
+  if (publishability.status === 'promotion-requested') {
+    const promotion = publishability.report.promotion;
     throw new Error(
       [
         'Child requested promotion instead of completing issue-tree work.',
@@ -628,57 +592,9 @@ async function executeChild(input: {
       ].filter(Boolean).join(' '),
     );
   }
-  let changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-  let changedFiles = changeSet.changedPaths;
-  if (changedFiles.length === 0) {
-    throw new Error('Codex completed without file changes');
-  }
-  const violations = [
-    ...validateChangedPaths(changedFiles, input.config),
-    ...validateCompletionReportSafety(report),
-  ];
-  if (violations.length > 0) {
-    throw new Error(violations.map((violation) => violation.message).join('; '));
-  }
 
-  let validation = await runConfiguredChecks(input.config, worktreePath, input.shellExecutor, report.validation);
-  const runnerVisualProof = await runRunnerVisualProof({
-    config: input.config,
-    issue: input.child.issue,
-    issueNumber: childIssueNumber,
-    worktreePath,
-    changedFiles,
-    report,
-    shellExecutor: input.shellExecutor,
-  });
-  validation = [...validation, ...runnerVisualProof.validation];
-  const artifacts = mergeArtifacts(report.artifacts, runnerVisualProof.artifacts);
-  if (runnerVisualProof.artifacts.length > 0) {
-    changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
-    changedFiles = changeSet.changedPaths;
-  }
-  const residualRisks = [...report.residualRisks];
-  if (validation.some((line) => line.status === 'failed')) {
-    residualRisks.push('One or more configured checks failed.');
-  }
-  const reviewGate = evaluateReviewGates({
-    config: input.config,
-    issue: input.child.issue,
-    changedFiles,
-    validation,
-    skippedChecks: report.skippedChecks,
-    report: { ...report, artifacts },
-    worktreePath,
-  });
-  if (!reviewGate.ok) {
-    throw new Error(reviewGate.reasons.join('; '));
-  }
-  if (!(await input.git.isWorktreeClean(worktreePath))) {
-    await input.git.commitAll({
-      worktreePath,
-      message: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
-    });
-    changeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead: beforeHead });
+  if (publishability.status === 'blocked') {
+    throw new Error(publishability.reasons.join('; '));
   }
 
   return {
@@ -688,39 +604,13 @@ async function executeChild(input: {
     promptPath,
     reportPath,
     logPath,
-    changedFiles,
-    validation,
-    artifacts,
-    commits: changeSet.commits,
-    skippedChecks: report.skippedChecks,
-    residualRisks,
+    changedFiles: publishability.changedFiles,
+    validation: publishability.validation,
+    artifacts: publishability.artifacts,
+    commits: publishability.commits,
+    skippedChecks: publishability.skippedChecks,
+    residualRisks: publishability.residualRisks,
   };
-}
-
-async function readRequiredScopedReport(reportPath: string): Promise<ScopedCompletionReport> {
-  const reportRead = await readScopedCompletionReport(reportPath);
-  if (reportRead.kind === 'missing') {
-    throw new Error('Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove child safety contract.');
-  }
-  return reportRead.report;
-}
-
-async function runConfiguredChecks(
-  config: CodexOrchestratorConfig,
-  worktreePath: string,
-  shellExecutor: ShellCommandExecutor,
-  reportValidation: ValidationLine[],
-): Promise<ValidationLine[]> {
-  const lines = [...reportValidation];
-  for (const [name, command] of Object.entries(config.checks)) {
-    const result = await shellExecutor(command, { cwd: worktreePath });
-    lines.push({
-      command,
-      status: result.exitCode === 0 ? 'passed' : 'failed',
-      summary: `${name}: ${result.exitCode === 0 ? 'passed' : result.stderr || result.stdout || `exit ${result.exitCode}`}`,
-    });
-  }
-  return lines;
 }
 
 async function blockFailedBatch(
@@ -801,6 +691,50 @@ async function handleMergeConflict(
   }
 }
 
+async function markCompletedChildrenReviewReady(
+  issueAdapter: GitHubIssueAdapter,
+  config: CodexOrchestratorConfig,
+  store: RunnerStateStore,
+  parentIssueNumber: number,
+  childResults: ChildExecutionResult[],
+): Promise<void> {
+  for (const childResult of childResults) {
+    await issueAdapter.removeLabels(childResult.child.issue.number, [config.github.labels.running.name]);
+    await issueAdapter.addLabels(childResult.child.issue.number, [config.github.labels.review.name]);
+    await issueAdapter.postComment(
+      childResult.child.issue.number,
+      buildChildReviewReport(parentIssueNumber, childResult),
+    );
+    await store.removeRun(childResult.child.issue.number);
+  }
+}
+
+async function blockCompletedChildren(
+  issueAdapter: GitHubIssueAdapter,
+  config: CodexOrchestratorConfig,
+  store: RunnerStateStore,
+  parentIssueNumber: number,
+  childResults: ChildExecutionResult[],
+  reason: string,
+  parentWorktreePath: string,
+): Promise<void> {
+  for (const result of childResults) {
+    await issueAdapter.removeLabels(result.child.issue.number, [config.github.labels.running.name]);
+    await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
+    await issueAdapter.postComment(
+      result.child.issue.number,
+      [
+        `codex-orchestrator blocked child #${result.child.issue.number} for parent #${parentIssueNumber}`,
+        'Reasons',
+        `- ${reason}`,
+        `- Merged child branch was not published: ${result.branchName}`,
+        `- Parent worktree preserved: ${parentWorktreePath}`,
+      ].join('\n'),
+    );
+    await store.removeRun(result.child.issue.number);
+  }
+}
+
 async function finishPlanBlocked(
   issueAdapter: GitHubIssueAdapter,
   config: CodexOrchestratorConfig,
@@ -821,22 +755,6 @@ async function finishPlanBlocked(
   await issueAdapter.addLabels(result.parentIssueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.parentIssueNumber, reportComment);
   return { ...result, status: 'blocked', reportComment };
-}
-
-function buildChildBody(node: PlanChildNode, parentIssueNumber: number): string {
-  return [
-    ensureAutonomousChildBody(node.body, parentIssueNumber),
-    '',
-    '## codex-orchestrator metadata',
-    `Stable ID: ${node.stableId}`,
-    `AFK/HITL: ${node.afkHitl}`,
-    `Depends on: ${node.dependsOn.length > 0 ? node.dependsOn.join(', ') : 'none'}`,
-    'Ownership:',
-    ...bulletList(node.ownershipScope),
-    'Spec gate: wave-level',
-    'Verification:',
-    ...bulletList(node.verification),
-  ].join('\n');
 }
 
 function dependencyIssuesFor(child: AutonomousChildNode, allChildren: AutonomousChildNode[]): GitHubIssue[] {
@@ -874,7 +792,7 @@ function buildIssueTreeReviewReport(
   pullRequest: GitHubPullRequest,
   batches: AutonomousChildNode[][],
   childResults: ChildExecutionResult[],
-  finalValidation: ValidationLine[],
+  finalValidation: RunnerValidationLine[],
 ): string {
   return [
     `codex-orchestrator issue-tree review report for #${parentIssueNumber}`,
@@ -904,7 +822,7 @@ function buildIssueTreePullRequestBody(
   parentIssueNumber: number,
   childIssues: GitHubIssue[],
   childResults: ChildExecutionResult[],
-  finalValidation: ValidationLine[],
+  finalValidation: RunnerValidationLine[],
 ): string {
   return [
     `Parent issue: #${parentIssueNumber}`,
