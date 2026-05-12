@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -140,6 +140,109 @@ test('createIssueWorktree refuses to remove dirty stale branch worktree', async 
       baseBranch: 'main',
     }),
     /has uncommitted changes/,
+  );
+});
+
+test('ensureIssueWorktree reuses existing clean same-issue worktree', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+
+  await git.ensureIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+    allowResume: true,
+  });
+
+  const branch = await execFileAsync('git', ['-C', worktreePath, 'branch', '--show-current']);
+  const status = await execFileAsync('git', ['-C', worktreePath, 'status', '--porcelain']);
+  assert.equal(branch.stdout.trim(), 'codex/issue-1');
+  assert.equal(status.stdout, '');
+});
+
+test('ensureIssueWorktree reuses existing dirty same-issue worktree', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+  await writeFile(join(worktreePath, 'dirty.txt'), 'continue me\n', 'utf8');
+
+  await git.ensureIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+    allowResume: true,
+  });
+
+  const branch = await execFileAsync('git', ['-C', worktreePath, 'branch', '--show-current']);
+  const status = await execFileAsync('git', ['-C', worktreePath, 'status', '--porcelain']);
+  assert.equal(branch.stdout.trim(), 'codex/issue-1');
+  assert.match(status.stdout, /\?\? dirty\.txt/);
+});
+
+test('ensureIssueWorktree attaches existing unmerged branch without deleting it', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const temporaryWorktree = join(root, 'temporary-issue-1');
+  const resumedWorktree = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: temporaryWorktree,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+  });
+  await writeFile(join(temporaryWorktree, 'feature.txt'), 'done\n', 'utf8');
+  await git.commitAll({ worktreePath: temporaryWorktree, message: 'Codex: implement issue #1' });
+  await git.removeWorktree({ targetRoot: repo, worktreePath: temporaryWorktree });
+
+  await git.ensureIssueWorktree({
+    targetRoot: repo,
+    workspacePath: resumedWorktree,
+    branchName: 'codex/issue-1',
+    baseBranch: 'main',
+    allowResume: true,
+  });
+
+  const branch = await execFileAsync('git', ['-C', resumedWorktree, 'branch', '--show-current']);
+  assert.equal(branch.stdout.trim(), 'codex/issue-1');
+  assert.equal(await readFile(join(resumedWorktree, 'feature.txt'), 'utf8'), 'done\n');
+});
+
+test('ensureIssueWorktree refuses unrelated dirty worktree at expected workspace path', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-2',
+    baseBranch: 'main',
+  });
+  await writeFile(join(worktreePath, 'dirty.txt'), 'do not remove\n', 'utf8');
+
+  await assert.rejects(
+    git.ensureIssueWorktree({
+      targetRoot: repo,
+      workspacePath: worktreePath,
+      branchName: 'codex/issue-1',
+      baseBranch: 'main',
+      allowResume: true,
+    }),
+    /belongs to refs\/heads\/codex\/issue-2/,
   );
 });
 

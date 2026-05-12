@@ -93,11 +93,12 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
 
   try {
-    await git.createIssueWorktree({
+    await git.ensureIssueWorktree({
       targetRoot,
       workspacePath: worktreePath,
       branchName,
       baseBranch: config.branches.base,
+      allowResume: true,
     });
     const sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });

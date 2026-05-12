@@ -9,6 +9,7 @@ import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/c
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
+import { GitWorktreeManager } from '../src/git/worktree.js';
 import type { ShellCommandExecutor } from '../src/process/command.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
@@ -126,6 +127,59 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/issue-155', '-1']);
   assert.match(pushed.stdout, /Codex: implement issue #155/);
+});
+
+test('scoped auto command resumes an existing dirty same-issue worktree', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const worktreePath = join(repo, validConfig.runner.workspaceRoot, 'issue-155');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-155',
+    baseBranch: 'main',
+  });
+  await writeFile(join(worktreePath, 'existing-proof.txt'), 'already captured\n', 'utf8');
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Continue controlled change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let codexInput: CodexCommandRunInput | undefined;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      codexInput = input;
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['existing-proof.txt', 'feature.txt'],
+          validation: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(result.worktreePath, worktreePath);
+  assert.equal(codexInput?.worktreePath, worktreePath);
+  assert.equal(await readFile(join(worktreePath, 'existing-proof.txt'), 'utf8'), 'already captured\n');
+  assert.equal(issueAdapter.postedComments.some((entry) => entry.body.includes('blocked scoped execution')), false);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
 });
 
 test('scoped auto command does not mark blocked after draft PR publication', async () => {

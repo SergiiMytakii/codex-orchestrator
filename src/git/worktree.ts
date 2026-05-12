@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
@@ -14,6 +14,10 @@ export interface CreateIssueWorktreeInput {
   workspacePath: string;
   branchName: string;
   baseBranch: string;
+}
+
+export interface EnsureIssueWorktreeInput extends CreateIssueWorktreeInput {
+  allowResume?: boolean;
 }
 
 export interface CommitAllInput {
@@ -64,16 +68,7 @@ export class GitWorktreeManager {
 
   public async createIssueWorktree(input: CreateIssueWorktreeInput): Promise<void> {
     await mkdir(dirname(input.workspacePath), { recursive: true });
-    const args = [
-      '-C',
-      input.targetRoot,
-      'worktree',
-      'add',
-      '-b',
-      input.branchName,
-      input.workspacePath,
-      input.baseBranch,
-    ];
+    const args = this.newIssueWorktreeArgs(input);
     const result = await this.executor('git', args);
     if (result.exitCode === 0) {
       return;
@@ -84,6 +79,40 @@ export class GitWorktreeManager {
 
     await this.removeMergedStaleBranchWorktree(input);
     await this.git(args);
+  }
+
+  public async ensureIssueWorktree(input: EnsureIssueWorktreeInput): Promise<void> {
+    if (!input.allowResume) {
+      await this.createIssueWorktree(input);
+      return;
+    }
+
+    await mkdir(dirname(input.workspacePath), { recursive: true });
+    const expectedBranchRef = `refs/heads/${input.branchName}`;
+    const worktrees = await this.listWorktrees(input.targetRoot);
+    const workspaceWorktree = worktrees.find((worktree) => samePath(worktree.path, input.workspacePath));
+    if (workspaceWorktree) {
+      if (workspaceWorktree.branch === expectedBranchRef) {
+        return;
+      }
+      throw new Error(
+        `Existing worktree at ${input.workspacePath} belongs to ${workspaceWorktree.branch ?? 'detached HEAD'}; expected ${expectedBranchRef}.`,
+      );
+    }
+
+    const branchWorktree = worktrees.find((worktree) => worktree.branch === expectedBranchRef);
+    if (branchWorktree) {
+      throw new Error(
+        `Existing branch ${input.branchName} is already checked out at ${branchWorktree.path}; refusing to create a second issue worktree at ${input.workspacePath}.`,
+      );
+    }
+
+    if (await this.branchExists(input.targetRoot, input.branchName)) {
+      await this.git(['-C', input.targetRoot, 'worktree', 'add', input.workspacePath, input.branchName]);
+      return;
+    }
+
+    await this.git(this.newIssueWorktreeArgs(input));
   }
 
   public async listChangedFiles(worktreePath: string): Promise<string[]> {
@@ -173,6 +202,37 @@ export class GitWorktreeManager {
     return result;
   }
 
+  private newIssueWorktreeArgs(input: CreateIssueWorktreeInput): string[] {
+    return [
+      '-C',
+      input.targetRoot,
+      'worktree',
+      'add',
+      '-b',
+      input.branchName,
+      input.workspacePath,
+      input.baseBranch,
+    ];
+  }
+
+  private async branchExists(targetRoot: string, branchName: string): Promise<boolean> {
+    const result = await this.executor('git', [
+      '-C',
+      targetRoot,
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branchName}`,
+    ]);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw new Error(`git command failed: git -C ${targetRoot} show-ref --verify --quiet refs/heads/${branchName}\n${result.stderr}`);
+  }
+
   private async removeMergedStaleBranchWorktree(input: CreateIssueWorktreeInput): Promise<void> {
     const ancestor = await this.executor('git', [
       '-C',
@@ -237,6 +297,15 @@ function parsePorcelainChangedFiles(output: string): string[] {
 
 function normalizePath(path: string): string {
   return path.replaceAll('\\', '/');
+}
+
+function samePath(left: string, right: string): boolean {
+  return canonicalPath(left) === canonicalPath(right);
+}
+
+function canonicalPath(path: string): string {
+  const resolvedPath = resolve(path);
+  return resolvedPath.startsWith('/private/') ? resolvedPath.slice('/private'.length) : resolvedPath;
 }
 
 function parseWorktreeList(output: string): GitWorktreeInfo[] {
