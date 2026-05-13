@@ -12,14 +12,20 @@ const defaultTimeoutMs = 600_000;
 
 const scenarioDefinitions = new Map([
   ['baseline', runBaselineScenario],
+  ['package-install', runPackageInstallScenario],
+  ['discovery-matrix', runDiscoveryMatrixScenario],
   ['real-codex', runRealCodexScenario],
   ['scoped-runner-commit', runScopedRunnerCommitScenario],
   ['scoped-local-commit', runScopedLocalCommitScenario],
+  ['run-scoped', runDirectScopedScenario],
   ['visual-proof', runVisualProofScenario],
+  ['quality-gates', runQualityGatesScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
   ['denied-secret', runDeniedSecretScenario],
   ['invalid-report', runInvalidReportScenario],
   ['plan-auto', runPlanAutoScenario],
+  ['run-plan-auto', runDirectPlanAutoScenario],
+  ['plan-auto-blocking', runPlanAutoBlockingScenario],
 ]);
 
 async function main() {
@@ -270,6 +276,78 @@ async function runBaselineScenario(context) {
   await assertPackageSurface(context);
 }
 
+async function runPackageInstallScenario(context) {
+  const packageDir = dirname(dirname(dirname(context.cliPath)));
+  const externalProject = join(context.root, 'external-package-install');
+  await mkdir(externalProject, { recursive: true });
+  await writeFile(join(externalProject, 'package.json'), '{"type":"module","private":true}\n', 'utf8');
+  await runCommand('npm', ['install', packageDir, '--ignore-scripts'], {
+    cwd: externalProject,
+    timeoutMs: context.options.timeoutMs,
+  });
+  const importCheck = [
+    'import { validateConfig, runStatusCommand, runDaemonCommand } from "codex-orchestrator";',
+    'import { validateConfig as validateConfigSubpath } from "codex-orchestrator/config/schema";',
+    'if (typeof validateConfig !== "function") throw new Error("missing root validateConfig");',
+    'if (typeof validateConfigSubpath !== "function") throw new Error("missing subpath validateConfig");',
+    'if (typeof runStatusCommand !== "function") throw new Error("missing runStatusCommand");',
+    'if (typeof runDaemonCommand !== "function") throw new Error("missing runDaemonCommand");',
+  ].join('\n');
+  await writeFile(join(externalProject, 'import-check.mjs'), importCheck, 'utf8');
+  await runCommand(process.execPath, ['import-check.mjs'], {
+    cwd: externalProject,
+    timeoutMs: context.options.timeoutMs,
+  });
+  const packageJson = JSON.parse(await readFile(join(packageDir, 'package.json'), 'utf8'));
+  const binResult = await runCommand(join(externalProject, 'node_modules', '.bin', 'codex-orchestrator'), ['--version'], {
+    cwd: externalProject,
+    timeoutMs: context.options.timeoutMs,
+  });
+  assertIncludes(binResult.stdout, `${packageJson.name} ${packageJson.version}`, 'installed package bin should report packaged version');
+}
+
+async function runDiscoveryMatrixScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const cases = [
+    {
+      scenario: 'discovery-manual',
+      labels: ['agent:manual'],
+      expected: 'manual-label: manual label is present',
+    },
+    {
+      scenario: 'discovery-conflicting-auth',
+      labels: ['agent:auto', 'agent:plan-auto'],
+      expected: 'conflicting-authorization-labels: auto and plan-auto labels are both present',
+    },
+    {
+      scenario: 'discovery-running',
+      labels: ['agent:auto', 'agent:running'],
+      expected: 'already-running: running label is present',
+    },
+    {
+      scenario: 'discovery-blocked',
+      labels: ['agent:auto', 'agent:blocked'],
+      expected: 'blocked-label: blocked label is present',
+    },
+    {
+      scenario: 'discovery-review',
+      labels: ['agent:auto', 'agent:review'],
+      expected: 'ready-for-review: review label is present',
+    },
+  ];
+
+  const issues = [];
+  for (const entry of cases) {
+    issues.push({ entry, issue: await createIssue(context, entry.scenario, entry.labels) });
+  }
+
+  const status = await runPackagedCli(context, ['status', '--target', context.targetRoot, '--dry-run']);
+  assert(eligibleLinesFromStatus(status.stdout).length === 0, `expected no eligible issues in discovery matrix\n${status.stdout}`);
+  for (const { entry, issue } of issues) {
+    assertIncludes(status.stdout, `#${issue.number} ${entry.expected}`, `status should show ${entry.scenario} skip reason`);
+  }
+}
+
 async function runRealCodexScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true, codexMode: 'real' });
   const artifactName = `live-smoke-real-codex-${context.runId}.md`;
@@ -307,6 +385,13 @@ async function runScopedLocalCommitScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: true });
 }
 
+async function runDirectScopedScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const issue = await createIssue(context, 'scoped-runner-commit', ['agent:auto'], 'Direct run smoke for scoped issue.');
+  await runDirectIssue(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false });
+}
+
 async function runVisualProofScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -320,6 +405,32 @@ async function runVisualProofScenario(context) {
   );
   await runDaemonOnce(context, issue.number, 'scoped-issue');
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectScreenshotProof: true });
+}
+
+async function runQualityGatesScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const cases = [
+    {
+      scenario: 'quality-missing-tdd',
+      expected: 'Quality gate requires TDD red-to-green proof',
+    },
+    {
+      scenario: 'quality-missing-code-review',
+      expected: 'Quality gate requires passed code-review validation',
+    },
+    {
+      scenario: 'quality-missing-cleanup-review',
+      expected: 'Quality gate requires passed cleanup-review validation',
+    },
+  ];
+
+  for (const entry of cases) {
+    const issue = await createIssue(context, entry.scenario, ['agent:auto']);
+    await runDaemonOnce(context, issue.number, 'scoped-issue');
+    await assertBlockedIssue(context, issue.number, entry.expected);
+    await assertNoPullRequestForBranch(context, `codex/issue-${issue.number}`);
+    await assertNoRemoteBranch(context, `codex/issue-${issue.number}`);
+  }
 }
 
 async function runLocalCommitBlockedScenario(context) {
@@ -350,13 +461,50 @@ async function runPlanAutoScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true });
   const issue = await createIssue(context, 'plan-auto', ['agent:plan-auto']);
   await runDaemonOnce(context, issue.number, 'plan-parent');
+  await assertPlanAutoSuccess(context, issue.number);
+}
 
-  const parent = await getIssue(context, issue.number);
+async function runDirectPlanAutoScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const issue = await createIssue(context, 'plan-auto', ['agent:plan-auto'], 'Direct run smoke for plan-auto parent.');
+  await runDirectIssue(context, issue.number, 'plan-parent');
+  await assertPlanAutoSuccess(context, issue.number);
+}
+
+async function runPlanAutoBlockingScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const malformed = await createIssue(context, 'plan-malformed-graph', ['agent:plan-auto']);
+  await runDaemonOnce(context, malformed.number, 'plan-parent');
+  await assertPlanBlockedIssue(context, malformed.number, 'graph.nodes must contain at least one child node');
+  await assertNoPullRequestForBranch(context, `codex/tree-${malformed.number}`);
+  await assertNoRemoteBranch(context, `codex/tree-${malformed.number}`);
+
+  const mutating = await createIssue(context, 'plan-mutates-files', ['agent:plan-auto']);
+  await runDaemonOnce(context, mutating.number, 'plan-parent');
+  await assertPlanBlockedIssue(context, mutating.number, 'Planning session changed repository files');
+  await assertNoPullRequestForBranch(context, `codex/tree-${mutating.number}`);
+  await assertNoRemoteBranch(context, `codex/tree-${mutating.number}`);
+
+  const arbitrary = await createIssue(context, 'plan-arbitrary-existing-child-target', ['agent:manual']);
+  const parent = await createIssue(
+    context,
+    'plan-arbitrary-existing-issue',
+    ['agent:plan-auto'],
+    `LIVE_SMOKE_ARBITRARY_ISSUE: ${arbitrary.number}`,
+  );
+  await runDaemonOnce(context, parent.number, 'plan-parent');
+  await assertPlanBlockedIssue(context, parent.number, 'refusing to update arbitrary issue');
+  await assertNoPullRequestForBranch(context, `codex/tree-${parent.number}`);
+  await assertNoRemoteBranch(context, `codex/tree-${parent.number}`);
+}
+
+async function assertPlanAutoSuccess(context, issueNumber) {
+  const parent = await getIssue(context, issueNumber);
   assertHasLabel(parent, 'agent:review');
   assertMissingLabel(parent, 'agent:running');
-  assertIssueHasComment(parent, `codex-orchestrator issue-tree review report for #${issue.number}`);
+  assertIssueHasComment(parent, `codex-orchestrator issue-tree review report for #${issueNumber}`);
 
-  const branchName = `codex/tree-${issue.number}`;
+  const branchName = `codex/tree-${issueNumber}`;
   context.createdBranches.push(branchName);
   await assertRemoteBranchExists(context, branchName);
   const pullRequest = await findPullRequestByBranch(context, branchName);
@@ -373,6 +521,15 @@ async function runPlanAutoScenario(context) {
     assertHasLabel(child, 'agent:review');
     assertIssueHasComment(child, 'codex-orchestrator child review report');
   }
+}
+
+async function runDirectIssue(context, issueNumber, mode) {
+  await assertOnlyEligibleIssue(context, issueNumber, mode);
+  const result = await runPackagedCli(context, ['run', '--target', context.targetRoot, '--issue', String(issueNumber)]);
+  const expectedHeading = mode === 'plan-parent'
+    ? `codex-orchestrator issue-tree review report for #${issueNumber}`
+    : `codex-orchestrator review report for #${issueNumber}`;
+  assertIncludes(result.stdout, expectedHeading, `direct run should print ${mode} report`);
 }
 
 async function runDaemonOnce(context, issueNumber, mode) {
@@ -461,6 +618,15 @@ async function assertBlockedIssue(context, issueNumber, expectedCommentText) {
   await assertLogFileExists(context, issueNumber);
 }
 
+async function assertPlanBlockedIssue(context, issueNumber, expectedCommentText) {
+  const issue = await getIssue(context, issueNumber);
+  assertHasLabel(issue, 'agent:blocked');
+  assertMissingLabel(issue, 'agent:running');
+  assertIssueHasComment(issue, `codex-orchestrator blocked parent issue-tree execution for #${issueNumber}`);
+  assertIssueHasComment(issue, expectedCommentText);
+  await assertLogFileExists(context, issueNumber);
+}
+
 async function assertNoEligibleIssues(context) {
   const status = await runPackagedCli(context, ['status', '--target', context.targetRoot, '--dry-run']);
   const eligibleLines = eligibleLinesFromStatus(status.stdout);
@@ -513,6 +679,11 @@ async function assertPackageSurface(context) {
 async function assertRemoteBranchExists(context, branchName) {
   const output = await gitOutput(context.targetRoot, ['ls-remote', '--heads', 'origin', branchName]);
   assert(output.includes(branchName), `expected remote branch ${branchName}`);
+}
+
+async function assertNoRemoteBranch(context, branchName) {
+  const output = await gitOutput(context.targetRoot, ['ls-remote', '--heads', 'origin', branchName]);
+  assert(!output.includes(branchName), `expected no remote branch ${branchName}`);
 }
 
 async function assertNoPullRequestForBranch(context, branchName) {
@@ -857,7 +1028,10 @@ if (!promptPath || !reportPath) {
 
 const prompt = readFileSync(promptPath, 'utf8');
 const issueNumber = Number(basename(reportPath).match(/^issue-(\d+)-/)?.[1] ?? 0);
-const scenario = inferScenarioFromReportPath(reportPath) ?? readMarker(prompt, 'LIVE_SMOKE_SCENARIO');
+const inferredScenario = inferScenarioFromReportPath(reportPath);
+const scenario = inferredScenario === 'plan-child'
+  ? inferredScenario
+  : readMarker(prompt, 'LIVE_SMOKE_SCENARIO') ?? inferredScenario;
 const runId = readMarker(prompt, 'LIVE_SMOKE_RUN_ID') ?? 'unknown';
 
 console.log(JSON.stringify({ type: 'live-smoke', message: 'starting ' + scenario + ' for #' + issueNumber }));
@@ -878,6 +1052,38 @@ switch (scenario) {
     writeVisualChange(issueNumber, runId);
     writeScopedReport(reportPath, ['components/live-smoke/issue-' + issueNumber + '.tsx', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
+  case 'quality-missing-tdd':
+    writeCodeChange(issueNumber, runId, 'quality-missing-tdd');
+    writeScopedReport(
+      reportPath,
+      ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+      [{ command: 'npm test', status: 'passed', summary: 'all tests passed without red-green proof' }],
+    );
+    break;
+  case 'quality-missing-code-review':
+    writeCodeChange(issueNumber, runId, 'quality-missing-code-review');
+    writeScopedReport(
+      reportPath,
+      ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+      [{ command: 'TDD red-to-green', status: 'passed', summary: 'Focused behavior test failed before implementation and passed after implementation.' }],
+    );
+    break;
+  case 'quality-missing-cleanup-review':
+    writeMediumRuntimeChange(issueNumber, runId);
+    writeScopedReport(
+      reportPath,
+      [
+        'src/live-smoke/issue-' + issueNumber + '-a.ts',
+        'src/live-smoke/issue-' + issueNumber + '-b.ts',
+        'src/live-smoke/issue-' + issueNumber + '-c.ts',
+        'test/live-smoke/issue-' + issueNumber + '.test.ts',
+      ],
+      [
+        { command: 'TDD red-to-green', status: 'passed', summary: 'Focused behavior test failed before implementation and passed after implementation.' },
+        { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+      ],
+    );
+    break;
   case 'denied-secret':
     mkdirSync('live-smoke-denied', { recursive: true });
     writeFileSync('live-smoke-denied/secret.txt', 'LIVE_SMOKE_SHOULD_BLOCK=1\n', 'utf8');
@@ -889,6 +1095,16 @@ switch (scenario) {
     break;
   case 'plan-auto':
     writePlanReport(reportPath, runId);
+    break;
+  case 'plan-malformed-graph':
+    writeMalformedPlanReport(reportPath, runId);
+    break;
+  case 'plan-mutates-files':
+    writeFileSync('live-smoke-plan-mutation.txt', 'planning must not mutate repository files\n', 'utf8');
+    writePlanReport(reportPath, runId);
+    break;
+  case 'plan-arbitrary-existing-issue':
+    writePlanReportForExistingIssue(reportPath, runId, Number(readMarker(prompt, 'LIVE_SMOKE_ARBITRARY_ISSUE')));
     break;
   case 'plan-child':
     writeCodeChange(issueNumber, runId, 'plan-child');
@@ -926,6 +1142,23 @@ function writeCodeChange(issue, run, kind) {
   );
 }
 
+function writeMediumRuntimeChange(issue, run) {
+  mkdirSync('src/live-smoke', { recursive: true });
+  mkdirSync('test/live-smoke', { recursive: true });
+  for (const suffix of ['a', 'b', 'c']) {
+    writeFileSync(
+      join('src', 'live-smoke', 'issue-' + issue + '-' + suffix + '.ts'),
+      'export const liveSmokeIssue' + issue + suffix.toUpperCase() + ' = ' + JSON.stringify({ issue, run, suffix }) + ';\n',
+      'utf8',
+    );
+  }
+  writeFileSync(
+    join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
+    'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
+    'utf8',
+  );
+}
+
 function writeVisualChange(issue, run) {
   mkdirSync('components/live-smoke', { recursive: true });
   mkdirSync('test/live-smoke', { recursive: true });
@@ -941,18 +1174,62 @@ function writeVisualChange(issue, run) {
   );
 }
 
-function writeScopedReport(path, changes) {
+function writeScopedReport(path, changes, validation = [
+  { command: 'red-green live smoke', status: 'passed', summary: 'test failed before implementation and passed after implementation' },
+  { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for live smoke fixture' },
+]) {
   writeFileSync(path, JSON.stringify({
     status: 'completed',
     changes,
-    validation: [
-      { command: 'red-green live smoke', status: 'passed', summary: 'test failed before implementation and passed after implementation' },
-      { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for live smoke fixture' },
-    ],
+    validation,
     artifacts: [],
     skippedChecks: [],
     residualRisks: [],
     prohibitedActions: [],
+  }, null, 2), 'utf8');
+}
+
+function writeMalformedPlanReport(path, run) {
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    parent: {
+      title: '[live-smoke:' + run + '] malformed plan parent',
+      body: 'Live smoke malformed graph parent.\n\nLIVE_SMOKE_RUN_ID: ' + run,
+    },
+    graph: {
+      nodes: [],
+      edges: [],
+      specGate: 'wave-level',
+    },
+    residualRisks: [],
+  }, null, 2), 'utf8');
+}
+
+function writePlanReportForExistingIssue(path, run, issueNumber) {
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    throw new Error('LIVE_SMOKE_ARBITRARY_ISSUE must be a positive integer');
+  }
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    parent: {
+      title: '[live-smoke:' + run + '] arbitrary existing issue parent',
+      body: 'Live smoke parent attempting arbitrary issue update.\n\nLIVE_SMOKE_RUN_ID: ' + run,
+    },
+    graph: {
+      nodes: [{
+        stableId: 'live-smoke-existing',
+        issueNumber,
+        title: '[live-smoke:' + run + '] should not update arbitrary issue',
+        body: 'This node intentionally points at an unmarked existing issue.',
+        afkHitl: 'afk',
+        ownershipScope: ['src/live-smoke/arbitrary-existing.ts'],
+        dependsOn: [],
+        verification: ['live smoke arbitrary existing issue block'],
+      }],
+      edges: [],
+      specGate: 'wave-level',
+    },
+    residualRisks: [],
   }, null, 2), 'utf8');
 }
 

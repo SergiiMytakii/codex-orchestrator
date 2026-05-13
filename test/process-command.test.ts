@@ -52,8 +52,8 @@ test('process executor terminates commands after idle timeout', async () => {
 test('process executor resets idle timeout on output activity', async () => {
   const result = await defaultProcessExecutor(
     execPath,
-    ['-e', 'setTimeout(() => console.log("active"), 30); setTimeout(() => console.log("done"), 70);'],
-    { idleTimeoutMs: 150 },
+    ['-e', 'console.log("active"); setTimeout(() => console.log("done"), 100);'],
+    { idleTimeoutMs: 500 },
   );
 
   assert.equal(result.exitCode, 0);

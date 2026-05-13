@@ -6,8 +6,47 @@ prove the full package flow through the packaged CLI, real GitHub Issues, real
 labels, real daemon polling, real branches, real draft PRs, local runner state,
 worktrees, logs, review gates, and cleanup behavior.
 
-Use this as the manual acceptance checklist first. Automate only after the
-manual shape is stable.
+The default `npm run smoke:live` run is the publish-gate smoke. It packages the
+current code with `npm pack`, runs the packaged CLI, creates real GitHub Issues,
+and verifies the runner-owned GitHub handoff. This checklist tracks what is now
+automated and what remains a manual/deeper release check.
+
+Run focused subsets while developing:
+
+```sh
+npm run smoke:live -- --scenario package-install --cleanup
+npm run smoke:live -- --scenario discovery-matrix --cleanup
+npm run smoke:live -- --scenario quality-gates --cleanup
+npm run smoke:live -- --scenario plan-auto-blocking --cleanup
+```
+
+Run the full publish gate before release:
+
+```sh
+npm run smoke:live -- --cleanup
+```
+
+## Automated scenario map
+
+- `baseline` - packaged CLI help/version/health/setup/status and package files.
+- `package-install` - installs the packed package into an external Node project,
+  imports the root and `config/schema` exports, and runs the installed bin.
+- `discovery-matrix` - verifies skipped issue states for manual, conflicting
+  authorization, running, blocked, and review labels.
+- `real-codex` - runs one docs-only scoped issue through the real Codex command.
+- `scoped-runner-commit` - daemon scoped success with runner-owned commit.
+- `scoped-local-commit` - daemon scoped success with accepted agent local commit.
+- `run-scoped` - direct `codex-orchestrator run --issue` scoped success.
+- `visual-proof` - runner-owned screenshot proof is attached to the PR.
+- `quality-gates` - blocks missing TDD, missing code-review, and missing
+  cleanup-review evidence before publication.
+- `local-commit-blocked` - blocks agent local commits when policy disallows them.
+- `denied-secret` - blocks a configured denied path before PR creation.
+- `invalid-report` - blocks invalid scoped completion JSON before publication.
+- `plan-auto` - daemon parent planning, child waves, integration branch, draft PR.
+- `run-plan-auto` - direct `codex-orchestrator run --issue` plan-auto success.
+- `plan-auto-blocking` - blocks malformed graph, planning file mutation, and
+  arbitrary existing issue updates before integration publication.
 
 ## Smoke contract
 
@@ -15,8 +54,8 @@ manual shape is stable.
 - [ ] Run the packaged CLI from `npm pack`, not TypeScript source files.
 - [ ] Use real GitHub Issues and real labels through `gh`.
 - [ ] Use `codex-orchestrator daemon --once` for the primary pickup path.
-- [ ] Use `codex-orchestrator run --issue` only for comparison or focused
-      reruns.
+- [ ] Prove direct `codex-orchestrator run --issue` equivalence through
+      `run-scoped` and `run-plan-auto`.
 - [ ] Keep all smoke-created issues and PRs clearly named with
       `[live-smoke]`.
 - [ ] Do not merge smoke PRs unless the scenario explicitly checks cleanup after
@@ -71,20 +110,16 @@ fake agent may edit files and make local commits only inside the issue worktree.
 
 ## Discovery and daemon pickup
 
-- [ ] Run `codex-orchestrator daemon --target . --once` with no eligible smoke
-      issue.
-- [ ] Verify daemon prints no eligible issues and performs cleanup scan.
-- [ ] Create a smoke issue with no auth label.
-- [ ] Run `codex-orchestrator status --target . --dry-run`.
-- [ ] Verify the issue appears as skipped because it has no configured
-      authorization label.
-- [ ] Add `agent:manual`, run status, and verify it is skipped as manual.
-- [ ] Remove manual label, add both `agent:auto` and `agent:plan-auto`, run
-      status, and verify conflicting authorization is skipped.
-- [ ] Leave only `agent:auto`, run status, and verify it is eligible as
-      `scoped-issue`.
-- [ ] Run `codex-orchestrator daemon --target . --once --max-runs 1`.
-- [ ] Verify daemon logs `running #<issue> scoped-issue`.
+- [ ] `baseline` runs `status --dry-run` with no eligible smoke issue.
+- [ ] `discovery-matrix` verifies `agent:manual` is skipped as manual.
+- [ ] `discovery-matrix` verifies `agent:auto` plus `agent:plan-auto` is skipped
+      as conflicting authorization.
+- [ ] `discovery-matrix` verifies `agent:running`, `agent:blocked`, and
+      `agent:review` are skipped with deterministic reasons.
+- [ ] Success scenarios verify daemon logs `running #<issue> scoped-issue` or
+      `running #<issue> plan-parent`.
+- [ ] Manual/deeper: verify a totally unlabeled issue stays invisible to daemon
+      discovery, because status queries only configured discovery labels.
 
 Expected result: daemon discovers exactly one eligible issue and skips all
 blocked states deterministically.
@@ -171,16 +206,17 @@ Expected result: unsafe or unverifiable work never gets pushed or opened as a PR
 
 ## Quality review gates
 
-- [ ] Runtime change without a test file is blocked when TDD requires test
-      changes.
-- [ ] Runtime change with tests but no red-green validation evidence is blocked.
-- [ ] Runtime change with no code-review evidence is blocked.
-- [ ] Runtime change touching at least three runtime files without cleanup-review
-      evidence is blocked.
-- [ ] Same change with test file, red-green evidence, code-review evidence, and
-      cleanup-review evidence passes.
-- [ ] Tests-only change does not require runtime review gates unnecessarily.
-- [ ] Documentation-only change does not require runtime review gates.
+- [ ] `quality-gates` blocks runtime changes with tests but no red-green
+      validation evidence.
+- [ ] `quality-gates` blocks runtime changes with TDD evidence but no
+      code-review evidence.
+- [ ] `quality-gates` blocks medium runtime changes with TDD and code-review
+      evidence but no cleanup-review evidence.
+- [ ] Existing success scenarios prove a runtime change with test, TDD evidence,
+      and code-review evidence can pass.
+- [ ] Manual/deeper: runtime change with no test file.
+- [ ] Manual/deeper: tests-only and docs-only exemptions, beyond the real Codex
+      docs-only smoke.
 
 Expected result: quality gates match configured policy and do not over-block
 non-runtime changes.
@@ -248,15 +284,13 @@ integration branch creation, and final draft PR all work through the daemon.
 
 ## Plan-auto blocking cases
 
-- [ ] Planning Codex mutates files.
-- [ ] Verify parent is blocked before child issues are created or updated.
-- [ ] Planning Codex creates a commit.
-- [ ] Verify parent is blocked before child issues are created or updated.
-- [ ] Planning output has malformed graph.
-- [ ] Verify parent is blocked with graph errors.
-- [ ] Planning output tries to update an arbitrary existing issue that is not a
-      marked autonomous child.
-- [ ] Verify parent is blocked.
+- [ ] `plan-auto-blocking` verifies planning file mutation blocks the parent.
+- [ ] `plan-auto-blocking` verifies malformed graph output blocks the parent.
+- [ ] `plan-auto-blocking` verifies an arbitrary existing issue update is
+      rejected before integration publication.
+- [ ] `plan-auto-blocking` verifies no draft PR or remote integration branch is
+      published for those blocked parents.
+- [ ] Manual/deeper: planning Codex creates a commit.
 - [ ] Child execution fails validation.
 - [ ] Verify parent and failed child are blocked without final integration PR.
 - [ ] Child branches create a merge conflict.
@@ -302,11 +336,12 @@ blocked, or unrelated work.
 
 ## CLI comparison path
 
-- [ ] For one scoped issue, run `codex-orchestrator run --target . --issue <n>`
-      instead of daemon.
-- [ ] Verify the result matches the daemon scoped success flow.
-- [ ] For one plan-auto parent, run `codex-orchestrator run --target . --issue <n>`.
-- [ ] Verify the result matches the daemon plan-auto flow.
+- [ ] `run-scoped` runs `codex-orchestrator run --target . --issue <n>` for a
+      scoped issue and verifies the same branch, draft PR, labels, report, log,
+      and state cleanup expected from daemon success.
+- [ ] `run-plan-auto` runs `codex-orchestrator run --target . --issue <n>` for a
+      plan-auto parent and verifies the same parent/child/integration handoff
+      expected from daemon success.
 - [ ] Verify invalid CLI arguments return usage errors for `setup`, `status`,
       `run`, and `daemon`.
 
@@ -314,13 +349,16 @@ Expected result: direct `run` and daemon share the same execution contracts.
 
 ## Public package surface
 
-- [ ] Verify `codex-orchestrator --help` lists all supported commands.
-- [ ] Verify `codex-orchestrator --version` matches `package.json`.
-- [ ] Verify package exports can be imported by a minimal external Node project.
-- [ ] Verify `codex-orchestrator/config/schema` export can be imported and
-      validates a generated config.
-- [ ] Verify `npm pack` contents include `dist/src`, `prompts`, `README.md`,
-      and `LICENSE`.
+- [ ] `baseline` verifies `codex-orchestrator --help`, `--version`, and `health`
+      through the packaged CLI.
+- [ ] `baseline` verifies `npm pack` contents include `dist/src`, `prompts`,
+      `README.md`, and `LICENSE`.
+- [ ] `package-install` verifies package exports can be imported by a minimal
+      external Node project.
+- [ ] `package-install` verifies `codex-orchestrator/config/schema` can be
+      imported by that external project.
+- [ ] `package-install` verifies the installed package bin reports the packaged
+      version.
 - [ ] Verify no local-only test fixtures or smoke secrets are included in the
       package tarball.
 
@@ -344,15 +382,15 @@ scenarios cover deterministic negative and edge cases.
 
 ## Exit criteria
 
-- [ ] All required deterministic scenarios pass.
+- [ ] All default `npm run smoke:live -- --cleanup` scenarios pass.
 - [ ] Every blocked scenario blocks before push/PR publication.
 - [ ] Every success scenario creates exactly the expected branch, draft PR,
       issue labels, issue comments, logs, and local state.
 - [ ] The visual proof scenario embeds a screenshot artifact in the PR body.
 - [ ] Daemon pickup is proven for both scoped and plan-auto work.
 - [ ] Direct `run` is proven equivalent for focused reruns.
-- [ ] Recovery and cleanup behavior is observed after both successful and failed
-      runs.
+- [ ] Recovery and merged-worktree cleanup behavior is observed separately when
+      that area changes.
 - [ ] The real Codex scenario passed as part of the default live smoke run.
 - [ ] All smoke-created branches, issues, PRs, and worktrees are either recorded
       for inspection or cleaned up deliberately.
