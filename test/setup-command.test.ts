@@ -44,6 +44,74 @@ test('setup creates project config and package prompt fallbacks', async () => {
   );
 });
 
+test('setup adds runtime work folders to gitignore without ignoring committed policy files', async () => {
+  const targetRoot = await tempRepo();
+  await writeFile(join(targetRoot, '.gitignore'), 'node_modules/\n', 'utf8');
+
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(
+    await readFile(join(targetRoot, '.gitignore'), 'utf8'),
+    [
+      'node_modules/',
+      '',
+      '# codex-orchestrator runtime files',
+      '.codex-orchestrator/workspaces/',
+      '.codex-orchestrator/state/',
+      '',
+    ].join('\n'),
+  );
+  assert.match(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'), /"github"/);
+});
+
+test('setup dry-run does not write gitignore runtime entries', async () => {
+  const targetRoot = await tempRepo();
+
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    dryRun: true,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  await assert.rejects(readFile(join(targetRoot, '.gitignore'), 'utf8'), /ENOENT/);
+});
+
+test('setup does not duplicate existing runtime gitignore entries', async () => {
+  const targetRoot = await tempRepo();
+  await writeFile(join(targetRoot, '.gitignore'), './.codex-orchestrator/state\n', 'utf8');
+
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(
+    await readFile(join(targetRoot, '.gitignore'), 'utf8'),
+    [
+      './.codex-orchestrator/state',
+      '',
+      '# codex-orchestrator runtime files',
+      '.codex-orchestrator/workspaces/',
+      '',
+    ].join('\n'),
+  );
+});
+
 test('setup infers GitHub owner and repo from origin remote', async () => {
   const targetRoot = await tempRepo();
   await initGitHubRemote(targetRoot, 'git@github.com:SergiiMytakii/IntelleReach.git');
@@ -248,6 +316,7 @@ test('dry-run reports intended automation without writing files or creating labe
   assert.equal(result.labelPlan.wouldCreate.length, 7);
   assert.match(result.output, /.codex-orchestrator\/config.json/);
   assert.match(result.output, /labels: create-missing/);
+  assert.match(result.output, /gitignore runtime entries: \.codex-orchestrator\/workspaces\/, \.codex-orchestrator\/state\//);
   assert.match(result.output, /prd: package-owned-prompt-fallback/);
   assert.match(result.output, /Codex will not be launched/);
   await assert.rejects(readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'), /ENOENT/);
