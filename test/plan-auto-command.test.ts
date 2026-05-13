@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -21,6 +21,16 @@ import { issueFixture } from './fixtures/issues.js';
 const execFileAsync = promisify(execFile);
 const labels = validConfig.github.labels;
 const now = new Date('2026-05-08T12:00:00.000Z');
+
+test('plan auto command delegates handoff evidence rendering to runner evidence module', async () => {
+  const source = await readFile('src/runner/plan-auto-command.ts', 'utf8');
+
+  assert.doesNotMatch(source, /function buildChildReviewReport/);
+  assert.doesNotMatch(source, /function buildIssueTreeReviewReport/);
+  assert.doesNotMatch(source, /function buildIssueTreePullRequestBody/);
+  assert.doesNotMatch(source, /function renderProofArtifacts/);
+  assert.match(source, /from '\.\/handoff-evidence\.js'/);
+});
 
 async function tempGitProject(configOverride?: (config: CodexOrchestratorConfig) => CodexOrchestratorConfig): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-plan-'));
@@ -172,7 +182,9 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.match(result.childIssues[0]?.body ?? '', /Stable ID: child-a/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Parent issue: #156/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts:[\s\S]*#157 none/);
   assert.match(result.reportComment, /codex-orchestrator issue-tree review report for #156/);
+  assert.match(result.reportComment, /Proof Artifacts[\s\S]*#157 none/);
   assert.deepEqual(issueAdapter.removedLabels.at(-1), { issueNumber: 156, labels: [labels.running.name] });
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 156, labels: [labels.review.name] });
   assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);

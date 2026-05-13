@@ -1,10 +1,10 @@
 import { readFile } from 'node:fs/promises';
 
 import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
-import type { SessionCommitInfo } from '../git/worktree.js';
 import type { ShellCommandExecutor } from '../process/command.js';
 import { projectConfigPath } from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
+import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export async function readRunnerConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
   const content = await readFile(projectConfigPath(targetRoot), 'utf8');
@@ -60,19 +60,6 @@ export function mergeArtifacts(
     merged.push(artifact);
   }
   return merged;
-}
-
-export function renderCommitEvidence(commits: SessionCommitInfo[]): string[] {
-  if (commits.length === 0) {
-    return ['- none'];
-  }
-  return commits.map((commit) => `- ${commit.sha.slice(0, 12)} ${commit.subject}`);
-}
-
-export interface RunnerValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
 }
 
 export async function runConfiguredChecks(

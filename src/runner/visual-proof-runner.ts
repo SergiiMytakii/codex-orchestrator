@@ -6,9 +6,9 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import type { RunnerValidationLine } from './command-utils.js';
 import type { ScopedCompletionReport } from './completion-report.js';
-import { shouldApplyVisualProofGate } from './review-gates.js';
+import type { RunnerValidationLine } from './handoff-evidence.js';
+import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
 
 interface ScreenshotArtifactSnapshot {
   path: string;
@@ -33,14 +33,15 @@ export interface RunnerVisualProofResult {
 }
 
 export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promise<RunnerVisualProofResult> {
-  const commandTemplate = input.config.reviewGates.visualProof.runnerValidationCommand?.trim();
+  const policy = runnerVisualProofPolicy(input.config);
+  const commandTemplate = policy.commandTemplate;
   if (!commandTemplate || !shouldApplyVisualProofGate(input)) {
     return { validation: [], artifacts: [] };
   }
 
   const proofDir = join(
     input.worktreePath,
-    input.config.reviewGates.visualProof.artifactDir,
+    policy.artifactDir,
     `issue-${input.issueNumber}`,
   );
   const runtimeDir = runnerVisualProofRuntimeDir(input.worktreePath, input.issueNumber);
@@ -56,16 +57,16 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     cwd: input.worktreePath,
     env: {
       ...runnerCommandBaseEnv(),
-      ...runnerPassthroughEnv(input.config.reviewGates.visualProof.envPassthrough ?? []),
+      ...runnerPassthroughEnv(policy.envPassthrough),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
-      CODEX_ORCHESTRATOR_ARTIFACT_DIR: input.config.reviewGates.visualProof.artifactDir,
+      CODEX_ORCHESTRATOR_ARTIFACT_DIR: policy.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
       CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR: playwrightProfileDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
       PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersDir,
     },
-    timeoutMs: input.config.reviewGates.visualProof.runnerTimeoutMs,
+    timeoutMs: policy.timeoutMs,
   });
   const after = await listScreenshotArtifacts(input.worktreePath, proofDir);
   const produced = after.filter((artifact) => {
@@ -92,13 +93,13 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     };
   }
 
-  const requiredArtifactCount = input.config.reviewGates.visualProof.minScreenshotArtifacts;
+  const requiredArtifactCount = policy.minScreenshotArtifacts;
   if (artifacts.length < requiredArtifactCount) {
     return {
       validation: [{
         command,
         status: 'failed',
-        summary: `runner visual proof failed: command completed but did not produce a screenshot artifact under ${input.config.reviewGates.visualProof.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
+        summary: `runner visual proof failed: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
       }],
       artifacts,
     };

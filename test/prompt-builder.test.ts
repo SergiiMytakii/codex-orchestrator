@@ -13,6 +13,10 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from '../src/runner/prompt.js';
+import {
+  buildQualityGatePromptLines,
+  buildVisualProofPromptLines,
+} from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { commentFixture, issueFixture } from './fixtures/issues.js';
 
@@ -46,6 +50,54 @@ test('prompt builder includes issue context, workflow, publication, safety, and 
   assert.match(prompt, /cleanup-review/);
   assert.match(prompt, /code-review/);
 });
+
+test('prompt builder uses review-gate policy contract lines', async () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        runtimeChangedPathGlobs: ['src/runtime/**/*.ts'],
+        testChangedPathGlobs: ['test/runtime/**/*.test.ts'],
+        cleanupReview: {
+          ...validConfig.reviewGates.quality.cleanupReview,
+          runtimeFileThreshold: 4,
+        },
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        artifactDir: '.proofs',
+        runnerValidationCommand: 'node .proofs/issue-${issueNumber}/visual-proof.mjs',
+        envPassthrough: ['LOGIN_EMAIL'],
+      },
+    },
+  };
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({ number: 155, labels: ['agent:auto'], body: 'Fix UI overlap' }),
+    config,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-155',
+    worktreePath: '/worktree',
+  });
+
+  for (const line of buildQualityGatePromptLines(config)) {
+    assert.match(prompt, new RegExp(escapeRegExp(line)));
+  }
+  for (const line of buildVisualProofPromptLines(config, 155)) {
+    assert.match(prompt, new RegExp(escapeRegExp(line)));
+  }
+
+  const source = await readFile('src/runner/prompt.ts', 'utf8');
+  assert.doesNotMatch(source, /function qualityGatePromptLines/);
+  assert.doesNotMatch(source, /function visualProofPromptLines/);
+});
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 test('prompt builder keeps shell-like issue text inert and literal', () => {
   const maliciousText = '$(touch /tmp/owned) `touch /tmp/owned` ${reportPath}; gh pr create';

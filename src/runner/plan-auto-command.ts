@@ -10,13 +10,18 @@ import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import {
-  bulletList,
   formatSessionTimestamp,
   readRunnerConfig,
-  renderCommitEvidence,
   runConfiguredChecks,
-  type RunnerValidationLine,
 } from './command-utils.js';
+import {
+  buildChildBlockedReport,
+  buildChildReviewReport,
+  buildIssueTreePullRequestBody,
+  buildIssueTreeReviewReport,
+  buildParentBlockedReport,
+  type RunnerValidationLine,
+} from './handoff-evidence.js';
 import {
   readPlanAutoCompletionReport,
   type PlanAutoCompletionReport,
@@ -369,18 +374,23 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderParentTemplate(config.pullRequests.issueTreeTitle, options.issueNumber),
-      body: buildIssueTreePullRequestBody(options.issueNumber, childIssues, executionResults, finalValidation),
+      body: buildIssueTreePullRequestBody({
+        parentIssueNumber: options.issueNumber,
+        childIssues,
+        childResults: executionResults,
+        finalValidation,
+      }),
       headBranch: branchName,
       baseBranch: config.branches.base,
     });
 
-    const reportComment = buildIssueTreeReviewReport(
-      options.issueNumber,
+    const reportComment = buildIssueTreeReviewReport({
+      parentIssueNumber: options.issueNumber,
       pullRequest,
-      batches.batches,
-      executionResults,
+      batches: batches.batches,
+      childResults: executionResults,
       finalValidation,
-    );
+    });
     await markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults);
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
@@ -628,12 +638,12 @@ async function blockFailedBatch(
     await issueAdapter.addLabels(failure.child.issue.number, [config.github.labels.blocked.name]);
     await issueAdapter.postComment(
       failure.child.issue.number,
-      [
-        `codex-orchestrator blocked child #${failure.child.issue.number} for parent #${parentIssueNumber}`,
-        'Reasons',
-        `- ${failure.message}`,
-        'Worktree preserved for maintainer inspection.',
-      ].join('\n'),
+      buildChildBlockedReport({
+        parentIssueNumber,
+        childIssueNumber: failure.child.issue.number,
+        reasons: [failure.message],
+        details: ['Worktree preserved for maintainer inspection.'],
+      }),
     );
   }
   for (const result of successfulUnmerged) {
@@ -641,13 +651,13 @@ async function blockFailedBatch(
     await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
     await issueAdapter.postComment(
       result.child.issue.number,
-      [
-        `codex-orchestrator blocked child #${result.child.issue.number} for parent #${parentIssueNumber}`,
-        'Reasons',
-        '- A sibling child failed before the batch merge; this child branch was not merged.',
-        `- Branch preserved: ${result.branchName}`,
-        `- Worktree preserved: ${result.worktreePath}`,
-      ].join('\n'),
+      buildChildBlockedReport({
+        parentIssueNumber,
+        childIssueNumber: result.child.issue.number,
+        reasons: ['A sibling child failed before the batch merge; this child branch was not merged.'],
+        branchName: result.branchName,
+        worktreePath: result.worktreePath,
+      }),
     );
   }
 }
@@ -672,21 +682,26 @@ async function handleMergeConflict(
     await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
     await issueAdapter.postComment(
       result.child.issue.number,
-      [
-        `codex-orchestrator blocked child #${result.child.issue.number} for parent #${parentIssueNumber}`,
-        'Reasons',
-        result.child.issue.number === childResult.child.issue.number
-          ? `- Merge conflict from branch ${childResult.branchName}`
-          : `- A sibling merge conflict stopped the batch before publication: ${childResult.branchName}`,
-        `- Parent worktree: ${error.worktreePath}`,
-        `- Child worktree: ${result.worktreePath}`,
-        `- Child branch preserved: ${result.branchName}`,
-        abortMessage ? `- Merge abort also failed: ${abortMessage}` : '- Merge abort completed.',
-        'Batch Children',
-        ...bulletList(batchResults.map((batchResult) => `#${batchResult.child.issue.number} ${batchResult.branchName}`)),
-        'Git Output',
-        ...bulletList([error.stderr || error.stdout || 'no git output']),
-      ].join('\n'),
+      buildChildBlockedReport({
+        parentIssueNumber,
+        childIssueNumber: result.child.issue.number,
+        reasons: [
+          result.child.issue.number === childResult.child.issue.number
+            ? `Merge conflict from branch ${childResult.branchName}`
+            : `A sibling merge conflict stopped the batch before publication: ${childResult.branchName}`,
+        ],
+        details: [
+          `- Parent worktree: ${error.worktreePath}`,
+          `- Child worktree: ${result.worktreePath}`,
+          `- Child branch preserved: ${result.branchName}`,
+          abortMessage ? `- Merge abort also failed: ${abortMessage}` : '- Merge abort completed.',
+        ],
+        batchChildren: batchResults.map((batchResult) => ({
+          issueNumber: batchResult.child.issue.number,
+          branchName: batchResult.branchName,
+        })),
+        gitOutput: error.stderr || error.stdout || 'no git output',
+      }),
     );
   }
 }
@@ -703,7 +718,7 @@ async function markCompletedChildrenReviewReady(
     await issueAdapter.addLabels(childResult.child.issue.number, [config.github.labels.review.name]);
     await issueAdapter.postComment(
       childResult.child.issue.number,
-      buildChildReviewReport(parentIssueNumber, childResult),
+      buildChildReviewReport({ parentIssueNumber, result: childResult }),
     );
     await store.removeRun(childResult.child.issue.number);
   }
@@ -723,13 +738,15 @@ async function blockCompletedChildren(
     await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
     await issueAdapter.postComment(
       result.child.issue.number,
-      [
-        `codex-orchestrator blocked child #${result.child.issue.number} for parent #${parentIssueNumber}`,
-        'Reasons',
-        `- ${reason}`,
-        `- Merged child branch was not published: ${result.branchName}`,
-        `- Parent worktree preserved: ${parentWorktreePath}`,
-      ].join('\n'),
+      buildChildBlockedReport({
+        parentIssueNumber,
+        childIssueNumber: result.child.issue.number,
+        reasons: [reason],
+        details: [
+          `- Merged child branch was not published: ${result.branchName}`,
+          `- Parent worktree preserved: ${parentWorktreePath}`,
+        ],
+      }),
     );
     await store.removeRun(result.child.issue.number);
   }
@@ -742,15 +759,12 @@ async function finishPlanBlocked(
   reasons: string[],
   mutatedChildren: GitHubIssue[],
 ): Promise<PlanAutoCommandResult> {
-  const reportComment = [
-    `codex-orchestrator blocked parent issue-tree execution for #${result.parentIssueNumber}`,
-    'Reasons',
-    ...bulletList(reasons),
-    'Log',
-    ...bulletList([result.logPath]),
-    'Mutated Child Issues',
-    ...bulletList(mutatedChildren.map((issue) => `#${issue.number} ${issue.title}`)),
-  ].join('\n');
+  const reportComment = buildParentBlockedReport({
+    parentIssueNumber: result.parentIssueNumber,
+    reasons,
+    logPath: result.logPath,
+    mutatedChildren,
+  });
   await issueAdapter.removeLabels(result.parentIssueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.parentIssueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.parentIssueNumber, reportComment);
@@ -765,116 +779,8 @@ function dependencyIssuesFor(child: AutonomousChildNode, allChildren: Autonomous
   });
 }
 
-function buildChildReviewReport(parentIssueNumber: number, result: ChildExecutionResult): string {
-  return [
-    `codex-orchestrator child review report for #${result.child.issue.number}`,
-    `Parent issue: #${parentIssueNumber}`,
-    `Integration branch: ${result.branchName}`,
-    'Changes',
-    ...bulletList(result.changedFiles),
-    'Validation',
-    ...result.validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
-    'Proof Artifacts',
-    ...renderProofArtifacts(result.artifacts),
-    'Local Commits',
-    ...renderCommitEvidence(result.commits),
-    'Log',
-    ...bulletList([result.logPath]),
-    'Skipped Checks',
-    ...bulletList(result.skippedChecks),
-    'Residual Risks',
-    ...bulletList(result.residualRisks),
-  ].join('\n');
-}
-
-function buildIssueTreeReviewReport(
-  parentIssueNumber: number,
-  pullRequest: GitHubPullRequest,
-  batches: AutonomousChildNode[][],
-  childResults: ChildExecutionResult[],
-  finalValidation: RunnerValidationLine[],
-): string {
-  return [
-    `codex-orchestrator issue-tree review report for #${parentIssueNumber}`,
-    'Pull Request',
-    `- ${pullRequest.url}`,
-    'Execution Batches',
-    ...batches.map((batch, index) => `- Batch ${index + 1}: ${batch.map((child) => `#${child.issue.number}`).join(', ')}`),
-    'Child Issues',
-    ...childResults.map((result) => `- #${result.child.issue.number} ${result.child.issue.title}: ${result.branchName}`),
-    'Validation',
-    ...childResults.flatMap((result) => result.validation.map((line) => `- #${result.child.issue.number} ${line.command}: ${line.status} - ${line.summary}`)),
-    ...finalValidation.map((line) => `- final ${line.command}: ${line.status} - ${line.summary}`),
-    'Skipped Checks',
-    ...bulletList(childResults.flatMap((result) => result.skippedChecks)),
-    'Proof Artifacts',
-    ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
-    'Logs',
-    ...childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
-    'Local Commits',
-    ...childResults.flatMap((result) => renderCommitEvidence(result.commits).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
-    'Residual Risks',
-    ...bulletList(childResults.flatMap((result) => result.residualRisks)),
-  ].join('\n');
-}
-
-function buildIssueTreePullRequestBody(
-  parentIssueNumber: number,
-  childIssues: GitHubIssue[],
-  childResults: ChildExecutionResult[],
-  finalValidation: RunnerValidationLine[],
-): string {
-  return [
-    `Parent issue: #${parentIssueNumber}`,
-    '',
-    'Child issues:',
-    ...childIssues.map((issue) => `- #${issue.number} ${issue.title}`),
-    '',
-    'Changed files:',
-    ...childResults.flatMap((result) => [
-      `- #${result.child.issue.number}:`,
-      ...result.changedFiles.map((file) => `  - ${file}`),
-    ]),
-    '',
-    'Validation:',
-    ...childResults.flatMap((result) => result.validation.map((line) => `- #${result.child.issue.number} ${line.command}: ${line.status} - ${line.summary}`)),
-    ...finalValidation.map((line) => `- final ${line.command}: ${line.status} - ${line.summary}`),
-    '',
-    'Skipped checks:',
-    ...bulletList(childResults.flatMap((result) => result.skippedChecks)),
-    '',
-    'Proof artifacts:',
-    ...childResults.flatMap((result) => renderProofArtifacts(result.artifacts).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
-    '',
-    'Logs:',
-    ...childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
-    '',
-    'Local commits:',
-    ...childResults.flatMap((result) => renderCommitEvidence(result.commits).map((line) => `- #${result.child.issue.number} ${line.replace(/^- /, '')}`)),
-    '',
-    'Residual risks:',
-    ...bulletList(childResults.flatMap((result) => result.residualRisks)),
-    '',
-    'Merge summary:',
-    ...childResults.map((result) => `- ${result.branchName} merged for #${result.child.issue.number}`),
-    '',
-    'Auto-merge is disabled.',
-  ].join('\n');
-}
-
 function renderParentTemplate(template: string, parentIssueNumber: number): string {
   return template.replaceAll('${parentIssueNumber}', String(parentIssueNumber));
-}
-
-function renderProofArtifacts(artifacts: ScopedCompletionReport['artifacts']): string[] {
-  if (artifacts.length === 0) {
-    return ['- none'];
-  }
-  return artifacts.map((artifact) => {
-    const target = artifact.url ?? artifact.path ?? 'missing-target';
-    const label = `${artifact.type}: ${artifact.description}`;
-    return artifact.type === 'screenshot' ? `- ![${label.replace(/[\[\]]/g, '')}](${target})` : `- ${label}: ${target}`;
-  });
 }
 
 function baseResult(

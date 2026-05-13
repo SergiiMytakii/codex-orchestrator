@@ -7,15 +7,18 @@ import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
-import { GitWorktreeManager, renderBranchTemplate, type SessionCommitInfo } from '../git/worktree.js';
+import { GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import {
-  bulletList,
   formatSessionTimestamp,
   readRunnerConfig,
-  renderCommitEvidence,
-  type RunnerValidationLine,
 } from './command-utils.js';
+import {
+  buildPromotionRequestReport,
+  buildScopedBlockedReport,
+  buildScopedPullRequestBody,
+  buildScopedReviewReport,
+} from './handoff-evidence.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import {
@@ -200,34 +203,34 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderTemplate(config.pullRequests.scopedIssueTitle, options.issueNumber),
-      body: buildPullRequestBody(
+      body: buildScopedPullRequestBody({
         config,
         branchName,
-        options.issueNumber,
-        publishability.changedFiles,
-        publishability.validation,
-        publishability.artifacts,
-        publishability.skippedChecks,
-        publishability.residualRisks,
+        issueNumber: options.issueNumber,
+        changedFiles: publishability.changedFiles,
+        validation: publishability.validation,
+        artifacts: publishability.artifacts,
+        skippedChecks: publishability.skippedChecks,
+        residualRisks: publishability.residualRisks,
         logPath,
-        publishability.commits,
-      ),
+        commits: publishability.commits,
+      }),
       headBranch: branchName,
       baseBranch: config.branches.base,
     });
-    const reportComment = buildReviewReport(
+    const reportComment = buildScopedReviewReport({
       config,
       branchName,
-      options.issueNumber,
+      issueNumber: options.issueNumber,
       pullRequest,
-      publishability.changedFiles,
-      publishability.validation,
-      publishability.artifacts,
-      publishability.skippedChecks,
-      publishability.residualRisks,
+      changedFiles: publishability.changedFiles,
+      validation: publishability.validation,
+      artifacts: publishability.artifacts,
+      skippedChecks: publishability.skippedChecks,
+      residualRisks: publishability.residualRisks,
       logPath,
-      publishability.commits,
-    );
+      commits: publishability.commits,
+    });
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
@@ -276,19 +279,14 @@ async function finishBlocked(
   skippedChecks: string[],
   residualRisks: string[],
 ): Promise<ScopedAutoCommandResult> {
-  const reportComment = [
-    `codex-orchestrator blocked scoped execution for #${result.issueNumber}`,
-    'Reasons',
-    ...bulletList(reasons),
-    'Changed Files',
-    ...bulletList(changedFiles),
-    'Log',
-    ...bulletList([result.logPath]),
-    'Skipped Checks',
-    ...bulletList(skippedChecks),
-    'Residual Risks',
-    ...bulletList(residualRisks),
-  ].join('\n');
+  const reportComment = buildScopedBlockedReport({
+    issueNumber: result.issueNumber,
+    reasons,
+    changedFiles,
+    logPath: result.logPath,
+    skippedChecks,
+    residualRisks,
+  });
   await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.issueNumber, reportComment);
@@ -301,95 +299,11 @@ async function finishPromotionRequested(
   config: CodexOrchestratorConfig,
   report: ScopedCompletionReport,
 ): Promise<ScopedAutoCommandResult> {
-  const promotion = report.promotion;
-  if (!promotion) {
-    throw new Error('promotion is required for needs-promotion');
-  }
-  const reportComment = [
-    `codex-orchestrator promotion requested for #${result.issueNumber}`,
-    `Reason: ${promotion.reason}`,
-    'Criteria',
-    ...bulletList(promotion.criteria),
-    'Evidence',
-    ...bulletList(promotion.evidence),
-    'Review this evidence and replace agent:auto with agent:plan-auto when parent issue-tree orchestration is desired.',
-  ].join('\n');
+  const reportComment = buildPromotionRequestReport({ issueNumber: result.issueNumber, report });
   await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.issueNumber, reportComment);
   return { ...result, status: 'promotion-requested', reportComment };
-}
-
-function buildReviewReport(
-  config: CodexOrchestratorConfig,
-  branchName: string,
-  issueNumber: number,
-  pullRequest: GitHubPullRequest,
-  changedFiles: string[],
-  validation: RunnerValidationLine[],
-  artifacts: ScopedCompletionReport['artifacts'],
-  skippedChecks: string[],
-  residualRisks: string[],
-  logPath: string,
-  commits: SessionCommitInfo[],
-): string {
-  return [
-    `codex-orchestrator review report for #${issueNumber}`,
-    'Pull Request',
-    `- ${pullRequest.url}`,
-    'Changes',
-    ...bulletList(changedFiles),
-    'Validation',
-    ...validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
-    'Proof Artifacts',
-    ...renderProofArtifacts(config, branchName, artifacts),
-    'Log',
-    ...bulletList([logPath]),
-    'Local Commits',
-    ...renderCommitEvidence(commits),
-    'Skipped Checks',
-    ...bulletList(skippedChecks),
-    'Residual Risks',
-    ...bulletList(residualRisks),
-  ].join('\n');
-}
-
-function buildPullRequestBody(
-  config: CodexOrchestratorConfig,
-  branchName: string,
-  issueNumber: number,
-  changedFiles: string[],
-  validation: RunnerValidationLine[],
-  artifacts: ScopedCompletionReport['artifacts'],
-  skippedChecks: string[],
-  residualRisks: string[],
-  logPath: string,
-  commits: SessionCommitInfo[],
-): string {
-  return [
-    `Closes #${issueNumber}`,
-    '',
-    'Changed files:',
-    ...bulletList(changedFiles),
-    '',
-    'Validation:',
-    ...validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
-    '',
-    'Proof artifacts:',
-    ...renderProofArtifacts(config, branchName, artifacts),
-    '',
-    'Log:',
-    ...bulletList([logPath]),
-    '',
-    'Local commits:',
-    ...renderCommitEvidence(commits),
-    '',
-    'Skipped checks:',
-    ...bulletList(skippedChecks),
-    '',
-    'Residual risks:',
-    ...bulletList(residualRisks),
-  ].join('\n');
 }
 
 function baseResult(
@@ -418,28 +332,4 @@ function isMobileIssue(issue: GitHubIssue): boolean {
   const labels = issue.labels.map((label) => label.name).join('\n');
   const text = `${issue.title}\n${issue.body}\n${labels}`;
   return /\b(?:android|flutter|ios|iphone|ipad|mobile|emulator|apk|aab|dart)\b/iu.test(text);
-}
-
-function renderProofArtifacts(
-  config: CodexOrchestratorConfig,
-  branchName: string,
-  artifacts: ScopedCompletionReport['artifacts'],
-): string[] {
-  if (artifacts.length === 0) {
-    return ['- none'];
-  }
-  return artifacts.map((artifact) => {
-    const target = artifact.url ?? rawGitHubUrl(config, branchName, artifact.path ?? '');
-    const label = `${artifact.type}: ${artifact.description}`;
-    return artifact.type === 'screenshot' ? `- ![${escapeMarkdownAlt(label)}](${target})` : `- ${label}: ${target}`;
-  });
-}
-
-function rawGitHubUrl(config: CodexOrchestratorConfig, branchName: string, path: string): string {
-  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  return `https://raw.githubusercontent.com/${encodeURIComponent(config.github.owner)}/${encodeURIComponent(config.github.repo)}/${encodeURIComponent(branchName)}/${encodedPath}`;
-}
-
-function escapeMarkdownAlt(value: string): string {
-  return value.replace(/[\[\]]/g, '');
 }

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { evaluateReviewGates, type ReviewGateInput } from '../src/runner/review-gates.js';
+import { shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
@@ -123,6 +124,67 @@ test('quality gate ignores skipped or failed TDD validation evidence', () => {
 
   assert.equal(result.ok, false);
   assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
+});
+
+test('quality gate uses configured runtime and test path globs with positive and negative cases', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        runtimeChangedPathGlobs: ['packages/runtime/**/*.ts'],
+        testChangedPathGlobs: ['packages/runtime/**/*.test.ts'],
+      },
+    },
+  };
+
+  const matching = evaluateReviewGates({
+    ...baseRuntimeGateInput,
+    config,
+    changedFiles: ['packages/runtime/session/index.ts', 'packages/runtime/session/index.test.ts'],
+    validation: [],
+  });
+  const nonMatching = evaluateReviewGates({
+    ...baseRuntimeGateInput,
+    config,
+    changedFiles: ['docs/runtime-notes.md'],
+    validation: [],
+  });
+
+  assert.equal(matching.ok, false);
+  assert.match(matching.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
+  assert.deepEqual(nonMatching, { ok: true, reasons: [] });
+});
+
+test('visual proof policy uses configured issue text and changed path globs with positive and negative cases', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        issueTextPatterns: ['needs visual proof'],
+        changedPathGlobs: ['apps/web/**/*.tsx'],
+      },
+    },
+  };
+
+  assert.equal(shouldApplyVisualProofGate({
+    config,
+    issue: issueFixture({ number: 155, title: 'Backend cleanup', body: 'No screenshots.' }),
+    changedFiles: ['apps/web/screens/Home.tsx'],
+  }), true);
+  assert.equal(shouldApplyVisualProofGate({
+    config,
+    issue: issueFixture({ number: 155, title: 'Needs visual proof', body: 'No UI files changed.' }),
+    changedFiles: ['src/server.ts'],
+  }), true);
+  assert.equal(shouldApplyVisualProofGate({
+    config,
+    issue: issueFixture({ number: 155, title: 'Backend cleanup', body: 'No screenshots.' }),
+    changedFiles: ['src/server.ts'],
+  }), false);
 });
 
 test('review gates accept runner-owned visual proof as UI layout test evidence', async () => {

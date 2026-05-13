@@ -11,6 +11,7 @@ import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
 import { GitWorktreeManager } from '../src/git/worktree.js';
 import type { ShellCommandExecutor } from '../src/process/command.js';
+import { buildScopedPullRequestBody, buildScopedReviewReport } from '../src/runner/handoff-evidence.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
 import { sessionCodexHomePath } from '../src/runner/session-home.js';
@@ -63,6 +64,35 @@ async function writeProjectConfig(
     'utf8',
   );
 }
+
+test('scoped handoff evidence renders review report and PR body proof artifacts', () => {
+  const evidence = {
+    config: { ...validConfig, github: { ...validConfig.github, owner: 'example', repo: 'repo' } },
+    branchName: 'codex/issue-155',
+    issueNumber: 155,
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    validation: [{ command: 'Playwright screenshots', status: 'passed' as const, summary: '390px viewport passed' }],
+    artifacts: [{ type: 'screenshot' as const, path: '.codex-orchestrator/proofs/issue-155/390.png', description: '390px layout' }],
+    skippedChecks: ['BrowserUse unavailable; runner proof used.'],
+    residualRisks: ['None beyond normal review.'],
+    logPath: '/tmp/issue-155.log',
+    commits: [{ sha: '1234567890abcdef', subject: 'Agent checkpoint' }],
+  };
+
+  const report = buildScopedReviewReport({
+    ...evidence,
+    pullRequestUrl: 'https://github.com/example/repo/pull/155',
+  });
+  const body = buildScopedPullRequestBody(evidence);
+
+  assert.match(report, /codex-orchestrator review report for #155/);
+  assert.match(report, /Pull Request\n- https:\/\/github\.com\/example\/repo\/pull\/155/);
+  assert.match(report, /Playwright screenshots: passed - 390px viewport passed/);
+  assert.match(report, /!\[screenshot: 390px layout\]\(https:\/\/raw\.githubusercontent\.com\/example\/repo\/codex%2Fissue-155\/\.codex-orchestrator\/proofs\/issue-155\/390\.png\)/);
+  assert.match(report, /1234567890ab Agent checkpoint/);
+  assert.match(body, /Closes #155/);
+  assert.match(body, /Proof artifacts:\n- !\[screenshot: 390px layout\]/);
+});
 
 test('scoped auto command creates worktree, runner commit, draft PR, review report, and cleans state', async () => {
   const repo = await tempGitProject();
@@ -690,8 +720,18 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     ...config,
     reviewGates: {
       ...config.reviewGates,
+      quality: {
+        ...config.reviewGates.quality,
+        runtimeChangedPathGlobs: ['src/frontend/**/*.tsx'],
+        testChangedPathGlobs: ['test/**/*.test.ts'],
+        cleanupReview: {
+          ...config.reviewGates.quality.cleanupReview,
+          runtimeFileThreshold: 5,
+        },
+      },
       visualProof: {
         ...config.reviewGates.visualProof,
+        artifactDir: '.proofs',
         runnerValidationCommand: 'npm run visual-proof -- --issue ${issueNumber}',
         runnerTimeoutMs: 1_234,
         envPassthrough: ['CODEX_ORCHESTRATOR_TEST_LOGIN'],
@@ -704,8 +744,10 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires responsive screenshots.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let promptText = '';
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      promptText = input.promptText;
       await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
       await mkdir(join(input.worktreePath, 'test'), { recursive: true });
       await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
@@ -767,9 +809,15 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     });
 
     assert.equal(result.status, 'review-ready');
+    assert.match(promptText, /Runtime files are detected with these globs: src\/frontend\/\*\*\/\*\.tsx\./);
+    assert.match(promptText, /Test files are detected with these globs: test\/\*\*\/\*\.test\.ts\./);
+    assert.match(promptText, /touches at least 5 runtime files/);
+    assert.match(promptText, /npm run visual-proof -- --issue \$\{issueNumber\}/);
+    assert.match(promptText, /CODEX_ORCHESTRATOR_TEST_LOGIN/);
     assert.match(result.reportComment, /npm run visual-proof -- --issue 155: passed/);
     assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
     assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+    assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts:\n- !\[screenshot: runner visual proof 390\.png\]/);
   } finally {
     if (previousLoginEnv === undefined) {
       delete process.env.CODEX_ORCHESTRATOR_TEST_LOGIN;

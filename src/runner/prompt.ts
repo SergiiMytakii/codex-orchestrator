@@ -4,6 +4,10 @@ import { dirname, join } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { AutonomousChildMetadata } from './issue-tree.js';
+import {
+  buildQualityGatePromptLines,
+  buildVisualProofPromptLines,
+} from './review-gate-policy.js';
 export {
   readPlanAutoCompletionReport,
   readScopedCompletionReport,
@@ -81,11 +85,11 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     'Do not run destructive database/cache actions.',
     'Do not run production deploy/release actions.',
     'Use explicit short timeouts for local HTTP probes, for example curl --max-time 10, and avoid blind probing of unrelated localhost ports.',
-    ...qualityGatePromptLines(input.config),
+    ...buildQualityGatePromptLines(input.config),
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    ...visualProofPromptLines(input.config, input.issue.number),
+    ...buildVisualProofPromptLines(input.config, input.issue.number),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -175,62 +179,16 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     'Do not run destructive database/cache actions.',
     'Do not run production deploy/release actions.',
     'Use explicit short timeouts for local HTTP probes, for example curl --max-time 10, and avoid blind probing of unrelated localhost ports.',
-    ...qualityGatePromptLines(input.config),
+    ...buildQualityGatePromptLines(input.config),
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    ...visualProofPromptLines(input.config, input.childIssue.number),
+    ...buildVisualProofPromptLines(input.config, input.childIssue.number),
     'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "log" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
   ].join('\n\n');
-}
-
-function visualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
-  const command = config.reviewGates.visualProof.runnerValidationCommand?.trim();
-  if (!command) {
-    return [
-      'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
-      `For visual/UI work, save screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts.`,
-    ];
-  }
-
-  const envNames = config.reviewGates.visualProof.envPassthrough ?? [];
-  const loginEnvLine = envNames.length > 0
-    ? `The runner visual proof command will receive these project environment variables when they exist: ${envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
-    : 'If authentication is required, make the visual proof script read credentials from environment variables configured in reviewGates.visualProof.envPassthrough; never hardcode credentials.';
-
-  return [
-    `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
-    `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
-    'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
-    'Do not open BrowserUse, Playwright, or any other browser from the child Codex session when this runner-owned visual proof command is configured.',
-    'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
-    'Do not report BrowserUse or browser unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
-    'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
-    'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
-    'The runner will expose CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR for proof scripts that need a stable Playwright user data directory.',
-    loginEnvLine,
-    'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
-  ];
-}
-
-function qualityGatePromptLines(config: CodexOrchestratorConfig): string[] {
-  const quality = config.reviewGates.quality;
-  if (!quality.enabled) {
-    return [];
-  }
-
-  return [
-    '## Quality Gate Contract',
-    'For runtime behavior changes, use strict TDD red-to-green: write one focused behavior test first, prove the test fails before implementation, then make the smallest implementation that passes after implementation.',
-    'Report TDD as a passed validation line that includes failing/red and passing/green evidence. Do not batch many tests before implementation.',
-    `Runtime files are detected with these globs: ${quality.runtimeChangedPathGlobs.join(', ')}.`,
-    `Test files are detected with these globs: ${quality.testChangedPathGlobs.join(', ')}.`,
-    'Run code-review before completion for runtime changes and report it as a passed validation line.',
-    `Run cleanup-review before code-review when the runtime change touches at least ${quality.cleanupReview.runtimeFileThreshold} runtime files, and report it as a passed validation line.`,
-  ];
 }
 
 function localCommitPublicationLine(config: CodexOrchestratorConfig, child: boolean): string {
