@@ -2,8 +2,9 @@ import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitWorktreeManager, SessionCommitInfo } from '../git/worktree.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import { mergeArtifacts, runConfiguredChecks, type RunnerValidationLine } from './command-utils.js';
+import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
+import type { RunnerValidationLine } from './handoff-evidence.js';
 import { evaluateReviewGates } from './review-gates.js';
 import {
   validateChangedPaths,
