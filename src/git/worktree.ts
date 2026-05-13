@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
+import { normalizePath, uniqueSortedPaths } from '../path-policy.js';
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
 
@@ -338,16 +339,8 @@ function parsePorcelainChangedFiles(output: string): string[] {
   return Array.from(new Set(files));
 }
 
-function normalizePath(path: string): string {
-  return path.replaceAll('\\', '/');
-}
-
 function parseNulPaths(output: string): string[] {
   return output.split('\0').filter(Boolean).map(normalizePath);
-}
-
-function uniqueSortedPaths(paths: string[]): string[] {
-  return Array.from(new Set(paths.map(normalizePath))).sort((left, right) => left.localeCompare(right));
 }
 
 function parseSessionCommitLog(output: string): SessionCommitInfo[] {

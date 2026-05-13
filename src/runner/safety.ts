@@ -1,4 +1,5 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { findDeniedPathMatch } from '../path-policy.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 
 export type SafetyViolationCode =
@@ -19,9 +20,10 @@ export interface SafetyViolation {
 export function validateChangedPaths(paths: string[], config: CodexOrchestratorConfig): SafetyViolation[] {
   const patterns = [...config.deny.secretFiles, ...config.deny.additionalPathGlobs];
   return paths.flatMap((path) => {
-    const normalized = normalizePath(path);
-    const matched = patterns.find((pattern) => globMatches(pattern, normalized));
-    return matched ? [{ code: 'secret-file-change' as const, message: `Changed path ${normalized} matches denied pattern ${matched}` }] : [];
+    const matched = findDeniedPathMatch(path, patterns);
+    return matched
+      ? [{ code: 'secret-file-change' as const, message: `Changed path ${matched.path} matches denied pattern ${matched.pattern}` }]
+      : [];
   });
 }
 
@@ -42,23 +44,4 @@ export function validateNoAgentOwnedGitPublication(beforeHead: string, afterHead
     ];
   }
   return [];
-}
-
-function globMatches(pattern: string, path: string): boolean {
-  const escaped = pattern
-    .split('/')
-    .map((segment) => {
-      if (segment === '**') {
-        return '.*';
-      }
-      return segment
-        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-        .replaceAll('*', '[^/]*');
-    })
-    .join('/');
-  return new RegExp(`^${escaped}$`).test(path);
-}
-
-function normalizePath(path: string): string {
-  return path.replaceAll('\\', '/').replace(/^\.\//, '');
 }

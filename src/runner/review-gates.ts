@@ -3,16 +3,18 @@ import { join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import {
+  acceptsScreenshotArtifactPath,
+  classifyChangedPaths,
+  isRunnerVisualProofCodeArtifactPath,
+} from '../path-policy.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
-  changedPathCovers,
-  globMatches,
   hasPassedTddValidation,
   hasPassedValidation,
   isRunnerVisualValidation,
   isStrongVisualValidation,
-  normalizePath,
   regexMatches,
   shouldApplyVisualProofGate,
   validationText,
@@ -68,15 +70,14 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     if (!artifact.path) {
       return false;
     }
-    const path = normalizePath(artifact.path);
-    if (input.worktreePath && !existsSync(join(input.worktreePath, path))) {
-      return false;
-    }
-    return globMatches(`${normalizePath(visualProof.artifactDir)}/**`, path)
-      && (
-        hasPassedRunnerVisualValidation
-        || input.changedFiles.some((file) => changedPathCovers(normalizePath(file), path))
-      );
+    const worktreePath = input.worktreePath;
+    return acceptsScreenshotArtifactPath({
+      artifactPath: artifact.path,
+      artifactDir: visualProof.artifactDir,
+      changedFiles: input.changedFiles,
+      hasPassedRunnerVisualValidation,
+      exists: worktreePath ? (path) => existsSync(join(worktreePath, path)) : undefined,
+    });
   });
 
   if (!hasPassedVisualValidation) {
@@ -106,18 +107,15 @@ function evaluateQualityGate(input: ReviewGateInput): string[] {
     return [];
   }
 
-  const runtimeFiles = input.changedFiles
-    .map(normalizePath)
-    .filter((path) => quality.runtimeChangedPathGlobs.some((pattern) => globMatches(pattern, path)))
-    .filter((path) => !quality.testChangedPathGlobs.some((pattern) => globMatches(pattern, path)));
+  const { runtimeFiles, testFiles } = classifyChangedPaths(input.changedFiles, {
+    runtimeChangedPathGlobs: quality.runtimeChangedPathGlobs,
+    testChangedPathGlobs: quality.testChangedPathGlobs,
+  });
   if (runtimeFiles.length === 0) {
     return [];
   }
 
   const reasons: string[] = [];
-  const testFiles = input.changedFiles
-    .map(normalizePath)
-    .filter((path) => quality.testChangedPathGlobs.some((pattern) => globMatches(pattern, path)));
 
   if (quality.tdd.enabled) {
     const hasTddValidation = hasPassedTddValidation(input.validation, quality.tdd.requiredValidationPatterns);
@@ -161,9 +159,7 @@ function hasPassedRunnerVisualProofEvidence(input: ReviewGateInput): boolean {
     return false;
   }
 
-  const artifactDir = normalizePath(input.config.reviewGates.visualProof.artifactDir);
   return input.changedFiles.some((file) => {
-    const path = normalizePath(file);
-    return globMatches(`${artifactDir}/**`, path) && /\.(?:cjs|js|mjs|ts|tsx)$/iu.test(path);
+    return isRunnerVisualProofCodeArtifactPath(file, input.config.reviewGates.visualProof.artifactDir);
   });
 }

@@ -1,5 +1,6 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import { globMatches } from '../path-policy.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
@@ -61,7 +62,7 @@ export function shouldApplyVisualProofGate(input: {
   const issueText = `${input.issue.title}\n${input.issue.body}`;
   const issueLooksVisual = visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
   const changedUiFiles = input.changedFiles.filter((path) =>
-    visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, normalizePath(path))),
+    visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
   );
 
   return issueLooksVisual || changedUiFiles.length > 0;
@@ -74,13 +75,18 @@ export function hasPassedValidation(validation: RunnerValidationLine[], patterns
 }
 
 export function hasPassedTddValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
-  if (hasPassedValidation(validation, patterns)) {
+  if (validation.some((line) =>
+    line.status === 'passed'
+      && !hasMissingTddProofText(validationText(line))
+      && patterns.some((pattern) => regexMatches(pattern, validationText(line))),
+  )) {
     return true;
   }
 
   const passedTexts = validation
     .filter((line) => line.status === 'passed')
-    .map(validationText);
+    .map(validationText)
+    .filter((text) => !hasMissingTddProofText(text));
   const hasRedEvidence = passedTexts.some(hasTddRedEvidence);
   const hasGreenEvidence = passedTexts.some(hasTddGreenEvidence);
   return hasRedEvidence && hasGreenEvidence;
@@ -102,29 +108,6 @@ export function regexMatches(pattern: string, text: string): boolean {
   return new RegExp(pattern, 'iu').test(text);
 }
 
-export function globMatches(pattern: string, path: string): boolean {
-  const escaped = normalizePath(pattern)
-    .split('/')
-    .map((segment) => {
-      if (segment === '**') {
-        return '.*';
-      }
-      return segment
-        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-        .replaceAll('*', '[^/]*');
-    })
-    .join('/');
-  return new RegExp(`^${escaped}$`).test(normalizePath(path));
-}
-
-export function normalizePath(path: string): string {
-  return path.replaceAll('\\', '/').replace(/^\.\//, '');
-}
-
-export function changedPathCovers(changedPath: string, artifactPath: string): boolean {
-  return changedPath === artifactPath || artifactPath.startsWith(changedPath.replace(/\/?$/, '/'));
-}
-
 export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
   commandTemplate?: string;
   artifactDir: string;
@@ -143,11 +126,16 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
 }
 
 function hasTddRedEvidence(text: string): boolean {
-  return /\bred\b/iu.test(text) || /\b(?:test|spec|check)\b[\s\S]{0,120}\bfail(?:ed|ing)?\b/iu.test(text);
+  return /\bred\s*:/iu.test(text) || /\b(?:test|spec|check)\b[\s\S]{0,120}\bfail(?:ed|ing)?\b/iu.test(text);
 }
 
 function hasTddGreenEvidence(text: string): boolean {
-  return /\bgreen\b/iu.test(text)
+  return /\bgreen\s*:/iu.test(text)
     || /\b(?:test|spec|jest|vitest|playwright|pytest)\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text)
     || /\b(?:flutter|dart|npm|pnpm|yarn)\s+(?:run\s+)?test\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text);
+}
+
+function hasMissingTddProofText(text: string): boolean {
+  return /\b(?:without|missing|no|lack(?:s|ing)?)\b[\s\S]{0,40}\bred[-\s]?green\b/iu.test(text)
+    || /\bred[-\s]?green\b[\s\S]{0,40}\b(?:missing|without|no|lack(?:s|ing)?)\b/iu.test(text);
 }

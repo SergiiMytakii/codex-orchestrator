@@ -79,6 +79,44 @@ test('createIssueWorktree disables branch tracking setup to avoid git config loc
   ]);
 });
 
+test('listChangedFiles normalizes porcelain rename paths through shared path policy', async () => {
+  const executor: ProcessExecutor = async () => ({
+    stdout: 'R  .\\src\\old.ts\0.\\src\\new.ts\0C  .\\docs\\old.md\0.\\docs\\new.md\0',
+    stderr: '',
+    exitCode: 0,
+  });
+  const git = new GitWorktreeManager(executor);
+
+  assert.deepEqual(await git.listChangedFiles('/repo/worktree'), [
+    'src/old.ts',
+    'src/new.ts',
+    'docs/old.md',
+    'docs/new.md',
+  ]);
+});
+
+test('collectSessionChangeSet normalizes and sorts committed plus working paths through shared path policy', async () => {
+  const executor: ProcessExecutor = async (_file, args) => {
+    if (args.includes('diff')) {
+      return { stdout: '.\\src\\z.ts\0.\\src\\a.ts\0', stderr: '', exitCode: 0 };
+    }
+    if (args.includes('status')) {
+      return { stdout: ' M .\\src\\z.ts\0?? .\\test\\z.test.ts\0', stderr: '', exitCode: 0 };
+    }
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+  const git = new GitWorktreeManager(executor);
+
+  const changeSet = await git.collectSessionChangeSet({ worktreePath: '/repo/worktree', baseHead: 'base' });
+
+  assert.deepEqual(changeSet.changedPaths, [
+    'src/a.ts',
+    'src/z.ts',
+    'test/z.test.ts',
+  ]);
+  assert.equal(changeSet.hasChanges, true);
+});
+
 test('collectSessionChangeSet reports committed-only session changes', async () => {
   const { root, repo } = await tempGitProject();
   const git = new GitWorktreeManager();
