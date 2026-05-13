@@ -95,6 +95,19 @@ test('quality gate rejects split TDD proof when green evidence is only a generic
   assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
 });
 
+test('quality gate rejects validation that says red-green proof is missing', () => {
+  const result = evaluateTddGate([
+    {
+      command: 'npm test',
+      status: 'passed',
+      summary: 'all tests passed without red-green proof',
+    },
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
+});
+
 test('quality gate rejects TDD proof with only green evidence', () => {
   const result = evaluateTddGate([
     {

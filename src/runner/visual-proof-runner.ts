@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import { normalizePath } from '../path-policy.js';
 import type { ShellCommandExecutor } from '../process/command.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
@@ -208,10 +209,6 @@ async function listFiles(root: string): Promise<string[]> {
     }
   }
   return files;
-}
-
-function normalizePath(path: string): string {
-  return path.replaceAll('\\', '/').replace(/^\.\//, '');
 }
 
 function isPathInside(parent: string, child: string): boolean {
