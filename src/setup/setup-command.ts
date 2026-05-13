@@ -77,6 +77,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
   if (!dryRun) {
     await writeProjectConfig(options.targetRoot, config);
     await copyPromptFiles(options.targetRoot, options.replacePackageSkills ?? false);
+    await ensureRuntimeGitignoreEntries(options.targetRoot, config);
   }
 
   const output = formatSetupOutput(configPath, labelPlan, config, promptFiles, dryRun);
@@ -89,6 +90,55 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     promptFiles,
     output,
   };
+}
+
+async function ensureRuntimeGitignoreEntries(targetRoot: string, config: CodexOrchestratorConfig): Promise<void> {
+  const gitignorePath = join(targetRoot, '.gitignore');
+  const entries = runtimeGitignoreEntries(config);
+  let existing = '';
+  try {
+    existing = await readFile(gitignorePath, 'utf8');
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      throw error;
+    }
+  }
+
+  const existingLines = new Set(existing.split(/\r?\n/u).map(normalizeExistingGitignoreLine));
+  const missingEntries = entries.filter((entry) => !existingLines.has(entry));
+  if (missingEntries.length === 0) {
+    return;
+  }
+
+  const prefix = existing.length === 0
+    ? ''
+    : existing.endsWith('\n')
+      ? '\n'
+      : '\n\n';
+  await writeFile(
+    gitignorePath,
+    `${existing}${prefix}# codex-orchestrator runtime files\n${missingEntries.join('\n')}\n`,
+    'utf8',
+  );
+}
+
+function gitignoreDirectory(path: string): string {
+  return `${path.replaceAll('\\', '/').replace(/^\.\//u, '').replace(/\/+$/u, '')}/`;
+}
+
+function runtimeGitignoreEntries(config: CodexOrchestratorConfig): string[] {
+  return Array.from(new Set([
+    gitignoreDirectory(config.runner.workspaceRoot),
+    gitignoreDirectory(config.runner.stateDir),
+  ]));
+}
+
+function normalizeExistingGitignoreLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) {
+    return trimmed;
+  }
+  return gitignoreDirectory(trimmed);
 }
 
 function formatSetupOutput(
@@ -114,6 +164,7 @@ function formatSetupOutput(
     'prompts:',
     promptSummary,
     `checks: ${Object.keys(config.checks).join(', ')}`,
+    `gitignore runtime entries: ${runtimeGitignoreEntries(config).join(', ')}`,
     `codex command: ${config.codex.command} ${config.codex.args.join(' ')}`,
     `branches: base ${config.branches.base}, ${config.branches.scopedIssue}, ${config.branches.issueTree}`,
     `pull requests: ${config.pullRequests.scopedIssueTitle}, ${config.pullRequests.issueTreeTitle}`,
