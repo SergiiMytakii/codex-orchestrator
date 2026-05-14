@@ -8,6 +8,7 @@ When cutting a new release:
 
 - Update `CHANGELOG.md` with human-readable “what got better” notes for the new version.
 - Update the **Latest release** section below with a short functional summary (2–6 bullets).
+- Run `npm run smoke:live` only when the user explicitly requests a live smoke run (it creates/updates GitHub issues and PRs).
 
 ### Latest release
 
