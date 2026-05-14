@@ -6,8 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-05-14
+
 ### Added
 - Automatic GitHub release notes on publish (tag + generated release notes), so each npm publish can have matching GitHub “what changed”.
+- Published `CHANGELOG.md` in the npm package, so the npm page can show a clear “what changed” history without leaving the registry.
 
 ### Changed
 - Started maintaining this changelog so release-by-release improvements are easy to scan.
