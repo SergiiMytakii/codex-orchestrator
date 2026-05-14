@@ -44,7 +44,7 @@ test('quality gate accepts TDD red-to-green proof in one validation entry', () =
     },
   ]);
 
-  assert.deepEqual(result, { ok: true, reasons: [] });
+  assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
 });
 
 test('quality gate accepts TDD red-to-green proof split across passed validation entries', () => {
@@ -61,7 +61,7 @@ test('quality gate accepts TDD red-to-green proof split across passed validation
     },
   ]);
 
-  assert.deepEqual(result, { ok: true, reasons: [] });
+  assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
 });
 
 test('quality gate rejects TDD proof with only red evidence', () => {
@@ -167,7 +167,7 @@ test('quality gate uses configured runtime and test path globs with positive and
 
   assert.equal(matching.ok, false);
   assert.match(matching.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
-  assert.deepEqual(nonMatching, { ok: true, reasons: [] });
+  assert.deepEqual(nonMatching, { ok: true, reasons: [], warnings: [] });
 });
 
 test('visual proof policy uses configured issue text and changed path globs with positive and negative cases', () => {
@@ -240,10 +240,10 @@ test('review gates accept runner-owned visual proof as UI layout test evidence',
     worktreePath,
   });
 
-  assert.deepEqual(result, { ok: true, reasons: [] });
+  assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
 });
 
-test('review gates block failed runner-owned visual proof even when a child claimed visual success', async () => {
+test('review gates warn on failed runner-owned visual proof instead of blocking publication', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-review-gates-'));
   const screenshotPath = '.codex-orchestrator/proofs/issue-155/390.png';
   await mkdir(join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
@@ -289,6 +289,45 @@ test('review gates block failed runner-owned visual proof even when a child clai
     worktreePath,
   });
 
-  assert.equal(result.ok, false);
-  assert.match(result.reasons.join('\n'), /runner visual proof failed/);
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /runner visual proof failed/);
+});
+
+test('review gates warn when no runner-owned visual proof command is configured', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        enabled: false,
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        runnerValidationCommand: '',
+      },
+    },
+  };
+
+  const result = evaluateReviewGates({
+    config,
+    issue: issueFixture({ number: 155, title: '[UI] Fix responsive campaign layout', body: 'Requires screenshots.' }),
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    validation: [{ command: '$code-review', status: 'passed', summary: 'No blocking findings.' }],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/frontend/CampaignList.tsx'],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+  });
+
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /visual proof/i);
 });

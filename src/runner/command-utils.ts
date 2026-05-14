@@ -67,15 +67,84 @@ export async function runConfiguredChecks(
   worktreePath: string,
   shellExecutor: ShellCommandExecutor,
   reportValidation: RunnerValidationLine[],
+  changedFiles: string[] = [],
 ): Promise<RunnerValidationLine[]> {
   const lines = [...reportValidation];
+  const policy = config.checksPolicy ?? {};
+  const missingNpmScript = policy.missingNpmScript ?? 'skip';
+  const lintBaseline = policy.lintBaseline ?? { mode: 'strict' as const };
+  const baseEnv = {
+    ...currentProcessEnv(),
+    CODEX_ORCHESTRATOR_CHANGED_FILES: changedFiles.join('\n'),
+    CODEX_ORCHESTRATOR_WORKTREE_PATH: worktreePath,
+  };
+
   for (const [name, command] of Object.entries(config.checks)) {
-    const result = await shellExecutor(command, { cwd: worktreePath });
+    const result = await shellExecutor(command, { cwd: worktreePath, env: baseEnv });
+    if (result.exitCode === 0) {
+      lines.push({ command, status: 'passed', summary: `${name}: passed` });
+      continue;
+    }
+
+    const output = `${result.stderr}\n${result.stdout}`.trim();
+    const missingScript = detectMissingNpmScript(output);
+    if (missingScript && missingNpmScript === 'skip') {
+      lines.push({
+        command,
+        status: 'skipped',
+        summary: `${name}: skipped (missing script: ${missingScript})`,
+      });
+      continue;
+    }
+
+    const looksLikeLint = isLintCheck(name, command);
+    if (looksLikeLint && lintBaseline.mode === 'touched-only' && lintBaseline.touchedFilesCommand) {
+      const touchedResult = await shellExecutor(lintBaseline.touchedFilesCommand, { cwd: worktreePath, env: baseEnv });
+      lines.push({
+        command: lintBaseline.touchedFilesCommand,
+        status: touchedResult.exitCode === 0 ? 'passed' : 'failed',
+        summary: `lint:touched: ${touchedResult.exitCode === 0 ? 'passed' : touchedResult.stderr || touchedResult.stdout || `exit ${touchedResult.exitCode}`}`,
+      });
+      if (touchedResult.exitCode === 0) {
+        lines.push({
+          command,
+          status: 'skipped',
+          summary: `${name}: lint baseline failed (repo-wide lint failed) but touched-files lint passed`,
+        });
+        continue;
+      }
+      lines.push({
+        command,
+        status: 'failed',
+        summary: `${name}: ${output || `exit ${result.exitCode}`}`,
+      });
+      continue;
+    }
+
     lines.push({
       command,
-      status: result.exitCode === 0 ? 'passed' : 'failed',
-      summary: `${name}: ${result.exitCode === 0 ? 'passed' : result.stderr || result.stdout || `exit ${result.exitCode}`}`,
+      status: 'failed',
+      summary: `${name}: ${output || `exit ${result.exitCode}`}`,
     });
   }
   return lines;
+}
+
+function currentProcessEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function detectMissingNpmScript(output: string): string | undefined {
+  const match = output.match(/Missing script:\s*"?([^"\n]+)"?/iu);
+  return match?.[1]?.trim() || undefined;
+}
+
+function isLintCheck(name: string, command: string): boolean {
+  return name.toLowerCase().includes('lint') || /\blint\b/iu.test(command);
 }

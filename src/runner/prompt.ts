@@ -30,6 +30,10 @@ export interface ScopedPromptInput {
   reportPath: string;
   branchName: string;
   worktreePath: string;
+  rework?: {
+    attempt: number;
+    blockedReasons: string[];
+  };
 }
 
 export interface PlanAutoPromptInput {
@@ -67,6 +71,16 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     .map((comment) => `- ${comment.createdAt} ${comment.author.login} (${comment.authorAssociation}): ${comment.body}`)
     .join('\n') || 'none';
 
+  const rework = input.rework
+    ? [
+      '## Rework Request',
+      `This is an automatic rework attempt (#${input.rework.attempt}). Continue from the current worktree state; do not start over.`,
+      'The previous attempt was blocked for these reasons:',
+      ...input.rework.blockedReasons.map((reason) => `- ${reason}`),
+      'Address the blockers, then produce a fresh completion report JSON for the runner.',
+    ].join('\n')
+    : '';
+
   return [
     '# Codex Orchestrator Scoped Implementation',
     '## Issue Context',
@@ -76,6 +90,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     `Body:\n${input.issue.body}`,
     `Labels: ${labels}`,
     `Comments:\n${comments}`,
+    ...(rework ? [rework] : []),
     '## Project Workflow',
     input.workflowPromptText,
     '## Runner-Owned Publication Contract',

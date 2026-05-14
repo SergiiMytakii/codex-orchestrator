@@ -125,6 +125,80 @@ test('implementation publishability blocks failed configured checks before publi
   assert.equal(await git.isWorktreeClean(repo), false);
 });
 
+test('implementation publishability does not fail when an npm script check is missing (skips with warning)', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nupdated\n', 'utf8');
+  await writeScopedReport(reportPath);
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: { typecheck: 'npm run typecheck' } }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: '', stderr: 'npm error Missing script: \"typecheck\"', exitCode: 1 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\n') : '', /missing script/i);
+  assert.match(result.status === 'publish-ready' ? result.validation.map((l) => l.status).join(',') : '', /skipped/);
+});
+
+test('implementation publishability can allow repo-wide lint failures when touched-files lint passes (policy touched-only)', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const x = 1;\n', 'utf8');
+  await writeScopedReport(reportPath, { changes: ['src/feature.ts'] });
+
+  let calls = 0;
+  const shellExecutor = async (command: string) => {
+    calls += 1;
+    if (command.includes('npm run lint:touched')) {
+      return { stdout: 'touched lint ok', stderr: '', exitCode: 0 };
+    }
+    if (command.includes('npm run lint')) {
+      return { stdout: '', stderr: 'lint baseline failure in untouched file', exitCode: 1 };
+    }
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: { lint: 'npm run lint' },
+      checksPolicy: {
+        missingNpmScript: 'skip',
+        lintBaseline: { mode: 'touched-only', touchedFilesCommand: 'npm run lint:touched' },
+      },
+      reviewGates: { quality: { enabled: false } } as any,
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: '[UI] Lint baseline', body: 'Fix only touched files.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: shellExecutor as any,
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(calls >= 2, true);
+  assert.equal(result.status, 'publish-ready');
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\\n') : '', /lint baseline/i);
+});
+
 async function tempGitProject(): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), 'codex-orchestrator-local-session-'));
   await execFileAsync('git', ['init', '-b', 'main', repo]);
@@ -165,13 +239,16 @@ function config(overrides: Partial<CodexOrchestratorConfig> = {}): CodexOrchestr
   };
 }
 
-async function writeScopedReport(reportPath: string): Promise<void> {
+async function writeScopedReport(
+  reportPath: string,
+  overrides: Partial<{ changes: string[] }> = {},
+): Promise<void> {
   await mkdir(join(reportPath, '..'), { recursive: true });
   await writeFile(
     reportPath,
     JSON.stringify({
       status: 'completed',
-      changes: ['README.md'],
+      changes: overrides.changes ?? ['README.md'],
       validation: [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
       artifacts: [],
       skippedChecks: [],

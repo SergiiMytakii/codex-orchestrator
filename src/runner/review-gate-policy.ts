@@ -7,8 +7,9 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
   const command = config.reviewGates.visualProof.runnerValidationCommand?.trim();
   if (!command) {
     return [
-      'For visual/UI work, use the BrowserUse/browser plugin when it is available in the session. If it is unavailable, state that explicitly in skippedChecks instead of claiming visual validation.',
-      `For visual/UI work, save screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts.`,
+      `For visual/UI work, if you can produce screenshot proof, save it under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include it as screenshot artifacts.`,
+      'Prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
+      'If screenshot proof is not possible in this environment, state that explicitly in skippedChecks along with the concrete reason (missing dependencies, missing credentials, dev server cannot start, etc.).',
     ];
   }
 
@@ -21,9 +22,9 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
-    'Do not open BrowserUse, Playwright, or any other browser from the child Codex session when this runner-owned visual proof command is configured.',
+    'Prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
     'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
-    'Do not report BrowserUse or browser unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
+    'Do not report browser tool unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
     'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
     'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
     'The runner will expose CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR for proof scripts that need a stable Playwright user data directory.',
@@ -97,7 +98,7 @@ export function validationText(line: RunnerValidationLine): string {
 }
 
 export function isStrongVisualValidation(line: RunnerValidationLine): boolean {
-  return /(BrowserUse|Playwright|screenshot|viewport)/iu.test(validationText(line));
+  return /(Playwright|screenshot|viewport)/iu.test(validationText(line));
 }
 
 export function isRunnerVisualValidation(line: RunnerValidationLine): boolean {

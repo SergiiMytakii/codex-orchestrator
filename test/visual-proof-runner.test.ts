@@ -97,7 +97,7 @@ test('runner visual proof ignores preexisting screenshots that the command did n
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'failed');
+  assert.equal(result.validation[0]?.status, 'skipped');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });
@@ -153,7 +153,7 @@ test('runner visual proof reports same-size screenshots when file content change
   }]);
 });
 
-test('runner visual proof fails when the command succeeds without producing a screenshot artifact', async () => {
+test('runner visual proof warns when the command succeeds without producing a screenshot artifact', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
   const shellExecutor: ShellCommandExecutor = async () => ({ stdout: 'skipped', stderr: '', exitCode: 0 });
 
@@ -184,7 +184,7 @@ test('runner visual proof fails when the command succeeds without producing a sc
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'failed');
+  assert.equal(result.validation[0]?.status, 'skipped');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });
@@ -239,7 +239,7 @@ test('runner visual proof ignores screenshots inside runner-owned browser intern
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'failed');
+  assert.equal(result.validation[0]?.status, 'skipped');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });

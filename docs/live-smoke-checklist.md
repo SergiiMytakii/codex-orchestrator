@@ -226,7 +226,7 @@ non-runtime changes.
 - [ ] Create a UI/visual smoke issue whose text matches the visual proof
       trigger patterns.
 - [ ] Fake Codex changes a configured frontend path without screenshot artifact.
-- [ ] Verify the run is blocked.
+- [ ] Verify the run is not blocked solely on missing visual proof, but reports a warning.
 - [ ] Configure `reviewGates.visualProof.runnerValidationCommand` to create a
       smoke screenshot artifact under the issue proof directory.
 - [ ] Rerun with visual validation evidence.
@@ -235,11 +235,11 @@ non-runtime changes.
       `.codex-orchestrator/proofs/issue-<number>/`.
 - [ ] Verify runner-owned visual proof environment variables are available to
       the command.
-- [ ] Verify skipped browser or screenshot proof blocks when the skipped reason
-      matches configured block patterns.
+- [ ] Verify skipped browser or screenshot proof is surfaced as a warning when
+      the proof command cannot produce artifacts.
 
-Expected result: visual work requires real proof, and runner-owned proof can
-satisfy the gate.
+Expected result: visual proof is runner-owned when configured, and missing proof
+is surfaced without blocking unrelated progress.
 
 ## Promotion and clarification
 

@@ -628,24 +628,38 @@ test('scoped auto command blocks medium runtime changes without cleanup-review p
   assert.match(result.reportComment, /Quality gate requires passed cleanup-review validation/);
 });
 
-test('scoped auto command blocks UI work without visual proof artifacts', async () => {
+test('scoped auto command retries once on retryable blockers and can recover to review-ready', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
-    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshots at responsive viewports.' }),
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let runCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
-      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
-      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      runCount += 1;
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), `export const attempt = ${runCount};\n`, 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(1, 1);\n', 'utf8');
+      const validation = runCount === 1
+        ? []
+        : [
+          {
+            command: 'TDD red-to-green',
+            status: 'passed',
+            summary: 'Focused behavior test failed before implementation and passed after implementation.',
+          },
+          { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+        ];
       await writeFile(
         input.reportPath,
         JSON.stringify({
           status: 'completed',
-          changes: ['src/frontend/CampaignList.tsx'],
-          validation: [{ command: 'Playwright screenshots', status: 'skipped', summary: 'browser launch failed' }],
+          changes: ['src/feature.ts', 'test/feature.test.ts'],
+          validation,
           artifacts: [],
-          skippedChecks: ['BrowserUse visual verification was not run because no BrowserUse tool is available.'],
+          skippedChecks: [],
           residualRisks: [],
           prohibitedActions: [],
         }),
@@ -664,19 +678,75 @@ test('scoped auto command blocks UI work without visual proof artifacts', async 
     now,
   });
 
+  assert.equal(runCount, 2);
+  assert.equal(result.status, 'review-ready');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+  assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
+});
+
+test('scoped auto command no longer blocks on missing UI visual proof (but can still block on quality gate)', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshots at responsive viewports.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const shellExecutor: ShellCommandExecutor = async (command) => {
+    if (command === 'true') {
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
+    return { stdout: '', stderr: 'missing proof script', exitCode: 1 };
+  };
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/frontend/CampaignList.tsx'],
+          validation: [{ command: 'Playwright screenshots', status: 'skipped', summary: 'browser launch failed' }],
+          artifacts: [],
+          skippedChecks: ['Visual proof was not produced in the child session.'],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor,
+    now,
+  });
+
   assert.equal(result.status, 'blocked');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
-  assert.match(result.reportComment, /Visual proof gate requires a passed BrowserUse\/Playwright\/screenshot validation line/);
-  assert.match(result.reportComment, /Visual proof gate requires at least 1 screenshot artifact/);
+  assert.match(result.reportComment, /Quality gate requires TDD/);
+  assert.match(result.reportComment, /Quality gate requires passed code-review/);
+  assert.doesNotMatch(result.reportComment, /Visual proof gate requires/);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
-test('scoped auto command rejects claimed screenshot artifacts that do not exist', async () => {
+test('scoped auto command does not add visual proof gate blockers for missing screenshot artifacts', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshot proof.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const shellExecutor: ShellCommandExecutor = async (command) => {
+    if (command === 'true') {
+      return { stdout: '', stderr: '', exitCode: 0 };
+    }
+    return { stdout: '', stderr: 'missing proof script', exitCode: 1 };
+  };
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
@@ -706,13 +776,14 @@ test('scoped auto command rejects claimed screenshot artifacts that do not exist
     issueAdapter,
     pullRequestAdapter,
     codexAdapter,
+    shellExecutor,
     now,
   });
 
   assert.equal(result.status, 'blocked');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
-  assert.match(result.reportComment, /Visual proof gate requires a passed BrowserUse\/Playwright\/screenshot validation line/);
-  assert.match(result.reportComment, /Visual proof gate requires at least 1 screenshot artifact/);
+  assert.match(result.reportComment, /Quality gate requires/);
+  assert.doesNotMatch(result.reportComment, /Visual proof gate requires/);
 });
 
 test('scoped auto command can satisfy UI proof gate with runner-owned visual validation command', async () => {

@@ -277,6 +277,14 @@ The package ships fallback prompts so a user does not need to already have a
 local Codex skill pack installed. During setup, compatible existing local skills
 can be reused; missing workflows fall back to package-owned prompts.
 
+Configured checks run before publication. By default, missing `npm run <script>`
+checks are treated as skipped warnings (not failures). You can override this
+behavior with `checksPolicy.missingNpmScript`.
+
+For repos with existing lint debt, `checksPolicy.lintBaseline.mode` can be set
+to `touched-only` so a failing repo-wide lint check can be downgraded when a
+separate “touched files” lint command passes.
+
 For runtime code changes, the default quality gate blocks review handoff unless
 the completion report contains passed validation for:
 
@@ -292,14 +300,12 @@ Runtime and test paths are configurable through
 `reviewGates.quality.runtimeChangedPathGlobs` and
 `reviewGates.quality.testChangedPathGlobs`.
 
-For UI or frontend issues, the default visual proof gate blocks `agent:review`
-unless the agent reports a passed BrowserUse/Playwright/screenshot validation
-line and at least one screenshot artifact. Screenshot artifacts should be saved
-under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in
-the PR and issue review report.
+For UI or frontend issues, visual proof is runner-owned via a configurable
+command (typically Playwright). Screenshot artifacts should be saved under
+`.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in the PR
+and issue review report.
 
-If BrowserUse or browser launch is unavailable inside the child Codex sandbox,
-configure a runner-owned command:
+Configure a runner-owned command:
 
 ```json
 {
@@ -329,18 +335,17 @@ cache and session files are not committed. Screenshot files
 created or updated under
 `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
 runner-owned proof artifacts. A zero-exit proof command that does not create or
-update the configured minimum number of screenshots is treated as failed, so a
-skipped browser run cannot silently satisfy the proof gate.
+update the configured minimum number of screenshots is reported as a warning.
 
 If the target UI requires login, keep credentials outside the config and expose
 only their variable names through `envPassthrough`. The visual proof script can
 read those values, sign in with the browser automation tool it uses, and fail
 with a clear message when a required login variable is missing.
 
-The default Codex command loads the user's Codex config so installed plugins,
-including BrowserUse/browser, remain available to the child agent. It also
-enables network access for the `workspace-write` sandbox so local dev servers can
-bind to `localhost` during browser validation.
+The default Codex command loads the user's Codex config so installed plugins
+remain available to the child agent. It also enables network access for the
+`workspace-write` sandbox so local dev servers can bind to `localhost` during
+browser validation.
 
 ## Local Commits vs Publication
 

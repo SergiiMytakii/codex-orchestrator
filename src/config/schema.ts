@@ -73,6 +73,13 @@ export interface CodexOrchestratorConfig {
     issueTreeOrchestration: WorkflowConfig;
   };
   checks: Record<string, string>;
+  checksPolicy?: {
+    missingNpmScript?: 'fail' | 'skip';
+    lintBaseline?: {
+      mode?: 'strict' | 'touched-only';
+      touchedFilesCommand?: string;
+    };
+  };
   reviewGates: {
     visualProof: {
       enabled: boolean;
@@ -155,6 +162,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   const project = expectObject(root, 'project', errors);
   const workflows = expectObject(root, 'workflows', errors);
   const checks = expectObject(root, 'checks', errors);
+  const checksPolicy = expectOptionalObject(root, 'checksPolicy', errors);
   const reviewGates = expectObject(root, 'reviewGates', errors);
   const deny = expectObject(root, 'deny', errors);
   const branches = expectObject(root, 'branches', errors);
@@ -205,6 +213,10 @@ export function validateConfig(input: unknown): ConfigValidationResult {
 
   if (checks) {
     validateChecks(checks, errors);
+  }
+
+  if (checksPolicy) {
+    validateChecksPolicy(checksPolicy, errors);
   }
 
   if (reviewGates) {
@@ -263,6 +275,19 @@ function expectObject(parent: ObjectRecord, path: string, errors: string[]): Obj
     return undefined;
   }
 
+  return objectValue;
+}
+
+function expectOptionalObject(parent: ObjectRecord, path: string, errors: string[]): ObjectRecord | undefined {
+  const value = readPath(parent, path);
+  if (value === undefined) {
+    return undefined;
+  }
+  const objectValue = asObject(value);
+  if (!objectValue) {
+    errors.push(`${path} must be an object`);
+    return undefined;
+  }
   return objectValue;
 }
 
@@ -398,6 +423,26 @@ function validateChecks(checks: ObjectRecord, errors: string[]): void {
   for (const [name, command] of Object.entries(checks)) {
     if (name.length === 0 || typeof command !== 'string' || command.length === 0) {
       errors.push('checks must map non-empty names to non-empty shell commands');
+    }
+  }
+}
+
+function validateChecksPolicy(policy: ObjectRecord, errors: string[]): void {
+  if ('missingNpmScript' in policy) {
+    expectUnion(policy, 'checksPolicy.missingNpmScript', ['fail', 'skip'] as const, errors);
+  }
+
+  const lintBaseline = 'lintBaseline' in policy ? asObject(policy.lintBaseline) : undefined;
+  if ('lintBaseline' in policy && !lintBaseline) {
+    errors.push('checksPolicy.lintBaseline must be an object');
+    return;
+  }
+  if (lintBaseline) {
+    if ('mode' in lintBaseline) {
+      expectUnion(lintBaseline, 'checksPolicy.lintBaseline.mode', ['strict', 'touched-only'] as const, errors);
+    }
+    if ('touchedFilesCommand' in lintBaseline) {
+      expectString(lintBaseline, 'checksPolicy.lintBaseline.touchedFilesCommand', errors);
     }
   }
 }

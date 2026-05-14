@@ -11,6 +11,6 @@ Run code-review before completion for runtime changes and report the result.
 Report validation, skipped checks, and risks.
 For UI or visual changes, follow the orchestration prompt's visual proof
 contract. If a runner-owned visual proof command is configured, prepare its
-script/artifacts but let the runner execute it. Otherwise use BrowserUse/browser
-when it is available, verify the changed screen in a browser, and attach
-screenshot artifacts.
+script/artifacts (prefer Playwright) but let the runner execute it. If visual
+proof is not possible in this environment, state that explicitly in skipped
+checks with the concrete reason and proceed.

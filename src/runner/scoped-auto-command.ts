@@ -94,6 +94,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   let reportPath = '';
   let logPath = '';
   let pullRequest: GitHubPullRequest | undefined;
+  const store = new RunnerStateStore(targetRoot, config);
 
   await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
 
@@ -105,79 +106,97 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       baseBranch: config.branches.base,
       allowResume: true,
     });
-    const sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(now)}`;
-    promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
-    await mkdir(dirname(reportPath), { recursive: true });
-    await mkdir(isolatedHomePath, { recursive: true });
-    const promptText = buildScopedImplementationPrompt({
-      issue,
-      config,
-      workflowPromptText,
-      promptPath,
-      reportPath,
-      branchName,
-      worktreePath,
-    });
-    await writeDurablePrompt({
-      targetRoot,
-      config,
-      issueNumber: options.issueNumber,
-      sessionId,
-      promptText,
-    });
-    const store = new RunnerStateStore(targetRoot, config);
-    await store.upsertRun({
-      issueNumber: options.issueNumber,
-      mode: 'scoped-issue',
-      workspacePath: worktreePath,
-      sessionId,
-      branchName,
-      promptPath,
-      reportPath,
-      logPath,
-      retryCount: 0,
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-    });
+    const maxReworkAttempts = 1;
+    let rework: { attempt: number; blockedReasons: string[] } | undefined;
+    let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
 
-    const beforeHead = await git.getHead(worktreePath);
-    let codexResult: CodexCommandRunResult;
-    try {
-      codexResult = await codexAdapter.run({
+    for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
+      const attemptNow = attempt === 0 ? now : new Date(now.getTime() + attempt);
+      const sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}`;
+      promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
+      reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
+      logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
+      const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
+      await mkdir(dirname(reportPath), { recursive: true });
+      await mkdir(isolatedHomePath, { recursive: true });
+      const promptText = buildScopedImplementationPrompt({
+        issue,
+        config,
+        workflowPromptText,
+        promptPath,
+        reportPath,
+        branchName,
+        worktreePath,
+        rework,
+      });
+      await writeDurablePrompt({
         targetRoot,
         config,
-        worktreePath,
-        promptPath,
-        promptText,
-        reportPath,
-        isolatedHomePath,
         issueNumber: options.issueNumber,
         sessionId,
-        branchName,
-        timeoutMs: codexTimeoutMs,
-        logPath,
+        promptText,
       });
-    } finally {
-      await cleanupSessionCodexHome(isolatedHomePath);
+      await store.upsertRun({
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        workspacePath: worktreePath,
+        sessionId,
+        branchName,
+        promptPath,
+        reportPath,
+        logPath,
+        retryCount: attempt,
+        createdAt: now.toISOString(),
+        updatedAt: attemptNow.toISOString(),
+      });
+
+      const beforeHead = await git.getHead(worktreePath);
+      let codexResult: CodexCommandRunResult;
+      try {
+        codexResult = await codexAdapter.run({
+          targetRoot,
+          config,
+          worktreePath,
+          promptPath,
+          promptText,
+          reportPath,
+          isolatedHomePath,
+          issueNumber: options.issueNumber,
+          sessionId,
+          branchName,
+          timeoutMs: codexTimeoutMs,
+          logPath,
+        });
+      } finally {
+        await cleanupSessionCodexHome(isolatedHomePath);
+      }
+      const afterHead = await git.getHead(worktreePath);
+      publishability = await runImplementationPublishabilityCheck({
+        config,
+        issue,
+        worktreePath,
+        reportPath,
+        beforeHead,
+        afterHead,
+        codexResult,
+        git,
+        shellExecutor,
+        commitMessage: `Codex: implement issue #${options.issueNumber}`,
+        localPhases: options.localPhases,
+        localPhaseExecutor: options.localPhaseExecutor,
+      });
+
+      if (publishability.status === 'blocked' && attempt < maxReworkAttempts && shouldRequestRework(publishability.reasons)) {
+        rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };
+        continue;
+      }
+
+      break;
     }
-    const afterHead = await git.getHead(worktreePath);
-    const publishability = await runImplementationPublishabilityCheck({
-      config,
-      issue,
-      worktreePath,
-      reportPath,
-      beforeHead,
-      afterHead,
-      codexResult,
-      git,
-      shellExecutor,
-      commitMessage: `Codex: implement issue #${options.issueNumber}`,
-      localPhases: options.localPhases,
-      localPhaseExecutor: options.localPhaseExecutor,
-    });
+
+    if (!publishability) {
+      throw new Error('Runner internal error: missing publishability result');
+    }
 
     if (publishability.status === 'promotion-requested') {
       return finishPromotionRequested(
@@ -257,6 +276,27 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       [],
     );
   }
+}
+
+function shouldRequestRework(reasons: string[]): boolean {
+  if (reasons.some((reason) => /matches denied pattern/iu.test(reason))) {
+    return false;
+  }
+  if (reasons.some((reason) => /runner-owned publication was violated/iu.test(reason))) {
+    return false;
+  }
+  if (reasons.some((reason) => /destructive-db-or-cache|production-deploy-or-release/iu.test(reason))) {
+    return false;
+  }
+
+  const retryablePatterns = [
+    /Quality gate requires/iu,
+    /One or more configured checks failed/iu,
+    /Invalid scoped completion report/iu,
+    /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/iu,
+    /Codex completed without file changes/iu,
+  ];
+  return reasons.some((reason) => retryablePatterns.some((pattern) => pattern.test(reason)));
 }
 
 async function readWorkflowPrompt(path: string): Promise<string> {

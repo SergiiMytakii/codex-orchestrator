@@ -195,7 +195,24 @@ export async function runImplementationPublishabilityCheck(
     };
   }
 
-  let validation = await runConfiguredChecks(input.config, input.worktreePath, input.shellExecutor, report.validation);
+  const validationBeforeChecks = report.validation.length;
+  let validation = await runConfiguredChecks(
+    input.config,
+    input.worktreePath,
+    input.shellExecutor,
+    report.validation,
+    changedFiles,
+  );
+  const checkWarnings = validation
+    .slice(validationBeforeChecks)
+    .filter((line) => line.status === 'skipped')
+    .map((line) => `Configured check warning: ${line.command} - ${line.summary}`);
+  if (checkWarnings.length > 0) {
+    report = {
+      ...report,
+      residualRisks: [...report.residualRisks, ...checkWarnings],
+    };
+  }
   const runnerVisualProof = await runRunnerVisualProof({
     config: input.config,
     issue: input.issue,
@@ -252,6 +269,13 @@ export async function runImplementationPublishabilityCheck(
       skippedChecks: report.skippedChecks,
       residualRisks,
       commits: changeSet.commits,
+    };
+  }
+  if (reviewGate.warnings.length > 0) {
+    residualRisks.push(...reviewGate.warnings);
+    report = {
+      ...report,
+      residualRisks: [...report.residualRisks, ...reviewGate.warnings],
     };
   }
 

@@ -73,6 +73,12 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       typecheck: 'npm run typecheck',
       test: 'npm test',
     },
+    checksPolicy: {
+      missingNpmScript: 'skip',
+      lintBaseline: {
+        mode: 'strict',
+      },
+    },
     reviewGates: {
       visualProof: {
         enabled: true,
@@ -99,23 +105,21 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'components/**',
         ],
         requiredValidationPatterns: [
-          'BrowserUse',
           'Playwright',
           'screenshot',
           'visual',
           'viewport',
+          'runner visual proof',
         ],
         blockOnSkippedPatterns: [
-          'BrowserUse',
           'Playwright',
-          'browser',
           'screenshot',
           'visual',
           'viewport',
-          'dev server',
+          'runner visual proof',
         ],
         minScreenshotArtifacts: 1,
-        runnerValidationCommand: '',
+        runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
         runnerTimeoutMs: 900_000,
         envPassthrough: [],
       },
@@ -216,6 +220,7 @@ export function mergeExistingProjectConfig(
   const existingProject = readObject(existing.project);
   const existingWorkflows = readObject(existing.workflows);
   const existingChecks = readStringRecord(existing.checks);
+  const existingChecksPolicy = readObject(existing.checksPolicy);
   const existingReviewGates = readObject(existing.reviewGates);
   const existingVisualProof = readObject(existingReviewGates?.visualProof);
   const existingQuality = readObject(existingReviewGates?.quality);
@@ -224,6 +229,7 @@ export function mergeExistingProjectConfig(
   const existingPullRequests = readObject(existing.pullRequests);
   const existingIssueClassification = readObject(existing.issueClassification);
 
+  const defaultChecksPolicy = defaults.checksPolicy ?? {};
   return {
     ...defaults,
     github: {
@@ -261,6 +267,14 @@ export function mergeExistingProjectConfig(
       ...existingWorkflows,
     },
     checks: existingChecks ?? defaults.checks,
+    checksPolicy: {
+      ...defaultChecksPolicy,
+      ...existingChecksPolicy,
+      lintBaseline: {
+        ...readObject((defaultChecksPolicy as Record<string, unknown>).lintBaseline),
+        ...readObject(existingChecksPolicy?.lintBaseline),
+      },
+    },
     reviewGates: {
       ...defaults.reviewGates,
       ...existingReviewGates,
