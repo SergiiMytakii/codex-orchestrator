@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -36,6 +36,7 @@ jobs:
         run: |
           package_name="$(npm pkg get name | tr -d '"')"
           package_version="$(npm pkg get version | tr -d '"')"
+          echo "version=${package_version}" >> "$GITHUB_OUTPUT"
 
           if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -48,3 +49,24 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_KEY }}
+
+      - name: Create git tag
+        if: steps.published.outputs.exists == 'false'
+        shell: bash
+        run: |
+          tag="v${{ steps.published.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "${tag}" >/dev/null 2>&1; then
+            echo "tag ${tag} already exists; skipping tag creation"
+            exit 0
+          fi
+          git tag -a "${tag}" -m "${tag}"
+          git push origin "${tag}"
+
+      - name: Create GitHub release (auto notes)
+        if: steps.published.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ format('v{0}', steps.published.outputs.version) }}
+          generate_release_notes: true

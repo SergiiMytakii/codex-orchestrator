@@ -251,6 +251,8 @@ labels.
 
 ## Project Policy
 
+See `CHANGELOG.md` for release-by-release notes.
+
 Every installed repository owns its own config:
 
 ```sh
