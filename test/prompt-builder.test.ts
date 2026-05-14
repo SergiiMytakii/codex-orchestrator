@@ -150,7 +150,7 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
 
   assert.match(prompt, /runner will execute this visual proof command outside the child Codex sandbox/);
   assert.match(prompt, /do not execute this runner-owned command yourself/);
-  assert.match(prompt, /Prefer Playwright-based screenshot proof via the runner-owned command/);
+  assert.match(prompt, /For browser\/web UI work, prefer Playwright-based screenshot proof via the runner-owned command/);
   assert.match(prompt, /primary visual proof path/);
   assert.match(prompt, /Do not report browser tool unavailability as a skipped check/);
   assert.match(prompt, /focused visual proof script with concrete assertions can be the TDD evidence/);
@@ -158,6 +158,45 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
   assert.match(prompt, /CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR/);
   assert.match(prompt, /CODEX_ORCHESTRATOR_LOGIN_EMAIL, CODEX_ORCHESTRATOR_LOGIN_PASSWORD/);
   assert.match(prompt, /never hardcode credentials/);
+});
+
+test('prompt builder directs Android mobile proof to Test Android Apps with non-blocking device fallback', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 155,
+      labels: ['agent:auto'],
+      title: 'Validate Android checkout screen',
+      body: 'Fix the mobile app checkout UI and verify it on Android.',
+    }),
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        visualProof: {
+          ...validConfig.reviewGates.visualProof,
+          runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
+        },
+      },
+    },
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-155',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /For Android mobile app UI work, use device-backed proof/);
+  assert.match(prompt, /`adb devices -l`/);
+  assert.match(prompt, /`export ANDROID_SERIAL=<serial>`/);
+  assert.match(prompt, /`emulator -list-avds`/);
+  assert.match(prompt, /`emulator -avd <avd-name>`/);
+  assert.match(prompt, /`adb wait-for-device`/);
+  assert.match(prompt, /If Test Android Apps skills are unavailable/);
+  assert.match(prompt, /try to enable or load that plugin/);
+  assert.match(prompt, /After selecting the adb target, use Test Android Apps skills/);
+  assert.match(prompt, /Do not use Playwright as the primary proof path for Android mobile app verification/);
+  assert.match(prompt, /If Test Android Apps cannot be enabled, or no usable Android device or emulator is available/);
+  assert.match(prompt, /concrete plugin or adb\/emulator reason/);
 });
 
 test('package scoped workflow prompt requires strict TDD and review gates', async () => {

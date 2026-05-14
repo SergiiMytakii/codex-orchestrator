@@ -8,7 +8,8 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
   if (!command) {
     return [
       `For visual/UI work, if you can produce screenshot proof, save it under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include it as screenshot artifacts.`,
-      'Prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
+      'For browser/web UI work, prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
+      ...androidMobileProofPromptLines(),
       'If screenshot proof is not possible in this environment, state that explicitly in skippedChecks along with the concrete reason (missing dependencies, missing credentials, dev server cannot start, etc.).',
     ];
   }
@@ -22,7 +23,8 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
-    'Prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
+    'For browser/web UI work, prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
+    ...androidMobileProofPromptLines(),
     'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
     'Do not report browser tool unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
     'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
@@ -30,6 +32,17 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     'The runner will expose CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR for proof scripts that need a stable Playwright user data directory.',
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
+  ];
+}
+
+function androidMobileProofPromptLines(): string[] {
+  return [
+    'For Android mobile app UI work, use device-backed proof instead of browser automation: run `adb devices -l`, prefer a connected non-emulator device serial, and run `export ANDROID_SERIAL=<serial>` for the proof session.',
+    'If no physical Android device is listed by adb, run `emulator -list-avds`, start an available AVD in a separate shell with `emulator -avd <avd-name>`, then wait for it with `adb wait-for-device` before testing.',
+    'If Test Android Apps skills are unavailable, try to enable or load that plugin through the available Codex plugin/tool discovery mechanism before falling back.',
+    'After selecting the adb target, use Test Android Apps skills for app launch, navigation, screenshots, logs, and performance evidence.',
+    'Do not use Playwright as the primary proof path for Android mobile app verification.',
+    'If Test Android Apps cannot be enabled, or no usable Android device or emulator is available, report the mobile proof as a warning/skipped check with the concrete plugin or adb/emulator reason; this is not a publication blocker by itself.',
   ];
 }
 

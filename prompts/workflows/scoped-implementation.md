@@ -11,6 +11,12 @@ Run code-review before completion for runtime changes and report the result.
 Report validation, skipped checks, and risks.
 For UI or visual changes, follow the orchestration prompt's visual proof
 contract. If a runner-owned visual proof command is configured, prepare its
-script/artifacts (prefer Playwright) but let the runner execute it. If visual
-proof is not possible in this environment, state that explicitly in skipped
-checks with the concrete reason and proceed.
+script/artifacts (prefer Playwright for browser/web UI) but let the runner
+execute it. For Android mobile app UI work, use device-backed proof instead of
+Playwright: run `adb devices -l`, prefer a connected non-emulator device serial,
+and run `export ANDROID_SERIAL=<serial>`. Otherwise run `emulator -list-avds`,
+start an AVD in a separate shell with `emulator -avd <avd-name>`, and wait with
+`adb wait-for-device`. If Test Android Apps skills are unavailable, try to enable
+or load that plugin through the available Codex plugin/tool discovery mechanism.
+If the plugin cannot be enabled, or no usable device or emulator is available,
+report that as a warning/skipped check with the concrete reason and proceed.

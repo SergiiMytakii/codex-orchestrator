@@ -303,9 +303,20 @@ Runtime and test paths are configurable through
 `reviewGates.quality.testChangedPathGlobs`.
 
 For UI or frontend issues, visual proof is runner-owned via a configurable
-command (typically Playwright). Screenshot artifacts should be saved under
-`.codex-orchestrator/proofs/issue-<number>/`; the runner includes them in the PR
-and issue review report.
+command (typically Playwright for browser/web UI). Screenshot artifacts should be
+saved under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes
+them in the PR and issue review report.
+
+For Android mobile app UI work, the implementation prompt directs Codex to use
+device-backed proof instead of Playwright: run `adb devices -l`, prefer a
+connected non-emulator device serial, and run `export ANDROID_SERIAL=<serial>`.
+Otherwise run `emulator -list-avds`, start an AVD in a separate shell with
+`emulator -avd <avd-name>`, and wait with `adb wait-for-device`. If Test Android
+Apps skills are unavailable, the agent should try to enable or load that plugin
+through the available Codex plugin/tool discovery mechanism. If the plugin cannot
+be enabled, or no usable adb target is available, the agent should report the
+mobile proof as a warning/skipped check with the concrete reason rather than
+treating it as a blocker by itself.
 
 Configure a runner-owned command:
 

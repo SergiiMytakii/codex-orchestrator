@@ -12,4 +12,10 @@ When cutting a new release:
 
 ### Latest release
 
-- `0.1.23` (2026-05-14): clear release notes (GitHub auto notes + npm-visible changelog) so users can quickly see what improved in each version.
+- `0.1.24` (2026-05-14):
+  - Android mobile UI proof now uses an explicit adb/emulator preflight instead
+    of Playwright-first guidance.
+  - Agents are told to prefer a connected Android device, then fall back to an
+    emulator.
+  - Missing Test Android Apps/plugin/device setup is reported as a warning, not
+    a release blocker.

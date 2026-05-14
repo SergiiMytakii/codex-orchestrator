@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-05-14
+
+### Changed
+- Mobile UI verification guidance now gives an explicit adb/emulator preflight
+  for Android mobile app work, prefers a connected device before emulator
+  fallback, tells agents to try loading Test Android Apps when unavailable, and
+  treats missing plugin/device targets as a warning rather than a blocker.
+
 ## [0.1.23] - 2026-05-14
 
 ### Added
