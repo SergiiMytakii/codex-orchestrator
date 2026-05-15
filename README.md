@@ -145,6 +145,8 @@ Check eligible work:
 
 ```sh
 codex-orchestrator status --target .
+codex-orchestrator status --target . --json
+codex-orchestrator doctor --target .
 ```
 
 Run one issue:
@@ -215,6 +217,35 @@ separate touched-files lint command passes.
 The default quality gate is conservative for runtime code changes. It can
 require TDD evidence, changed tests, code review, cleanup review for larger
 changes, and visual proof for UI work.
+
+## Diagnostics
+
+`doctor` is a read-only readiness check for operators. It validates the target
+config, GitHub label visibility, git/base branch access, runner state paths,
+configured checks, the Codex command, phase profiles, and visual proof settings.
+It never launches Codex, creates worktrees, edits labels, or changes issues.
+
+```sh
+codex-orchestrator doctor --target .
+codex-orchestrator doctor --target . --json
+```
+
+`status --json` returns the same queue view as text status plus active local
+runs and recent lifecycle events. The JSON is designed for wrappers and
+dashboards; it includes bounded artifact paths such as context snapshots, but
+not raw Codex transcripts, secrets, prompt text, or full issue comments.
+
+Codex command profiles can be set per runner phase under `codex.profiles`.
+Supported phases are `plan-parent`, `scoped-issue`, `tree-child`,
+`fresh-context-review`, `visual-proof`, and `quality-review`. Missing profile
+fields fall back to the global `codex.command`, `codex.args`, `timeoutMs`, and
+`idleTimeoutMs`, so existing configs keep working.
+
+Each Codex session writes a bounded context snapshot before invocation and links
+it from lifecycle events under the runner state directory. Snapshots record the
+issue identity, runner decision, selected profile, workspace paths, and
+publication boundaries so a maintainer can reproduce why a session started
+without reading raw logs.
 
 ## Visual Proof
 
@@ -288,9 +319,10 @@ Default labels:
 codex-orchestrator --help
 codex-orchestrator --version
 codex-orchestrator health
+codex-orchestrator doctor --target <path> [--json]
 codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
   [--github-repo <repo>] [--dry-run] [--prepare-labels]
-codex-orchestrator status --target <path> [--dry-run]
+codex-orchestrator status --target <path> [--dry-run] [--json]
 codex-orchestrator run --target <path> --issue <number>
 codex-orchestrator daemon --target <path> [--once] \
   [--interval-seconds <seconds>] [--max-runs <count>]

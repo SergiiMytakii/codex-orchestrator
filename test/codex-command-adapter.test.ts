@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CodexCommandAdapter, buildCodexProcessEnv } from '../src/codex/command-adapter.js';
+import { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from '../src/codex/command-adapter.js';
 import type { ProcessExecutor } from '../src/process/command.js';
 import { validConfig } from './fixtures/config.js';
 
@@ -119,6 +119,75 @@ test('codex command adapter allows a per-run timeout override', async () => {
 
   const [, , options] = calls[0] ?? [];
   assert.equal(options?.timeoutMs, 3_600_000);
+});
+
+test('codex command adapter selects phase-specific command profile deterministically', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const config = {
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      profiles: {
+        'plan-parent': {
+          command: 'codex-plan',
+          args: ['exec-plan', '${sessionId}'],
+          timeoutMs: 12_000,
+          idleTimeoutMs: 6_000,
+          env: {
+            CODEX_ORCHESTRATOR_PHASE: '${sessionId}',
+          },
+        },
+      },
+    },
+  };
+  const adapter = new CodexCommandAdapter(config, executor);
+
+  await adapter.run({ ...input, config, phase: 'plan-parent' });
+
+  const [file, args, options] = calls[0] ?? [];
+  assert.equal(file, 'codex-plan');
+  assert.deepEqual(args, ['exec-plan', input.sessionId]);
+  assert.equal(options?.timeoutMs, 12_000);
+  assert.equal(options?.idleTimeoutMs, 6_000);
+  assert.equal(options?.env?.CODEX_ORCHESTRATOR_PHASE, input.sessionId);
+});
+
+test('codex phase profile timeout wins over per-run timeout override', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const config = {
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      profiles: {
+        'scoped-issue': {
+          timeoutMs: 22_000,
+        },
+      },
+    },
+  };
+  const adapter = new CodexCommandAdapter(config, executor);
+
+  await adapter.run({ ...input, config, phase: 'scoped-issue', timeoutMs: 44_000 });
+
+  const [, , options] = calls[0] ?? [];
+  assert.equal(options?.timeoutMs, 22_000);
+});
+
+test('codex profile fallback keeps global command values for missing phases', () => {
+  const profile = resolveCodexProfile(validConfig, 'tree-child');
+
+  assert.equal(profile.command, validConfig.codex.command);
+  assert.deepEqual(profile.args, validConfig.codex.args);
+  assert.equal(profile.timeoutMs, validConfig.codex.timeoutMs);
+  assert.equal(profile.idleTimeoutMs, validConfig.codex.idleTimeoutMs);
 });
 
 test('codex env defaults CODEX_HOME to the user codex home for authentication', () => {

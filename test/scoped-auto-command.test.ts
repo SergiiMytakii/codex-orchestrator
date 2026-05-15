@@ -5,17 +5,21 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
-import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/command-adapter.js';
+import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../src/codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
 import { GitWorktreeManager } from '../src/git/worktree.js';
-import type { ShellCommandExecutor } from '../src/process/command.js';
+import type { ProcessExecutor, ShellCommandExecutor } from '../src/process/command.js';
 import { buildScopedPullRequestBody, buildScopedReviewReport } from '../src/runner/handoff-evidence.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
+import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
+import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
+import { runStatusCommand } from '../src/runner/status-command.js';
 import { sessionCodexHomePath } from '../src/runner/session-home.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
+import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
@@ -139,6 +143,7 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.equal(result.branchName, 'codex/issue-155');
   assert.equal(await readFile(join(result.worktreePath, 'feature.txt'), 'utf8'), 'done\n');
   assert.equal(codexInput?.promptPath, result.promptPath);
+  assert.equal(codexInput?.phase, 'scoped-issue');
   assert.equal(codexInput?.reportPath, result.reportPath);
   assert.equal(codexInput?.isolatedHomePath, sessionCodexHomePath({
     targetRoot: repo,
@@ -163,9 +168,86 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.equal(summary.outcome, 'review-ready');
   assert.deepEqual(summary.policySuggestions, []);
   assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);
+  const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
+  assert.equal(recentEvents[0]?.summary, 'Scoped implementation passed runner gates and completed draft PR handoff.');
+  assert.equal(recentEvents[0]?.artifacts?.some((artifact) => artifact.kind === 'pr'), true);
+  assert.equal(recentEvents.some((event) => event.summary.includes('Starting scoped Codex')), true);
+  const snapshotArtifact = recentEvents.flatMap((event) => event.artifacts ?? []).find((artifact) => artifact.kind === 'snapshot');
+  assert.ok(snapshotArtifact?.path);
+  const snapshot = JSON.parse(await readFile(snapshotArtifact.path, 'utf8')) as Record<string, unknown>;
+  assert.equal((snapshot.runner as Record<string, unknown>).phase, 'scoped-issue');
+  assert.doesNotMatch(JSON.stringify(snapshot), /GH_TOKEN|raw transcript/);
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/issue-155', '-1']);
   assert.match(pushed.stdout, /Codex: implement issue #155/);
+});
+
+test('diagnostics wave regression covers profile, snapshot, events, status JSON, and doctor', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    codex: {
+      ...config.codex,
+      profiles: {
+        'scoped-issue': {
+          command: 'codex-scoped',
+          args: ['exec-scoped', '${issueNumber}'],
+          timeoutMs: 22_000,
+        },
+      },
+    },
+  }));
+  const config = JSON.parse(await readFile(join(repo, '.codex-orchestrator', 'config.json'), 'utf8')) as CodexOrchestratorConfig;
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement diagnostics-backed change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const executorCalls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    executorCalls.push(args);
+    const [, , options] = args;
+    assert.equal(options?.cwd?.endsWith('issue-155'), true);
+    await writeFile(join(options?.cwd ?? '', 'diagnostics.txt'), 'done\n', 'utf8');
+    const reportPath = options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE;
+    assert.ok(reportPath);
+    await writeFile(
+      reportPath,
+      JSON.stringify({
+        status: 'completed',
+        changes: ['diagnostics.txt'],
+        validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+        skippedChecks: [],
+        residualRisks: [],
+        prohibitedActions: [],
+      }),
+      'utf8',
+    );
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: new CodexCommandAdapter(config, executor),
+    now,
+  });
+  const status = await runStatusCommand({ targetRoot: repo, issueAdapter, json: true });
+  const doctor = await runDoctorCommand({
+    targetRoot: repo,
+    labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(config.github.labels).map((label) => ({ name: label.name }))),
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    json: true,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(executorCalls[0]?.[0], 'codex-scoped');
+  assert.deepEqual(executorCalls[0]?.[1], ['exec-scoped', '155']);
+  assert.equal(executorCalls[0]?.[2]?.timeoutMs, 22_000);
+  const recentEvents = JSON.parse(status.output) as { recentEvents: Array<{ artifacts?: Array<{ kind: string; path?: string }> }> };
+  const snapshotPath = recentEvents.recentEvents.flatMap((event) => event.artifacts ?? []).find((artifact) => artifact.kind === 'snapshot')?.path;
+  assert.ok(snapshotPath);
+  assert.equal(doctor.json.summary.fail, 0);
 });
 
 test('scoped auto command publishes validated agent local commits when policy allows', async () => {

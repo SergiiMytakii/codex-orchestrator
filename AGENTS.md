@@ -12,6 +12,14 @@ When cutting a new release:
 
 ### Latest release
 
+- `0.1.26` (2026-05-16):
+  - Read-only `doctor` diagnostics report runner readiness in text or JSON.
+  - `status --json` exposes queue, recovery, active run, and recent event
+    evidence for dashboards.
+  - Phase-specific Codex profiles, lifecycle events, and context snapshots make
+    runner sessions easier to audit without raw transcripts.
+  - Live smoke covers diagnostics/profile behavior through the packaged CLI.
+
 - `0.1.25` (2026-05-15):
   - Runner-owned Loop Policy adds priority-based daemon selection and bounded
     rework.

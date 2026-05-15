@@ -7,6 +7,7 @@ import { readPackageInfo } from './package-info.js';
 import { readRunnerConfig } from './runner/command-utils.js';
 import { discoverIssueWork } from './runner/issue-state-machine.js';
 import { runDaemonCommand } from './runner/daemon-command.js';
+import { runDoctorCommand } from './runner/doctor-command.js';
 import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
@@ -18,13 +19,15 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
+  codex-orchestrator doctor --target <path> [--json]
   codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
-  codex-orchestrator status --target <path> [--dry-run]
+  codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>]
 
 Commands:
   health       Run a no-op local health check.
+  doctor       Run read-only runner readiness diagnostics.
   setup        Create or dry-run project-local orchestrator config. Use --prepare-labels to create missing agent labels.
   status       Show eligible/skipped issue work and local recovery state.
   run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
@@ -48,6 +51,12 @@ interface SetupCliArgs {
 interface StatusCliArgs {
   target?: string;
   dryRun: boolean;
+  json: boolean;
+}
+
+interface DoctorCliArgs {
+  target?: string;
+  json: boolean;
 }
 
 interface RunCliArgs {
@@ -108,6 +117,28 @@ async function main(args: string[]): Promise<number> {
     }
   }
 
+  if (command === 'doctor') {
+    const parsed = parseDoctorArgs(args.slice(1));
+
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+
+    try {
+      const result = await runDoctorCommand({
+        targetRoot: parsed.value.target,
+        json: parsed.value.json,
+      });
+      process.stdout.write(`${result.output}\n`);
+      return result.json.summary.fail > 0 ? 1 : 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'doctor failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   if (command === 'status') {
     const parsed = parseStatusArgs(args.slice(1));
 
@@ -120,6 +151,7 @@ async function main(args: string[]): Promise<number> {
       const result = await runStatusCommand({
         targetRoot: parsed.value.target,
         dryRun: parsed.value.dryRun,
+        json: parsed.value.json,
       });
       process.stdout.write(`${result.output}\n`);
       return 0;
@@ -240,6 +272,7 @@ function parseRunArgs(
 function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { target: string } } | { ok: false; error: string } {
   const parsed: StatusCliArgs = {
     dryRun: false,
+    json: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -257,6 +290,9 @@ function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { t
       case '--dry-run':
         parsed.dryRun = true;
         break;
+      case '--json':
+        parsed.json = true;
+        break;
       default:
         return { ok: false, error: `Unknown status option: ${arg ?? ''}` };
     }
@@ -264,6 +300,38 @@ function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { t
 
   if (!parsed.target) {
     return { ok: false, error: 'status requires --target <path>' };
+  }
+
+  return { ok: true, value: { ...parsed, target: parsed.target } };
+}
+
+function parseDoctorArgs(args: string[]): { ok: true; value: DoctorCliArgs & { target: string } } | { ok: false; error: string } {
+  const parsed: DoctorCliArgs = {
+    json: false,
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--target':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.target = next;
+        index += 1;
+        break;
+      case '--json':
+        parsed.json = true;
+        break;
+      default:
+        return { ok: false, error: `Unknown doctor option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.target) {
+    return { ok: false, error: 'doctor requires --target <path>' };
   }
 
   return { ok: true, value: { ...parsed, target: parsed.target } };

@@ -19,6 +19,7 @@ const scenarioDefinitions = new Map([
   ['scoped-local-commit', runScopedLocalCommitScenario],
   ['run-scoped', runDirectScopedScenario],
   ['loop-policy', runLoopPolicyScenario],
+  ['diagnostics', runDiagnosticsScenario],
   ['visual-proof', runVisualProofScenario],
   ['quality-gates', runQualityGatesScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
@@ -265,6 +266,15 @@ async function configureTarget(context, overrides = {}) {
   if (overrides.loopPolicy) {
     config.loopPolicy = mergeLoopPolicy(config.loopPolicy, overrides.loopPolicy);
   }
+  if (overrides.codexProfiles) {
+    config.codex.profiles = overrides.codexProfiles;
+  }
+  if (overrides.codexCommand) {
+    config.codex.command = overrides.codexCommand;
+  }
+  if (overrides.codexArgs) {
+    config.codex.args = overrides.codexArgs;
+  }
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
@@ -494,6 +504,46 @@ async function runLoopPolicyScenario(context) {
   );
   await runDaemonOnce(context, parent.number, 'plan-parent');
   await assertPlanAutoSuccess(context, parent.number, { expectLoopPolicyEvidence: true });
+}
+
+async function runDiagnosticsScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    codexCommand: process.execPath,
+    codexArgs: ['-e', 'process.exit(7)'],
+    codexProfiles: {
+      'scoped-issue': {
+        command: process.execPath,
+        args: [context.fakeAgentPath],
+        timeoutMs: 120_000,
+        idleTimeoutMs: 30_000,
+        env: {
+          CODEX_ORCHESTRATOR_LIVE_SMOKE_PHASE: 'scoped-issue',
+        },
+      },
+    },
+    loopPolicy: {
+      freshContextReview: {
+        enabled: false,
+      },
+    },
+  });
+  const doctor = await runPackagedCli(context, ['doctor', '--target', context.targetRoot, '--json']);
+  const doctorJson = JSON.parse(doctor.stdout);
+  assert(doctorJson.summary.fail === 0, `doctor should pass diagnostics readiness\n${doctor.stdout}`);
+
+  const issue = await createIssue(context, 'diagnostics', ['agent:auto']);
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false });
+
+  const status = await runPackagedCli(context, ['status', '--target', context.targetRoot, '--json']);
+  const statusJson = JSON.parse(status.stdout);
+  const recentEvents = statusJson.recentEvents ?? [];
+  assert(recentEvents.length > 0, 'status --json should include recent lifecycle events');
+  const snapshotArtifact = recentEvents.flatMap((event) => event.artifacts ?? []).find((artifact) => artifact.kind === 'snapshot');
+  assert(snapshotArtifact?.path, `expected snapshot artifact in recent events\n${status.stdout}`);
+  await assertPathExists(snapshotArtifact.path, 'diagnostics context snapshot should exist');
+  await appendReport(context, `Diagnostics snapshot: ${snapshotArtifact.path}\n\n`);
 }
 
 async function runVisualProofScenario(context) {
@@ -1185,6 +1235,7 @@ if (prompt.includes('# Fresh-Context Review')) {
 
 switch (scenario) {
   case 'scoped-runner-commit':
+  case 'diagnostics':
     writeCodeChange(issueNumber, runId, 'runner');
     writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;

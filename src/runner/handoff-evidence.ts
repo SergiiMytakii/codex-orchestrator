@@ -19,6 +19,7 @@ export interface FreshContextReviewEvidence {
   findings: string[];
   residualRisks: string[];
   logPath: string;
+  snapshotPath?: string;
 }
 
 export interface ScopedHandoffEvidence {
@@ -167,6 +168,8 @@ function renderFreshContextReviewEvidence(evidence: FreshContextReviewEvidence |
     ...bulletList(evidence.residualRisks),
     'Fresh-Context Review Log',
     ...bulletList([evidence.logPath]),
+    'Fresh-Context Review Snapshot',
+    ...bulletList(evidence.snapshotPath ? [evidence.snapshotPath] : []),
   ];
 }
 
@@ -178,6 +181,7 @@ function renderFreshContextReviewPullRequestSection(evidence: FreshContextReview
     'Fresh-Context Review:',
     `- status: ${evidence.status}`,
     ...bulletList(evidence.findings),
+    ...(evidence.snapshotPath ? [`- snapshot: ${evidence.snapshotPath}`] : []),
     '',
   ];
 }

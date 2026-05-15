@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
+import { writeContextSnapshot } from './context-snapshot.js';
 import type { FreshContextReviewEvidence } from './handoff-evidence.js';
 import type { runImplementationPublishabilityCheck } from './local-execution-session.js';
 import { sessionPromptPath, sessionReportPath, writeDurablePrompt } from './prompt.js';
@@ -58,6 +59,21 @@ export async function runFreshContextReviewIfEnabled(input: {
     sessionId: input.isolatedSessionId,
     promptText,
   });
+  const snapshot = await writeContextSnapshot({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issue: input.issue,
+    mode: 'scoped-issue',
+    phase: 'fresh-context-review',
+    decision: 'fresh context review before publication',
+    sessionId: input.isolatedSessionId,
+    worktreePath: input.worktreePath,
+    promptPath: reviewPromptPath,
+    reportPath: reviewReportPath,
+    logPath: reviewLogPath,
+    branchName: input.branchName,
+    baseBranch: input.config.branches.base,
+  });
 
   let codexResult: CodexCommandRunResult;
   try {
@@ -72,7 +88,7 @@ export async function runFreshContextReviewIfEnabled(input: {
       issueNumber: input.issue.number,
       sessionId: input.isolatedSessionId,
       branchName: input.branchName,
-      timeoutMs: input.config.codex.timeoutMs,
+      phase: 'fresh-context-review',
       logPath: reviewLogPath,
     });
   } finally {
@@ -85,6 +101,7 @@ export async function runFreshContextReviewIfEnabled(input: {
       findings: [`Fresh-Context Review Codex exited with code ${codexResult.exitCode}`],
       residualRisks: [],
       logPath: reviewLogPath,
+      snapshotPath: snapshot.path,
     };
   }
 
@@ -97,6 +114,7 @@ export async function runFreshContextReviewIfEnabled(input: {
       findings: [error instanceof Error ? error.message : 'Fresh-Context Review report could not be read'],
       residualRisks: [],
       logPath: reviewLogPath,
+      snapshotPath: snapshot.path,
     };
   }
   const findings = report.findings.map(
@@ -109,6 +127,7 @@ export async function runFreshContextReviewIfEnabled(input: {
     findings,
     residualRisks: report.residualRisks,
     logPath: reviewLogPath,
+    snapshotPath: snapshot.path,
   };
 }
 

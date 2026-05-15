@@ -1,7 +1,7 @@
-export type { CodexOrchestratorConfig, ConfigValidationResult } from './config/schema.js';
-export { validateConfig } from './config/schema.js';
-export { CodexCommandAdapter, buildCodexProcessEnv } from './codex/command-adapter.js';
-export type { CodexCommandRunInput, CodexCommandRunResult } from './codex/command-adapter.js';
+export type { CodexOrchestratorConfig, ConfigValidationResult, CodexPhase, CodexProfileConfig } from './config/schema.js';
+export { validateConfig, codexPhaseKeys } from './config/schema.js';
+export { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from './codex/command-adapter.js';
+export type { CodexCommandRunInput, CodexCommandRunResult, EffectiveCodexProfile } from './codex/command-adapter.js';
 export { GhCliPullRequestAdapter } from './github/gh-pull-request-adapter.js';
 export type {
   GitHubIssue,
@@ -91,5 +91,9 @@ export {
 export type { SafetyViolation, SafetyViolationCode } from './runner/safety.js';
 export { runStatusCommand } from './runner/status-command.js';
 export type { StatusCommandOptions, StatusCommandResult } from './runner/status-command.js';
+export { runDoctorCommand } from './runner/doctor-command.js';
+export type { DoctorCheckResult, DoctorCommandOptions, DoctorCommandResult, DoctorJson } from './runner/doctor-command.js';
+export { RunnerLifecycleEventStore } from './runner/lifecycle-events.js';
+export type { LifecycleArtifact, RunnerLifecycleEvent } from './runner/lifecycle-events.js';
 export type { SetupCommandOptions, SetupCommandResult } from './setup/setup-command.js';
 export { runSetupCommand } from './setup/setup-command.js';

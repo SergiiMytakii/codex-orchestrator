@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-05-16
+
+### Added
+- Runner diagnostics wave: read-only `doctor`, `status --json`, phase-specific
+  Codex profiles, lifecycle events, and bounded context snapshots before Codex
+  sessions.
+- Live smoke coverage for diagnostics/profile evidence through the packaged CLI.
+
+### Changed
+- Status and handoff evidence now point to bounded runner artifacts instead of
+  requiring operators to inspect raw Codex transcripts.
+
 ## [0.1.25] - 2026-05-15
 
 ### Added

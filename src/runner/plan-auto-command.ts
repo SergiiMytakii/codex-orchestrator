@@ -25,6 +25,7 @@ import {
 } from './handoff-evidence.js';
 import { writeDurableRunSummary, type DurableRunSummaryEvidence } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
+import { writeContextSnapshot } from './context-snapshot.js';
 import {
   readPlanAutoCompletionReport,
   type PlanAutoCompletionReport,
@@ -39,6 +40,7 @@ import {
   type AutonomousChildNode,
 } from './issue-tree.js';
 import { runImplementationPublishabilityCheck } from './local-execution-session.js';
+import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
 import { RunnerStateStore } from './local-state.js';
 import {
   buildIssueTreeChildPrompt,
@@ -90,6 +92,8 @@ interface PlanBlockedContext {
   reportPath: string;
   logPath: string;
   childIssues: GitHubIssue[];
+  sessionId?: string;
+  snapshotPath?: string;
 }
 
 interface ChildExecutionResult {
@@ -147,10 +151,15 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   let promptPath = '';
   let reportPath = '';
   let logPath = '';
+  let sessionId = '';
+  let parentSnapshotPath = '';
   const childIssues: GitHubIssue[] = [];
   let pullRequest: GitHubPullRequest | undefined;
   let store: RunnerStateStore | undefined;
   const executionResults: ChildExecutionResult[] = [];
+  const events = new RunnerLifecycleEventStore(targetRoot, config);
+  const buildBase = () =>
+    baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues, sessionId, parentSnapshotPath);
 
   await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
 
@@ -161,7 +170,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       branchName,
       baseBranch: config.branches.base,
     });
-    const sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
+    sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
@@ -183,6 +192,33 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       issueNumber: options.issueNumber,
       sessionId,
       promptText,
+    });
+    const snapshot = await writeContextSnapshot({
+      targetRoot,
+      config,
+      issue: parentIssue,
+      mode: 'plan-parent',
+      phase: 'plan-parent',
+      decision: 'parent planning session',
+      sessionId,
+      worktreePath,
+      promptPath,
+      reportPath,
+      logPath,
+      branchName,
+      baseBranch: config.branches.base,
+      createdAt: now,
+    });
+    parentSnapshotPath = snapshot.path;
+    await safeAppendEvent(events, {
+      timestamp: now,
+      issueNumber: options.issueNumber,
+      mode: 'plan-parent',
+      sessionId,
+      phase: 'plan-parent',
+      status: 'started',
+      summary: 'Starting parent planning Codex session.',
+      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshot.path),
     });
     store = new RunnerStateStore(targetRoot, config);
     await store.upsertRun({
@@ -213,16 +249,17 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         issueNumber: options.issueNumber,
         sessionId,
         branchName,
+        phase: 'plan-parent',
         logPath,
       });
     } finally {
       await cleanupSessionCodexHome(isolatedHomePath);
     }
     const afterHead = await git.getHead(worktreePath);
-    const base = baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues);
+    const base = buildBase();
 
     if (beforeHead !== afterHead) {
-      return finishPlanBlocked(issueAdapter, config, base, ['Planning session changed git HEAD; planning must not commit.'], []);
+      return finishPlanBlocked(issueAdapter, config, events, base, ['Planning session changed git HEAD; planning must not commit.'], []);
     }
 
     const changedFiles = await git.listChangedFiles(worktreePath);
@@ -230,6 +267,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       return finishPlanBlocked(
         issueAdapter,
         config,
+        events,
         base,
         ['Planning session changed repository files; planning must return structured output only.'],
         [],
@@ -240,6 +278,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       return finishPlanBlocked(
         issueAdapter,
         config,
+        events,
         base,
         [`Codex exited with code ${codexResult.exitCode}: ${codexResult.stderr || codexResult.stdout}`],
         [],
@@ -251,6 +290,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       return finishPlanBlocked(
         issueAdapter,
         config,
+        events,
         base,
         ['Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove planning graph.'],
         [],
@@ -271,7 +311,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     const childNodes = await readAutonomousChildNodes(issueAdapter, config, options.issueNumber, childIssues);
     const batches = collectExecutableChildBatches(childNodes, config);
     if (!batches.ok) {
-      return finishPlanBlocked(issueAdapter, config, base, batches.errors, childIssues);
+      return finishPlanBlocked(issueAdapter, config, events, base, batches.errors, childIssues);
     }
 
     for (const batch of batches.batches) {
@@ -288,6 +328,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         shellExecutor,
         issueTreeWorkflowPrompt,
         now,
+        events,
       })));
       const failures: Array<{
         child?: AutonomousChildNode;
@@ -321,7 +362,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         return finishPlanBlocked(
           issueAdapter,
           config,
-          baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+          events,
+          buildBase(),
           [
             'Child batch failed before merge; no child from the failed batch was merged, pushed, or published.',
             ...failures.map((failure) => failure.child ? `#${failure.child.issue.number}: ${failure.message}` : failure.message),
@@ -354,7 +396,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
             return finishPlanBlocked(
               issueAdapter,
               config,
-              baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+              events,
+              buildBase(),
               [
                 `Merge conflict while merging #${childResult.child.issue.number} from ${childResult.branchName}.`,
                 error.stderr || error.stdout,
@@ -386,7 +429,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       return finishPlanBlocked(
         issueAdapter,
         config,
-        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+        events,
+        buildBase(),
         [
           'One or more configured checks failed.',
           ...failedFinalValidation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
@@ -419,9 +463,21 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
     await store.removeRun(options.issueNumber);
+    await safeAppendEvent(events, {
+      issueNumber: options.issueNumber,
+      mode: 'plan-parent',
+      sessionId,
+      phase: 'plan-parent',
+      status: 'completed',
+      summary: 'Issue-tree execution completed draft PR handoff.',
+      artifacts: [
+        ...sessionArtifacts(promptPath, reportPath, logPath, parentSnapshotPath),
+        { kind: 'pr', url: pullRequest.url, description: 'Draft pull request' },
+      ],
+    });
 
     return {
-      ...baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+      ...buildBase(),
       status: 'review-ready',
       pullRequest,
       reportComment,
@@ -445,7 +501,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     return finishPlanBlocked(
       issueAdapter,
       config,
-      baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues),
+      events,
+      buildBase(),
       [message],
       childIssues,
     );
@@ -509,6 +566,7 @@ async function executeChild(input: {
   shellExecutor: ShellCommandExecutor;
   issueTreeWorkflowPrompt: string;
   now: Date;
+  events: RunnerLifecycleEventStore;
 }): Promise<ChildExecutionResult> {
   const childIssueNumber = input.child.issue.number;
   const branchName = `codex/tree-${input.parentIssue.number}-issue-${childIssueNumber}`;
@@ -585,6 +643,7 @@ async function executeChild(input: {
   let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
   let rework: { attempt: number; blockedReasons: string[] } | undefined;
   for (let attempt = 0; attempt <= input.config.loopPolicy.rework.maxAttempts; attempt++) {
+    const attemptNow = new Date(input.now.getTime() + attempt);
     const attemptPromptText = rework
       ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\nAddress the blockers, then produce a fresh completion report JSON for the runner.`
       : promptText;
@@ -594,6 +653,37 @@ async function executeChild(input: {
       issueNumber: childIssueNumber,
       sessionId,
       promptText: attemptPromptText,
+    });
+    const snapshot = await writeContextSnapshot({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issue: input.child.issue,
+      mode: 'tree-child',
+      phase: 'tree-child',
+      decision: rework
+        ? `tree-child rework attempt #${rework.attempt} under parent #${input.parentIssue.number}`
+        : `child issue execution under parent #${input.parentIssue.number}`,
+      sessionId,
+      worktreePath,
+      promptPath,
+      reportPath,
+      logPath,
+      branchName,
+      baseBranch: input.parentBranchName,
+      parentIssueNumber: input.parentIssue.number,
+      blockedBy: [],
+      createdAt: attemptNow,
+    });
+    await safeAppendEvent(input.events, {
+      timestamp: attemptNow,
+      issueNumber: childIssueNumber,
+      parentIssueNumber: input.parentIssue.number,
+      mode: 'tree-child',
+      sessionId,
+      phase: 'tree-child',
+      status: 'started',
+      summary: rework ? `Starting tree-child rework attempt #${rework.attempt}.` : 'Starting tree-child Codex session.',
+      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshot.path),
     });
     const beforeHead = await input.git.getHead(worktreePath);
     let codexResult: CodexCommandRunResult;
@@ -609,6 +699,7 @@ async function executeChild(input: {
         issueNumber: childIssueNumber,
         sessionId,
         branchName,
+        phase: 'tree-child',
         logPath,
       });
     } finally {
@@ -885,6 +976,7 @@ async function blockCompletedChildren(
 async function finishPlanBlocked(
   issueAdapter: GitHubIssueAdapter,
   config: CodexOrchestratorConfig,
+  events: RunnerLifecycleEventStore,
   result: PlanBlockedContext,
   reasons: string[],
   mutatedChildren: GitHubIssue[],
@@ -898,6 +990,15 @@ async function finishPlanBlocked(
   await issueAdapter.removeLabels(result.parentIssueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.parentIssueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.parentIssueNumber, reportComment);
+  await safeAppendEvent(events, {
+    issueNumber: result.parentIssueNumber,
+    mode: 'plan-parent',
+    sessionId: result.sessionId,
+    phase: 'plan-parent',
+    status: 'blocked',
+    summary: `Issue-tree execution blocked: ${reasons[0] ?? 'blocked'}`,
+    artifacts: sessionArtifacts(result.promptPath, result.reportPath, result.logPath, result.snapshotPath),
+  });
   return { ...result, status: 'blocked', reportComment };
 }
 
@@ -913,6 +1014,32 @@ function renderParentTemplate(template: string, parentIssueNumber: number): stri
   return template.replaceAll('${parentIssueNumber}', String(parentIssueNumber));
 }
 
+function sessionArtifacts(
+  promptPath: string,
+  reportPath: string,
+  logPath: string,
+  snapshotPath?: string,
+): LifecycleArtifact[] {
+  const artifacts: Array<LifecycleArtifact | undefined> = [
+    snapshotPath ? { kind: 'snapshot', path: snapshotPath, description: 'Context snapshot' } : undefined,
+    promptPath ? { kind: 'prompt', path: promptPath, description: 'Session prompt path' } : undefined,
+    reportPath ? { kind: 'report', path: reportPath, description: 'Session report path' } : undefined,
+    logPath ? { kind: 'log', path: logPath, description: 'Session log path' } : undefined,
+  ];
+  return artifacts.filter((artifact): artifact is LifecycleArtifact => Boolean(artifact));
+}
+
+async function safeAppendEvent(
+  store: RunnerLifecycleEventStore,
+  input: Parameters<RunnerLifecycleEventStore['append']>[0],
+): Promise<void> {
+  try {
+    await store.append(input);
+  } catch {
+    // Diagnostics evidence must not alter the runner publication outcome.
+  }
+}
+
 function baseResult(
   parentIssueNumber: number,
   branchName: string,
@@ -921,6 +1048,8 @@ function baseResult(
   reportPath: string,
   logPath: string,
   childIssues: GitHubIssue[],
+  sessionId?: string,
+  snapshotPath?: string,
 ): PlanBlockedContext {
-  return { parentIssueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues };
+  return { parentIssueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues, sessionId, snapshotPath };
 }

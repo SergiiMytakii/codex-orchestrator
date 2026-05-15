@@ -16,6 +16,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.codex.timeoutMs, 1_800_000);
     assert.equal(result.value.codex.mobileTimeoutMs, 3_600_000);
     assert.equal(result.value.codex.idleTimeoutMs, 300_000);
+    assert.deepEqual(result.value.codex.profiles, {});
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.equal(result.value.reviewGates.visualProof.runnerTimeoutMs, 900_000);
@@ -56,6 +57,62 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.branches.base, 'main');
     assert.equal(result.value.branches.scopedIssue, 'codex/issue-${issueNumber}');
   }
+});
+
+test('accepts phase-specific codex profiles with deterministic fallback fields', () => {
+  const result = validateConfig({
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      profiles: {
+        'plan-parent': {
+          command: 'codex-plan',
+          args: ['exec', '--profile', '${sessionId}'],
+          timeoutMs: 10_000,
+          idleTimeoutMs: 5_000,
+          env: {
+            CODEX_ORCHESTRATOR_PHASE: 'plan-parent',
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value.codex.profiles?.['plan-parent']?.command, 'codex-plan');
+  }
+});
+
+test('rejects invalid phase-specific codex profile config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      profiles: {
+        unknown: {
+          command: '',
+        },
+        'scoped-issue': {
+          args: ['exec', ''],
+          timeoutMs: 0,
+          idleTimeoutMs: 0,
+          env: {
+            GH_TOKEN: 'secret',
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'codex.profiles contains unknown phase unknown',
+    'codex.profiles.scoped-issue.args must be an array of non-empty strings when provided',
+    'codex.profiles.scoped-issue.timeoutMs must be a positive integer when provided',
+    'codex.profiles.scoped-issue.idleTimeoutMs must be a positive integer when provided',
+    'codex.profiles.scoped-issue.env must not contain forbidden key GH_TOKEN',
+  ]);
 });
 
 test('rejects invalid codex command contract', () => {

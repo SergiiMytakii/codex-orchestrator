@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { forbiddenCodexProfileEnvKeys, type CodexOrchestratorConfig, type CodexPhase, type CodexProfileConfig } from '../config/schema.js';
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
 import { RunLogWriter } from '../runner/run-log.js';
@@ -17,6 +17,7 @@ export interface CodexCommandRunInput {
   issueNumber: number;
   sessionId: string;
   branchName: string;
+  phase?: CodexPhase;
   timeoutMs?: number;
   logPath?: string;
 }
@@ -35,16 +36,19 @@ export class CodexCommandAdapter {
   ) {}
 
   public async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
-    const args = this.config.codex.args.map((arg) => renderCodexArg(arg, input));
+    const phase = input.phase ?? 'scoped-issue';
+    const effectiveProfile = resolveCodexProfile(this.config, phase);
+    const profileTimeoutMs = this.config.codex.profiles?.[phase]?.timeoutMs;
+    const args = effectiveProfile.args.map((arg) => renderCodexArg(arg, input));
     const logWriter = input.logPath ? new RunLogWriter(input.logPath) : undefined;
-    await logWriter?.appendLifecycle(`starting ${this.config.codex.command} ${args.join(' ')}`);
+    await logWriter?.appendLifecycle(`starting ${effectiveProfile.command} ${args.join(' ')}`);
     try {
-      const result = await this.executor(this.config.codex.command, args, {
+      const result = await this.executor(effectiveProfile.command, args, {
         cwd: input.worktreePath,
         stdin: input.promptText,
-        env: buildCodexProcessEnv(input, process.env),
-        timeoutMs: input.timeoutMs ?? this.config.codex.timeoutMs,
-        idleTimeoutMs: this.config.codex.idleTimeoutMs,
+        env: buildCodexProcessEnv(input, process.env, effectiveProfile.env),
+        timeoutMs: profileTimeoutMs ?? input.timeoutMs ?? this.config.codex.timeoutMs,
+        idleTimeoutMs: effectiveProfile.idleTimeoutMs,
         onStdoutChunk: logWriter ? (chunk) => logWriter.appendStdout(chunk) : undefined,
         onStderrChunk: logWriter ? (chunk) => logWriter.appendStderr(chunk) : undefined,
       });
@@ -58,6 +62,7 @@ export class CodexCommandAdapter {
 export function buildCodexProcessEnv(
   input: CodexCommandRunInput,
   sourceEnv: NodeJS.ProcessEnv,
+  profileEnv: Record<string, string> = {},
 ): Record<string, string> {
   const allowed = ['PATH', 'CODEX_HOME', 'LANG', 'LC_ALL', 'TMPDIR'];
   const env: Record<string, string> = {};
@@ -68,10 +73,36 @@ export function buildCodexProcessEnv(
     }
   }
   env.CODEX_HOME = env.CODEX_HOME || join(homedir(), '.codex');
+  for (const [key, value] of Object.entries(profileEnv)) {
+    if (!forbiddenCodexProfileEnvKeys.has(key)) {
+      env[key] = renderCodexArg(value, input);
+    }
+  }
   env.HOME = input.isolatedHomePath;
   env[input.config.codex.promptFileEnv] = input.promptPath;
   env[input.config.codex.reportFileEnv] = input.reportPath;
   return env;
+}
+
+export interface EffectiveCodexProfile {
+  phase: CodexPhase;
+  command: string;
+  args: string[];
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  env: Record<string, string>;
+}
+
+export function resolveCodexProfile(config: CodexOrchestratorConfig, phase: CodexPhase): EffectiveCodexProfile {
+  const profile: CodexProfileConfig = config.codex.profiles?.[phase] ?? {};
+  return {
+    phase,
+    command: profile.command ?? config.codex.command,
+    args: profile.args ?? config.codex.args,
+    timeoutMs: profile.timeoutMs ?? config.codex.timeoutMs,
+    idleTimeoutMs: profile.idleTimeoutMs ?? config.codex.idleTimeoutMs,
+    env: profile.env ?? {},
+  };
 }
 
 function renderCodexArg(arg: string, input: CodexCommandRunInput): string {

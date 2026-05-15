@@ -19,6 +19,33 @@ export type RetryableReworkBlocker =
   | 'failed-configured-checks'
   | 'missing-quality-gate-evidence';
 export type FreshContextReviewMode = 'advisory';
+export const codexPhaseKeys = [
+  'plan-parent',
+  'scoped-issue',
+  'tree-child',
+  'fresh-context-review',
+  'visual-proof',
+  'quality-review',
+] as const;
+export type CodexPhase = (typeof codexPhaseKeys)[number];
+
+export interface CodexProfileConfig {
+  command?: string;
+  args?: string[];
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  env?: Record<string, string>;
+}
+
+export const forbiddenCodexProfileEnvKeys = new Set([
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'SSH_AUTH_SOCK',
+  'GIT_ASKPASS',
+  'HOME',
+  'CODEX_ORCHESTRATOR_PROMPT_FILE',
+  'CODEX_ORCHESTRATOR_REPORT_FILE',
+]);
 
 export interface LabelDefinition {
   name: string;
@@ -88,6 +115,7 @@ export interface CodexOrchestratorConfig {
     timeoutMs?: number;
     mobileTimeoutMs?: number;
     idleTimeoutMs?: number;
+    profiles?: Partial<Record<CodexPhase, CodexProfileConfig>>;
     promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
     reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
   };
@@ -229,6 +257,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectOptionalPositiveInteger(codex, 'codex.timeoutMs', errors);
     expectOptionalPositiveInteger(codex, 'codex.mobileTimeoutMs', errors);
     expectOptionalPositiveInteger(codex, 'codex.idleTimeoutMs', errors);
+    validateCodexProfiles(codex, errors);
     expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
     expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
   }
@@ -460,6 +489,49 @@ function validateChecks(checks: ObjectRecord, errors: string[]): void {
   for (const [name, command] of Object.entries(checks)) {
     if (name.length === 0 || typeof command !== 'string' || command.length === 0) {
       errors.push('checks must map non-empty names to non-empty shell commands');
+    }
+  }
+}
+
+function validateCodexProfiles(codex: ObjectRecord, errors: string[]): void {
+  const profiles = expectOptionalObject(codex, 'codex.profiles', errors);
+  if (!profiles) {
+    return;
+  }
+
+  for (const key of Object.keys(profiles)) {
+    if (!codexPhaseKeys.includes(key as CodexPhase)) {
+      errors.push(`codex.profiles contains unknown phase ${key}`);
+      continue;
+    }
+    const profile = expectOptionalObject(profiles, `codex.profiles.${key}`, errors);
+    if (!profile) {
+      continue;
+    }
+    expectOptionalString(profile, `codex.profiles.${key}.command`, errors);
+    expectOptionalStringArray(profile, `codex.profiles.${key}.args`, errors);
+    expectOptionalPositiveInteger(profile, `codex.profiles.${key}.timeoutMs`, errors);
+    expectOptionalPositiveInteger(profile, `codex.profiles.${key}.idleTimeoutMs`, errors);
+    validateCodexProfileEnv(profile, key, errors);
+  }
+}
+
+function validateCodexProfileEnv(profile: ObjectRecord, phase: string, errors: string[]): void {
+  const env = expectOptionalObject(profile, `codex.profiles.${phase}.env`, errors);
+  if (!env) {
+    return;
+  }
+  const keys = Object.keys(env);
+  if (keys.some((key) => !/^[A-Z_][A-Z0-9_]*$/.test(key))) {
+    errors.push(`codex.profiles.${phase}.env must contain valid environment variable names`);
+  }
+  const forbidden = keys.find((key) => forbiddenCodexProfileEnvKeys.has(key));
+  if (forbidden) {
+    errors.push(`codex.profiles.${phase}.env must not contain forbidden key ${forbidden}`);
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== 'string') {
+      errors.push(`codex.profiles.${phase}.env.${key} must be a string`);
     }
   }
 }

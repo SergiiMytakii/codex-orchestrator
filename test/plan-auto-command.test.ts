@@ -11,6 +11,7 @@ import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
 import type { CreateDraftPullRequestInput, GitHubPullRequest } from '../src/github/pull-requests.js';
 import { renderAutonomousChildMarker } from '../src/runner/issue-tree.js';
+import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { runPlanAutoCommand } from '../src/runner/plan-auto-command.js';
 import type { PlanAutoCompletionReport } from '../src/runner/prompt.js';
@@ -200,6 +201,10 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.deepEqual(issueAdapter.removedLabels.at(-1), { issueNumber: 156, labels: [labels.running.name] });
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 156, labels: [labels.review.name] });
   assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);
+  const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
+  assert.equal(recentEvents[0]?.summary, 'Issue-tree execution completed draft PR handoff.');
+  assert.equal(recentEvents[0]?.artifacts?.some((artifact) => artifact.kind === 'pr'), true);
+  assert.equal(recentEvents.some((event) => event.mode === 'tree-child' && event.artifacts?.some((artifact) => artifact.kind === 'snapshot')), true);
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156', '-1']);
   assert.match(pushed.stdout, /Codex: merge issue/);
@@ -267,6 +272,8 @@ test('plan-auto command applies configured child rework loop before parent integ
   assert.equal(childRuns, 2);
   assert.match(reworkPrompt, /This is an automatic rework attempt \(#1\)/);
   assert.match(reworkPrompt, /Codex completed without file changes/);
+  const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
+  assert.equal(recentEvents.filter((event) => event.mode === 'tree-child' && event.status === 'started').length, 2);
 });
 
 test('plan-auto command blocks child publication on configured fresh-context review finding', async () => {

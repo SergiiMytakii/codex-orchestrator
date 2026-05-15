@@ -23,12 +23,14 @@ import {
 import { writeDurableRunSummary } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
+import { writeContextSnapshot } from './context-snapshot.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import {
   runImplementationPublishabilityCheck,
   type LocalExecutionPhaseExecutor,
 } from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
+import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
 import {
   buildScopedImplementationPrompt,
   sessionPromptPath,
@@ -98,10 +100,20 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   let reportPath = '';
   let logPath = '';
   let sessionId = '';
+  let snapshotPath = '';
   let pullRequest: GitHubPullRequest | undefined;
   const store = new RunnerStateStore(targetRoot, config);
+  const events = new RunnerLifecycleEventStore(targetRoot, config);
 
   await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
+  await safeAppendEvent(events, {
+    timestamp: now,
+    issueNumber: options.issueNumber,
+    mode: 'scoped-issue',
+    phase: 'scoped-issue',
+    status: 'started',
+    summary: 'Issue claimed for scoped autonomous work.',
+  });
 
   try {
     await git.ensureIssueWorktree({
@@ -141,6 +153,23 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         sessionId,
         promptText,
       });
+      const snapshot = await writeContextSnapshot({
+        targetRoot,
+        config,
+        issue,
+        mode: 'scoped-issue',
+        phase: 'scoped-issue',
+        decision: 'has configured auto label and no blocking state labels',
+        sessionId,
+        worktreePath,
+        promptPath,
+        reportPath,
+        logPath,
+        branchName,
+        baseBranch: config.branches.base,
+        createdAt: attemptNow,
+      });
+      snapshotPath = snapshot.path;
       await store.upsertRun({
         issueNumber: options.issueNumber,
         mode: 'scoped-issue',
@@ -153,6 +182,16 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         retryCount: attempt,
         createdAt: now.toISOString(),
         updatedAt: attemptNow.toISOString(),
+      });
+      await safeAppendEvent(events, {
+        timestamp: attemptNow,
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId,
+        phase: 'scoped-issue',
+        status: 'started',
+        summary: 'Starting scoped Codex implementation session.',
+        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
       });
 
       const beforeHead = await git.getHead(worktreePath);
@@ -169,6 +208,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
           issueNumber: options.issueNumber,
           sessionId,
           branchName,
+          phase: 'scoped-issue',
           timeoutMs: codexTimeoutMs,
           logPath,
         });
@@ -189,6 +229,15 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         commitMessage: `Codex: implement issue #${options.issueNumber}`,
         localPhases: options.localPhases,
         localPhaseExecutor: options.localPhaseExecutor,
+      });
+      await safeAppendEvent(events, {
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId,
+        phase: 'quality-review',
+        status: publishability.status === 'blocked' ? 'blocked' : 'completed',
+        summary: `Runner publishability gate returned ${publishability.status}.`,
+        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
       });
 
       if (
@@ -223,6 +272,21 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         logPath,
         reportPath,
       });
+      await safeAppendEvent(events, {
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId,
+        phase: 'scoped-issue',
+        status: 'blocked',
+        summary: 'Scoped implementation requested promotion instead of direct publication.',
+        artifacts: sessionArtifacts(
+          promptPath,
+          reportPath,
+          logPath,
+          snapshotPath,
+          durableRunSummary?.path,
+        ),
+      });
       return finishPromotionRequested(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
@@ -248,6 +312,15 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
         logPath,
         reportPath,
+      });
+      await safeAppendEvent(events, {
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId,
+        phase: 'scoped-issue',
+        status: 'blocked',
+        summary: 'Scoped implementation blocked before draft PR handoff.',
+        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath, durableRunSummary?.path),
       });
       return finishBlocked(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
@@ -289,6 +362,15 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         logPath,
         reportPath,
       });
+      await safeAppendEvent(events, {
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId,
+        phase: 'fresh-context-review',
+        status: 'blocked',
+        summary: 'Fresh-Context Review blocked scoped publication.',
+        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath, durableRunSummary?.path),
+      });
       return finishBlocked(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
@@ -321,7 +403,6 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       logPath,
       reportPath,
     });
-
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
       title: renderTemplate(config.pullRequests.scopedIssueTitle, options.issueNumber),
@@ -361,6 +442,18 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
     await issueAdapter.postComment(options.issueNumber, reportComment);
     await store.removeRun(options.issueNumber);
+    await safeAppendEvent(events, {
+      issueNumber: options.issueNumber,
+      mode: 'scoped-issue',
+      sessionId,
+      phase: 'scoped-issue',
+      status: 'completed',
+      summary: 'Scoped implementation passed runner gates and completed draft PR handoff.',
+      artifacts: [
+        ...sessionArtifacts(promptPath, reportPath, logPath, freshContextReview?.snapshotPath ?? snapshotPath, durableRunSummary?.path),
+        { kind: 'pr', url: pullRequest.url, description: 'Draft pull request' },
+      ],
+    });
 
     return {
       ...baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
@@ -371,8 +464,29 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   } catch (error) {
     const message = error instanceof Error ? error.message : 'scoped execution failed';
     if (pullRequest) {
+      await safeAppendEvent(events, {
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        sessionId: sessionId || undefined,
+        phase: 'scoped-issue',
+        status: 'failed',
+        summary: `Scoped execution failed after draft PR creation: ${message}`,
+        artifacts: [
+          ...sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+          { kind: 'pr', url: pullRequest.url, description: 'Draft pull request' },
+        ],
+      });
       throw new Error(`Scoped execution failed after draft PR creation (${pullRequest.url}); not marking issue blocked: ${message}`);
     }
+    await safeAppendEvent(events, {
+      issueNumber: options.issueNumber,
+      mode: 'scoped-issue',
+      sessionId: sessionId || undefined,
+      phase: 'scoped-issue',
+      status: 'blocked',
+      summary: `Scoped execution failed before draft PR handoff: ${message}`,
+      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+    });
     return finishBlocked(
       baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
       issueAdapter,
@@ -382,6 +496,34 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       [],
       [],
     );
+  }
+}
+
+function sessionArtifacts(
+  promptPath: string,
+  reportPath: string,
+  logPath: string,
+  snapshotPath?: string,
+  durableSummaryPath?: string,
+): LifecycleArtifact[] {
+  const artifacts: Array<LifecycleArtifact | undefined> = [
+    snapshotPath ? { kind: 'snapshot', path: snapshotPath, description: 'Context snapshot' } : undefined,
+    promptPath ? { kind: 'prompt', path: promptPath, description: 'Session prompt path' } : undefined,
+    reportPath ? { kind: 'report', path: reportPath, description: 'Session report path' } : undefined,
+    logPath ? { kind: 'log', path: logPath, description: 'Session log path' } : undefined,
+    durableSummaryPath ? { kind: 'durable-summary', path: durableSummaryPath, description: 'Durable run summary' } : undefined,
+  ];
+  return artifacts.filter((artifact): artifact is LifecycleArtifact => Boolean(artifact));
+}
+
+async function safeAppendEvent(
+  store: RunnerLifecycleEventStore,
+  input: Parameters<RunnerLifecycleEventStore['append']>[0],
+): Promise<void> {
+  try {
+    await store.append(input);
+  } catch {
+    // Lifecycle evidence must not create a new publication blocker after runner gates pass.
   }
 }
 
@@ -453,6 +595,9 @@ function renderTemplate(template: string, issueNumber: number): string {
 }
 
 function selectCodexTimeoutMs(config: CodexOrchestratorConfig, issue: GitHubIssue): number | undefined {
+  if (config.codex.profiles?.['scoped-issue']?.timeoutMs) {
+    return undefined;
+  }
   if (!config.codex.mobileTimeoutMs || !isMobileIssue(issue)) {
     return undefined;
   }

@@ -61,6 +61,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       timeoutMs: 1_800_000,
       mobileTimeoutMs: 3_600_000,
       idleTimeoutMs: 300_000,
+      profiles: {},
       promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
       reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
     },
@@ -288,6 +289,8 @@ export function mergeExistingProjectConfig(
       timeoutMs: migrateCodexTimeout(readPositiveInteger(existingCodex?.timeoutMs), defaults.codex.timeoutMs ?? 1_800_000),
       mobileTimeoutMs: readPositiveInteger(existingCodex?.mobileTimeoutMs) ?? defaults.codex.mobileTimeoutMs,
       idleTimeoutMs: readPositiveInteger(existingCodex?.idleTimeoutMs) ?? defaults.codex.idleTimeoutMs,
+      profiles: (readObject(existingCodex?.profiles) as CodexOrchestratorConfig['codex']['profiles'] | undefined)
+        ?? defaults.codex.profiles,
       promptFileEnv: defaults.codex.promptFileEnv,
       reportFileEnv: defaults.codex.reportFileEnv,
       adapter: defaults.codex.adapter,

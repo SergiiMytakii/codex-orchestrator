@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
+import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
 import { runStatusCommand } from '../src/runner/status-command.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -77,6 +78,58 @@ test('status command prints none for empty sections', async () => {
 
   assert.match(result.output, /mode: status/);
   assert.match(result.output, /eligible:\n  - none\nskipped:\n  - none\nrecovery:\n  - none/);
+});
+
+test('status command returns stable JSON with active runs and recent lifecycle events', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+  await store.save({
+    version: 1,
+    runs: [
+      {
+        issueNumber: 10,
+        mode: 'scoped-issue',
+        workspacePath: '.codex-orchestrator/workspaces/10',
+        sessionId: 'session-10',
+        retryCount: 0,
+        createdAt: '2026-05-15T10:00:00.000Z',
+        updatedAt: '2026-05-15T10:00:00.000Z',
+        promptPath: '/repo/prompt.md',
+        reportPath: '/repo/report.json',
+        logPath: '/repo/run.log',
+      },
+    ],
+  });
+  const events = new RunnerLifecycleEventStore(targetRoot, validConfig);
+  await events.append({
+    timestamp: new Date('2026-05-15T10:00:00.000Z'),
+    issueNumber: 10,
+    mode: 'scoped-issue',
+    sessionId: 'session-10',
+    phase: 'scoped-issue',
+    status: 'started',
+    summary: 'started',
+    artifacts: [{ kind: 'snapshot', path: '/repo/snapshot.json' }],
+  });
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 10, labels: [labels.running.name, labels.auto.name] }),
+    issueFixture({ number: 11, labels: [labels.auto.name] }),
+  ]);
+
+  const result = await runStatusCommand({ targetRoot, issueAdapter: adapter, json: true });
+  const parsed = JSON.parse(result.output) as Record<string, unknown>;
+
+  assert.equal(parsed.version, 1);
+  assert.equal((parsed.repo as Record<string, unknown>).owner, validConfig.github.owner);
+  assert.equal(Array.isArray(parsed.eligible), true);
+  assert.equal((parsed.eligible as unknown[]).length, 1);
+  assert.equal((parsed.activeRuns as Array<Record<string, unknown>>)[0]?.sessionId, 'session-10');
+  assert.equal((parsed.recentEvents as Array<Record<string, unknown>>)[0]?.summary, 'started');
+  assert.deepEqual(
+    ((parsed.recentEvents as Array<Record<string, unknown>>)[0]?.artifacts as Array<Record<string, unknown>>)[0],
+    { kind: 'snapshot', path: '/repo/snapshot.json' },
+  );
+  assert.doesNotMatch(result.output, /raw transcript|secret-token|full comment dump/);
 });
 
 test('status command preserves default behavior for configs without local commit policy', async () => {

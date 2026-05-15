@@ -61,6 +61,7 @@ test('prints help', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
+  assert.match(result.stdout, /doctor/);
   assert.match(result.stdout, /status/);
   assert.match(result.stdout, /daemon/);
   assert.match(result.stdout, /agent:auto/);
@@ -172,6 +173,13 @@ test('status missing target exits with usage error', async () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /status requires --target <path>/);
+});
+
+test('doctor missing target exits with usage error', async () => {
+  const result = await runCli(['doctor', '--json']);
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /doctor requires --target <path>/);
 });
 
 test('run command validates required arguments', async () => {

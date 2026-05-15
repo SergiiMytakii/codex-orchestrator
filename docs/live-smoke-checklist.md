@@ -17,6 +17,7 @@ Run focused subsets while developing:
 npm run smoke:live -- --scenario package-install --cleanup
 npm run smoke:live -- --scenario discovery-matrix --cleanup
 npm run smoke:live -- --scenario quality-gates --cleanup
+npm run smoke:live -- --scenario diagnostics --cleanup
 npm run smoke:live -- --scenario plan-auto-blocking --cleanup
 ```
 
@@ -40,6 +41,9 @@ npm run smoke:live -- --cleanup
 - `loop-policy` - priority-based daemon selection, bounded rework evidence,
   optional Fresh-Context Review evidence, Durable Run Summary excerpts, and
   non-mutating Policy Suggestions.
+- `diagnostics` - packaged CLI proof for `doctor`, `status --json`,
+  phase-specific profile selection, lifecycle event evidence, and context
+  snapshot artifact references.
 - `visual-proof` - runner-owned screenshot proof is attached to the PR.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
@@ -84,12 +88,32 @@ npm run smoke:live -- --cleanup
 - [ ] Run `codex-orchestrator setup --target . --prepare-labels`.
 - [ ] Verify `.codex-orchestrator/config.json` exists and validates through
       `codex-orchestrator status --target . --dry-run`.
+- [ ] Verify `codex-orchestrator doctor --target . --json` reports readiness
+      without launching Codex or mutating GitHub.
+- [ ] Verify `codex-orchestrator status --target . --json` returns repo,
+      target, eligible, skipped, recovery, active runs, and recent events.
 - [ ] Verify required labels exist in GitHub: `agent:auto`,
       `agent:plan-auto`, `agent:child`, `agent:running`, `agent:blocked`,
       `agent:manual`, and `agent:review`.
 
 Expected result: setup can infer or use this repository, labels exist, status
 can read GitHub, and no Codex execution starts during setup or status.
+
+## Diagnostics proof
+
+- [ ] `diagnostics` configures a scoped phase profile whose global Codex command
+      would fail if the runner did not select the profile.
+- [ ] Run one scoped issue through the packaged CLI path.
+- [ ] Verify lifecycle events are written under runner state.
+- [ ] Verify `status --json` exposes recent events newest-first.
+- [ ] Verify recent events include a `snapshot` artifact path.
+- [ ] Verify the snapshot file exists and remains bounded evidence rather than
+      a raw Codex transcript or full issue comment dump.
+- [ ] Verify `doctor --json` reports pass/warn/fail arrays without creating
+      worktrees, launching Codex, editing labels, or changing issues.
+
+Expected result: operator diagnostics can explain readiness and the latest run
+from structured runner-owned artifacts.
 
 ## Controlled Codex mode
 
