@@ -20,8 +20,11 @@ import {
   buildIssueTreePullRequestBody,
   buildIssueTreeReviewReport,
   buildParentBlockedReport,
+  type FreshContextReviewEvidence,
   type RunnerValidationLine,
 } from './handoff-evidence.js';
+import { writeDurableRunSummary, type DurableRunSummaryEvidence } from './durable-run-summary.js';
+import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import {
   readPlanAutoCompletionReport,
   type PlanAutoCompletionReport,
@@ -44,6 +47,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
+import { shouldRequestImplementationRework } from './rework-policy.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -101,6 +105,18 @@ interface ChildExecutionResult {
   commits: SessionCommitInfo[];
   skippedChecks: string[];
   residualRisks: string[];
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: DurableRunSummaryEvidence;
+}
+
+class ChildExecutionBlockedError extends Error {
+  public constructor(
+    message: string,
+    public readonly durableRunSummary?: DurableRunSummaryEvidence,
+    public readonly freshContextReview?: FreshContextReviewEvidence,
+  ) {
+    super(message);
+  }
 }
 
 export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promise<PlanAutoCommandResult> {
@@ -273,7 +289,12 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         issueTreeWorkflowPrompt,
         now,
       })));
-      const failures: Array<{ child?: AutonomousChildNode; message: string }> = [];
+      const failures: Array<{
+        child?: AutonomousChildNode;
+        message: string;
+        durableRunSummary?: DurableRunSummaryEvidence;
+        freshContextReview?: FreshContextReviewEvidence;
+      }> = [];
       for (const [index, result] of settled.entries()) {
         if (result.status === 'fulfilled') {
           continue;
@@ -281,6 +302,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         failures.push({
           child: batch[index],
           message: result.reason instanceof Error ? result.reason.message : 'child execution failed',
+          durableRunSummary: result.reason instanceof ChildExecutionBlockedError ? result.reason.durableRunSummary : undefined,
+          freshContextReview: result.reason instanceof ChildExecutionBlockedError ? result.reason.freshContextReview : undefined,
         });
       }
       if (failures.length > 0) {
@@ -559,38 +582,67 @@ async function executeChild(input: {
     updatedAt: input.now.toISOString(),
   });
 
-  const beforeHead = await input.git.getHead(worktreePath);
-  let codexResult: CodexCommandRunResult;
-  try {
-    codexResult = await input.codexAdapter.run({
+  let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
+  let rework: { attempt: number; blockedReasons: string[] } | undefined;
+  for (let attempt = 0; attempt <= input.config.loopPolicy.rework.maxAttempts; attempt++) {
+    const attemptPromptText = rework
+      ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\nAddress the blockers, then produce a fresh completion report JSON for the runner.`
+      : promptText;
+    await writeDurablePrompt({
       targetRoot: input.targetRoot,
       config: input.config,
-      worktreePath,
-      promptPath,
-      promptText,
-      reportPath,
-      isolatedHomePath,
       issueNumber: childIssueNumber,
       sessionId,
-      branchName,
-      logPath,
+      promptText: attemptPromptText,
     });
-  } finally {
-    await cleanupSessionCodexHome(isolatedHomePath);
+    const beforeHead = await input.git.getHead(worktreePath);
+    let codexResult: CodexCommandRunResult;
+    try {
+      codexResult = await input.codexAdapter.run({
+        targetRoot: input.targetRoot,
+        config: input.config,
+        worktreePath,
+        promptPath,
+        promptText: attemptPromptText,
+        reportPath,
+        isolatedHomePath,
+        issueNumber: childIssueNumber,
+        sessionId,
+        branchName,
+        logPath,
+      });
+    } finally {
+      await cleanupSessionCodexHome(isolatedHomePath);
+    }
+    const afterHead = await input.git.getHead(worktreePath);
+    publishability = await runImplementationPublishabilityCheck({
+      config: input.config,
+      issue: input.child.issue,
+      worktreePath,
+      reportPath,
+      beforeHead,
+      afterHead,
+      codexResult,
+      git: input.git,
+      shellExecutor: input.shellExecutor,
+      commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
+    });
+
+    if (
+      publishability.status === 'blocked'
+      && attempt < input.config.loopPolicy.rework.maxAttempts
+      && shouldRequestImplementationRework(publishability.reasons, input.config)
+    ) {
+      rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };
+      await mkdir(isolatedHomePath, { recursive: true });
+      continue;
+    }
+    break;
   }
-  const afterHead = await input.git.getHead(worktreePath);
-  const publishability = await runImplementationPublishabilityCheck({
-    config: input.config,
-    issue: input.child.issue,
-    worktreePath,
-    reportPath,
-    beforeHead,
-    afterHead,
-    codexResult,
-    git: input.git,
-    shellExecutor: input.shellExecutor,
-    commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
-  });
+
+  if (!publishability) {
+    throw new Error('Runner internal error: missing child publishability result');
+  }
 
   if (publishability.status === 'promotion-requested') {
     const promotion = publishability.report.promotion;
@@ -604,8 +656,74 @@ async function executeChild(input: {
   }
 
   if (publishability.status === 'blocked') {
-    throw new Error(publishability.reasons.join('; '));
+    const durableRunSummary = await writeDurableRunSummary({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+      outcome: 'blocked',
+      changedFiles: publishability.changedFiles,
+      validation: [],
+      blockers: publishability.reasons,
+      skippedChecks: publishability.skippedChecks,
+      residualRisks: publishability.residualRisks,
+      nextAction: 'Parent issue-tree execution is blocked until this child is resolved.',
+      logPath,
+      reportPath,
+    });
+    throw new ChildExecutionBlockedError(publishability.reasons.join('; '), durableRunSummary);
   }
+
+  const freshContextReview = await runFreshContextReviewIfEnabled({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issue: input.child.issue,
+    codexAdapter: input.codexAdapter,
+    worktreePath,
+    isolatedSessionId: `${sessionId}-fresh-review`,
+    branchName,
+    publishability,
+  });
+  if (freshContextReview?.status === 'blocked') {
+    const durableRunSummary = await writeDurableRunSummary({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+      outcome: 'blocked',
+      changedFiles: publishability.changedFiles,
+      validation: publishability.validation,
+      blockers: ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
+      skippedChecks: publishability.skippedChecks,
+      residualRisks: [...publishability.residualRisks, ...freshContextReview.residualRisks],
+      suggestionEvidence: freshContextReview.findings,
+      nextAction: 'Parent issue-tree execution is blocked until this child review finding is resolved.',
+      logPath,
+      reportPath,
+    });
+    throw new ChildExecutionBlockedError(
+      ['Fresh-Context Review blocked publication', ...freshContextReview.findings].join('; '),
+      durableRunSummary,
+      freshContextReview,
+    );
+  }
+
+  const durableRunSummary = await writeDurableRunSummary({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issueNumber: childIssueNumber,
+    sessionId,
+    outcome: 'review-ready',
+    changedFiles: publishability.changedFiles,
+    validation: publishability.validation,
+    blockers: [],
+    skippedChecks: publishability.skippedChecks,
+    residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
+    suggestionEvidence: freshContextReview?.findings,
+    nextAction: 'Parent issue-tree integration should merge this child branch.',
+    logPath,
+    reportPath,
+  });
 
   return {
     child: input.child,
@@ -619,7 +737,9 @@ async function executeChild(input: {
     artifacts: publishability.artifacts,
     commits: publishability.commits,
     skippedChecks: publishability.skippedChecks,
-    residualRisks: publishability.residualRisks,
+    residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
+    freshContextReview,
+    durableRunSummary,
   };
 }
 
@@ -627,7 +747,12 @@ async function blockFailedBatch(
   issueAdapter: GitHubIssueAdapter,
   config: CodexOrchestratorConfig,
   parentIssueNumber: number,
-  failures: Array<{ child?: AutonomousChildNode; message: string }>,
+  failures: Array<{
+    child?: AutonomousChildNode;
+    message: string;
+    durableRunSummary?: DurableRunSummaryEvidence;
+    freshContextReview?: FreshContextReviewEvidence;
+  }>,
   successfulUnmerged: ChildExecutionResult[],
 ): Promise<void> {
   for (const failure of failures) {
@@ -643,6 +768,8 @@ async function blockFailedBatch(
         childIssueNumber: failure.child.issue.number,
         reasons: [failure.message],
         details: ['Worktree preserved for maintainer inspection.'],
+        freshContextReview: failure.freshContextReview,
+        durableRunSummary: failure.durableRunSummary,
       }),
     );
   }
@@ -657,6 +784,7 @@ async function blockFailedBatch(
         reasons: ['A sibling child failed before the batch merge; this child branch was not merged.'],
         branchName: result.branchName,
         worktreePath: result.worktreePath,
+        durableRunSummary: result.durableRunSummary,
       }),
     );
   }
@@ -701,6 +829,7 @@ async function handleMergeConflict(
           branchName: batchResult.branchName,
         })),
         gitOutput: error.stderr || error.stdout || 'no git output',
+        durableRunSummary: result.durableRunSummary,
       }),
     );
   }
@@ -746,6 +875,7 @@ async function blockCompletedChildren(
           `- Merged child branch was not published: ${result.branchName}`,
           `- Parent worktree preserved: ${parentWorktreePath}`,
         ],
+        durableRunSummary: result.durableRunSummary,
       }),
     );
     await store.removeRun(result.child.issue.number);

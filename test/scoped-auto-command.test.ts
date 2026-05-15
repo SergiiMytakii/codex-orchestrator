@@ -153,6 +153,15 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.deepEqual(issueAdapter.removedLabels.at(-1), { issueNumber: 155, labels: [labels.running.name] });
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
   assert.match(issueAdapter.postedComments.at(-1)?.body ?? '', /codex-orchestrator review report for #155/);
+  assert.match(issueAdapter.postedComments.at(-1)?.body ?? '', /Durable Run Summary/);
+  const summary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-155-issue-155-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(summary.outcome, 'review-ready');
+  assert.deepEqual(summary.policySuggestions, []);
   assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/issue-155', '-1']);
@@ -336,7 +345,67 @@ test('scoped auto command blocks when completion report is missing before PR pub
   assert.equal(result.status, 'blocked');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
   assert.match(result.reportComment, /runner cannot prove safety contract/);
+  assert.match(result.reportComment, /Durable Run Summary/);
+  const summary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-155-issue-155-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(summary.outcome, 'blocked');
+  assert.match(String((summary.blockers as string[])[0]), /CODEX_ORCHESTRATOR_REPORT_FILE/);
+  assert.match(String((summary.policySuggestions as string[])[0]), /Non-mutating recommendation/);
+  assert.match(result.reportComment, /policy suggestions: Non-mutating recommendation/);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
+});
+
+test('scoped auto command writes durable summary for promotion requests', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 155, labels: [labels.auto.name] })]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'needs-promotion',
+          changes: [],
+          validation: [],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: ['Needs parent planning.'],
+          prohibitedActions: [],
+          promotion: {
+            reason: 'Touches multiple ownership scopes.',
+            criteria: ['multi-service'],
+            evidence: ['Issue body names two services.'],
+          },
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'promotion-requested');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Durable Run Summary/);
+  const summary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-155-issue-155-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(summary.outcome, 'promotion-requested');
 });
 
 test('scoped auto command uses mobile codex timeout for Flutter and Android issues', async () => {
@@ -682,6 +751,407 @@ test('scoped auto command retries once on retryable blockers and can recover to 
   assert.equal(result.status, 'review-ready');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
+});
+
+test('scoped auto command uses configured rework limit and includes exact blockers in rework prompts', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: {
+        ...config.loopPolicy.rework,
+        maxAttempts: 2,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const promptTexts: string[] = [];
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      promptTexts.push(input.promptText);
+      if (runCount === 3) {
+        await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+        await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+        await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const fixed = true;\n', 'utf8');
+        await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(fixed, true);\n', 'utf8');
+      }
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: runCount === 3 ? ['src/feature.ts', 'test/feature.test.ts'] : [],
+          validation: runCount === 3
+            ? [
+              {
+                command: 'TDD red-to-green',
+                status: 'passed',
+                summary: 'Focused behavior test failed before implementation and passed after implementation.',
+              },
+              { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+            ]
+            : [],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(runCount, 3);
+  assert.equal(result.status, 'review-ready');
+  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
+  assert.match(promptTexts[1] ?? '', /- Codex completed without file changes/);
+  assert.match(promptTexts[2] ?? '', /This is an automatic rework attempt \(#2\)/);
+  assert.match(promptTexts[2] ?? '', /- Codex completed without file changes/);
+});
+
+test('scoped auto command respects zero configured rework attempts', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: {
+        ...config.loopPolicy.rework,
+        maxAttempts: 0,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: [],
+          validation: [],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(runCount, 1);
+  assert.equal(result.status, 'blocked');
+  assert.match(result.reportComment, /Codex completed without file changes/);
+});
+
+test('scoped auto command includes advisory fresh-context review evidence before handoff', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      freshContextReview: {
+        ...config.loopPolicy.freshContextReview,
+        enabled: true,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const prompts: string[] = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      prompts.push(input.promptText);
+      if (input.sessionId.endsWith('-fresh-review')) {
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            findings: [{
+              severity: 'advisory',
+              confidence: 'medium',
+              summary: 'Consider adding one more edge-case test.',
+              evidence: 'Changed files include feature.txt only.',
+            }],
+            residualRisks: ['Review was advisory only.'],
+          }),
+          'utf8',
+        );
+        return { stdout: 'review ok', stderr: '', exitCode: 0 };
+      }
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1] ?? '', /# Fresh-Context Review/);
+  assert.doesNotMatch(prompts[1] ?? '', /# Codex Orchestrator Scoped Implementation/);
+  assert.match(result.reportComment, /Fresh-Context Review/);
+  assert.match(result.reportComment, /advisory medium: Consider adding one more edge-case test\./);
+  assert.match(result.reportComment, /Non-mutating recommendation: review Fresh-Context Review evidence/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Fresh-Context Review/);
+});
+
+test('scoped auto command blocks draft PR on high-confidence fresh-context policy violation', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      freshContextReview: {
+        ...config.loopPolicy.freshContextReview,
+        enabled: true,
+        blockOnHighConfidencePolicyViolations: true,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.endsWith('-fresh-review')) {
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            findings: [{
+              severity: 'policy-violation',
+              confidence: 'high',
+              summary: 'Runner-owned publication boundary was crossed.',
+              evidence: 'Review found a push command in validation evidence.',
+            }],
+            residualRisks: [],
+          }),
+          'utf8',
+        );
+        return { stdout: 'review found blocker', stderr: '', exitCode: 0 };
+      }
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Fresh-Context Review blocked publication/);
+  assert.match(result.reportComment, /policy-violation high: Runner-owned publication boundary was crossed\./);
+});
+
+test('scoped auto command records durable evidence when fresh-context review report is invalid', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      freshContextReview: {
+        ...config.loopPolicy.freshContextReview,
+        enabled: true,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.endsWith('-fresh-review')) {
+        await writeFile(input.reportPath, '{not-json', 'utf8');
+        return { stdout: 'review invalid', stderr: '', exitCode: 0 };
+      }
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Invalid Fresh-Context Review report: report must be valid JSON/);
+  assert.match(result.reportComment, /Durable Run Summary/);
+  assert.match(result.reportComment, /Non-mutating recommendation/);
+});
+
+test('scoped auto command proves configured loop path end to end without live services', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: { ...config.loopPolicy.rework, maxAttempts: 1 },
+      freshContextReview: { ...config.loopPolicy.freshContextReview, enabled: true },
+      durableRunSummaries: { enabled: true },
+      policySuggestions: { enabled: true, maxSuggestions: 3 },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let implementationRuns = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.endsWith('-fresh-review')) {
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            findings: [{
+              severity: 'advisory',
+              confidence: 'medium',
+              summary: 'Review evidence is sufficient with a small follow-up suggestion.',
+              evidence: 'Validation and changed files were present.',
+            }],
+            residualRisks: [],
+          }),
+          'utf8',
+        );
+        return { stdout: 'review ok', stderr: '', exitCode: 0 };
+      }
+      implementationRuns += 1;
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      if (implementationRuns === 2) {
+        await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const fixed = true;\n', 'utf8');
+        await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(fixed, true);\n', 'utf8');
+      }
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: implementationRuns === 2 ? ['src/feature.ts', 'test/feature.test.ts'] : [],
+          validation: implementationRuns === 2
+            ? [
+              {
+                command: 'TDD red-to-green',
+                status: 'passed',
+                summary: 'Focused behavior test failed before implementation and passed after implementation.',
+              },
+              { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+            ]
+            : [],
+          artifacts: [],
+          skippedChecks: ['Optional benchmark not run.'],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(implementationRuns, 2);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+  assert.match(result.reportComment, /Fresh-Context Review/);
+  assert.match(result.reportComment, /Durable Run Summary/);
+  assert.match(result.reportComment, /Non-mutating recommendation/);
 });
 
 test('scoped auto command no longer blocks on missing UI visual proof (but can still block on quality gate)', async () => {

@@ -4,6 +4,7 @@ import type { GitHubPullRequest } from '../github/pull-requests.js';
 import type { SessionCommitInfo } from '../git/worktree.js';
 import type { AutonomousChildNode } from './issue-tree.js';
 import type { ScopedCompletionReport } from './completion-report.js';
+import type { DurableRunSummaryEvidence } from './durable-run-summary.js';
 
 export interface RunnerValidationLine {
   command: string;
@@ -12,6 +13,13 @@ export interface RunnerValidationLine {
 }
 
 type CommitEvidence = Pick<SessionCommitInfo, 'sha' | 'subject'>;
+
+export interface FreshContextReviewEvidence {
+  status: 'passed' | 'blocked';
+  findings: string[];
+  residualRisks: string[];
+  logPath: string;
+}
 
 export interface ScopedHandoffEvidence {
   config: CodexOrchestratorConfig;
@@ -24,6 +32,8 @@ export interface ScopedHandoffEvidence {
   residualRisks: string[];
   logPath: string;
   commits: CommitEvidence[];
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: DurableRunSummaryEvidence;
 }
 
 export interface ChildHandoffEvidence {
@@ -36,6 +46,8 @@ export interface ChildHandoffEvidence {
   skippedChecks: string[];
   residualRisks: string[];
   logPath: string;
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: DurableRunSummaryEvidence;
 }
 
 export function buildScopedReviewReport(
@@ -55,6 +67,8 @@ export function buildScopedReviewReport(
     ...bulletList([input.logPath]),
     'Local Commits',
     ...renderCommitEvidence(input.commits),
+    ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     'Skipped Checks',
     ...bulletList(input.skippedChecks),
     'Residual Risks',
@@ -81,6 +95,8 @@ export function buildScopedPullRequestBody(input: ScopedHandoffEvidence): string
     'Local commits:',
     ...renderCommitEvidence(input.commits),
     '',
+    ...renderFreshContextReviewPullRequestSection(input.freshContextReview),
+    ...renderDurableRunSummaryPullRequestSection(input.durableRunSummary),
     'Skipped checks:',
     ...bulletList(input.skippedChecks),
     '',
@@ -96,6 +112,8 @@ export function buildScopedBlockedReport(input: {
   logPath: string;
   skippedChecks: string[];
   residualRisks: string[];
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: DurableRunSummaryEvidence;
 }): string {
   return [
     `codex-orchestrator blocked scoped execution for #${input.issueNumber}`,
@@ -105,6 +123,8 @@ export function buildScopedBlockedReport(input: {
     ...bulletList(input.changedFiles),
     'Log',
     ...bulletList([input.logPath]),
+    ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     'Skipped Checks',
     ...bulletList(input.skippedChecks),
     'Residual Risks',
@@ -112,7 +132,61 @@ export function buildScopedBlockedReport(input: {
   ].join('\n');
 }
 
-export function buildPromotionRequestReport(input: { issueNumber: number; report: ScopedCompletionReport }): string {
+function renderDurableRunSummaryEvidence(evidence: DurableRunSummaryEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    'Durable Run Summary',
+    `- ${evidence.path}`,
+    ...evidence.excerpt.map((line) => `- ${line}`),
+  ];
+}
+
+function renderDurableRunSummaryPullRequestSection(evidence: DurableRunSummaryEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    'Durable Run Summary:',
+    `- ${evidence.path}`,
+    ...evidence.excerpt.map((line) => `- ${line}`),
+    '',
+  ];
+}
+
+function renderFreshContextReviewEvidence(evidence: FreshContextReviewEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    'Fresh-Context Review',
+    `- status: ${evidence.status}`,
+    ...bulletList(evidence.findings),
+    'Fresh-Context Review Residual Risks',
+    ...bulletList(evidence.residualRisks),
+    'Fresh-Context Review Log',
+    ...bulletList([evidence.logPath]),
+  ];
+}
+
+function renderFreshContextReviewPullRequestSection(evidence: FreshContextReviewEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    'Fresh-Context Review:',
+    `- status: ${evidence.status}`,
+    ...bulletList(evidence.findings),
+    '',
+  ];
+}
+
+export function buildPromotionRequestReport(input: {
+  issueNumber: number;
+  report: ScopedCompletionReport;
+  durableRunSummary?: DurableRunSummaryEvidence;
+}): string {
   const promotion = input.report.promotion;
   if (!promotion) {
     throw new Error('promotion is required for needs-promotion');
@@ -124,6 +198,7 @@ export function buildPromotionRequestReport(input: { issueNumber: number; report
     ...bulletList(promotion.criteria),
     'Evidence',
     ...bulletList(promotion.evidence),
+    ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     'Review this evidence and replace agent:auto with agent:plan-auto when parent issue-tree orchestration is desired.',
   ].join('\n');
 }
@@ -147,6 +222,8 @@ export function buildChildReviewReport(input: { parentIssueNumber: number; resul
     ...bulletList(input.result.skippedChecks),
     'Residual Risks',
     ...bulletList(input.result.residualRisks),
+    ...renderFreshContextReviewEvidence(input.result.freshContextReview),
+    ...renderDurableRunSummaryEvidence(input.result.durableRunSummary),
   ].join('\n');
 }
 
@@ -165,6 +242,10 @@ export function buildIssueTreeReviewReport(input: {
     ...input.batches.map((batch, index) => `- Batch ${index + 1}: ${batch.map((child) => `#${child.issue.number}`).join(', ')}`),
     'Child Issues',
     ...input.childResults.map((result) => `- #${result.child.issue.number} ${result.child.issue.title}: ${result.branchName}`),
+    'Child Loop Outcomes',
+    ...input.childResults.map((result) => (
+      `- #${result.child.issue.number}: ${result.durableRunSummary?.excerpt[0] ?? 'outcome: review-ready'}`
+    )),
     'Validation',
     ...input.childResults.flatMap((result) => renderValidationEvidence(result.validation, { prefix: `#${result.child.issue.number} ` })),
     ...renderValidationEvidence(input.finalValidation, { prefix: 'final ' }),
@@ -220,6 +301,11 @@ export function buildIssueTreePullRequestBody(input: {
     'Residual risks:',
     ...bulletList(input.childResults.flatMap((result) => result.residualRisks)),
     '',
+    'Child loop outcomes:',
+    ...input.childResults.map((result) => (
+      `- #${result.child.issue.number}: ${result.durableRunSummary?.excerpt[0] ?? 'outcome: review-ready'}`
+    )),
+    '',
     'Merge summary:',
     ...input.childResults.map((result) => `- ${result.branchName} merged for #${result.child.issue.number}`),
     '',
@@ -236,6 +322,8 @@ export function buildChildBlockedReport(input: {
   worktreePath?: string;
   batchChildren?: Array<{ issueNumber: number; branchName: string }>;
   gitOutput?: string;
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: DurableRunSummaryEvidence;
 }): string {
   return [
     `codex-orchestrator blocked child #${input.childIssueNumber} for parent #${input.parentIssueNumber}`,
@@ -244,6 +332,8 @@ export function buildChildBlockedReport(input: {
     ...(input.details ?? []),
     ...(input.branchName ? [`- Branch preserved: ${input.branchName}`] : []),
     ...(input.worktreePath ? [`- Worktree preserved: ${input.worktreePath}`] : []),
+    ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     ...(input.batchChildren ? ['Batch Children', ...bulletList(input.batchChildren.map((child) => `#${child.issueNumber} ${child.branchName}`))] : []),
     ...(input.gitOutput ? ['Git Output', ...bulletList([input.gitOutput])] : []),
   ].join('\n');

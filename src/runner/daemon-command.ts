@@ -69,6 +69,7 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
       emit(`[${now().toISOString()}] no eligible issues`);
     } else {
       emit(`[${now().toISOString()}] running #${decision.issueNumber} ${decision.mode}`);
+      emit(`[${now().toISOString()}] selection: ${decision.selectionSummary}`);
       try {
         const executeIssue = options.executeIssue ?? ((issueNumber) => runIssue(targetRoot, issueNumber, decision.mode));
         await executeIssue(decision.issueNumber);
@@ -111,7 +112,7 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
 async function findNextEligibleIssue(
   adapter: GitHubIssueAdapter,
   config: Awaited<ReturnType<typeof readRunnerConfig>>,
-): Promise<Extract<IssueDiscoveryDecision, { kind: 'eligible' }> | undefined> {
+): Promise<(Extract<IssueDiscoveryDecision, { kind: 'eligible' }> & { selectionSummary: string }) | undefined> {
   const discoveryLabels = [
     config.github.labels.auto.name,
     config.github.labels.planAuto.name,
@@ -121,9 +122,48 @@ async function findNextEligibleIssue(
     config.github.labels.review.name,
   ];
   const issues = await adapter.listOpenIssuesWithAnyLabel(discoveryLabels);
-  return discoverIssueWork(issues, config).find(
+  const eligible = discoverIssueWork(issues, config).filter(
     (decision): decision is Extract<IssueDiscoveryDecision, { kind: 'eligible' }> => decision.kind === 'eligible',
   );
+  const [selected] = eligible.sort((left, right) => compareEligibleIssueSelection(left, right, issues, config));
+  return selected ? { ...selected, selectionSummary: selectionSummary(selected, issues, config) } : undefined;
+}
+
+function compareEligibleIssueSelection(
+  left: Extract<IssueDiscoveryDecision, { kind: 'eligible' }>,
+  right: Extract<IssueDiscoveryDecision, { kind: 'eligible' }>,
+  issues: Parameters<typeof discoverIssueWork>[0],
+  config: Awaited<ReturnType<typeof readRunnerConfig>>,
+): number {
+  const leftPriority = priorityRank(left.issueNumber, issues, config);
+  const rightPriority = priorityRank(right.issueNumber, issues, config);
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+  return left.issueNumber - right.issueNumber;
+}
+
+function priorityRank(
+  issueNumber: number,
+  issues: Parameters<typeof discoverIssueWork>[0],
+  config: Awaited<ReturnType<typeof readRunnerConfig>>,
+): number {
+  const issue = issues.find((candidate) => candidate.number === issueNumber);
+  const labels = new Set(issue?.labels.map((label) => label.name) ?? []);
+  const rank = config.loopPolicy.issueSelection.priorityLabels.findIndex((label) => labels.has(label));
+  return rank === -1 ? Number.POSITIVE_INFINITY : rank;
+}
+
+function selectionSummary(
+  decision: Extract<IssueDiscoveryDecision, { kind: 'eligible' }>,
+  issues: Parameters<typeof discoverIssueWork>[0],
+  config: Awaited<ReturnType<typeof readRunnerConfig>>,
+): string {
+  const rank = priorityRank(decision.issueNumber, issues, config);
+  const priority = Number.isFinite(rank)
+    ? config.loopPolicy.issueSelection.priorityLabels[rank]
+    : 'unprioritized';
+  return `priority ${priority}, tie-breaker ${config.loopPolicy.issueSelection.tieBreaker}`;
 }
 
 function runIssue(

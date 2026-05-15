@@ -18,6 +18,7 @@ const scenarioDefinitions = new Map([
   ['scoped-runner-commit', runScopedRunnerCommitScenario],
   ['scoped-local-commit', runScopedLocalCommitScenario],
   ['run-scoped', runDirectScopedScenario],
+  ['loop-policy', runLoopPolicyScenario],
   ['visual-proof', runVisualProofScenario],
   ['quality-gates', runQualityGatesScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
@@ -261,7 +262,37 @@ async function configureTarget(context, overrides = {}) {
   if (overrides.runnerValidationCommand) {
     config.reviewGates.visualProof.runnerValidationCommand = overrides.runnerValidationCommand;
   }
+  if (overrides.loopPolicy) {
+    config.loopPolicy = mergeLoopPolicy(config.loopPolicy, overrides.loopPolicy);
+  }
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+}
+
+function mergeLoopPolicy(base, overrides) {
+  return {
+    ...base,
+    ...overrides,
+    issueSelection: {
+      ...base.issueSelection,
+      ...(overrides.issueSelection ?? {}),
+    },
+    rework: {
+      ...base.rework,
+      ...(overrides.rework ?? {}),
+    },
+    freshContextReview: {
+      ...base.freshContextReview,
+      ...(overrides.freshContextReview ?? {}),
+    },
+    durableRunSummaries: {
+      ...base.durableRunSummaries,
+      ...(overrides.durableRunSummaries ?? {}),
+    },
+    policySuggestions: {
+      ...base.policySuggestions,
+      ...(overrides.policySuggestions ?? {}),
+    },
+  };
 }
 
 async function runBaselineScenario(context) {
@@ -392,6 +423,79 @@ async function runDirectScopedScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false });
 }
 
+async function runLoopPolicyScenario(context) {
+  const loopPolicy = {
+    issueSelection: {
+      priorityLabels: ['agent:child'],
+      tieBreaker: 'issue-number-asc',
+    },
+    rework: {
+      maxAttempts: 1,
+      retryableBlockers: [
+        'missing-completion-report',
+        'invalid-completion-report',
+        'no-changed-files',
+        'failed-configured-checks',
+        'missing-quality-gate-evidence',
+      ],
+    },
+    freshContextReview: {
+      enabled: true,
+      mode: 'advisory',
+      blockOnHighConfidencePolicyViolations: true,
+    },
+    durableRunSummaries: {
+      enabled: true,
+    },
+    policySuggestions: {
+      enabled: true,
+      maxSuggestions: 5,
+    },
+  };
+  await configureTarget(context, { allowAgentLocalCommits: true, loopPolicy });
+
+  const lowerPriority = await createIssue(
+    context,
+    'loop-policy-lower-priority',
+    ['agent:auto'],
+    'Lower-priority issue used to prove daemon priority selection.',
+  );
+  const selected = await createIssue(
+    context,
+    'loop-policy-rework',
+    ['agent:auto', 'agent:child'],
+    'Higher-priority Loop Policy issue. The fake agent intentionally needs one bounded rework attempt.',
+    { skipNoEligibleCheck: true },
+  );
+
+  const status = await runPackagedCli(context, ['status', '--target', context.targetRoot, '--dry-run']);
+  const eligible = eligibleLinesFromStatus(status.stdout);
+  assert(
+    eligible.some((line) => line.startsWith(`  - #${lowerPriority.number} scoped-issue:`))
+      && eligible.some((line) => line.startsWith(`  - #${selected.number} scoped-issue:`)),
+    `expected both loop-policy priority candidates to be eligible\n${status.stdout}`,
+  );
+  const daemon = await runPackagedCli(context, ['daemon', '--target', context.targetRoot, '--once', '--max-runs', '1']);
+  assertIncludes(daemon.stdout, `running #${selected.number} scoped-issue`, 'daemon should select the configured priority issue');
+  assert(!daemon.stdout.includes(`running #${lowerPriority.number} scoped-issue`), 'daemon should not select lower-priority issue first');
+  assertIncludes(daemon.stdout, 'selection: priority agent:child, tie-breaker issue-number-asc', 'daemon should report priority selection policy');
+  await assertScopedSuccess(context, selected.number, {
+    expectLocalCommit: false,
+    expectLoopPolicyEvidence: true,
+  });
+  await closeIssue(context, lowerPriority.number, 'lower-priority Loop Policy candidate was intentionally not executed');
+
+  await configureTarget(context, { allowAgentLocalCommits: true, loopPolicy });
+  const parent = await createIssue(
+    context,
+    'plan-auto',
+    ['agent:plan-auto'],
+    'Loop Policy issue-tree compatibility smoke.',
+  );
+  await runDaemonOnce(context, parent.number, 'plan-parent');
+  await assertPlanAutoSuccess(context, parent.number, { expectLoopPolicyEvidence: true });
+}
+
 async function runVisualProofScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -498,7 +602,7 @@ async function runPlanAutoBlockingScenario(context) {
   await assertNoRemoteBranch(context, `codex/tree-${parent.number}`);
 }
 
-async function assertPlanAutoSuccess(context, issueNumber) {
+async function assertPlanAutoSuccess(context, issueNumber, { expectLoopPolicyEvidence = false } = {}) {
   const parent = await getIssue(context, issueNumber);
   assertHasLabel(parent, 'agent:review');
   assertMissingLabel(parent, 'agent:running');
@@ -511,6 +615,12 @@ async function assertPlanAutoSuccess(context, issueNumber) {
   assert(pullRequest, `expected draft PR for ${branchName}`);
   assert(pullRequest.isDraft === true, `expected ${branchName} PR to be a draft`);
   context.createdPullRequests.push(pullRequest.number);
+  const body = await getPullRequestBody(context, pullRequest.number);
+  assertIncludes(body, 'Child loop outcomes:', 'issue-tree PR body should include child loop outcome evidence');
+  assertIncludes(body, 'Auto-merge is disabled.', 'issue-tree PR body should preserve runner-owned publication boundary');
+  if (expectLoopPolicyEvidence) {
+    assertIncludes(body, 'outcome: review-ready', 'issue-tree PR should include child durable outcome evidence');
+  }
 
   const childIssues = await listIssuesByRunId(context);
   const children = childIssues.filter((child) => child.title.includes('plan child'));
@@ -539,8 +649,10 @@ async function runDaemonOnce(context, issueNumber, mode) {
   assertIncludes(result.stdout, `completed #${issueNumber}`, `daemon should complete issue #${issueNumber}`);
 }
 
-async function createIssue(context, scenario, labels, extraBody = '') {
-  await assertNoEligibleIssues(context);
+async function createIssue(context, scenario, labels, extraBody = '', options = {}) {
+  if (!options.skipNoEligibleCheck) {
+    await assertNoEligibleIssues(context);
+  }
   const title = `[live-smoke:${context.runId}] ${scenario}`;
   const body = [
     'Live smoke issue created by scripts/live-smoke.mjs.',
@@ -565,11 +677,20 @@ async function createIssue(context, scenario, labels, extraBody = '') {
   return getIssue(context, issueNumber);
 }
 
-async function assertScopedSuccess(context, issueNumber, { expectLocalCommit, expectScreenshotProof = false }) {
+async function assertScopedSuccess(
+  context,
+  issueNumber,
+  { expectLocalCommit, expectScreenshotProof = false, expectLoopPolicyEvidence = false },
+) {
   const issue = await getIssue(context, issueNumber);
   assertHasLabel(issue, 'agent:review');
   assertMissingLabel(issue, 'agent:running');
   assertIssueHasComment(issue, `codex-orchestrator review report for #${issueNumber}`);
+  if (expectLoopPolicyEvidence) {
+    assertIssueHasComment(issue, 'Fresh-Context Review');
+    assertIssueHasComment(issue, 'Durable Run Summary');
+    assertIssueHasComment(issue, 'policy suggestions: Non-mutating recommendation');
+  }
 
   const branchName = `codex/issue-${issueNumber}`;
   context.createdBranches.push(branchName);
@@ -582,6 +703,11 @@ async function assertScopedSuccess(context, issueNumber, { expectLocalCommit, ex
   assertIncludes(body, `Closes #${issueNumber}`, 'PR body should link issue');
   assertIncludes(body, 'Validation', 'PR body should include validation evidence');
   assertIncludes(body, 'Log', 'PR body should include log evidence');
+  if (expectLoopPolicyEvidence) {
+    assertIncludes(body, 'Fresh-Context Review:', 'PR body should include Fresh-Context Review evidence');
+    assertIncludes(body, 'Durable Run Summary:', 'PR body should include Durable Run Summary evidence');
+    assertIncludes(body, 'policy suggestions: Non-mutating recommendation', 'PR body should include non-mutating Policy Suggestions');
+  }
   if (expectLocalCommit) {
     assertIncludes(body.toLowerCase(), 'local commits', 'PR body should include local commit summary');
     assertIncludes(body, 'Live smoke agent checkpoint', 'PR body should include fake agent commit');
@@ -607,6 +733,19 @@ async function assertScopedSuccess(context, issueNumber, { expectLocalCommit, ex
   }
   await assertLogFileExists(context, issueNumber);
   await assertRunStateCleared(context, issueNumber);
+}
+
+async function closeIssue(context, issueNumber, reason) {
+  await runCommand('gh', [
+    'issue',
+    'close',
+    String(issueNumber),
+    '--repo',
+    context.repo,
+    '--comment',
+    `[live-smoke:${context.runId}] ${reason}`,
+  ], { timeoutMs: context.options.timeoutMs });
+  await appendReport(context, `Closed issue #${issueNumber}: ${reason}\n\n`);
 }
 
 async function assertBlockedIssue(context, issueNumber, expectedCommentText) {
@@ -1038,6 +1177,12 @@ console.log(JSON.stringify({ type: 'live-smoke', message: 'starting ' + scenario
 console.error('live-smoke fake stderr for #' + issueNumber + '\n');
 mkdirSync(dirname(reportPath), { recursive: true });
 
+if (prompt.includes('# Fresh-Context Review')) {
+  writeFreshContextReviewReport(reportPath, scenario);
+  console.log(JSON.stringify({ type: 'live-smoke', message: 'completed fresh-context review for ' + scenario + ' #' + issueNumber }));
+  process.exit(0);
+}
+
 switch (scenario) {
   case 'scoped-runner-commit':
     writeCodeChange(issueNumber, runId, 'runner');
@@ -1047,6 +1192,26 @@ switch (scenario) {
     writeCodeChange(issueNumber, runId, 'local');
     gitCommit('Live smoke agent checkpoint #' + issueNumber);
     writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
+    break;
+  case 'loop-policy-rework':
+    if (!prompt.includes('automatic rework attempt (#1)')) {
+      writeScopedReport(
+        reportPath,
+        [],
+        [
+          { command: 'red-green live smoke', status: 'passed', summary: 'test failed before implementation and passed after implementation' },
+          { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for live smoke fixture' },
+        ],
+      );
+      break;
+    }
+    writeCodeChange(issueNumber, runId, 'loop-policy-rework');
+    writeScopedReport(
+      reportPath,
+      ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+      undefined,
+      ['policy suggestion smoke evidence after bounded rework'],
+    );
     break;
   case 'visual-proof':
     writeVisualChange(issueNumber, runId);
@@ -1177,15 +1342,28 @@ function writeVisualChange(issue, run) {
 function writeScopedReport(path, changes, validation = [
   { command: 'red-green live smoke', status: 'passed', summary: 'test failed before implementation and passed after implementation' },
   { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for live smoke fixture' },
-]) {
+], residualRisks = []) {
   writeFileSync(path, JSON.stringify({
     status: 'completed',
     changes,
     validation,
     artifacts: [],
     skippedChecks: [],
-    residualRisks: [],
+    residualRisks,
     prohibitedActions: [],
+  }, null, 2), 'utf8');
+}
+
+function writeFreshContextReviewReport(path, scenario) {
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    findings: [{
+      severity: 'advisory',
+      confidence: 'medium',
+      summary: 'Loop Policy live smoke Fresh-Context Review evidence for ' + scenario + '.',
+      evidence: 'The fake review ran in a separate runner-owned session and did not mutate GitHub.',
+    }],
+    residualRisks: ['policy suggestion smoke evidence from Fresh-Context Review'],
   }, null, 2), 'utf8');
 }
 

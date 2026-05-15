@@ -1,162 +1,94 @@
 # codex-orchestrator
 
-`codex-orchestrator` is a reusable GitHub Issues runner for Codex.
+`codex-orchestrator` turns GitHub Issues into controlled Codex work.
 
-It lets a maintainer turn selected GitHub Issues into controlled Codex work:
-the runner prepares an isolated workspace, gives Codex the issue context and
-project policy, checks the result, and hands the work back as a reviewable draft
-pull request.
+Instead of starting a new Codex chat for every issue, you label the work you
+want automated. The runner creates an isolated workspace, gives Codex the issue
+and your repo rules, checks the result, and hands it back as a draft pull
+request.
 
-For larger features, it can start from one parent issue, ask Codex to plan the
-work, create or update child issues, run the safe child issues in dependency
-order, and open one integration draft PR.
+For bigger features, it can start from one parent issue, ask Codex to plan the
+work, create or update child issues, run the safe children in order, and open
+one integration draft PR.
 
-The package is designed to be installed into any repository. The generic
-orchestration lives in this npm package; each target repository keeps its own
-policy in `.codex-orchestrator/`.
+The package is installed into any repository. The reusable runner lives in this
+npm package; each target repository keeps its own rules in
+`.codex-orchestrator/`.
 
-## Why Use It
+For a technical walkthrough of the runner lifecycle, policy model, review
+gates, and recovery behavior, see [docs/deep-dive.md](docs/deep-dive.md).
 
-Codex is useful for implementation work, but coordinating it manually does not
-scale well:
+## Why This Exists
 
-- a maintainer has to start a new chat for every small issue;
-- large features need PRD, issue breakdown, triage, child issue execution, and
-  final integration;
-- concurrent agent work can conflict if multiple tasks touch the same files;
-- agents should not decide by themselves which linked issues are authorized;
-- publication should be consistent: branch, commit, push, and pull request
-  creation should follow one project policy;
-- humans still need review control before anything is merged.
+Codex can write useful code, but running it manually gets messy fast:
 
-`codex-orchestrator` solves the coordination layer. GitHub Issues become the
-work queue, GitHub labels become the state machine, isolated worktrees become
-the agent workspaces, and draft pull requests become the handoff point back to
-humans.
+- every small issue needs a new chat and repeated context;
+- large features need planning, child issues, triage, execution, and final
+  integration;
+- parallel agent work can conflict when tasks touch the same files;
+- someone still needs to decide what is allowed, what is blocked, and what needs
+  review;
+- branches, commits, checks, PRs, and labels should follow one project policy.
 
-## Feature Overview
+`codex-orchestrator` is the coordination layer.
 
-`codex-orchestrator` is designed for maintainers who want Codex to do useful
-work without giving up control of the repository.
+GitHub Issues become the work queue. Labels decide what Codex may run. Isolated
+worktrees keep runs separate. Review gates check the result. Draft PRs return
+control to humans before anything is merged.
 
-### Issue-Driven Work Queue
+## What You Get
 
-GitHub Issues are the source of truth. A maintainer adds `agent:auto` to one
-issue, or `agent:plan-auto` to a larger parent issue. The runner only starts
-issues that are explicitly authorized and skips issues that are manual, blocked,
-already running, already under review, or closed.
+- A repeatable way to send selected GitHub Issues to Codex.
+- One-off autonomous runs for scoped implementation tasks.
+- Parent planning for larger features, with child issues executed in safe waves.
+- Project-owned rules for labels, branches, prompts, checks, review gates, and
+  blocked actions.
+- Full change-set checks, including local commits, staged files, unstaged files,
+  and untracked files.
+- Durable logs and summaries when a run is interrupted, blocked, or ready for
+  review.
+- Draft PR handoff by default. No auto-merge.
 
-### Scoped Autonomous Issues
+## How It Works
 
-Use `agent:auto` for one well-scoped task. The runner creates a branch and
-worktree, runs Codex with the issue context, validates the work, then opens a
-draft PR for human review.
-
-Codex may change files and, when project policy allows it, make local commits in
-the issue branch. The runner still owns external publication: push, draft PR
-creation, labels, comments, merges, publishing, and deploys.
-
-### Parent Planning and Child Waves
-
-Use `agent:plan-auto` for larger work. The runner asks Codex to plan the parent
-issue, produce a child issue tree, mark safe child issues, and execute those
-children in dependency-aware waves.
-
-Only runner-marked child issues belong to the autonomous tree. A link, milestone,
-project field, or casual reference is not enough. Successful tree execution
-opens one integration draft PR.
-
-### Review Gates Before Handoff
-
-The runner checks the work before it opens a draft PR. By default, runtime
-changes need test evidence, code review evidence, and for larger changes cleanup
-review evidence. UI work can require visual proof such as screenshots or a
-runner-owned browser validation command.
-
-### Full Change-Set Awareness
-
-The runner treats the agent result as a full local change set. That includes
-local commits, staged files, unstaged files, and untracked files. Safety checks
-and review gates are applied to the whole result, not just to whatever happens
-to be left uncommitted.
-
-### Durable Logs and Recovery
-
-Runs keep local state and durable evidence so interrupted or blocked work can be
-inspected. Agent output, validation results, skipped checks, residual risks,
-visual artifacts, and preserved worktrees are surfaced in review or blocked
-reports where relevant.
-
-### Project-Owned Policy
-
-Each target repository owns its policy in `.codex-orchestrator/`: labels,
-branches, checks, prompts, review gates, deny rules, visual proof settings, and
-runner behavior. The npm package provides the reusable runner; the repository
-decides how strict the automation should be.
-
-### PR-First by Design
-
-The package does not auto-merge. It opens draft PRs and moves issues to a review
-state so humans can inspect the result before anything lands on the base branch.
-
-## What Happens During a Run
-
-For a normal `agent:auto` issue, the runner:
-
-1. Reads the issue and checks that its labels allow autonomous work.
-2. Claims the issue so another runner does not start it at the same time.
-3. Creates an isolated git worktree and branch.
-4. Builds a project-aware Codex prompt from the issue and local policy.
-5. Runs Codex and captures the result.
-6. Collects the full local change set, including local commits when allowed.
-7. Blocks unsafe paths, missing reports, failed checks, missing review evidence,
-   or skipped required proof.
-8. Pushes the branch and opens a draft PR only after validation passes.
-9. Posts a review report and moves the issue to `agent:review`.
-
-## Authorization Modes
-
-There are two main labels.
+There are two main modes.
 
 ### `agent:auto`
 
-Use `agent:auto` for one scoped implementation issue.
+Use `agent:auto` for one clear implementation issue.
 
-Example:
+The runner:
 
-```sh
-codex-orchestrator run --target . --issue 123
-```
-
-The runner checks that issue `#123` is eligible, creates a worktree and branch,
-runs Codex, validates the result, pushes the branch, and opens one draft PR.
+1. Checks that the issue is allowed to run.
+2. Claims the issue so another runner does not start it too.
+3. Creates a branch and isolated git worktree.
+4. Runs Codex with the issue context and repo policy.
+5. Validates the full local change set.
+6. Pushes the branch and opens a draft PR only after the gates pass.
+7. Moves the issue to review and posts the run report.
 
 ### `agent:plan-auto`
 
-Use `agent:plan-auto` for a larger parent issue.
+Use `agent:plan-auto` for work that needs planning first.
 
-This mode is for work that should be planned before implementation. The runner
-asks Codex to produce or update the PRD, break the work into child issues,
-review the breakdown, triage the children, and execute the autonomous children
-in waves.
+The runner asks Codex to plan the parent issue, break it into child issues,
+triage them, run safe children in dependency order, and then open one
+integration draft PR.
 
-Only explicitly marked child issues belong to the autonomous tree. A child issue
-must have the configured child label and the runner-owned parent marker. A link,
-milestone, project, or casual reference is not enough.
-
-Successful tree execution opens one integration draft PR.
+Only child issues explicitly marked by the runner belong to the autonomous tree.
+Ordinary links, milestones, project fields, or casual references are not enough.
 
 ## Basic Workflow
 
 1. Install the package.
 2. Run `setup` in the repository you want to automate.
-3. Commit the generated `.codex-orchestrator/` policy into that repository.
+3. Commit the generated `.codex-orchestrator/` policy.
 4. Add `agent:auto` or `agent:plan-auto` to a GitHub Issue.
 5. Run `status` to see what is eligible or blocked.
 6. Run one selected issue with `run`, or let `daemon` poll for eligible work.
 7. Review the draft PR created by the runner.
 
-The runner does not auto-merge.
+The runner never auto-merges.
 
 ## Installation
 
@@ -221,9 +153,15 @@ Run one issue:
 codex-orchestrator run --target . --issue 123
 ```
 
+Run the daemon:
+
+```sh
+codex-orchestrator daemon --target .
+```
+
 ## Agent-Assisted Setup
 
-A user does not need a long prompt. They can ask an agent:
+You do not need a long prompt. You can ask an agent:
 
 ```text
 Set up codex-orchestrator for this repo.
@@ -244,81 +182,44 @@ codex-orchestrator --help
 
 The package also ships a setup prompt in `prompts/setup-skill.md`. Setup copies
 that prompt into `.codex-orchestrator/prompts/setup-skill.md`, so future agents
-working in the repository can find the repository-local setup guidance.
+working in the repository can find repository-local setup guidance.
 
 Use `--dry-run` only when you want a preview without writing files or creating
 labels.
 
 ## Project Policy
 
-See `CHANGELOG.md` for release-by-release notes.
-
-Every installed repository owns its own config:
+Every installed repository owns its config:
 
 ```sh
 .codex-orchestrator/config.json
 ```
 
-That config controls:
+That config is where the repo decides how strict automation should be. It
+controls the GitHub repo, labels, base branch, branch names, validation checks,
+review gates, blocked paths, child issue concurrency, durable logs, PR titles,
+and the prompts used for planning and implementation.
 
-- GitHub owner and repo;
-- labels used for the runner state machine;
-- base branch and branch name templates;
-- whether implementation agents may create local commits;
-- validation checks such as `npm test`;
-- review gates, including strict TDD, code review, cleanup review, and visual
-  proof requirements;
-- deny rules for secrets and unsafe actions;
-- concurrency for child issue execution;
-- durable run logs and recovery state;
-- pull request title templates;
-- prompts used for PRD, issue breakdown, triage, scoped implementation, and
-  issue-tree orchestration.
+The package ships fallback prompts, so a repository does not need a local Codex
+skill pack before setup. If compatible local skills already exist, setup can
+reuse them.
 
-The package ships fallback prompts so a user does not need to already have a
-local Codex skill pack installed. During setup, compatible existing local skills
-can be reused; missing workflows fall back to package-owned prompts.
-
-Configured checks run before publication. By default, missing `npm run <script>`
-checks are treated as skipped warnings (not failures). You can override this
-behavior with `checksPolicy.missingNpmScript`.
+Configured checks run before publication. By default, missing
+`npm run <script>` checks are reported as skipped warnings, not failures. You can
+change that with `checksPolicy.missingNpmScript`.
 
 For repos with existing lint debt, `checksPolicy.lintBaseline.mode` can be set
-to `touched-only` so a failing repo-wide lint check can be downgraded when a
-separate “touched files” lint command passes.
+to `touched-only`. That lets a repo-wide lint failure be downgraded when a
+separate touched-files lint command passes.
 
-For runtime code changes, the default quality gate blocks review handoff unless
-the completion report contains passed validation for:
+The default quality gate is conservative for runtime code changes. It can
+require TDD evidence, changed tests, code review, cleanup review for larger
+changes, and visual proof for UI work.
 
-- strict TDD red-to-green evidence: a focused behavior test failed before the
-  implementation and passed after the implementation;
-- a changed test file for the runtime change;
-- `code-review` for every runtime change;
-- `cleanup-review` when the change touches at least three runtime files.
+## Visual Proof
 
-These are runner-enforced checks, not only prompt guidance. They apply to the
-full local change set, including local commits when they are allowed by policy.
-Runtime and test paths are configurable through
-`reviewGates.quality.runtimeChangedPathGlobs` and
-`reviewGates.quality.testChangedPathGlobs`.
-
-For UI or frontend issues, visual proof is runner-owned via a configurable
-command (typically Playwright for browser/web UI). Screenshot artifacts should be
-saved under `.codex-orchestrator/proofs/issue-<number>/`; the runner includes
-them in the PR and issue review report.
-
-For Android mobile app UI work, the implementation prompt directs Codex to use
-device-backed proof instead of Playwright: run `adb devices -l`, prefer a
-connected non-emulator device serial, and run `export ANDROID_SERIAL=<serial>`.
-Otherwise run `emulator -list-avds`, start an AVD in a separate shell with
-`emulator -avd <avd-name>`, and wait with `adb wait-for-device`. If Test Android
-Apps skills are unavailable, the agent should try to enable or load that plugin
-through the available Codex plugin/tool discovery mechanism. If the plugin cannot
-be enabled, or no usable adb target is available, the agent should report the
-mobile proof as a warning/skipped check with the concrete reason rather than
-treating it as a blocker by itself.
-
-Configure a runner-owned command:
+For browser UI work, configure a runner-owned proof command, usually a
+Playwright script:
 
 ```json
 {
@@ -335,89 +236,51 @@ Configure a runner-owned command:
 }
 ```
 
-The runner executes this command from the issue worktree after Codex finishes and
-before review-gate evaluation. It also sets
-`CODEX_ORCHESTRATOR_ISSUE_NUMBER`, `CODEX_ORCHESTRATOR_ARTIFACT_DIR`,
-`CODEX_ORCHESTRATOR_PROOF_DIR`,
-`CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR`,
-`CODEX_ORCHESTRATOR_WORKTREE_PATH`, and `CODEX_ORCHESTRATOR_CHANGED_FILES`.
-Use `CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR` as the Playwright user data
-directory when proof scripts need a stable browser profile; this runtime
-directory and `PLAYWRIGHT_BROWSERS_PATH` are kept outside the worktree so browser
-cache and session files are not committed. Screenshot files
-created or updated under
-`CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR and issue review report as
-runner-owned proof artifacts. A zero-exit proof command that does not create or
-update the configured minimum number of screenshots is reported as a warning.
+The runner executes this command from the issue worktree after Codex finishes
+and before review-gate evaluation. It sets environment variables for the issue
+number, artifact directory, proof directory, Playwright profile directory,
+worktree path, and changed files.
 
-If the target UI requires login, keep credentials outside the config and expose
-only their variable names through `envPassthrough`. The visual proof script can
-read those values, sign in with the browser automation tool it uses, and fail
-with a clear message when a required login variable is missing.
+Screenshots created under `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR
+and issue review report. Keep login credentials outside config and expose only
+their variable names through `envPassthrough`.
 
-The default Codex command loads the user's Codex config so installed plugins
-remain available to the child agent. It also enables network access for the
-`workspace-write` sandbox so local dev servers can bind to `localhost` during
-browser validation.
+For Android UI work, the implementation prompt asks Codex to use `adb` or an
+emulator-backed proof path instead of browser proof. Missing Android tooling or
+no usable device is reported as a warning with the concrete reason, not as an
+automatic release blocker.
 
-## Local Commits vs Publication
+## Safety Model
 
-`codex-orchestrator` separates local implementation work from external
-publication.
+The package is PR-first and human-reviewed. The important guardrails are:
 
-Implementation agents may be allowed to create local commits in their issue
-worktree. This can make larger sessions easier to inspect because the branch
-contains meaningful checkpoints. Local commits are still treated as untrusted
-agent output until the runner validates them.
-
-The runner remains the only owner of external publication:
-
-- pushing branches;
-- opening draft pull requests;
-- moving GitHub labels;
-- posting issue comments;
-- merging child branches into an integration branch;
-- publishing packages or deploying.
-
-If an agent tries to bypass those boundaries, the run is blocked instead of
-published.
+- no automatic merge, and only draft PRs are opened;
+- Codex may change files, but the runner owns remote publication and GitHub
+  state;
+- only explicitly authorized issues run;
+- child issues are never inferred from ordinary links or references;
+- committed and uncommitted changes are checked before publication;
+- secret files, destructive data/cache actions, and production deploy/release
+  actions are blocked by default;
+- malformed or missing completion reports block publication;
+- bounded rework stops at the configured limit;
+- Policy Suggestions are recommendations only;
+- underspecified work can be blocked for maintainer clarification instead of
+  letting Codex invent product decisions.
 
 ## Labels
 
 Default labels:
 
-- `agent:auto` - a scoped issue is authorized for autonomous implementation;
-- `agent:plan-auto` - a parent issue is authorized for planning and issue-tree
-  execution;
-- `agent:child` - a child issue belongs to an autonomous parent tree;
-- `agent:running` - the runner is currently working on the issue;
-- `agent:blocked` - the runner needs maintainer input;
-- `agent:manual` - the issue is reserved for human work;
-- `agent:review` - the result is ready for human review.
+- `agent:auto` - run one scoped issue;
+- `agent:plan-auto` - plan and run a parent issue tree;
+- `agent:child` - child issue in an autonomous tree;
+- `agent:running` - runner is working;
+- `agent:blocked` - maintainer input needed;
+- `agent:manual` - reserved for human work;
+- `agent:review` - ready for human review.
 
 `setup --prepare-labels` creates missing labels through `gh`.
-
-## Safety Model
-
-The package is intentionally PR-first and human-reviewed.
-
-Important guardrails:
-
-- no automatic merge;
-- draft PRs only;
-- Codex may change files and local commits, but the runner owns remote
-  publication and GitHub state;
-- child issues are never inferred from ordinary links or references;
-- manual, blocked, running, review, and closed issues are not started;
-- child implementations run in isolated worktrees;
-- parallel child work is limited and avoids overlapping ownership scopes;
-- committed and uncommitted changes are checked before publication;
-- secret files are blocked by policy;
-- destructive database/cache actions and production deploy/release actions are
-  blocked by default;
-- malformed or missing completion reports block publication;
-- underspecified work can be blocked for maintainer clarification instead of
-  letting Codex invent product decisions.
 
 ## CLI Reference
 
@@ -425,17 +288,16 @@ Important guardrails:
 codex-orchestrator --help
 codex-orchestrator --version
 codex-orchestrator health
-codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
+codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
+  [--github-repo <repo>] [--dry-run] [--prepare-labels]
 codex-orchestrator status --target <path> [--dry-run]
 codex-orchestrator run --target <path> --issue <number>
-codex-orchestrator daemon --target <path> [--once] [--interval-seconds <seconds>] [--max-runs <count>]
+codex-orchestrator daemon --target <path> [--once] \
+  [--interval-seconds <seconds>] [--max-runs <count>]
 ```
 
-### `setup`
-
-Creates project-local config and prompt files under `.codex-orchestrator/`.
-
-Useful flags:
+`setup` creates project-local config and prompt files under
+`.codex-orchestrator/`. Useful flags:
 
 - `--dry-run` - show the setup plan without writing files or creating labels;
 - `--prepare-labels` - create missing GitHub labels;
@@ -447,42 +309,21 @@ Useful flags:
 
 Setup does not launch Codex, commit changes, or open pull requests.
 
-### `status`
+`status` is read-only. It shows eligible issues, skipped issues with reasons,
+and local recovery state.
 
-Shows eligible issues, skipped issues with reasons, and local recovery state.
+`run` executes one selected issue when labels and state allow it. `agent:auto`
+opens one scoped draft PR. `agent:plan-auto` runs parent planning, child waves,
+final validation, and one integration draft PR.
 
-`status` is read-only. It does not launch Codex and does not mutate GitHub.
-
-### `run`
-
-Executes one selected issue if its labels and state authorize autonomous work.
-
-For `agent:auto`, it runs one scoped implementation and opens one draft PR.
-
-For `agent:plan-auto`, it runs parent planning, child issue management,
-dependency-aware child waves, final validation, and one integration draft PR.
-
-### `daemon`
-
-Polls GitHub Issues for eligible `agent:auto` or `agent:plan-auto` work and runs
-one issue at a time.
-
-After each polling cycle, the daemon also cleans up runner-owned worktrees when
-all of these are true:
-
-- the worktree is under `runner.workspaceRoot`;
-- the worktree is not listed in local runner state as active;
-- the worktree branch has a merged GitHub pull request;
-- the worktree has no uncommitted or untracked changes.
-
-Dirty, blocked, active, or unpublished worktrees are preserved for maintainer
-inspection. Cleanup is built into the daemon; there is intentionally no separate
-cleanup CLI command.
+`daemon` polls for eligible work and runs one issue at a time. It also cleans up
+runner-owned worktrees after their PRs are merged, while preserving dirty,
+blocked, active, or unpublished worktrees for inspection.
 
 ## Current Scope
 
-The package focuses on local runner workflows: explicit one-off runs, daemon
-polling, project-local configuration, and runner-owned worktree cleanup. Hosted
+The package focuses on local runner workflows: one-off runs, daemon polling,
+project-local configuration, and runner-owned worktree cleanup. Hosted
 infrastructure is not part of this package today.
 
 Non-GitHub trackers and non-Codex agents are also out of scope for the current
@@ -499,3 +340,5 @@ npm run typecheck
 Publishing is configured through GitHub Actions. A push to `main` runs tests and
 publishes the package to npm only when the current package version is not already
 published. The repository must provide the GitHub secret `NPM_KEY`.
+
+See `CHANGELOG.md` for release-by-release notes.

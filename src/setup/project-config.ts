@@ -174,6 +174,34 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         },
       },
     },
+    loopPolicy: {
+      issueSelection: {
+        priorityLabels: ['priority:critical', 'priority:high', 'priority:medium', 'priority:low'],
+        tieBreaker: 'issue-number-asc',
+      },
+      rework: {
+        maxAttempts: 1,
+        retryableBlockers: [
+          'missing-completion-report',
+          'invalid-completion-report',
+          'no-changed-files',
+          'failed-configured-checks',
+          'missing-quality-gate-evidence',
+        ],
+      },
+      freshContextReview: {
+        enabled: false,
+        mode: 'advisory',
+        blockOnHighConfidencePolicyViolations: true,
+      },
+      durableRunSummaries: {
+        enabled: true,
+      },
+      policySuggestions: {
+        enabled: true,
+        maxSuggestions: 5,
+      },
+    },
     deny: {
       secretFiles: ['.env', '.env.*'],
       destructiveDbOrCache: true,
@@ -224,6 +252,12 @@ export function mergeExistingProjectConfig(
   const existingReviewGates = readObject(existing.reviewGates);
   const existingVisualProof = readObject(existingReviewGates?.visualProof);
   const existingQuality = readObject(existingReviewGates?.quality);
+  const existingLoopPolicy = readObject(existing.loopPolicy);
+  const existingIssueSelection = readObject(existingLoopPolicy?.issueSelection);
+  const existingRework = readObject(existingLoopPolicy?.rework);
+  const existingFreshContextReview = readObject(existingLoopPolicy?.freshContextReview);
+  const existingDurableRunSummaries = readObject(existingLoopPolicy?.durableRunSummaries);
+  const existingPolicySuggestions = readObject(existingLoopPolicy?.policySuggestions);
   const existingDeny = readObject(existing.deny);
   const existingBranches = readObject(existing.branches);
   const existingPullRequests = readObject(existing.pullRequests);
@@ -297,6 +331,30 @@ export function mergeExistingProjectConfig(
           ...defaults.reviewGates.quality.codeReview,
           ...readObject(existingQuality?.codeReview),
         },
+      },
+    },
+    loopPolicy: {
+      ...defaults.loopPolicy,
+      ...existingLoopPolicy,
+      issueSelection: {
+        ...defaults.loopPolicy.issueSelection,
+        ...existingIssueSelection,
+      },
+      rework: {
+        ...defaults.loopPolicy.rework,
+        ...existingRework,
+      },
+      freshContextReview: {
+        ...defaults.loopPolicy.freshContextReview,
+        ...existingFreshContextReview,
+      },
+      durableRunSummaries: {
+        ...defaults.loopPolicy.durableRunSummaries,
+        ...existingDurableRunSummaries,
+      },
+      policySuggestions: {
+        ...defaults.loopPolicy.policySuggestions,
+        ...existingPolicySuggestions,
       },
     },
     deny: {

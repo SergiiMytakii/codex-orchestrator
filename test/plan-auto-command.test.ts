@@ -185,12 +185,164 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts:[\s\S]*#157 none/);
   assert.match(result.reportComment, /codex-orchestrator issue-tree review report for #156/);
   assert.match(result.reportComment, /Proof Artifacts[\s\S]*#157 none/);
+  assert.match(result.reportComment, /Child Loop Outcomes[\s\S]*#157: outcome: review-ready/);
+  assert.match(
+    [...issueAdapter.postedComments].reverse().find((entry) => entry.issueNumber === 157)?.body ?? '',
+    /Durable Run Summary/,
+  );
+  const childSummary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-157-tree-156-issue-157-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(childSummary.outcome, 'review-ready');
   assert.deepEqual(issueAdapter.removedLabels.at(-1), { issueNumber: 156, labels: [labels.running.name] });
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 156, labels: [labels.review.name] });
   assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156', '-1']);
   assert.match(pushed.stdout, /Codex: merge issue/);
+});
+
+test('plan-auto command applies configured child rework loop before parent integration', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: {
+        ...config.loopPolicy.rework,
+        maxAttempts: 1,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+  let childRuns = 0;
+  let reworkPrompt = '';
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      } else {
+        childRuns += 1;
+        reworkPrompt = input.promptText;
+        if (childRuns === 2) {
+          await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        }
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: childRuns === 2 ? [`child-${input.issueNumber}.txt`] : [],
+            validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(childRuns, 2);
+  assert.match(reworkPrompt, /This is an automatic rework attempt \(#1\)/);
+  assert.match(reworkPrompt, /Codex completed without file changes/);
+});
+
+test('plan-auto command blocks child publication on configured fresh-context review finding', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      freshContextReview: {
+        ...config.loopPolicy.freshContextReview,
+        enabled: true,
+        blockOnHighConfidencePolicyViolations: true,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      } else if (input.sessionId.endsWith('-fresh-review')) {
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            findings: [{
+              severity: 'policy-violation',
+              confidence: 'high',
+              summary: 'Child violates the runner-owned publication boundary.',
+              evidence: 'Review found publication evidence.',
+            }],
+            residualRisks: [],
+          }),
+          'utf8',
+        );
+      } else {
+        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: [`child-${input.issueNumber}.txt`],
+            validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  const childBlocked = [...issueAdapter.postedComments].reverse().find((entry) => entry.issueNumber === 157)?.body ?? '';
+  assert.match(childBlocked, /Fresh-Context Review blocked publication/);
+  assert.match(childBlocked, /Durable Run Summary/);
+  assert.match(childBlocked, /Non-mutating recommendation/);
 });
 
 test('plan-auto command integrates validated child local commits when policy allows', async () => {

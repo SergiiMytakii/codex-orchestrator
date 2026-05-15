@@ -11,6 +11,14 @@ export type LabelPreparationPolicy = 'report-only' | 'create-missing';
 export type WorkflowId = (typeof workflowKeys)[number];
 export type WorkflowSource = (typeof workflowSources)[number];
 export type ClarificationGate = 'block-and-comment';
+export type IssueSelectionTieBreaker = 'issue-number-asc';
+export type RetryableReworkBlocker =
+  | 'missing-completion-report'
+  | 'invalid-completion-report'
+  | 'no-changed-files'
+  | 'failed-configured-checks'
+  | 'missing-quality-gate-evidence';
+export type FreshContextReviewMode = 'advisory';
 
 export interface LabelDefinition {
   name: string;
@@ -23,6 +31,29 @@ export interface WorkflowConfig {
   source: WorkflowSource;
   promptPath?: string;
   skillPath?: string;
+}
+
+export interface LoopPolicyConfig {
+  issueSelection: {
+    priorityLabels: string[];
+    tieBreaker: IssueSelectionTieBreaker;
+  };
+  rework: {
+    maxAttempts: number;
+    retryableBlockers: RetryableReworkBlocker[];
+  };
+  freshContextReview: {
+    enabled: boolean;
+    mode: FreshContextReviewMode;
+    blockOnHighConfidencePolicyViolations: boolean;
+  };
+  durableRunSummaries: {
+    enabled: boolean;
+  };
+  policySuggestions: {
+    enabled: boolean;
+    maxSuggestions: number;
+  };
 }
 
 export interface CodexOrchestratorConfig {
@@ -113,6 +144,7 @@ export interface CodexOrchestratorConfig {
       };
     };
   };
+  loopPolicy: LoopPolicyConfig;
   deny: {
     secretFiles: string[];
     destructiveDbOrCache: boolean;
@@ -164,6 +196,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   const checks = expectObject(root, 'checks', errors);
   const checksPolicy = expectOptionalObject(root, 'checksPolicy', errors);
   const reviewGates = expectObject(root, 'reviewGates', errors);
+  const loopPolicy = expectObject(root, 'loopPolicy', errors);
   const deny = expectObject(root, 'deny', errors);
   const branches = expectObject(root, 'branches', errors);
   const pullRequests = expectObject(root, 'pullRequests', errors);
@@ -221,6 +254,10 @@ export function validateConfig(input: unknown): ConfigValidationResult {
 
   if (reviewGates) {
     validateReviewGates(reviewGates, errors);
+  }
+
+  if (loopPolicy) {
+    validateLoopPolicy(loopPolicy, errors);
   }
 
   if (deny) {
@@ -469,6 +506,42 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   validateQualityGate(parent, errors);
 }
 
+function validateLoopPolicy(parent: ObjectRecord, errors: string[]): void {
+  const issueSelection = expectObject(parent, 'loopPolicy.issueSelection', errors);
+  if (issueSelection) {
+    expectStringArray(issueSelection, 'loopPolicy.issueSelection.priorityLabels', errors);
+    expectUnion(issueSelection, 'loopPolicy.issueSelection.tieBreaker', ['issue-number-asc'] as const, errors);
+  }
+
+  const rework = expectObject(parent, 'loopPolicy.rework', errors);
+  if (rework) {
+    expectNonNegativeInteger(rework, 'loopPolicy.rework.maxAttempts', errors);
+    expectRetryableBlockers(rework, errors);
+  }
+
+  const freshContextReview = expectObject(parent, 'loopPolicy.freshContextReview', errors);
+  if (freshContextReview) {
+    expectBoolean(freshContextReview, 'loopPolicy.freshContextReview.enabled', errors);
+    expectUnion(freshContextReview, 'loopPolicy.freshContextReview.mode', ['advisory'] as const, errors);
+    expectBoolean(
+      freshContextReview,
+      'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations',
+      errors,
+    );
+  }
+
+  const durableRunSummaries = expectObject(parent, 'loopPolicy.durableRunSummaries', errors);
+  if (durableRunSummaries) {
+    expectBoolean(durableRunSummaries, 'loopPolicy.durableRunSummaries.enabled', errors);
+  }
+
+  const policySuggestions = expectObject(parent, 'loopPolicy.policySuggestions', errors);
+  if (policySuggestions) {
+    expectBoolean(policySuggestions, 'loopPolicy.policySuggestions.enabled', errors);
+    expectPositiveInteger(policySuggestions, 'loopPolicy.policySuggestions.maxSuggestions', errors);
+  }
+}
+
 function validateQualityGate(parent: ObjectRecord, errors: string[]): void {
   const quality = expectObject(parent, 'reviewGates.quality', errors);
   if (!quality) {
@@ -542,6 +615,35 @@ function expectPositiveInteger(parent: ObjectRecord, path: string, errors: strin
   }
 
   return value;
+}
+
+function expectNonNegativeInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {
+  const value = readPath(parent, path);
+
+  if (!Number.isInteger(value) || typeof value !== 'number' || value < 0) {
+    errors.push(`${path} must be a non-negative integer`);
+    return undefined;
+  }
+
+  return value;
+}
+
+function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): RetryableReworkBlocker[] | undefined {
+  const validBlockers = [
+    'missing-completion-report',
+    'invalid-completion-report',
+    'no-changed-files',
+    'failed-configured-checks',
+    'missing-quality-gate-evidence',
+  ] as const;
+  const value = readPath(parent, 'loopPolicy.rework.retryableBlockers');
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !validBlockers.includes(item as RetryableReworkBlocker))) {
+    errors.push(`loopPolicy.rework.retryableBlockers must contain only ${validBlockers.join(', ')}`);
+    return undefined;
+  }
+
+  return value as RetryableReworkBlocker[];
 }
 
 function expectOptionalPositiveInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {

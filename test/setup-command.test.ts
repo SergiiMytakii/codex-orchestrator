@@ -199,6 +199,14 @@ test('setup migrates existing config defaults without overwriting project policy
           },
         },
       },
+      loopPolicy: {
+        issueSelection: {
+          priorityLabels: ['priority:urgent', 'priority:normal'],
+        },
+        rework: {
+          maxAttempts: 2,
+        },
+      },
       branches: {
         base: 'dev',
       },
@@ -224,6 +232,13 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.reviewGates.quality.tdd.requireTestChange, false);
   assert.equal(result.config.reviewGates.quality.tdd.enabled, true);
   assert.equal(result.config.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
+  assert.deepEqual(result.config.loopPolicy.issueSelection.priorityLabels, [
+    'priority:urgent',
+    'priority:normal',
+  ]);
+  assert.equal(result.config.loopPolicy.rework.maxAttempts, 2);
+  assert.equal(result.config.loopPolicy.freshContextReview.enabled, false);
+  assert.equal(result.config.loopPolicy.policySuggestions.maxSuggestions, 5);
   assert.equal(validateConfig(result.config).ok, true);
 });
 

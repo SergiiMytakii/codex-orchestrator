@@ -12,10 +12,10 @@ When cutting a new release:
 
 ### Latest release
 
-- `0.1.24` (2026-05-14):
-  - Android mobile UI proof now uses an explicit adb/emulator preflight instead
-    of Playwright-first guidance.
-  - Agents are told to prefer a connected Android device, then fall back to an
-    emulator.
-  - Missing Test Android Apps/plugin/device setup is reported as a warning, not
-    a release blocker.
+- `0.1.25` (2026-05-15):
+  - Runner-owned Loop Policy adds priority-based daemon selection and bounded
+    rework.
+  - Fresh-Context Review and Durable Run Summary evidence can be included in
+    scoped and issue-tree handoffs.
+  - Policy Suggestions are reported as non-mutating recommendations.
+  - Live smoke now validates the Loop Policy path end to end against GitHub.

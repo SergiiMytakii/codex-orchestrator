@@ -18,7 +18,10 @@ import {
   buildScopedBlockedReport,
   buildScopedPullRequestBody,
   buildScopedReviewReport,
+  type FreshContextReviewEvidence,
 } from './handoff-evidence.js';
+import { writeDurableRunSummary } from './durable-run-summary.js';
+import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import {
@@ -32,6 +35,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
+import { shouldRequestImplementationRework } from './rework-policy.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -93,6 +97,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   let promptPath = '';
   let reportPath = '';
   let logPath = '';
+  let sessionId = '';
   let pullRequest: GitHubPullRequest | undefined;
   const store = new RunnerStateStore(targetRoot, config);
 
@@ -106,13 +111,13 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       baseBranch: config.branches.base,
       allowResume: true,
     });
-    const maxReworkAttempts = 1;
+    const maxReworkAttempts = config.loopPolicy.rework.maxAttempts;
     let rework: { attempt: number; blockedReasons: string[] } | undefined;
     let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
 
     for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
       const attemptNow = attempt === 0 ? now : new Date(now.getTime() + attempt);
-      const sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}`;
+      sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}`;
       promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
       reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
       logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
@@ -186,7 +191,11 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         localPhaseExecutor: options.localPhaseExecutor,
       });
 
-      if (publishability.status === 'blocked' && attempt < maxReworkAttempts && shouldRequestRework(publishability.reasons)) {
+      if (
+        publishability.status === 'blocked'
+        && attempt < maxReworkAttempts
+        && shouldRequestImplementationRework(publishability.reasons, config)
+      ) {
         rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };
         continue;
       }
@@ -199,15 +208,47 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     }
 
     if (publishability.status === 'promotion-requested') {
+      const durableRunSummary = await writeDurableRunSummary({
+        targetRoot,
+        config,
+        issueNumber: options.issueNumber,
+        sessionId,
+        outcome: 'promotion-requested',
+        changedFiles: [],
+        validation: publishability.report.validation,
+        blockers: [publishability.report.promotion?.reason ?? 'Promotion requested'],
+        skippedChecks: publishability.report.skippedChecks,
+        residualRisks: publishability.report.residualRisks,
+        nextAction: 'Maintainer should review promotion evidence and decide whether to use parent issue-tree orchestration.',
+        logPath,
+        reportPath,
+      });
       return finishPromotionRequested(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
         config,
         publishability.report,
+        durableRunSummary,
       );
     }
 
     if (publishability.status === 'blocked') {
+      const durableRunSummary = await writeDurableRunSummary({
+        targetRoot,
+        config,
+        issueNumber: options.issueNumber,
+        sessionId,
+        outcome: 'blocked',
+        changedFiles: publishability.changedFiles,
+        validation: [],
+        blockers: publishability.reasons,
+        skippedChecks: publishability.skippedChecks,
+        residualRisks: publishability.residualRisks,
+        suggestionEvidence: [],
+        nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+        logPath,
+        reportPath,
+      });
       return finishBlocked(
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
@@ -216,8 +257,70 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         publishability.changedFiles,
         publishability.skippedChecks,
         publishability.residualRisks,
+        undefined,
+        durableRunSummary,
       );
     }
+
+    const freshContextReview = await runFreshContextReviewIfEnabled({
+      targetRoot,
+      config,
+      issue,
+      codexAdapter,
+      worktreePath,
+      isolatedSessionId: `issue-${options.issueNumber}-${formatSessionTimestamp(new Date(now.getTime() + maxReworkAttempts + 1))}-fresh-review`,
+      branchName,
+      publishability,
+    });
+    if (freshContextReview?.status === 'blocked') {
+      const durableRunSummary = await writeDurableRunSummary({
+        targetRoot,
+        config,
+        issueNumber: options.issueNumber,
+        sessionId,
+        outcome: 'blocked',
+        changedFiles: publishability.changedFiles,
+        validation: publishability.validation,
+        blockers: ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
+        skippedChecks: publishability.skippedChecks,
+        residualRisks: [...publishability.residualRisks, ...freshContextReview.residualRisks],
+        suggestionEvidence: freshContextReview.findings,
+        nextAction: 'Review the Fresh-Context Review blocker before draft PR handoff.',
+        logPath,
+        reportPath,
+      });
+      return finishBlocked(
+        baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
+        issueAdapter,
+        config,
+        ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
+        publishability.changedFiles,
+        publishability.skippedChecks,
+        [...publishability.residualRisks, ...freshContextReview.residualRisks],
+        freshContextReview,
+        durableRunSummary,
+      );
+    }
+
+    const durableRunSummary = await writeDurableRunSummary({
+      targetRoot,
+      config,
+      issueNumber: options.issueNumber,
+      sessionId,
+      outcome: 'review-ready',
+      changedFiles: publishability.changedFiles,
+      validation: publishability.validation,
+      blockers: [],
+      skippedChecks: publishability.skippedChecks,
+      residualRisks: [
+        ...publishability.residualRisks,
+        ...(freshContextReview?.residualRisks ?? []),
+      ],
+      suggestionEvidence: freshContextReview?.findings,
+      nextAction: 'Review the draft pull request before merge.',
+      logPath,
+      reportPath,
+    });
 
     await git.pushBranch({ worktreePath, branchName });
     pullRequest = await pullRequestAdapter.createDraftPullRequest({
@@ -233,6 +336,8 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         residualRisks: publishability.residualRisks,
         logPath,
         commits: publishability.commits,
+        freshContextReview,
+        durableRunSummary,
       }),
       headBranch: branchName,
       baseBranch: config.branches.base,
@@ -249,6 +354,8 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       residualRisks: publishability.residualRisks,
       logPath,
       commits: publishability.commits,
+      freshContextReview,
+      durableRunSummary,
     });
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
     await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
@@ -278,27 +385,6 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   }
 }
 
-function shouldRequestRework(reasons: string[]): boolean {
-  if (reasons.some((reason) => /matches denied pattern/iu.test(reason))) {
-    return false;
-  }
-  if (reasons.some((reason) => /runner-owned publication was violated/iu.test(reason))) {
-    return false;
-  }
-  if (reasons.some((reason) => /destructive-db-or-cache|production-deploy-or-release/iu.test(reason))) {
-    return false;
-  }
-
-  const retryablePatterns = [
-    /Quality gate requires/iu,
-    /One or more configured checks failed/iu,
-    /Invalid scoped completion report/iu,
-    /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/iu,
-    /Codex completed without file changes/iu,
-  ];
-  return reasons.some((reason) => retryablePatterns.some((pattern) => pattern.test(reason)));
-}
-
 async function readWorkflowPrompt(path: string): Promise<string> {
   try {
     return await readFile(path, 'utf8');
@@ -318,6 +404,8 @@ async function finishBlocked(
   changedFiles: string[],
   skippedChecks: string[],
   residualRisks: string[],
+  freshContextReview?: FreshContextReviewEvidence,
+  durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
 ): Promise<ScopedAutoCommandResult> {
   const reportComment = buildScopedBlockedReport({
     issueNumber: result.issueNumber,
@@ -326,6 +414,8 @@ async function finishBlocked(
     logPath: result.logPath,
     skippedChecks,
     residualRisks,
+    freshContextReview,
+    durableRunSummary,
   });
   await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
@@ -338,8 +428,9 @@ async function finishPromotionRequested(
   issueAdapter: GitHubIssueAdapter,
   config: CodexOrchestratorConfig,
   report: ScopedCompletionReport,
+  durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
 ): Promise<ScopedAutoCommandResult> {
-  const reportComment = buildPromotionRequestReport({ issueNumber: result.issueNumber, report });
+  const reportComment = buildPromotionRequestReport({ issueNumber: result.issueNumber, report, durableRunSummary });
   await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
   await issueAdapter.postComment(result.issueNumber, reportComment);

@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-05-15
+
+### Added
+- Runner-owned Loop Policy controls for daemon priority selection, bounded
+  rework, optional Fresh-Context Review, Durable Run Summaries, and
+  non-mutating Policy Suggestions.
+
+### Changed
+- Scoped and issue-tree handoff reports now include stronger runner-owned
+  evidence before draft PR publication, while keeping GitHub publication,
+  labels, comments, merges, releases, and deploys outside Agent authority.
+
 ## [0.1.24] - 2026-05-14
 
 ### Changed

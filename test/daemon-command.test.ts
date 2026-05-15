@@ -69,10 +69,10 @@ test('daemon once reports no eligible issues without executing work', async () =
   );
 });
 
-test('daemon once executes the first eligible issue by discovery order', async () => {
+test('daemon once executes the first eligible issue by policy order', async () => {
   const targetRoot = await tempRepo();
   const adapter = new InMemoryGitHubIssueAdapter([
-    issueFixture({ number: 3, labels: [labels.planAuto.name] }),
+    issueFixture({ number: 3, labels: [labels.planAuto.name, 'priority:high'] }),
     issueFixture({ number: 1, labels: [labels.auto.name] }),
   ]);
   const executed: number[] = [];
@@ -88,10 +88,36 @@ test('daemon once executes the first eligible issue by discovery order', async (
     now: () => new Date('2026-05-08T10:00:00.000Z'),
   });
 
-  assert.deepEqual(executed, [1]);
-  assert.deepEqual(result.executed, [1]);
-  assert.match(result.output, /running #1 scoped-issue/);
-  assert.match(result.output, /completed #1/);
+  assert.deepEqual(executed, [3]);
+  assert.deepEqual(result.executed, [3]);
+  assert.match(result.output, /running #3 plan-parent/);
+  assert.match(result.output, /selection: priority priority:high, tie-breaker issue-number-asc/);
+  assert.match(result.output, /completed #3/);
+});
+
+test('daemon selection keeps issue-number ascending as the priority tie-breaker', async () => {
+  const targetRoot = await tempRepo();
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 8, labels: [labels.auto.name, 'priority:medium'] }),
+    issueFixture({ number: 2, labels: [labels.auto.name, 'priority:medium'] }),
+    issueFixture({ number: 1, labels: [labels.auto.name] }),
+  ]);
+  const executed: number[] = [];
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: adapter,
+    once: true,
+    executeIssue: async (issueNumber) => {
+      executed.push(issueNumber);
+      return { reportComment: 'ok' };
+    },
+    now: () => new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.deepEqual(executed, [2]);
+  assert.deepEqual(result.executed, [2]);
+  assert.match(result.output, /running #2 scoped-issue/);
 });
 
 test('daemon keeps polling until maxRuns is reached', async () => {

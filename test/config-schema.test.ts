@@ -23,6 +23,22 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.reviewGates.quality.enabled, true);
     assert.equal(result.value.reviewGates.quality.tdd.requireTestChange, true);
     assert.equal(result.value.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
+    assert.deepEqual(result.value.loopPolicy.issueSelection.priorityLabels, ['priority:critical', 'priority:high', 'priority:medium', 'priority:low']);
+    assert.equal(result.value.loopPolicy.issueSelection.tieBreaker, 'issue-number-asc');
+    assert.equal(result.value.loopPolicy.rework.maxAttempts, 1);
+    assert.deepEqual(result.value.loopPolicy.rework.retryableBlockers, [
+      'missing-completion-report',
+      'invalid-completion-report',
+      'no-changed-files',
+      'failed-configured-checks',
+      'missing-quality-gate-evidence',
+    ]);
+    assert.equal(result.value.loopPolicy.freshContextReview.enabled, false);
+    assert.equal(result.value.loopPolicy.freshContextReview.mode, 'advisory');
+    assert.equal(result.value.loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations, true);
+    assert.equal(result.value.loopPolicy.durableRunSummaries.enabled, true);
+    assert.equal(result.value.loopPolicy.policySuggestions.enabled, true);
+    assert.equal(result.value.loopPolicy.policySuggestions.maxSuggestions, 5);
     assert.deepEqual(result.value.codex.args, [
       'exec',
       '--cd',
@@ -150,6 +166,48 @@ test('rejects invalid quality gate config', () => {
     'reviewGates.quality.tdd.requireTestChange must be a boolean',
     'reviewGates.quality.tdd.requiredValidationPatterns contains invalid regular expression [',
     'reviewGates.quality.cleanupReview.runtimeFileThreshold must be a positive integer',
+  ]);
+});
+
+test('rejects invalid loop policy config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    loopPolicy: {
+      issueSelection: {
+        priorityLabels: ['priority:high', ''],
+        tieBreaker: 'created-at',
+      },
+      rework: {
+        maxAttempts: -1,
+        retryableBlockers: ['no-changed-files', 'unknown'],
+      },
+      freshContextReview: {
+        enabled: 'yes',
+        mode: 'strict',
+        blockOnHighConfidencePolicyViolations: 'yes',
+      },
+      durableRunSummaries: {
+        enabled: 'yes',
+      },
+      policySuggestions: {
+        enabled: 'yes',
+        maxSuggestions: 0,
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'loopPolicy.issueSelection.priorityLabels must be an array of non-empty strings',
+    'loopPolicy.issueSelection.tieBreaker must be one of issue-number-asc',
+    'loopPolicy.rework.maxAttempts must be a non-negative integer',
+    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence',
+    'loopPolicy.freshContextReview.enabled must be a boolean',
+    'loopPolicy.freshContextReview.mode must be one of advisory',
+    'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations must be a boolean',
+    'loopPolicy.durableRunSummaries.enabled must be a boolean',
+    'loopPolicy.policySuggestions.enabled must be a boolean',
+    'loopPolicy.policySuggestions.maxSuggestions must be a positive integer',
   ]);
 });
 

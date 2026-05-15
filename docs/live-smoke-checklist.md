@@ -37,6 +37,9 @@ npm run smoke:live -- --cleanup
 - `scoped-runner-commit` - daemon scoped success with runner-owned commit.
 - `scoped-local-commit` - daemon scoped success with accepted agent local commit.
 - `run-scoped` - direct `codex-orchestrator run --issue` scoped success.
+- `loop-policy` - priority-based daemon selection, bounded rework evidence,
+  optional Fresh-Context Review evidence, Durable Run Summary excerpts, and
+  non-mutating Policy Suggestions.
 - `visual-proof` - runner-owned screenshot proof is attached to the PR.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
@@ -118,11 +121,37 @@ fake agent may edit files and make local commits only inside the issue worktree.
       `agent:review` are skipped with deterministic reasons.
 - [ ] Success scenarios verify daemon logs `running #<issue> scoped-issue` or
       `running #<issue> plan-parent`.
+- [ ] Loop Policy scenarios verify daemon logs the selected priority label or
+      `unprioritized` plus the configured tie-breaker.
 - [ ] Manual/deeper: verify a totally unlabeled issue stays invisible to daemon
       discovery, because status queries only configured discovery labels.
 
 Expected result: daemon discovers exactly one eligible issue and skips all
 blocked states deterministically.
+
+## Loop Policy live proof
+
+- [ ] `loop-policy` creates two eligible scoped issues and verifies the daemon
+      selects the issue with the configured priority label before the lower
+      priority issue, even when the lower priority issue has the smaller number.
+- [ ] `loop-policy` verifies daemon output records the selected priority label
+      and the `issue-number-asc` tie-breaker.
+- [ ] `loop-policy` exercises one bounded Rework Loop attempt by first producing
+      a retryable no-change blocker, then completing on the configured final
+      attempt.
+- [ ] `loop-policy` enables Fresh-Context Review and verifies the generated PR
+      and issue report include Fresh-Context Review evidence before handoff.
+- [ ] `loop-policy` verifies Durable Run Summary excerpts and non-mutating
+      Policy Suggestions appear in generated PR/report evidence.
+- [ ] `loop-policy` runs a parent issue-tree after the scoped proof to verify
+      child waves still complete with child loop outcomes under the same Loop
+      Policy settings.
+- [ ] `loop-policy` verifies the Runner-Owned Publication Boundary by checking
+      the result remains draft-PR based, with no auto-merge and no agent-owned
+      GitHub publication.
+
+Expected result: Loop Policy behavior is proven in a controlled self-repo live
+scenario without handing publication authority to Codex.
 
 ## Scoped success flow
 
@@ -138,6 +167,12 @@ blocked states deterministically.
 - [ ] Verify one draft PR is opened and references `Closes #<issue>`.
 - [ ] Verify the PR body includes validation evidence, changed paths, residual
       risks, skipped checks, and artifacts section when present.
+- [ ] Verify Durable Run Summary evidence appears in the PR body and issue
+      report, and that Policy Suggestions are marked as non-mutating when
+      present.
+- [ ] When Fresh-Context Review is enabled for the scenario, verify advisory
+      findings are reported before handoff and do not give the review session
+      GitHub publication authority.
 - [ ] Verify the issue has a review report comment beginning
       `codex-orchestrator review report for #<issue>`.
 - [ ] Verify the worktree exists under `.codex-orchestrator/workspaces`.
