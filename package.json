@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestrator",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "description": "Reusable GitHub Issues runner for Codex.",
   "type": "module",
   "license": "MIT",
