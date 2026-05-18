@@ -44,6 +44,51 @@ test('setup creates project config and package-bundled prompts', async () => {
   );
 });
 
+test('setup persists discovered absolute codex command path', async () => {
+  const targetRoot = await tempRepo();
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+    codexCommandResolver: async () => '/Applications/Codex.app/Contents/Resources/codex',
+  });
+
+  const configJson = JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')) as {
+    codex?: { command?: string };
+  };
+
+  assert.equal(result.config.codex.command, '/Applications/Codex.app/Contents/Resources/codex');
+  assert.equal(configJson.codex?.command, '/Applications/Codex.app/Contents/Resources/codex');
+});
+
+test('setup preserves an explicitly configured custom codex command', async () => {
+  const targetRoot = await tempRepo();
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+      },
+      codex: {
+        command: 'custom-codex',
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+    codexCommandResolver: async () => '/Applications/Codex.app/Contents/Resources/codex',
+  });
+
+  assert.equal(result.config.codex.command, 'custom-codex');
+});
+
 test('setup adds checked orchestrator npm scripts to target package json', async () => {
   const targetRoot = await tempRepo();
   await writeFile(

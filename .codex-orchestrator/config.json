@@ -3,7 +3,7 @@
   "github": {
     "owner": "SergiiMytakii",
     "repo": "codex-orchestrator",
-    "prepareLabels": "create-missing",
+    "prepareLabels": "report-only",
     "labels": {
       "auto": {
         "name": "agent:auto",
@@ -53,7 +53,7 @@
   },
   "codex": {
     "adapter": "codex-cli",
-    "command": "codex",
+    "command": "/Applications/Codex.app/Contents/Resources/codex",
     "args": [
       "exec",
       "--cd",

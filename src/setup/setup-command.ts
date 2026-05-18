@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { validateConfig } from '../config/schema.js';
+import { resolveCodexCommand, type CodexCommandResolver } from './codex-command-resolver.js';
 import { GhCliLabelAdapter } from './github-label-adapter.js';
 import type { GitHubLabelAdapter, LabelPlan } from './labels.js';
 import { planLabels } from './labels.js';
@@ -28,6 +29,7 @@ export interface SetupCommandOptions {
   prepareLabels?: boolean;
   replacePackageSkills?: boolean;
   labelAdapter?: GitHubLabelAdapter;
+  codexCommandResolver?: CodexCommandResolver;
 }
 
 export interface SetupCommandResult {
@@ -56,6 +58,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
 
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
   const workflows = await resolveWorkflowConfigs();
+  const discoveredCodexCommand = await (options.codexCommandResolver ?? resolveCodexCommand)();
   const defaultConfig = buildProjectConfig({
     owner,
     repo,
@@ -63,6 +66,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     workflows,
   });
   const config = mergeExistingProjectConfig(defaultConfig, existingConfig);
+  persistDiscoveredCodexCommand(config, discoveredCodexCommand);
   const validation = validateConfig(config);
 
   if (!validation.ok) {
@@ -90,6 +94,25 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     promptFiles,
     output,
   };
+}
+
+function persistDiscoveredCodexCommand(
+  config: CodexOrchestratorConfig,
+  discoveredCodexCommand: string | undefined,
+): void {
+  if (!discoveredCodexCommand) {
+    return;
+  }
+
+  if (config.codex.command === 'codex') {
+    config.codex.command = discoveredCodexCommand;
+  }
+
+  for (const profile of Object.values(config.codex.profiles ?? {})) {
+    if (profile?.command === 'codex') {
+      profile.command = discoveredCodexCommand;
+    }
+  }
 }
 
 const packageScripts: Record<string, string> = {

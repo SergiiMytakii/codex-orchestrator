@@ -237,6 +237,7 @@ test('diagnostics wave regression covers profile, snapshot, events, status JSON,
     targetRoot: repo,
     labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(config.github.labels).map((label) => ({ name: label.name }))),
     shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commandResolver: async () => '/usr/local/bin/tool',
     json: true,
   });
 

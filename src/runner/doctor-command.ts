@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { codexPhaseKeys } from '../config/schema.js';
+import { resolveExecutableCommand, type ExecutableCommandResolver } from '../setup/codex-command-resolver.js';
 import type { GitHubLabelAdapter } from '../setup/labels.js';
 import { GhCliLabelAdapter } from '../setup/github-label-adapter.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
@@ -34,6 +35,7 @@ export interface DoctorCommandOptions {
   json?: boolean;
   labelAdapter?: GitHubLabelAdapter;
   shellExecutor?: ShellCommandExecutor;
+  commandResolver?: ExecutableCommandResolver;
 }
 
 export interface DoctorCommandResult {
@@ -55,8 +57,9 @@ export async function runDoctorCommand(options: DoctorCommandOptions): Promise<D
 
   if (config) {
     const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
+    const commandResolver = options.commandResolver ?? resolveExecutableCommand;
     const labelAdapter = options.labelAdapter ?? new GhCliLabelAdapter(config.github.owner, config.github.repo);
-    checks.push(...await collectReadinessChecks(targetRoot, config, labelAdapter, shellExecutor));
+    checks.push(...await collectReadinessChecks(targetRoot, config, labelAdapter, shellExecutor, commandResolver));
   }
 
   const json = buildDoctorJson(targetRoot, config, checks);
@@ -71,9 +74,10 @@ async function collectReadinessChecks(
   config: CodexOrchestratorConfig,
   labelAdapter: GitHubLabelAdapter,
   shellExecutor: ShellCommandExecutor,
+  commandResolver: ExecutableCommandResolver,
 ): Promise<DoctorCheckResult[]> {
   const checks: DoctorCheckResult[] = [];
-  checks.push(await checkCommand(shellExecutor, 'git', 'git', 'Git command'));
+  checks.push(await checkCommand(commandResolver, 'git', 'git', 'Git command'));
   checks.push(await checkShell(shellExecutor, 'git-repository', 'Git repository', 'git rev-parse --is-inside-work-tree', targetRoot));
   checks.push(await checkShell(
     shellExecutor,
@@ -86,8 +90,8 @@ async function collectReadinessChecks(
   checks.push(await checkPath(targetRoot, 'target', 'Target directory'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.stateDir), 'state-dir', 'Runner state directory', 'warn'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.workspaceRoot), 'workspace-root', 'Runner workspace root', 'warn'));
-  checks.push(await checkCommand(shellExecutor, config.codex.command, 'codex-command', 'Codex command'));
-  checks.push(...await checkProfileCommands(config, shellExecutor));
+  checks.push(await checkCommand(commandResolver, config.codex.command, 'codex-command', 'Codex command'));
+  checks.push(...await checkProfileCommands(config, commandResolver));
   checks.push(check(
     'configured-checks',
     'Configured checks',
@@ -113,7 +117,7 @@ async function collectReadinessChecks(
 
 async function checkProfileCommands(
   config: CodexOrchestratorConfig,
-  shellExecutor: ShellCommandExecutor,
+  commandResolver: ExecutableCommandResolver,
 ): Promise<DoctorCheckResult[]> {
   const checks: DoctorCheckResult[] = [];
   for (const phase of codexPhaseKeys) {
@@ -121,7 +125,7 @@ async function checkProfileCommands(
     if (!command || command === config.codex.command) {
       continue;
     }
-    checks.push(await checkCommand(shellExecutor, command, `codex-profile-${phase}`, `Codex profile ${phase}`));
+    checks.push(await checkCommand(commandResolver, command, `codex-profile-${phase}`, `Codex profile ${phase}`));
   }
   return checks;
 }
@@ -158,12 +162,18 @@ async function checkPath(path: string, id: string, title: string, missingStatus:
 }
 
 async function checkCommand(
-  shellExecutor: ShellCommandExecutor,
+  commandResolver: ExecutableCommandResolver,
   command: string,
   id: string,
   title: string,
 ): Promise<DoctorCheckResult> {
-  return checkShell(shellExecutor, id, title, `command -v ${shellQuote(command)}`, undefined);
+  const resolvedCommand = await commandResolver(command);
+  return check(
+    id,
+    title,
+    resolvedCommand ? 'pass' : 'fail',
+    resolvedCommand ? `${title} is ready` : unavailableCommandSummary(id, command),
+  );
 }
 
 async function checkShell(
@@ -178,8 +188,22 @@ async function checkShell(
     id,
     title,
     result.exitCode === 0 ? 'pass' : 'fail',
-    result.exitCode === 0 ? `${title} is ready` : (result.stderr || result.stdout || `${title} failed`),
+    result.exitCode === 0
+      ? `${title} is ready`
+      : (result.stderr || result.stdout || `${title} failed`),
   );
+}
+
+function unavailableCommandSummary(id: string, command: string): string {
+  if (id === 'codex-command') {
+    return `Codex command '${command}' is not available. Re-run setup so codex-orchestrator can persist a stable Codex CLI path.`;
+  }
+
+  if (id.startsWith('codex-profile-')) {
+    return `Codex profile command '${command}' is not available. Re-run setup or update the configured profile command.`;
+  }
+
+  return `Command '${command}' is not available.`;
 }
 
 function buildDoctorJson(
@@ -232,5 +256,9 @@ function check(
 }
 
 function shellQuote(value: string): string {
+  if (process.platform === 'win32') {
+    return `"${value.replaceAll('"', '""')}"`;
+  }
+
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
