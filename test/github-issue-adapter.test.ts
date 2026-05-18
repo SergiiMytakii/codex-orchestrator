@@ -50,6 +50,79 @@ test('in-memory issue adapter creates and updates issues deterministically', asy
   assert.equal(updated.comments[0]?.body, 'comment');
 });
 
+test('in-memory issue adapter keeps issue open when closure evidence comment fails', async () => {
+  class FailingCommentIssueAdapter extends InMemoryGitHubIssueAdapter {
+    public override async postComment(_issueNumber: number, _body: string): Promise<void> {
+      throw new Error('comment failed');
+    }
+  }
+  const adapter = new FailingCommentIssueAdapter([issueFixture({ number: 1, labels: ['agent:auto'] })]);
+
+  await assert.rejects(
+    adapter.closeIssueWithEvidence(1, {
+      reason: {
+        type: 'implemented-in',
+        links: ['https://github.com/example/repo/pull/12'],
+      },
+      validation: 'npm test passed',
+    }),
+    /comment failed/,
+  );
+
+  assert.equal((await adapter.getIssue(1))?.state, 'OPEN');
+  assert.deepEqual(adapter.postedComments, []);
+});
+
+test('in-memory issue adapter rejects invalid closure evidence before mutating issue', async () => {
+  const adapter = new InMemoryGitHubIssueAdapter([issueFixture({ number: 1, labels: ['agent:auto'] })]);
+
+  await assert.rejects(
+    adapter.closeIssueWithEvidence(1, {
+      reason: {
+        type: 'implemented-in',
+        links: [],
+      },
+      validation: 'npm test passed',
+    }),
+    /requires at least one PR or commit link/,
+  );
+
+  assert.equal((await adapter.getIssue(1))?.state, 'OPEN');
+  assert.deepEqual(adapter.postedComments, []);
+});
+
+test('in-memory issue adapter records implemented-as-part-of and closed-because evidence', async () => {
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 1, labels: ['agent:child'] }),
+    issueFixture({ number: 2, labels: ['agent:auto'] }),
+  ]);
+
+  await adapter.closeIssueWithEvidence(1, {
+    reason: {
+      type: 'implemented-as-part-of',
+      summary: 'parent issue-tree wave',
+      links: ['https://github.com/example/repo/issues/10'],
+    },
+    validation: 'parent integration checks passed',
+  });
+  await adapter.closeIssueWithEvidence(2, {
+    reason: {
+      type: 'closed-because',
+      reason: 'duplicate',
+      details: 'Covered by #1',
+      links: ['https://github.com/example/repo/issues/1'],
+    },
+    validation: 'Validation not run: duplicate issue.',
+  });
+
+  assert.equal((await adapter.getIssue(1))?.state, 'CLOSED');
+  assert.equal((await adapter.getIssue(2))?.state, 'CLOSED');
+  assert.match(adapter.postedComments[0]?.body ?? '', /Implemented as part of: parent issue-tree wave/);
+  assert.match(adapter.postedComments[0]?.body ?? '', /https:\/\/github.com\/example\/repo\/issues\/10/);
+  assert.match(adapter.postedComments[1]?.body ?? '', /Closed because: duplicate - Covered by #1/);
+  assert.match(adapter.postedComments[1]?.body ?? '', /Validation: Validation not run: duplicate issue\./);
+});
+
 test('gh issue adapter lists open issues once and filters matching labels locally', async () => {
   const calls: Array<{ file: string; args: string[] }> = [];
   const executor: CommandExecutor = async (file, args) => {
@@ -181,6 +254,29 @@ test('gh issue adapter uses exact mutation commands', async () => {
     ['issue', 'edit', '1', '--repo', 'example/repo', '--remove-label', 'agent:blocked'],
     ['issue', 'comment', '1', '--repo', 'example/repo', '--body', 'hello'],
   ]);
+});
+
+test('gh issue adapter posts closure evidence before closing issue', async () => {
+  const calls: string[][] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    calls.push(args);
+    return { stdout: '{}', stderr: '' };
+  };
+  const adapter = new GhCliIssueAdapter('example', 'repo', executor);
+
+  await adapter.closeIssueWithEvidence(1, {
+    reason: {
+      type: 'implemented-in',
+      links: ['https://github.com/example/repo/pull/12'],
+    },
+    validation: 'npm test passed',
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0]?.slice(0, 5), ['issue', 'comment', '1', '--repo', 'example/repo']);
+  assert.match(calls[0]?.at(-1) ?? '', /codex-orchestrator completion evidence/);
+  assert.match(calls[0]?.at(-1) ?? '', /Implemented in: https:\/\/github.com\/example\/repo\/pull\/12/);
+  assert.deepEqual(calls[1], ['issue', 'close', '1', '--repo', 'example/repo']);
 });
 
 test('gh issue adapter truncates oversized comments before posting', async () => {

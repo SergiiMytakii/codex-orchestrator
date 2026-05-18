@@ -6,6 +6,7 @@ import {
   RunnerStateStore,
   buildPlanAutoPrompt,
   buildScopedImplementationPrompt,
+  closeIssueWithEvidence,
   runScopedAutoCommand,
   runPlanAutoCommand,
   runLocalExecutionSession,
@@ -17,6 +18,7 @@ import {
   renderAutonomousChildMarker,
   runSetupCommand,
   runStatusCommand,
+  formatIssueClosureEvidenceComment,
   validatePlanGraph,
   validateConfig,
 } from '../src/index.js';
@@ -49,4 +51,6 @@ test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof reconcileRunnerState, 'function');
   assert.equal(typeof runStatusCommand, 'function');
   assert.equal(typeof runDaemonCommand, 'function');
+  assert.equal(typeof closeIssueWithEvidence, 'function');
+  assert.equal(typeof formatIssueClosureEvidenceComment, 'function');
 });
