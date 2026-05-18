@@ -6,6 +6,7 @@ import { codexPhaseKeys } from '../config/schema.js';
 import { resolveExecutableCommand, type ExecutableCommandResolver } from '../setup/codex-command-resolver.js';
 import type { GitHubLabelAdapter } from '../setup/labels.js';
 import { GhCliLabelAdapter } from '../setup/github-label-adapter.js';
+import { checkPromptFiles } from '../setup/prompt-sync.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import { readRunnerConfig } from './command-utils.js';
 
@@ -90,6 +91,7 @@ async function collectReadinessChecks(
   checks.push(await checkPath(targetRoot, 'target', 'Target directory'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.stateDir), 'state-dir', 'Runner state directory', 'warn'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.workspaceRoot), 'workspace-root', 'Runner workspace root', 'warn'));
+  checks.push(await checkPromptUpdates(targetRoot));
   checks.push(await checkCommand(commandResolver, config.codex.command, 'codex-command', 'Codex command'));
   checks.push(...await checkProfileCommands(config, commandResolver));
   checks.push(check(
@@ -113,6 +115,25 @@ async function collectReadinessChecks(
       : 'visual proof gate is disabled',
   ));
   return checks;
+}
+
+async function checkPromptUpdates(targetRoot: string): Promise<DoctorCheckResult> {
+  const result = await checkPromptFiles(targetRoot);
+  const pending = result.installed.length + result.updated.length + result.conflicts.length;
+  if (pending === 0) {
+    return check('prompt-sync', 'Prompt sync', 'pass', 'project prompts match bundled package prompts');
+  }
+
+  return check(
+    'prompt-sync',
+    'Prompt sync',
+    'warn',
+    `prompt updates available: ${result.installed.length} missing, ${result.updated.length} safe update(s), ${result.conflicts.length} conflict(s)`,
+    [
+      'Run codex-orchestrator setup --sync-prompts=auto to apply safe prompt updates.',
+      'Use --sync-prompts=replace to overwrite local prompt edits with bundled prompts.',
+    ],
+  );
 }
 
 async function checkProfileCommands(

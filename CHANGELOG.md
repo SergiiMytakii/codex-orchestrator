@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-05-18
+
+### Added
+- Setup now records a prompt manifest and supports `--sync-prompts` modes for
+  safe prompt refreshes, local-edit preservation, replacement, and appended
+  package updates.
+- Doctor now warns when package prompt updates are available and points users to
+  the setup command that applies safe prompt updates.
+
 ## [0.1.27] - 2026-05-18
 
 ### Changed

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ShellCommandExecutor } from '../src/process/command.js';
 import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
+import { runSetupCommand } from '../src/setup/setup-command.js';
 import { validConfig } from './fixtures/config.js';
 
 async function tempRepo(config = validConfig): Promise<string> {
@@ -104,3 +106,39 @@ test('doctor command fails when a configured phase profile command is unavailabl
 
   assert.equal(result.json.fail.some((check) => check.id === 'codex-profile-fresh-context-review'), true);
 });
+
+test('doctor warns when package prompt updates are available', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-doctor-prompts-'));
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+  const promptRoot = join(targetRoot, '.codex-orchestrator', 'prompts');
+  const manifestPath = join(promptRoot, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+    prompts: Record<string, { installedHash: string; packageHash: string }>;
+  };
+  const oldPrdPrompt = 'old package prd prompt\n';
+  await writeFile(join(promptRoot, 'workflows', 'prd.md'), oldPrdPrompt, 'utf8');
+  manifest.prompts['workflows/prd.md'].installedHash = sha256(oldPrdPrompt);
+  manifest.prompts['workflows/prd.md'].packageHash = sha256(oldPrdPrompt);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const result = await runDoctorCommand({
+    targetRoot,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commandResolver: async (command: string) => `/usr/local/bin/${command}`,
+    labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(validConfig.github.labels).map((label) => ({ name: label.name }))),
+    json: true,
+  });
+  const promptSync = result.json.warn.find((check) => check.id === 'prompt-sync');
+
+  assert.match(promptSync?.summary ?? '', /1 safe update/);
+  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=auto/);
+});
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}

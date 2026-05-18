@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
@@ -17,6 +17,7 @@ import {
   readExistingConfig,
   writeProjectConfig,
 } from './project-config.js';
+import { checkPromptFiles, syncPromptFiles, type PromptSyncMode, type PromptSyncResult } from './prompt-sync.js';
 import { resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,6 +29,7 @@ export interface SetupCommandOptions {
   dryRun?: boolean;
   prepareLabels?: boolean;
   replacePackageSkills?: boolean;
+  promptSyncMode?: PromptSyncMode;
   labelAdapter?: GitHubLabelAdapter;
   codexCommandResolver?: CodexCommandResolver;
 }
@@ -38,6 +40,7 @@ export interface SetupCommandResult {
   dryRun: boolean;
   labelPlan: LabelPlan;
   promptFiles: string[];
+  promptSync?: PromptSyncResult;
   output: string;
 }
 
@@ -76,15 +79,19 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
   const adapter = options.labelAdapter ?? new GhCliLabelAdapter(owner, repo);
   const labelPlan = await planLabels(adapter, config.github.labels, prepareLabels, dryRun);
   const promptFiles = workflowDefinitions.map((definition) => join(options.targetRoot, definition.promptPath));
+  const promptSyncMode = options.promptSyncMode ?? (options.replacePackageSkills ? 'replace' : 'auto');
+  let promptSync: PromptSyncResult | undefined;
 
-  if (!dryRun) {
+  if (dryRun) {
+    promptSync = await checkPromptFiles(options.targetRoot, promptSyncMode);
+  } else {
     await writeProjectConfig(options.targetRoot, config);
-    await copyPromptFiles(options.targetRoot, options.replacePackageSkills ?? false);
+    promptSync = await syncPromptFiles(options.targetRoot, promptSyncMode);
     await ensureRuntimeGitignoreEntries(options.targetRoot, config);
     await ensurePackageScripts(options.targetRoot);
   }
 
-  const output = formatSetupOutput(configPath, labelPlan, config, promptFiles, dryRun);
+  const output = formatSetupOutput(configPath, labelPlan, config, promptFiles, dryRun, promptSync);
 
   return {
     config,
@@ -92,6 +99,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     dryRun,
     labelPlan,
     promptFiles,
+    promptSync,
     output,
   };
 }
@@ -204,6 +212,7 @@ function formatSetupOutput(
   config: CodexOrchestratorConfig,
   promptFiles: string[],
   dryRun: boolean,
+  promptSync: PromptSyncResult | undefined,
 ): string {
   const workflowLines = Object.entries(config.workflows)
     .map(([id, workflow]) => `  - ${id}: ${workflow.source}`)
@@ -220,6 +229,7 @@ function formatSetupOutput(
     workflowLines,
     'prompts:',
     promptSummary,
+    formatPromptSync(promptSync),
     `checks: ${Object.keys(config.checks).join(', ')}`,
     `gitignore runtime entries: ${runtimeGitignoreEntries(config).join(', ')}`,
     `codex command: ${config.codex.command} ${config.codex.args.join(' ')}`,
@@ -230,39 +240,21 @@ function formatSetupOutput(
   ].join('\n');
 }
 
-async function copyPromptFiles(targetRoot: string, replacePackageSkills: boolean): Promise<void> {
-  await copyPrompt('setup-skill.md', join(targetRoot, '.codex-orchestrator', 'prompts', 'setup-skill.md'), replacePackageSkills);
-
-  for (const definition of workflowDefinitions) {
-    const sourceName = definition.promptPath.replace('.codex-orchestrator/prompts/workflows/', '');
-    await copyPrompt(
-      join('workflows', sourceName),
-      join(targetRoot, definition.promptPath),
-      replacePackageSkills,
-    );
-  }
-}
-
-async function copyPrompt(relativePromptPath: string, destination: string, replacePackageSkills: boolean): Promise<void> {
-  await mkdir(dirname(destination), { recursive: true });
-  const source = new URL(`../../../prompts/${relativePromptPath}`, import.meta.url);
-
-  if (replacePackageSkills) {
-    await cp(source, destination, { force: true });
-    return;
+function formatPromptSync(promptSync: PromptSyncResult | undefined): string {
+  if (!promptSync) {
+    return 'prompt sync: dry-run';
   }
 
-  try {
-    await readFile(destination, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      const content = await readFile(source, 'utf8');
-      await writeFile(destination, content, 'utf8');
-      return;
-    }
-
-    throw error;
+  const line = `prompt sync: ${promptSync.installed.length} installed, ${promptSync.updated.length} updated, ${promptSync.preserved.length} preserved, ${promptSync.conflicts.length} conflict`;
+  if (promptSync.conflicts.length === 0) {
+    return line;
   }
+
+  return [
+    line,
+    `prompt conflicts: ${promptSync.conflicts.join(', ')}`,
+    'Run setup --sync-prompts=merge or --sync-prompts=replace to resolve package prompt updates.',
+  ].join('\n');
 }
 
 function readExistingString(

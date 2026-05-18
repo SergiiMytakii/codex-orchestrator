@@ -12,6 +12,16 @@ When cutting a new release:
 
 ### Latest release
 
+- `0.1.29` (2026-05-18):
+  - Setup records a prompt manifest so future package prompt changes can be
+    compared against the installed baseline.
+  - `setup --sync-prompts` supports safe auto-refresh, keep, replace, and
+    appended merge modes for package-bundled prompts.
+  - `doctor` reports when package prompt updates are available and points to
+    the setup command that applies safe updates.
+  - Existing repos without a prompt manifest now get explicit prompt conflict
+    reporting instead of silent preservation.
+
 - `0.1.27` (2026-05-18):
   - Package-bundled workflow prompts are documented as the runtime model, with
     no dependency on local Codex `SKILL.md` files.

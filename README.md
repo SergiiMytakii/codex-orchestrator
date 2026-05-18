@@ -212,6 +212,10 @@ prompts into `.codex-orchestrator/prompts/workflows/`, and the runner reads the
 copied prompt files during `agent:auto` and `agent:plan-auto` runs. Workflow
 `skillName` values in config are descriptive metadata for the workflow role;
 they are not a runtime dependency on the user's local Codex skill directory.
+Setup also writes `.codex-orchestrator/prompts/manifest.json`, which lets later
+setup runs tell apart untouched package prompts from prompts edited by the
+project. By default, setup refreshes untouched prompts and reports conflicts for
+locally edited prompts.
 
 Configured checks run before publication. By default, missing
 `npm run <script>` checks are reported as skipped warnings, not failures. You can
@@ -344,9 +348,14 @@ codex-orchestrator daemon --target <path> [--once] \
 - `--target <path>` - override the target directory, which defaults to the current directory;
 - `--github-owner <owner>` - override the GitHub owner inferred from `origin`;
 - `--github-repo <repo>` - override the GitHub repo inferred from `origin`;
+- `--sync-prompts <auto|keep|replace|merge>` - choose how package-bundled
+  prompt updates are applied. `auto` refreshes untouched prompts and reports
+  local-edit conflicts, `keep` preserves existing prompts, `replace` overwrites
+  with bundled prompts, and `merge` appends bundled updates to locally edited
+  prompts;
 - `--replace-package-skills` - refresh package-bundled prompt files. The flag
-  name is kept for compatibility; it does not install or require local Codex
-  skills.
+  name is kept for compatibility and behaves like `--sync-prompts=replace`; it
+  does not install or require local Codex skills.
 
 Setup does not launch Codex, commit changes, or open pull requests.
 When the target repository already has a `package.json`, setup also adds

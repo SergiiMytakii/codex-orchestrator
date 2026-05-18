@@ -12,6 +12,7 @@ import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
+import { promptSyncModes, type PromptSyncMode } from './setup/prompt-sync.js';
 
 const helpText = `codex-orchestrator
 
@@ -20,7 +21,7 @@ Usage:
   codex-orchestrator --version
   codex-orchestrator health
   codex-orchestrator doctor --target <path> [--json]
-  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels]
+  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--sync-prompts <mode>]
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>]
@@ -36,6 +37,12 @@ Commands:
 Options:
   --help, -h      Show this help.
   --version, -v   Show package version.
+
+Prompt sync modes:
+  --sync-prompts auto      Update untouched prompts and report locally edited conflicts.
+  --sync-prompts keep      Keep existing prompts and install only missing prompts.
+  --sync-prompts replace   Replace prompts with bundled package versions.
+  --sync-prompts merge     Append bundled updates to locally edited prompts.
 `;
 
 interface SetupCliArgs {
@@ -45,6 +52,7 @@ interface SetupCliArgs {
   dryRun: boolean;
   prepareLabels: boolean;
   replacePackageSkills: boolean;
+  promptSyncMode?: PromptSyncMode;
 }
 
 interface StatusCliArgs {
@@ -105,6 +113,7 @@ async function main(args: string[]): Promise<number> {
         dryRun: parsed.value.dryRun,
         prepareLabels: parsed.value.prepareLabels,
         replacePackageSkills: parsed.value.replacePackageSkills,
+        promptSyncMode: parsed.value.promptSyncMode,
       });
       process.stdout.write(`${result.output}\n`);
       return 0;
@@ -423,6 +432,22 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
       case '--prepare-labels':
         parsed.prepareLabels = true;
         break;
+      case '--sync-prompts':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        if (!isPromptSyncMode(next)) {
+          return { ok: false, error: `${arg} must be one of ${promptSyncModes.join(', ')}` };
+        }
+        parsed.promptSyncMode = next;
+        index += 1;
+        break;
+      case '--sync-prompts=auto':
+      case '--sync-prompts=keep':
+      case '--sync-prompts=replace':
+      case '--sync-prompts=merge':
+        parsed.promptSyncMode = arg.replace('--sync-prompts=', '') as PromptSyncMode;
+        break;
       case '--replace-package-skills':
         parsed.replacePackageSkills = true;
         break;
@@ -432,6 +457,10 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
   }
 
   return { ok: true, value: { ...parsed, target: parsed.target ?? process.cwd() } };
+}
+
+function isPromptSyncMode(value: string): value is PromptSyncMode {
+  return (promptSyncModes as readonly string[]).includes(value);
 }
 
 main(process.argv.slice(2))

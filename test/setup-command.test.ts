@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -209,6 +210,25 @@ test('setup dry-run does not write gitignore runtime entries', async () => {
   });
 
   await assert.rejects(readFile(join(targetRoot, '.gitignore'), 'utf8'), /ENOENT/);
+});
+
+test('setup dry-run previews the selected prompt sync mode without writing prompts', async () => {
+  const targetRoot = await tempRepo();
+  const promptPath = join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows', 'prd.md');
+  await mkdir(join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows'), { recursive: true });
+  await writeFile(promptPath, 'project prompt\n', 'utf8');
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    dryRun: true,
+    promptSyncMode: 'replace',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(await readFile(promptPath, 'utf8'), 'project prompt\n');
+  assert.equal(result.promptSync?.updated.includes('workflows/prd.md'), true);
 });
 
 test('setup does not duplicate existing runtime gitignore entries', async () => {
@@ -570,7 +590,7 @@ test('setup does not overwrite existing prompt files by default', async () => {
   await mkdir(join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows'), { recursive: true });
   await writeFile(promptPath, 'user-owned prompt\n', 'utf8');
 
-  await runSetupCommand({
+  const result = await runSetupCommand({
     targetRoot,
     githubOwner: 'SergiiMytakii',
     githubRepo: 'IntelleReach',
@@ -578,4 +598,87 @@ test('setup does not overwrite existing prompt files by default', async () => {
   });
 
   assert.equal(await readFile(promptPath, 'utf8'), 'user-owned prompt\n');
+  assert.match(result.output, /prompt conflicts: workflows\/prd\.md/);
 });
+
+test('setup syncs untouched prompt updates and reports local prompt conflicts', async () => {
+  const targetRoot = await tempRepo();
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  const promptRoot = join(targetRoot, '.codex-orchestrator', 'prompts');
+  const manifestPath = join(promptRoot, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+    prompts: Record<string, { installedHash: string; packageHash: string }>;
+  };
+  const oldPrdPrompt = 'old package prd prompt\n';
+  const oldTriagePrompt = 'old package triage prompt\n';
+  const customTriagePrompt = 'project customized triage prompt\n';
+  const prdPath = join(promptRoot, 'workflows', 'prd.md');
+  const triagePath = join(promptRoot, 'workflows', 'triage.md');
+
+  await writeFile(prdPath, oldPrdPrompt, 'utf8');
+  await writeFile(triagePath, customTriagePrompt, 'utf8');
+  manifest.prompts['workflows/prd.md'].installedHash = sha256(oldPrdPrompt);
+  manifest.prompts['workflows/prd.md'].packageHash = sha256(oldPrdPrompt);
+  manifest.prompts['workflows/triage.md'].installedHash = sha256(oldTriagePrompt);
+  manifest.prompts['workflows/triage.md'].packageHash = sha256(oldTriagePrompt);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.match(await readFile(prdPath, 'utf8'), /Problem Statement/);
+  assert.equal(await readFile(triagePath, 'utf8'), customTriagePrompt);
+  assert.match(result.output, /prompt sync: .*1 updated.*1 conflict/);
+  assert.match(result.output, /Run setup --sync-prompts=merge or --sync-prompts=replace/);
+});
+
+test('setup merge mode appends bundled prompt updates to locally edited prompts', async () => {
+  const targetRoot = await tempRepo();
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  const promptRoot = join(targetRoot, '.codex-orchestrator', 'prompts');
+  const manifestPath = join(promptRoot, 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+    prompts: Record<string, { installedHash: string; packageHash: string }>;
+  };
+  const oldTriagePrompt = 'old package triage prompt\n';
+  const customTriagePrompt = 'project customized triage prompt\n';
+  const triagePath = join(promptRoot, 'workflows', 'triage.md');
+  await writeFile(triagePath, customTriagePrompt, 'utf8');
+  manifest.prompts['workflows/triage.md'].installedHash = sha256(oldTriagePrompt);
+  manifest.prompts['workflows/triage.md'].packageHash = sha256(oldTriagePrompt);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    promptSyncMode: 'merge',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+  const mergedPrompt = await readFile(triagePath, 'utf8');
+
+  assert.match(mergedPrompt, /project customized triage prompt/);
+  assert.match(mergedPrompt, /codex-orchestrator package prompt update: workflows\/triage\.md/);
+  assert.match(mergedPrompt, /Agent Brief/);
+  assert.doesNotMatch(result.output, /prompt conflicts:/);
+});
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
