@@ -137,6 +137,9 @@ test('doctor warns when package prompt updates are available', async () => {
 
   assert.match(promptSync?.summary ?? '', /1 safe update/);
   assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=auto/);
+  assert.match(promptSync?.details?.join('\n') ?? '', /If conflicts are reported, ask the user to choose keep, merge, or replace/);
+  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=merge/);
+  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=replace/);
 });
 
 function sha256(value: string): string {

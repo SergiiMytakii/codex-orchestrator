@@ -6,7 +6,7 @@ import { codexPhaseKeys } from '../config/schema.js';
 import { resolveExecutableCommand, type ExecutableCommandResolver } from '../setup/codex-command-resolver.js';
 import type { GitHubLabelAdapter } from '../setup/labels.js';
 import { GhCliLabelAdapter } from '../setup/github-label-adapter.js';
-import { checkPromptFiles } from '../setup/prompt-sync.js';
+import { checkPromptFiles, promptConflictGuidance } from '../setup/prompt-sync.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import { readRunnerConfig } from './command-utils.js';
 
@@ -131,7 +131,8 @@ async function checkPromptUpdates(targetRoot: string): Promise<DoctorCheckResult
     `prompt updates available: ${result.installed.length} missing, ${result.updated.length} safe update(s), ${result.conflicts.length} conflict(s)`,
     [
       'Run codex-orchestrator setup --sync-prompts=auto to apply safe prompt updates.',
-      'Use --sync-prompts=replace to overwrite local prompt edits with bundled prompts.',
+      'If conflicts are reported, ask the user to choose keep, merge, or replace.',
+      ...promptConflictGuidance('codex-orchestrator setup'),
     ],
   );
 }

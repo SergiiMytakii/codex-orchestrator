@@ -16,6 +16,16 @@ export interface PromptSyncResult {
   conflicts: string[];
 }
 
+export function promptConflictGuidance(commandPrefix = 'codex-orchestrator setup'): string[] {
+  return [
+    'Choose how to handle local prompt edits:',
+    `- Keep local prompts: ${commandPrefix} --sync-prompts=keep`,
+    `- Merge package updates into local prompts: ${commandPrefix} --sync-prompts=merge`,
+    `- Replace local prompts: ${commandPrefix} --sync-prompts=replace`,
+    'Ask the user which action to take before changing conflicted prompts.',
+  ];
+}
+
 interface PromptManifest {
   version: 1;
   packageName: string;

@@ -599,6 +599,10 @@ test('setup does not overwrite existing prompt files by default', async () => {
 
   assert.equal(await readFile(promptPath, 'utf8'), 'user-owned prompt\n');
   assert.match(result.output, /prompt conflicts: workflows\/prd\.md/);
+  assert.match(result.output, /Choose how to handle local prompt edits/);
+  assert.match(result.output, /Keep local prompts: codex-orchestrator setup --sync-prompts=keep/);
+  assert.match(result.output, /Merge package updates into local prompts: codex-orchestrator setup --sync-prompts=merge/);
+  assert.match(result.output, /Replace local prompts: codex-orchestrator setup --sync-prompts=replace/);
 });
 
 test('setup syncs untouched prompt updates and reports local prompt conflicts', async () => {
@@ -639,7 +643,8 @@ test('setup syncs untouched prompt updates and reports local prompt conflicts', 
   assert.match(await readFile(prdPath, 'utf8'), /Problem Statement/);
   assert.equal(await readFile(triagePath, 'utf8'), customTriagePrompt);
   assert.match(result.output, /prompt sync: .*1 updated.*1 conflict/);
-  assert.match(result.output, /Run setup --sync-prompts=merge or --sync-prompts=replace/);
+  assert.match(result.output, /Choose how to handle local prompt edits/);
+  assert.match(result.output, /Ask the user which action to take before changing conflicted prompts/);
 });
 
 test('setup merge mode appends bundled prompt updates to locally edited prompts', async () => {

@@ -17,7 +17,13 @@ import {
   readExistingConfig,
   writeProjectConfig,
 } from './project-config.js';
-import { checkPromptFiles, syncPromptFiles, type PromptSyncMode, type PromptSyncResult } from './prompt-sync.js';
+import {
+  checkPromptFiles,
+  promptConflictGuidance,
+  syncPromptFiles,
+  type PromptSyncMode,
+  type PromptSyncResult,
+} from './prompt-sync.js';
 import { resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
 
 const execFileAsync = promisify(execFile);
@@ -253,7 +259,7 @@ function formatPromptSync(promptSync: PromptSyncResult | undefined): string {
   return [
     line,
     `prompt conflicts: ${promptSync.conflicts.join(', ')}`,
-    'Run setup --sync-prompts=merge or --sync-prompts=replace to resolve package prompt updates.',
+    ...promptConflictGuidance('codex-orchestrator setup'),
   ].join('\n');
 }
 

@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Prompt conflict reports now give agents explicit keep, merge, and replace
+  actions so users get a concrete choice instead of a bare warning.
+
 ## [0.1.29] - 2026-05-18
 
 ### Added
