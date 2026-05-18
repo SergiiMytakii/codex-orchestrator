@@ -1,6 +1,7 @@
 import type { CommandExecutionError, CommandExecutor } from './gh-cli.js';
 import { defaultGhExecutor } from './gh-cli.js';
 import type {
+  CloseIssueEvidenceInput,
   CreateIssueInput,
   GitHubIssue,
   GitHubIssueAdapter,
@@ -11,6 +12,7 @@ import type {
   PullRequestState,
   UpdateIssueInput,
 } from './issues.js';
+import { closeIssueWithEvidence } from './issues.js';
 
 const issueJsonFields = 'number,title,body,url,state,labels,comments,closedByPullRequestsReferences';
 
@@ -119,6 +121,15 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
 
   public async postComment(issueNumber: number, body: string): Promise<void> {
     await this.executor('gh', ['issue', 'comment', String(issueNumber), '--repo', this.repo, '--body', truncateCommentBody(body)]);
+  }
+
+  public async closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void> {
+    await closeIssueWithEvidence(issueNumber, input, {
+      postComment: (targetIssueNumber, body) => this.postComment(targetIssueNumber, body),
+      closeIssue: async (targetIssueNumber) => {
+        await this.executor('gh', ['issue', 'close', String(targetIssueNumber), '--repo', this.repo]);
+      },
+    });
   }
 }
 

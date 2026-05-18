@@ -81,6 +81,57 @@ test('reconciles all recovery statuses without mutating local state in report-on
   assert.deepEqual(adapter.removedLabels, []);
 });
 
+test('recovery surfaces closed issues that have no completion evidence', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+  await store.save({
+    version: 1,
+    runs: [metadata(1), metadata(2), metadata(3)],
+  });
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 1, state: 'CLOSED', labels: [] }),
+    issueFixture({
+      number: 2,
+      state: 'CLOSED',
+      labels: [],
+      comments: [
+        commentFixture({
+          body: [
+            'codex-orchestrator completion evidence',
+            '',
+            'Implemented as part of: https://github.com/example/repo/issues/10',
+            'Validation: parent integration checks passed',
+          ].join('\n'),
+          createdAt: '2026-05-08T11:00:00.000Z',
+        }),
+      ],
+    }),
+    issueFixture({
+      number: 3,
+      state: 'CLOSED',
+      labels: [],
+      pullRequests: [{ number: 12, url: 'https://github.com/example/repo/pull/12', state: 'MERGED' }],
+    }),
+  ]);
+
+  const entries = await reconcileRunnerState({
+    store,
+    issueAdapter: adapter,
+    config: validConfig,
+    now,
+    updateLocalState: false,
+  });
+
+  assert.deepEqual(
+    entries.map((entry) => [entry.issueNumber, entry.status, entry.reason]),
+    [
+      [1, 'closed-missing-evidence', 'GitHub marks the issue closed without completion evidence'],
+      [2, 'completed', 'GitHub marks the work completed'],
+      [3, 'completed', 'GitHub marks the work completed'],
+    ],
+  );
+});
+
 test('recovery clears clarification only when resume is allowed', async () => {
   const targetRoot = await tempRepo();
   const store = new RunnerStateStore(targetRoot, validConfig);

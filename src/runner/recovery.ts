@@ -1,5 +1,6 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
+import { hasIssueClosureEvidence } from '../github/issues.js';
 import {
   clearClarificationGate,
   hasMaintainerResponseAfterLatestClarification,
@@ -12,6 +13,7 @@ export type RecoveryStatus =
   | 'stale'
   | 'missing'
   | 'completed'
+  | 'closed-missing-evidence'
   | 'waiting-for-clarification'
   | 'clarification-resumable';
 
@@ -39,6 +41,7 @@ const recoveryReasons: Record<RecoveryStatus, string> = {
   stale: 'local run exists but GitHub no longer marks it running',
   missing: 'local run has no matching GitHub issue',
   completed: 'GitHub marks the work completed',
+  'closed-missing-evidence': 'GitHub marks the issue closed without completion evidence',
   'waiting-for-clarification': 'blocked clarification is waiting for maintainer response',
   'clarification-resumable': 'maintainer clarification response detected',
 };
@@ -87,11 +90,10 @@ function classifyIssue(issue: GitHubIssue | undefined, config: CodexOrchestrator
   }
 
   const labels = new Set(issue.labels.map((label) => label.name));
-  if (
-    issue.state === 'CLOSED' ||
-    labels.has(config.github.labels.review.name) ||
-    issue.closedByPullRequestsReferences.length > 0
-  ) {
+  if (issue.state === 'CLOSED') {
+    return hasIssueClosureEvidence(issue) ? 'completed' : 'closed-missing-evidence';
+  }
+  if (labels.has(config.github.labels.review.name) || issue.closedByPullRequestsReferences.length > 0) {
     return 'completed';
   }
   if (labels.has(config.github.labels.blocked.name)) {

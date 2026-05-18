@@ -46,6 +46,21 @@ export interface UpdateIssueInput {
   removeLabels?: string[];
 }
 
+export type CloseIssueEvidenceReason =
+  | { type: 'implemented-in'; links: string[] }
+  | { type: 'implemented-as-part-of'; links: string[]; summary?: string }
+  | {
+      type: 'closed-because';
+      reason: 'duplicate' | 'invalid' | 'out-of-scope' | 'superseded' | 'manually-completed';
+      details: string;
+      links?: string[];
+    };
+
+export interface CloseIssueEvidenceInput {
+  reason: CloseIssueEvidenceReason;
+  validation: string;
+}
+
 export interface GitHubIssueAdapter {
   listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   getIssue(number: number): Promise<GitHubIssue | undefined>;
@@ -54,6 +69,92 @@ export interface GitHubIssueAdapter {
   addLabels(issueNumber: number, labels: string[]): Promise<void>;
   removeLabels(issueNumber: number, labels: string[]): Promise<void>;
   postComment(issueNumber: number, body: string): Promise<void>;
+  closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void>;
+}
+
+export class CloseIssueEvidenceError extends Error {
+  public constructor(message: string) {
+    super(message);
+  }
+}
+
+export async function closeIssueWithEvidence(
+  issueNumber: number,
+  input: CloseIssueEvidenceInput,
+  actions: {
+    postComment(issueNumber: number, body: string): Promise<void>;
+    closeIssue(issueNumber: number): Promise<void>;
+  },
+): Promise<void> {
+  const body = formatIssueClosureEvidenceComment(input);
+  await actions.postComment(issueNumber, body);
+  await actions.closeIssue(issueNumber);
+}
+
+export function formatIssueClosureEvidenceComment(input: CloseIssueEvidenceInput): string {
+  const validation = requireNonEmpty(input.validation, 'Closure evidence validation is required');
+  const reason = input.reason;
+
+  if (reason.type === 'implemented-in') {
+    const links = requireLinks(reason.links, 'Implemented-in closure evidence requires at least one PR or commit link');
+    return [
+      'codex-orchestrator completion evidence',
+      '',
+      `Implemented in: ${links.join(', ')}`,
+      `Validation: ${validation}`,
+    ].join('\n');
+  }
+
+  if (reason.type === 'implemented-as-part-of') {
+    const links = requireLinks(reason.links, 'Implemented-as-part-of closure evidence requires at least one parent, PRD, wave, or PR link');
+    const summary = reason.summary?.trim();
+    return [
+      'codex-orchestrator completion evidence',
+      '',
+      `Implemented as part of: ${summary ? `${summary} - ` : ''}${links.join(', ')}`,
+      `Validation: ${validation}`,
+    ].join('\n');
+  }
+
+  const details = requireNonEmpty(reason.details, 'Closed-because closure evidence requires details');
+  const links = (reason.links ?? []).map((link) => link.trim()).filter(Boolean);
+  return [
+    'codex-orchestrator completion evidence',
+    '',
+    `Closed because: ${reason.reason} - ${details}${links.length > 0 ? ` (${links.join(', ')})` : ''}`,
+    `Validation: ${validation}`,
+  ].join('\n');
+}
+
+export function hasIssueClosureEvidence(issue: GitHubIssue): boolean {
+  return issue.closedByPullRequestsReferences.length > 0
+    || issue.comments.some((comment) => isIssueClosureEvidenceComment(comment.body));
+}
+
+export function isIssueClosureEvidenceComment(body: string): boolean {
+  return body.includes('codex-orchestrator completion evidence')
+    && body.includes('Validation:')
+    && (
+      body.includes('Implemented in:')
+      || body.includes('Implemented as part of:')
+      || body.includes('Closed because:')
+    );
+}
+
+function requireNonEmpty(value: string, message: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new CloseIssueEvidenceError(message);
+  }
+  return trimmed;
+}
+
+function requireLinks(links: string[], message: string): string[] {
+  const cleaned = links.map((link) => link.trim()).filter(Boolean);
+  if (cleaned.length === 0) {
+    throw new CloseIssueEvidenceError(message);
+  }
+  return cleaned;
 }
 
 export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
@@ -163,6 +264,16 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
       authorAssociation: 'NONE',
     });
     this.postedComments.push({ issueNumber, body });
+  }
+
+  public async closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void> {
+    await closeIssueWithEvidence(issueNumber, input, {
+      postComment: (targetIssueNumber, body) => this.postComment(targetIssueNumber, body),
+      closeIssue: async (targetIssueNumber) => {
+        const issue = this.requireIssue(targetIssueNumber);
+        issue.state = 'CLOSED';
+      },
+    });
   }
 
   private requireIssue(issueNumber: number): GitHubIssue {

@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'n
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 600_000;
@@ -786,16 +786,46 @@ async function assertScopedSuccess(
 }
 
 async function closeIssue(context, issueNumber, reason) {
-  await runCommand('gh', [
-    'issue',
-    'close',
-    String(issueNumber),
-    '--repo',
-    context.repo,
-    '--comment',
-    `[live-smoke:${context.runId}] ${reason}`,
-  ], { timeoutMs: context.options.timeoutMs });
+  const { closeIssueWithEvidence } = await importIssueHelpers(context);
+  await closeIssueWithEvidence(
+    issueNumber,
+    {
+      reason: {
+        type: 'closed-because',
+        reason: 'manually-completed',
+        details: `[live-smoke:${context.runId}] ${reason}`,
+      },
+      validation: 'Validation not run: live smoke cleanup closes temporary test artifacts.',
+    },
+    {
+      postComment: async (targetIssueNumber, body) => {
+        await runCommand('gh', [
+          'issue',
+          'comment',
+          String(targetIssueNumber),
+          '--repo',
+          context.repo,
+          '--body',
+          body,
+        ], { timeoutMs: context.options.timeoutMs });
+      },
+      closeIssue: async (targetIssueNumber) => {
+        await runCommand('gh', [
+          'issue',
+          'close',
+          String(targetIssueNumber),
+          '--repo',
+          context.repo,
+        ], { timeoutMs: context.options.timeoutMs });
+      },
+    },
+  );
   await appendReport(context, `Closed issue #${issueNumber}: ${reason}\n\n`);
+}
+
+async function importIssueHelpers(context) {
+  const packageIndexPath = join(dirname(context.cliPath), 'index.js');
+  return import(pathToFileURL(packageIndexPath).href);
 }
 
 async function assertBlockedIssue(context, issueNumber, expectedCommentText) {
@@ -996,9 +1026,7 @@ async function cleanupGitHubArtifacts(context) {
   }
   for (const issueNumber of [...new Set(context.createdIssues)].reverse()) {
     await bestEffort(context, `close issue #${issueNumber}`, async () => {
-      await runCommand('gh', ['issue', 'close', String(issueNumber), '--repo', context.repo, '--comment', `[live-smoke:${context.runId}] cleanup`], {
-        timeoutMs: context.options.timeoutMs,
-      });
+      await closeIssue(context, issueNumber, 'cleanup');
     });
   }
 }

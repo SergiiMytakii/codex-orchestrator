@@ -4,6 +4,8 @@ export { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from '
 export type { CodexCommandRunInput, CodexCommandRunResult, EffectiveCodexProfile } from './codex/command-adapter.js';
 export { GhCliPullRequestAdapter } from './github/gh-pull-request-adapter.js';
 export type {
+  CloseIssueEvidenceInput,
+  CloseIssueEvidenceReason,
   GitHubIssue,
   GitHubIssueAdapter,
   GitHubIssueComment,
@@ -12,7 +14,14 @@ export type {
   IssueState,
   PullRequestState,
 } from './github/issues.js';
-export { InMemoryGitHubIssueAdapter } from './github/issues.js';
+export {
+  CloseIssueEvidenceError,
+  closeIssueWithEvidence,
+  formatIssueClosureEvidenceComment,
+  hasIssueClosureEvidence,
+  InMemoryGitHubIssueAdapter,
+  isIssueClosureEvidenceComment,
+} from './github/issues.js';
 export type { CreateDraftPullRequestInput, GitHubPullRequest, GitHubPullRequestAdapter } from './github/pull-requests.js';
 export { InMemoryGitHubPullRequestAdapter } from './github/pull-requests.js';
 export { GitWorktreeManager, renderBranchTemplate } from './git/worktree.js';
