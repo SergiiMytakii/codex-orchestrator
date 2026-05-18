@@ -175,10 +175,10 @@ test('plan-auto command plans parent, executes marked children, and opens one in
     issueAdapter.updatedIssues.some((entry) => (
       entry.issueNumber === result.childIssues[0]?.number && entry.input.addLabels?.includes(labels.auto.name)
     )),
-    true,
+    false,
   );
-  assert.deepEqual(result.childIssues[0]?.labels.map((label) => label.name), [labels.child.name, labels.auto.name]);
-  assert.deepEqual(result.childIssues[1]?.labels.map((label) => label.name), [labels.child.name, labels.auto.name]);
+  assert.deepEqual(result.childIssues[0]?.labels.map((label) => label.name), [labels.child.name]);
+  assert.deepEqual(result.childIssues[1]?.labels.map((label) => label.name), [labels.child.name]);
   assert.match(result.childIssues[0]?.body ?? '', /codex-orchestrator:autonomous-child parent=#156/);
   assert.match(result.childIssues[0]?.body ?? '', /Stable ID: child-a/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);

@@ -115,7 +115,7 @@ test('runs setup dry-run without launching Codex', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /.codex-orchestrator\/config.json/);
   assert.match(result.stdout, /labels: report-only/);
-  assert.match(result.stdout, /prd: package-owned-prompt-fallback/);
+  assert.match(result.stdout, /prd: package-bundled-prompt/);
   assert.match(result.stdout, /Codex will not be launched/);
   assert.match(result.stdout, /setup will not commit or open a pull request/);
 });

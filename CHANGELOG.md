@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-05-18
+
+### Changed
+- Setup and docs now describe the package-bundled workflow prompt model
+  clearly, so installed repositories do not depend on local Codex `SKILL.md`
+  files.
+- `agent:auto` is reserved for standalone scoped issues, while issue-tree
+  children use only `agent:child` plus runner metadata and are executed by their
+  parent `agent:plan-auto` flow.
+- The default workflow prompts are full package-bundled workflows instead of
+  fallback stubs, with setup preserving project-owned prompt edits by default.
+
 ## [0.1.26] - 2026-05-16
 
 ### Added

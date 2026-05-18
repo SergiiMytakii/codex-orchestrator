@@ -11,6 +11,11 @@ export const workflowKeys = [
 
 export const labelPreparationPolicies = ['report-only', 'create-missing'] as const;
 
-export const workflowSources = ['existing-skill', 'package-owned-skill', 'package-owned-prompt-fallback'] as const;
+export const workflowSources = [
+  'existing-skill',
+  'package-owned-skill',
+  'package-bundled-prompt',
+  'package-owned-prompt-fallback',
+] as const;
 
 export const forbiddenRuntimeKeys = ['runtime', 'state', 'locks', 'sessions', 'worktrees', 'retries', 'cache'] as const;

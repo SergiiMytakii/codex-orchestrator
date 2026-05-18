@@ -7,7 +7,7 @@ export const fallbackWorkflows = Object.fromEntries(
     definition.id,
     {
       skillName: definition.skillName,
-      source: 'package-owned-prompt-fallback',
+      source: 'package-bundled-prompt',
       promptPath: definition.promptPath,
     },
   ]),

@@ -16,7 +16,7 @@ import {
   readExistingConfig,
   writeProjectConfig,
 } from './project-config.js';
-import { defaultSkillsRoot, resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
+import { resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,7 +26,6 @@ export interface SetupCommandOptions {
   githubRepo?: string;
   dryRun?: boolean;
   prepareLabels?: boolean;
-  skillsRoot?: string;
   replacePackageSkills?: boolean;
   labelAdapter?: GitHubLabelAdapter;
 }
@@ -56,7 +55,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
   }
 
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
-  const workflows = await resolveWorkflowConfigs(options.skillsRoot ?? defaultSkillsRoot());
+  const workflows = await resolveWorkflowConfigs();
   const defaultConfig = buildProjectConfig({
     owner,
     repo,
@@ -78,6 +77,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     await writeProjectConfig(options.targetRoot, config);
     await copyPromptFiles(options.targetRoot, options.replacePackageSkills ?? false);
     await ensureRuntimeGitignoreEntries(options.targetRoot, config);
+    await ensurePackageScripts(options.targetRoot);
   }
 
   const output = formatSetupOutput(configPath, labelPlan, config, promptFiles, dryRun);
@@ -90,6 +90,40 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     promptFiles,
     output,
   };
+}
+
+const packageScripts: Record<string, string> = {
+  'orchestrator:doctor': 'codex-orchestrator doctor --target .',
+  'orchestrator:status': 'codex-orchestrator status --target .',
+  'orchestrator:status:json': 'codex-orchestrator status --target . --json',
+  'orchestrator:daemon': 'codex-orchestrator doctor --target . && codex-orchestrator daemon --target .',
+  'orchestrator:daemon:once': 'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --once',
+  'orchestrator:daemon:fast': 'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --interval-seconds 60',
+  'orchestrator:daemon:max3': 'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --max-runs 3',
+};
+
+async function ensurePackageScripts(targetRoot: string): Promise<void> {
+  const packageJsonPath = join(targetRoot, 'package.json');
+  let content = '';
+  try {
+    content = await readFile(packageJsonPath, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+
+  const packageJson = JSON.parse(content) as Record<string, unknown>;
+  const existingScripts = typeof packageJson.scripts === 'object' && packageJson.scripts !== null && !Array.isArray(packageJson.scripts)
+    ? packageJson.scripts as Record<string, unknown>
+    : {};
+
+  packageJson.scripts = {
+    ...packageScripts,
+    ...existingScripts,
+  };
+  await writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
 }
 
 async function ensureRuntimeGitignoreEntries(targetRoot: string, config: CodexOrchestratorConfig): Promise<void> {

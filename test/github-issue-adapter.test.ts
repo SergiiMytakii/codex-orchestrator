@@ -33,7 +33,7 @@ test('in-memory issue adapter creates and updates issues deterministically', asy
   const created = await adapter.createIssue({
     title: 'Child',
     body: 'Body',
-    labels: ['agent:child', 'agent:child', 'agent:auto'],
+    labels: ['agent:child', 'agent:child'],
   });
   await adapter.postComment(created.number, 'comment');
   const updated = await adapter.updateIssue(created.number, {
@@ -221,7 +221,7 @@ test('gh issue adapter creates issues and reads them back', async () => {
   };
   const adapter = new GhCliIssueAdapter('example', 'repo', executor);
 
-  const issue = await adapter.createIssue({ title: 'Child', body: 'Body', labels: ['agent:child', 'agent:auto'] });
+  const issue = await adapter.createIssue({ title: 'Child', body: 'Body', labels: ['agent:child', 'priority:high'] });
 
   assert.equal(issue.number, 42);
   assert.deepEqual(calls[0], [
@@ -236,7 +236,7 @@ test('gh issue adapter creates issues and reads them back', async () => {
     '--label',
     'agent:child',
     '--label',
-    'agent:auto',
+    'priority:high',
   ]);
   assert.deepEqual(calls[1], [
     'issue',

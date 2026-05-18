@@ -55,7 +55,9 @@ There are two main modes.
 
 ### `agent:auto`
 
-Use `agent:auto` for one clear implementation issue.
+Use `agent:auto` for one clear standalone implementation issue. Do not use it
+for child issues created by `agent:plan-auto`; those are marked with
+`agent:child` and are executed only by the parent issue-tree flow.
 
 The runner:
 
@@ -77,6 +79,8 @@ integration draft PR.
 
 Only child issues explicitly marked by the runner belong to the autonomous tree.
 Ordinary links, milestones, project fields, or casual references are not enough.
+Child issues use `agent:child`, not `agent:auto`, so the daemon cannot confuse
+parent-owned child work with standalone scoped work.
 
 ## Basic Workflow
 
@@ -202,9 +206,12 @@ controls the GitHub repo, labels, base branch, branch names, validation checks,
 review gates, blocked paths, child issue concurrency, durable logs, PR titles,
 and the prompts used for planning and implementation.
 
-The package ships fallback prompts, so a repository does not need a local Codex
-skill pack before setup. If compatible local skills already exist, setup can
-reuse them.
+The package ships bundled workflow prompts, so a repository does not need local
+Codex `SKILL.md` files installed on the user's machine. Setup copies those
+prompts into `.codex-orchestrator/prompts/workflows/`, and the runner reads the
+copied prompt files during `agent:auto` and `agent:plan-auto` runs. Workflow
+`skillName` values in config are descriptive metadata for the workflow role;
+they are not a runtime dependency on the user's local Codex skill directory.
 
 Configured checks run before publication. By default, missing
 `npm run <script>` checks are reported as skipped warnings, not failures. You can
@@ -305,7 +312,8 @@ Default labels:
 
 - `agent:auto` - run one scoped issue;
 - `agent:plan-auto` - plan and run a parent issue tree;
-- `agent:child` - child issue in an autonomous tree;
+- `agent:child` - child issue in an autonomous tree; this is not a standalone
+  authorization label;
 - `agent:running` - runner is working;
 - `agent:blocked` - maintainer input needed;
 - `agent:manual` - reserved for human work;
@@ -336,10 +344,14 @@ codex-orchestrator daemon --target <path> [--once] \
 - `--target <path>` - override the target directory, which defaults to the current directory;
 - `--github-owner <owner>` - override the GitHub owner inferred from `origin`;
 - `--github-repo <repo>` - override the GitHub repo inferred from `origin`;
-- `--skills-root <path>` - choose where setup looks for existing Codex skills;
-- `--replace-package-skills` - refresh package-owned prompt files.
+- `--replace-package-skills` - refresh package-bundled prompt files. The flag
+  name is kept for compatibility; it does not install or require local Codex
+  skills.
 
 Setup does not launch Codex, commit changes, or open pull requests.
+When the target repository already has a `package.json`, setup also adds
+`orchestrator:*` npm scripts. Daemon scripts run `doctor` first, then start the
+daemon only if the readiness check passes.
 
 `status` is read-only. It shows eligible issues, skipped issues with reasons,
 and local recovery state.

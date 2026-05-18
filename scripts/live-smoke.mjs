@@ -436,7 +436,7 @@ async function runDirectScopedScenario(context) {
 async function runLoopPolicyScenario(context) {
   const loopPolicy = {
     issueSelection: {
-      priorityLabels: ['agent:child'],
+      priorityLabels: ['priority:loop'],
       tieBreaker: 'issue-number-asc',
     },
     rework: {
@@ -473,7 +473,7 @@ async function runLoopPolicyScenario(context) {
   const selected = await createIssue(
     context,
     'loop-policy-rework',
-    ['agent:auto', 'agent:child'],
+    ['agent:auto', 'priority:loop'],
     'Higher-priority Loop Policy issue. The fake agent intentionally needs one bounded rework attempt.',
     { skipNoEligibleCheck: true },
   );
@@ -488,7 +488,7 @@ async function runLoopPolicyScenario(context) {
   const daemon = await runPackagedCli(context, ['daemon', '--target', context.targetRoot, '--once', '--max-runs', '1']);
   assertIncludes(daemon.stdout, `running #${selected.number} scoped-issue`, 'daemon should select the configured priority issue');
   assert(!daemon.stdout.includes(`running #${lowerPriority.number} scoped-issue`), 'daemon should not select lower-priority issue first');
-  assertIncludes(daemon.stdout, 'selection: priority agent:child, tie-breaker issue-number-asc', 'daemon should report priority selection policy');
+  assertIncludes(daemon.stdout, 'selection: priority priority:loop, tie-breaker issue-number-asc', 'daemon should report priority selection policy');
   await assertScopedSuccess(context, selected.number, {
     expectLocalCommit: false,
     expectLoopPolicyEvidence: true,

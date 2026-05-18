@@ -12,6 +12,15 @@ When cutting a new release:
 
 ### Latest release
 
+- `0.1.27` (2026-05-18):
+  - Package-bundled workflow prompts are documented as the runtime model, with
+    no dependency on local Codex `SKILL.md` files.
+  - `agent:auto` is reserved for standalone scoped issues.
+  - Issue-tree children use `agent:child` plus runner metadata and are executed
+    only by their parent `agent:plan-auto` flow.
+  - Setup installs full bundled workflow prompts and preserves project-owned
+    prompt edits by default.
+
 - `0.1.26` (2026-05-16):
   - Read-only `doctor` diagnostics report runner readiness in text or JSON.
   - `status --json` exposes queue, recovery, active run, and recent event

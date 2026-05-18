@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestrator",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Reusable GitHub Issues runner for Codex.",
   "type": "module",
   "license": "MIT",
@@ -35,6 +35,13 @@
     "url": "git+https://github.com/SergiiMytakii/codex-orchestrator.git"
   },
   "scripts": {
+    "orchestrator:doctor": "npm run build --silent && node dist/src/cli.js doctor --target .",
+    "orchestrator:status": "npm run build --silent && node dist/src/cli.js status --target .",
+    "orchestrator:status:json": "npm run build --silent && node dist/src/cli.js status --target . --json",
+    "orchestrator:daemon": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target .",
+    "orchestrator:daemon:once": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --once",
+    "orchestrator:daemon:fast": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --interval-seconds 60",
+    "orchestrator:daemon:max3": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --max-runs 3",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

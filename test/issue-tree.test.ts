@@ -73,7 +73,7 @@ test('autonomous child lifecycle creates marked children and reads metadata', as
   const readback = await readAutonomousChildNodes(adapter, validConfig, 151, [issue]);
 
   assert.equal(issue.title, 'A');
-  assert.deepEqual(issue.labels.map((label) => label.name), [labels.child.name, labels.auto.name]);
+  assert.deepEqual(issue.labels.map((label) => label.name), [labels.child.name]);
   assert.match(issue.body, /codex-orchestrator:autonomous-child parent=#151/);
   assert.match(issue.body, /Stable ID: a/);
   assert.equal(readback.length, 1);
@@ -89,7 +89,7 @@ test('autonomous child lifecycle creates marked children and reads metadata', as
 test('autonomous child lifecycle updates only existing children of parent and rejects arbitrary issue before mutation', async () => {
   const existing = issueFixture({
     number: 12,
-    labels: [labels.child.name, labels.auto.name],
+    labels: [labels.child.name],
     body: renderAutonomousChildBody(validGraph().nodes[0]!, 151),
   });
   const arbitrary = issueFixture({
@@ -228,7 +228,7 @@ function childBody(input: {
 test('autonomous child metadata parses only marked children with required fields', () => {
   const issue = issueFixture({
     number: 20,
-    labels: [labels.child.name, labels.auto.name],
+    labels: [labels.child.name],
     body: childBody({ stableId: 'child-a', dependsOn: ['base'], ownershipScope: ['src/a.ts', 'test/a.test.ts'] }),
   });
 
@@ -250,7 +250,7 @@ test('autonomous child metadata parses only marked children with required fields
   const malformed = parseAutonomousChildMetadata(
     issueFixture({
       number: 22,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: '', ownershipScope: [], verification: [], specGate: 'issue-level' }),
     }),
     validConfig,
@@ -282,22 +282,22 @@ test('executable child batches enforce state, dependencies, max concurrency, and
   const nodes = [
     issueFixture({
       number: 31,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'a', ownershipScope: ['src/shared.ts'] }),
     }),
     issueFixture({
       number: 32,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'b', ownershipScope: ['src/shared.ts'] }),
     }),
     issueFixture({
       number: 33,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'c', ownershipScope: ['src/c.ts'] }),
     }),
     issueFixture({
       number: 34,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'd', dependsOn: ['a', 'b'], ownershipScope: ['src/d.ts'] }),
     }),
   ].map((issue) => {
@@ -316,26 +316,26 @@ test('executable child batches enforce state, dependencies, max concurrency, and
   assert.equal((batches.ok ? batches.batches : []).every((batch) => batch.length <= 3), true);
 });
 
-test('executable child batches reject hitl, blocked state, missing auto, malformed graph, and closed issues', () => {
+test('executable child batches reject hitl, blocked state, malformed graph, and closed issues', () => {
   const issues = [
     issueFixture({
       number: 41,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'hitl', afkHitl: 'hitl' }),
     }),
     issueFixture({
       number: 42,
-      labels: [labels.child.name, labels.auto.name, labels.blocked.name],
+      labels: [labels.child.name, labels.blocked.name],
       body: childBody({ stableId: 'blocked' }),
     }),
     issueFixture({
       number: 43,
       labels: [labels.child.name],
-      body: childBody({ stableId: 'missing-auto' }),
+      body: childBody({ stableId: 'malformed', dependsOn: ['missing'] }),
     }),
     issueFixture({
       number: 44,
-      labels: [labels.child.name, labels.auto.name],
+      labels: [labels.child.name],
       body: childBody({ stableId: 'closed' }),
       state: 'CLOSED',
     }),
@@ -351,6 +351,6 @@ test('executable child batches reject hitl, blocked state, missing auto, malform
   assert.equal(result.ok, false);
   assert.match(result.ok ? '' : result.errors.join('\n'), /#41.*hitl/);
   assert.match(result.ok ? '' : result.errors.join('\n'), /#42.*blocked/);
-  assert.match(result.ok ? '' : result.errors.join('\n'), /#43.*agent:auto/);
+  assert.match(result.ok ? '' : result.errors.join('\n'), /unknown node missing/);
   assert.match(result.ok ? '' : result.errors.join('\n'), /#44.*closed/);
 });

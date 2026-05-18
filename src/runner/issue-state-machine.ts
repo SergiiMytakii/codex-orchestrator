@@ -10,6 +10,7 @@ export type SkipReasonCode =
   | 'conflicting-state-labels'
   | 'already-running'
   | 'ready-for-review'
+  | 'child-label'
   | 'missing-authorization-label'
   | 'closed';
 
@@ -49,6 +50,7 @@ const reasonStrings = {
   conflictingState: 'multiple state labels are present',
   running: 'running label is present',
   review: 'review label is present',
+  child: 'child label is present; parent plan-auto owns child execution',
   missingAuthorization: 'no configured auto or plan-auto label is present',
   closed: 'issue is closed',
 } as const;
@@ -142,6 +144,7 @@ function decideIssueWork(issue: GitHubIssue, config: CodexOrchestratorConfig): I
   const blocked = config.github.labels.blocked.name;
   const running = config.github.labels.running.name;
   const review = config.github.labels.review.name;
+  const child = config.github.labels.child.name;
   const authCount = [auto, planAuto].filter((label) => labels.has(label)).length;
   const stateCount = [running, blocked, review].filter((label) => labels.has(label)).length;
 
@@ -165,6 +168,9 @@ function decideIssueWork(issue: GitHubIssue, config: CodexOrchestratorConfig): I
   }
   if (issue.state === 'CLOSED') {
     return skipped(issue, 'closed', reasonStrings.closed);
+  }
+  if (labels.has(child)) {
+    return skipped(issue, 'child-label', reasonStrings.child);
   }
   if (authCount === 0) {
     return skipped(issue, 'missing-authorization-label', reasonStrings.missingAuthorization);

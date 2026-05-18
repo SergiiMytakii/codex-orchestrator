@@ -20,7 +20,7 @@ async function initGitHubRemote(targetRoot: string, remoteUrl: string): Promise<
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteUrl]);
 }
 
-test('setup creates project config and package prompt fallbacks', async () => {
+test('setup creates project config and package-bundled prompts', async () => {
   const targetRoot = await tempRepo();
   const adapter = new InMemoryGitHubLabelAdapter([{ name: 'agent:auto' }]);
 
@@ -42,6 +42,83 @@ test('setup creates project config and package prompt fallbacks', async () => {
     await readFile(join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows', 'prd.md'), 'utf8'),
     /PRD/,
   );
+});
+
+test('setup adds checked orchestrator npm scripts to target package json', async () => {
+  const targetRoot = await tempRepo();
+  await writeFile(
+    join(targetRoot, 'package.json'),
+    JSON.stringify({
+      name: 'target-project',
+      scripts: {
+        test: 'node --test',
+      },
+    }, null, 2),
+    'utf8',
+  );
+
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  const packageJson = JSON.parse(await readFile(join(targetRoot, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+
+  assert.equal(packageJson.scripts?.test, 'node --test');
+  assert.equal(packageJson.scripts?.['orchestrator:doctor'], 'codex-orchestrator doctor --target .');
+  assert.equal(packageJson.scripts?.['orchestrator:status'], 'codex-orchestrator status --target .');
+  assert.equal(packageJson.scripts?.['orchestrator:status:json'], 'codex-orchestrator status --target . --json');
+  assert.equal(
+    packageJson.scripts?.['orchestrator:daemon'],
+    'codex-orchestrator doctor --target . && codex-orchestrator daemon --target .',
+  );
+  assert.equal(
+    packageJson.scripts?.['orchestrator:daemon:once'],
+    'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --once',
+  );
+  assert.equal(
+    packageJson.scripts?.['orchestrator:daemon:fast'],
+    'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --interval-seconds 60',
+  );
+  assert.equal(
+    packageJson.scripts?.['orchestrator:daemon:max3'],
+    'codex-orchestrator doctor --target . && codex-orchestrator daemon --target . --max-runs 3',
+  );
+});
+
+test('setup preserves existing orchestrator npm scripts', async () => {
+  const targetRoot = await tempRepo();
+  await writeFile(
+    join(targetRoot, 'package.json'),
+    JSON.stringify({
+      name: 'target-project',
+      scripts: {
+        'orchestrator:doctor': 'npm run build --silent && node dist/src/cli.js doctor --target .',
+      },
+    }, null, 2),
+    'utf8',
+  );
+
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  const packageJson = JSON.parse(await readFile(join(targetRoot, 'package.json'), 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+
+  assert.equal(
+    packageJson.scripts?.['orchestrator:doctor'],
+    'npm run build --silent && node dist/src/cli.js doctor --target .',
+  );
+  assert.equal(packageJson.scripts?.['orchestrator:status'], 'codex-orchestrator status --target .');
 });
 
 test('setup adds runtime work folders to gitignore without ignoring committed policy files', async () => {
@@ -332,7 +409,7 @@ test('dry-run reports intended automation without writing files or creating labe
   assert.match(result.output, /.codex-orchestrator\/config.json/);
   assert.match(result.output, /labels: create-missing/);
   assert.match(result.output, /gitignore runtime entries: \.codex-orchestrator\/workspaces\/, \.codex-orchestrator\/state\//);
-  assert.match(result.output, /prd: package-owned-prompt-fallback/);
+  assert.match(result.output, /prd: package-bundled-prompt/);
   assert.match(result.output, /Codex will not be launched/);
   await assert.rejects(readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'), /ENOENT/);
 });
@@ -390,22 +467,56 @@ test('setup does not create labels from an existing config policy without the cu
   assert.equal(adapter.createdLabels.length, 0);
 });
 
-test('setup reuses existing local skills', async () => {
+test('setup uses bundled workflow prompts', async () => {
   const targetRoot = await tempRepo();
-  const skillsRoot = await tempRepo();
-  await mkdir(join(skillsRoot, 'to-prd'), { recursive: true });
-  await writeFile(join(skillsRoot, 'to-prd', 'SKILL.md'), '# to-prd\n', 'utf8');
 
   const result = await runSetupCommand({
     targetRoot,
     githubOwner: 'SergiiMytakii',
     githubRepo: 'IntelleReach',
-    skillsRoot,
     labelAdapter: new InMemoryGitHubLabelAdapter(),
   });
 
-  assert.equal(result.config.workflows.prd.source, 'existing-skill');
-  assert.equal(result.config.workflows.issueBreakdown.source, 'package-owned-prompt-fallback');
+  assert.equal(result.config.workflows.prd.source, 'package-bundled-prompt');
+  assert.equal(result.config.workflows.prd.skillPath, undefined);
+  assert.equal(result.config.workflows.issueBreakdown.source, 'package-bundled-prompt');
+});
+
+test('setup migrates old workflow sources to package bundled prompts', async () => {
+  const targetRoot = await tempRepo();
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+      },
+      workflows: {
+        prd: {
+          skillName: 'to-prd',
+          source: 'package-owned-prompt-fallback',
+          promptPath: '.codex-orchestrator/prompts/workflows/prd.md',
+        },
+        scopedImplementation: {
+          skillName: 'spec-implementer',
+          source: 'existing-skill',
+          skillPath: '/Users/example/.codex/skills/spec-implementer/SKILL.md',
+          promptPath: '.codex-orchestrator/prompts/workflows/scoped-implementation.md',
+        },
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.equal(result.config.workflows.prd.source, 'package-bundled-prompt');
+  assert.equal(result.config.workflows.scopedImplementation.source, 'package-bundled-prompt');
+  assert.equal(result.config.workflows.scopedImplementation.skillPath, undefined);
 });
 
 test('setup does not overwrite existing prompt files by default', async () => {

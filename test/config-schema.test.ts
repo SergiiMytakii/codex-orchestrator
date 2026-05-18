@@ -11,7 +11,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.github.labels.auto.name, 'agent:auto');
     assert.equal(result.value.runner.maxParallelChildren, 3);
     assert.equal(result.value.runner.allowAgentLocalCommits, false);
-    assert.equal(result.value.workflows.prd.source, 'package-owned-prompt-fallback');
+    assert.equal(result.value.workflows.prd.source, 'package-bundled-prompt');
     assert.equal(result.value.codex.command, 'codex');
     assert.equal(result.value.codex.timeoutMs, 1_800_000);
     assert.equal(result.value.codex.mobileTimeoutMs, 3_600_000);
@@ -156,7 +156,7 @@ test('rejects invalid workflow source with a dot-path error', () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok ? [] : result.errors, [
-    'workflows.prd.source must be one of existing-skill, package-owned-skill, package-owned-prompt-fallback',
+    'workflows.prd.source must be one of existing-skill, package-owned-skill, package-bundled-prompt, package-owned-prompt-fallback',
   ]);
 });
 

@@ -53,6 +53,7 @@ test('skips issues by deterministic precedence and reason strings', () => {
       issueFixture({ number: 6, labels: [labels.review.name, labels.auto.name] }),
       issueFixture({ number: 7, labels: [labels.auto.name], state: 'CLOSED' }),
       issueFixture({ number: 8, labels: [labels.child.name] }),
+      issueFixture({ number: 9, labels: [labels.child.name, labels.auto.name] }),
     ],
     validConfig,
   );
@@ -69,7 +70,8 @@ test('skips issues by deterministic precedence and reason strings', () => {
       ['already-running', 'running label is present'],
       ['ready-for-review', 'review label is present'],
       ['closed', 'issue is closed'],
-      ['missing-authorization-label', 'no configured auto or plan-auto label is present'],
+      ['child-label', 'child label is present; parent plan-auto owns child execution'],
+      ['child-label', 'child label is present; parent plan-auto owns child execution'],
     ],
   );
 });

@@ -42,7 +42,6 @@ interface SetupCliArgs {
   target?: string;
   githubOwner?: string;
   githubRepo?: string;
-  skillsRoot?: string;
   dryRun: boolean;
   prepareLabels: boolean;
   replacePackageSkills: boolean;
@@ -105,7 +104,6 @@ async function main(args: string[]): Promise<number> {
         githubRepo: parsed.value.githubRepo,
         dryRun: parsed.value.dryRun,
         prepareLabels: parsed.value.prepareLabels,
-        skillsRoot: parsed.value.skillsRoot,
         replacePackageSkills: parsed.value.replacePackageSkills,
       });
       process.stdout.write(`${result.output}\n`);
@@ -417,13 +415,6 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
           return { ok: false, error: `${arg} requires a value` };
         }
         parsed.githubRepo = next;
-        index += 1;
-        break;
-      case '--skills-root':
-        if (!next || next.startsWith('--')) {
-          return { ok: false, error: `${arg} requires a value` };
-        }
-        parsed.skillsRoot = next;
         index += 1;
         break;
       case '--dry-run':

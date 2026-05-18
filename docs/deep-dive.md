@@ -97,9 +97,10 @@ The runner only starts work that is explicitly authorized.
 
 Default labels:
 
-- `agent:auto` authorizes one scoped implementation run;
+- `agent:auto` authorizes one standalone scoped implementation run;
 - `agent:plan-auto` authorizes parent planning and child issue execution;
-- `agent:child` marks child issues that belong to an autonomous parent tree;
+- `agent:child` marks child issues that belong to an autonomous parent tree
+  and is not a standalone authorization label;
 - `agent:running` means a runner has claimed the issue;
 - `agent:blocked` means maintainer input or manual recovery is needed;
 - `agent:manual` reserves the issue for human work;
@@ -110,7 +111,9 @@ already in review, or otherwise not authorized by policy.
 
 Child issues are not inferred from ordinary GitHub links, milestones, project
 fields, or casual references. They must carry the configured child label and the
-runner-owned parent marker.
+runner-owned parent marker. Child issues do not use `agent:auto`; the parent
+`agent:plan-auto` flow owns child execution through the marker, child label, and
+AFK/HITL metadata.
 
 ## Scoped Issue Run
 

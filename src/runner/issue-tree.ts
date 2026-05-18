@@ -263,7 +263,6 @@ export function collectExecutableChildBatches(
   config: CodexOrchestratorConfig,
 ): AutonomousChildBatchResult {
   const errors: string[] = [];
-  const autoLabel = config.github.labels.auto.name;
   const manualLabel = config.github.labels.manual.name;
   const blockedLabel = config.github.labels.blocked.name;
   const runningLabel = config.github.labels.running.name;
@@ -279,9 +278,6 @@ export function collectExecutableChildBatches(
     const labels = new Set(node.issue.labels.map((label) => label.name));
     if (node.issue.state === 'CLOSED') {
       errors.push(`Issue #${node.issue.number} is closed`);
-    }
-    if (!labels.has(autoLabel)) {
-      errors.push(`Issue #${node.issue.number} missing ${autoLabel}`);
     }
     if (node.metadata.afkHitl !== 'afk') {
       errors.push(`Issue #${node.issue.number} is ${node.metadata.afkHitl}`);
@@ -338,7 +334,6 @@ export async function persistAutonomousChildNode(
 ): Promise<GitHubIssue> {
   const body = renderAutonomousChildBody(node, parentIssueNumber);
   const childLabel = config.github.labels.child.name;
-  const autoLabel = config.github.labels.auto.name;
 
   let issue: GitHubIssue;
   if (node.issueNumber !== undefined) {
@@ -355,7 +350,6 @@ export async function persistAutonomousChildNode(
       title: node.title,
       body,
       addLabels: [childLabel],
-      removeLabels: node.afkHitl === 'hitl' ? [autoLabel] : undefined,
     });
   } else {
     issue = await issueAdapter.createIssue({
@@ -367,14 +361,6 @@ export async function persistAutonomousChildNode(
 
   if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
     throw new Error(`Child issue #${issue.number} was not persisted with the autonomous marker for #${parentIssueNumber}.`);
-  }
-  if (node.afkHitl === 'afk') {
-    issue = await issueAdapter.updateIssue(issue.number, { addLabels: [autoLabel] });
-    if (!isAutonomousChildOfParent(issue, config, parentIssueNumber)) {
-      throw new Error(
-        `Child issue #${issue.number} lost the autonomous marker for #${parentIssueNumber} while enabling agent:auto.`,
-      );
-    }
   }
   return issue;
 }

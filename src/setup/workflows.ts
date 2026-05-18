@@ -1,7 +1,3 @@
-import { access } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-
 import type { WorkflowConfig, WorkflowId } from '../config/schema.js';
 
 export interface WorkflowDefinition {
@@ -37,40 +33,16 @@ export const workflowDefinitions: readonly WorkflowDefinition[] = [
 
 export type WorkflowConfigMap = Record<WorkflowId, WorkflowConfig>;
 
-export function defaultSkillsRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CODEX_HOME ? join(env.CODEX_HOME, 'skills') : join(homedir(), '.codex', 'skills');
-}
+export async function resolveWorkflowConfigs(): Promise<WorkflowConfigMap> {
+  const entries = workflowDefinitions.map((definition) => {
+    const config: WorkflowConfig = {
+      skillName: definition.skillName,
+      source: 'package-bundled-prompt',
+      promptPath: definition.promptPath,
+    };
 
-export async function resolveWorkflowConfigs(skillsRoot: string): Promise<WorkflowConfigMap> {
-  const entries = await Promise.all(
-    workflowDefinitions.map(async (definition) => {
-      const skillPath = join(skillsRoot, definition.skillName, 'SKILL.md');
-      const exists = await pathExists(skillPath);
-      const config: WorkflowConfig = exists
-        ? {
-            skillName: definition.skillName,
-            source: 'existing-skill',
-            skillPath,
-            promptPath: definition.promptPath,
-          }
-        : {
-            skillName: definition.skillName,
-            source: 'package-owned-prompt-fallback',
-            promptPath: definition.promptPath,
-          };
-
-      return [definition.id, config] as const;
-    }),
-  );
+    return [definition.id, config] as const;
+  });
 
   return Object.fromEntries(entries) as WorkflowConfigMap;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }

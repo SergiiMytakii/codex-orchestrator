@@ -7,5 +7,9 @@ coverage/
 npm-debug.log*
 
 # Local codex-orchestrator runtime state.
-.codex-orchestrator/
+.codex-orchestrator/proofs/
 codex-orchestrator-*.tgz
+
+# codex-orchestrator runtime files
+.codex-orchestrator/workspaces/
+.codex-orchestrator/state/

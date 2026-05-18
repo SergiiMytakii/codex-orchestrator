@@ -480,7 +480,7 @@ function validateWorkflow(parent: ObjectRecord, path: string, errors: string[]):
     expectString(workflow, `${path}.skillPath`, errors);
   }
 
-  if (source === 'package-owned-prompt-fallback') {
+  if (source === 'package-bundled-prompt' || source === 'package-owned-prompt-fallback') {
     expectString(workflow, `${path}.promptPath`, errors);
   }
 }

@@ -299,10 +299,7 @@ export function mergeExistingProjectConfig(
       ...defaults.project,
       ...existingProject,
     },
-    workflows: {
-      ...defaults.workflows,
-      ...existingWorkflows,
-    },
+    workflows: migrateWorkflowConfigs(defaults.workflows, existingWorkflows),
     checks: existingChecks ?? defaults.checks,
     checksPolicy: {
       ...defaultChecksPolicy,
@@ -424,6 +421,26 @@ function label(name: string, color: string, description: string): LabelDefinitio
   return { name, color, description };
 }
 
+function migrateWorkflowConfigs(
+  defaults: WorkflowConfigMap,
+  existingWorkflows: Record<string, unknown> | undefined,
+): WorkflowConfigMap {
+  const entries = Object.entries(defaults).map(([id, workflow]) => {
+    const existing = readObject(existingWorkflows?.[id]);
+    const promptPath = readString(existing?.promptPath) ?? workflow.promptPath;
+    return [
+      id,
+      {
+        skillName: workflow.skillName,
+        source: 'package-bundled-prompt',
+        promptPath,
+      },
+    ] as const;
+  });
+
+  return Object.fromEntries(entries) as WorkflowConfigMap;
+}
+
 function migrateCodexArgs(existingArgs: string[] | undefined, defaultArgs: string[]): string[] {
   if (!existingArgs) {
     return defaultArgs;
@@ -455,6 +472,10 @@ function readObject(value: unknown): Record<string, unknown> | undefined {
 
 function readStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function readStringRecord(value: unknown): Record<string, string> | undefined {
