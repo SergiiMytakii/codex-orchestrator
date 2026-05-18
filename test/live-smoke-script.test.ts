@@ -40,6 +40,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /run-scoped/);
   assert.match(result.stdout, /run-plan-auto/);
+  assert.match(result.stdout, /remote-base-branch/);
   assert.match(result.stdout, /discovery-matrix/);
   assert.match(result.stdout, /quality-gates/);
   assert.match(result.stdout, /loop-policy/);

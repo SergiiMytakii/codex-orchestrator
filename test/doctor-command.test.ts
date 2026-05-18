@@ -76,6 +76,55 @@ test('doctor explains how to repair an unavailable codex command', async () => {
   );
 });
 
+test('doctor warns on legacy string base branch config', async () => {
+  const targetRoot = await tempRepo({
+    ...validConfig,
+    branches: {
+      ...validConfig.branches,
+      base: 'main',
+    },
+  });
+
+  const result = await runDoctorCommand({
+    targetRoot,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    commandResolver: async (command: string) => `/usr/local/bin/${command}`,
+    labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(validConfig.github.labels).map((label) => ({ name: label.name }))),
+    json: true,
+  });
+
+  assert.equal(result.json.warn.some((check) => check.id === 'base-branch-config-format'), true);
+});
+
+test('doctor verifies the configured remote base branch instead of a local branch name', async () => {
+  const targetRoot = await tempRepo({
+    ...validConfig,
+    branches: {
+      ...validConfig.branches,
+      base: { mode: 'explicit', remote: 'origin', branch: 'sirbro-dev' },
+    },
+  });
+  const commands: string[] = [];
+
+  const result = await runDoctorCommand({
+    targetRoot,
+    shellExecutor: async (command) => {
+      commands.push(command);
+      return {
+        stdout: '',
+        stderr: command.includes('refs/remotes/origin/sirbro-dev') ? 'missing remote base' : '',
+        exitCode: command.includes('refs/remotes/origin/sirbro-dev') ? 1 : 0,
+      };
+    },
+    commandResolver: async (command: string) => `/usr/local/bin/${command}`,
+    labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(validConfig.github.labels).map((label) => ({ name: label.name }))),
+    json: true,
+  });
+
+  assert.equal(commands.some((command) => command.includes('git fetch') && command.includes('refs/remotes/origin/sirbro-dev')), true);
+  assert.equal(result.json.fail.some((check) => check.id === 'base-branch'), true);
+});
+
 test('doctor command fails when a configured phase profile command is unavailable', async () => {
   const targetRoot = await tempRepo({
     ...validConfig,

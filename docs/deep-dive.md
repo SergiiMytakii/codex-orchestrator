@@ -250,7 +250,11 @@ the configured minimum number of screenshots, the runner reports a warning.
 
 For Android UI work, the implementation prompt uses device-backed proof through
 `adb` or an emulator. Missing Android tooling or no usable device is reported as
-a concrete warning instead of a release blocker by itself.
+a concrete warning instead of a release blocker by itself. Native Android proof
+uses the project Gradle wrapper with a writable Gradle cache. Flutter SDK cache
+recovery applies only to Flutter projects and only through a preconfigured
+writable SDK path in `CODEX_ORCHESTRATOR_FLUTTER_ROOT`. Native iOS proof uses
+Xcode simulator/device tooling with a writable DerivedData path.
 
 ## Loop Policy
 

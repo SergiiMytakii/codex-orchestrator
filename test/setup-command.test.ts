@@ -21,6 +21,19 @@ async function initGitHubRemote(targetRoot: string, remoteUrl: string): Promise<
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteUrl]);
 }
 
+async function initTrackedBranch(targetRoot: string, branchName: string): Promise<void> {
+  const remote = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-remote-')), 'remote.git');
+  await execFileAsync('git', ['init', '--bare', remote]);
+  await execFileAsync('git', ['-C', targetRoot, 'init', '-b', branchName]);
+  await execFileAsync('git', ['-C', targetRoot, 'config', 'user.name', 'Test User']);
+  await execFileAsync('git', ['-C', targetRoot, 'config', 'user.email', 'test@example.com']);
+  await writeFile(join(targetRoot, 'README.md'), '# fixture\n', 'utf8');
+  await execFileAsync('git', ['-C', targetRoot, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', targetRoot, 'commit', '-m', 'Initial']);
+  await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remote]);
+  await execFileAsync('git', ['-C', targetRoot, 'push', '-u', 'origin', branchName]);
+}
+
 test('setup creates project config and package-bundled prompts', async () => {
   const targetRoot = await tempRepo();
   const adapter = new InMemoryGitHubLabelAdapter([{ name: 'agent:auto' }]);
@@ -43,6 +56,21 @@ test('setup creates project config and package-bundled prompts', async () => {
     await readFile(join(targetRoot, '.codex-orchestrator', 'prompts', 'workflows', 'prd.md'), 'utf8'),
     /PRD/,
   );
+});
+
+test('setup chooses the current upstream branch as the explicit Codex PR base', async () => {
+  const targetRoot = await tempRepo();
+  await initTrackedBranch(targetRoot, 'sirbro-dev');
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'M-Ivonin',
+    githubRepo: 'tipsterBro',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.deepEqual(result.config.branches.base, { mode: 'explicit', remote: 'origin', branch: 'sirbro-dev' });
+  assert.match(result.output, /branches: base origin\/sirbro-dev/);
 });
 
 test('setup persists discovered absolute codex command path', async () => {
@@ -363,7 +391,7 @@ test('setup migrates existing config defaults without overwriting project policy
 
   assert.equal(result.config.runner.maxParallelChildren, 2);
   assert.deepEqual(result.config.checks, { architecture: 'npm run test:architecture' });
-  assert.equal(result.config.branches.base, 'dev');
+  assert.deepEqual(result.config.branches.base, { mode: 'explicit', remote: 'origin', branch: 'dev' });
   assert.equal(result.config.codex.args.includes('--ignore-user-config'), false);
   assert.equal(result.config.codex.args.includes('sandbox_workspace_write.network_access=true'), true);
   assert.equal(result.config.codex.timeoutMs, 1_800_000);

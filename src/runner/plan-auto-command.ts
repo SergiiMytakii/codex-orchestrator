@@ -3,11 +3,13 @@ import { dirname, join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { resolveBaseBranch } from '../git/base-branch.js';
 import { GitMergeConflictError, GitWorktreeManager, renderBranchTemplate, type SessionCommitInfo } from '../git/worktree.js';
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
+import { verifyPullRequestRefs } from '../github/pull-requests.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import {
   formatSessionTimestamp,
@@ -132,6 +134,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   const git = options.git ?? new GitWorktreeManager();
   const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
   const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(config);
+  const resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
   const parentIssue = await issueAdapter.getIssue(options.issueNumber);
 
   if (!parentIssue) {
@@ -168,7 +171,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       targetRoot,
       workspacePath: worktreePath,
       branchName,
-      baseBranch: config.branches.base,
+      baseBranch: resolvedBase.sha,
+      requiredBaseSha: resolvedBase.sha,
     });
     sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
@@ -206,7 +210,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       reportPath,
       logPath,
       branchName,
-      baseBranch: config.branches.base,
+      baseBranch: resolvedBase.prBaseBranch,
+      base: resolvedBase,
       createdAt: now,
     });
     parentSnapshotPath = snapshot.path;
@@ -448,8 +453,9 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         finalValidation,
       }),
       headBranch: branchName,
-      baseBranch: config.branches.base,
+      baseBranch: resolvedBase.prBaseBranch,
     });
+    pullRequest = await verifyPullRequestRefs(pullRequestAdapter, pullRequest, branchName, resolvedBase.prBaseBranch);
 
     const reportComment = buildIssueTreeReviewReport({
       parentIssueNumber: options.issueNumber,

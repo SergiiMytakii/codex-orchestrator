@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig, CodexPhase } from '../config/schema.js';
+import type { ResolvedBaseBranch } from '../git/base-branch.js';
 import { resolveCodexProfile } from '../codex/command-adapter.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { RunnerMode } from './issue-state-machine.js';
@@ -21,6 +22,7 @@ export interface WriteContextSnapshotInput {
   logPath: string;
   branchName: string;
   baseBranch: string;
+  base?: ResolvedBaseBranch | { branch: string; sha?: string };
   headSha?: string;
   parentIssueNumber?: number;
   blockedBy?: number[];
@@ -70,6 +72,9 @@ export async function writeContextSnapshot(input: WriteContextSnapshotInput): Pr
     repository: {
       targetRoot: input.targetRoot,
       baseBranch: input.baseBranch,
+      base: input.base
+        ? serializeBase(input.base)
+        : undefined,
       branchName: input.branchName,
       headSha: input.headSha,
     },
@@ -98,6 +103,21 @@ export async function writeContextSnapshot(input: WriteContextSnapshotInput): Pr
   await mkdir(dirname(snapshotPath), { recursive: true });
   await writeFile(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
   return { path: snapshotPath };
+}
+
+function serializeBase(base: ResolvedBaseBranch | { branch: string; sha?: string }): Record<string, string | undefined> {
+  if ('remoteRef' in base) {
+    return {
+      remote: base.remote,
+      branch: base.branch,
+      ref: base.remoteRef,
+      sha: base.sha,
+    };
+  }
+  return {
+    branch: base.branch,
+    sha: base.sha,
+  };
 }
 
 function contextSnapshotPath(input: WriteContextSnapshotInput): string {

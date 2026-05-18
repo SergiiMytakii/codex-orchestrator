@@ -12,6 +12,15 @@ When cutting a new release:
 
 ### Latest release
 
+- `0.1.30` (2026-05-18):
+  - Setup stores an explicit remote base branch for Codex PRs.
+  - Scoped and issue-tree root branches start from the resolved remote base SHA.
+  - PR creation verifies GitHub opened the draft against the expected base
+    branch.
+  - Doctor reports configured remote base readiness and warns about legacy or
+    mismatched Codex branches.
+  - Live smoke now covers remote base branch behavior end to end.
+
 - `0.1.29` (2026-05-18):
   - Setup records a prompt manifest so future package prompt changes can be
     compared against the installed baseline.

@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { codexPhaseKeys } from '../config/schema.js';
+import { baseBranchParts, formatBaseBranch, isLegacyBaseBranch } from '../git/base-branch.js';
 import { resolveExecutableCommand, type ExecutableCommandResolver } from '../setup/codex-command-resolver.js';
 import type { GitHubLabelAdapter } from '../setup/labels.js';
 import { GhCliLabelAdapter } from '../setup/github-label-adapter.js';
@@ -84,9 +85,18 @@ async function collectReadinessChecks(
     shellExecutor,
     'base-branch',
     'Base branch',
-    `git rev-parse --verify ${shellQuote(config.branches.base)}`,
+    baseBranchReadinessCommand(config),
     targetRoot,
   ));
+  if (isLegacyBaseBranch(config.branches.base)) {
+    checks.push(check(
+      'base-branch-config-format',
+      'Base branch config format',
+      'warn',
+      `legacy base branch config detected: ${config.branches.base}; run setup to migrate to an explicit remote base`,
+    ));
+  }
+  checks.push(await checkCodexBranchBases(targetRoot, config, shellExecutor));
   checks.push(await checkLabels(labelAdapter, Object.values(config.github.labels).map((label) => label.name)));
   checks.push(await checkPath(targetRoot, 'target', 'Target directory'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.stateDir), 'state-dir', 'Runner state directory', 'warn'));
@@ -115,6 +125,39 @@ async function collectReadinessChecks(
       : 'visual proof gate is disabled',
   ));
   return checks;
+}
+
+function baseBranchReadinessCommand(config: CodexOrchestratorConfig): string {
+  const base = baseBranchParts(config.branches.base);
+  return [
+    `git fetch ${shellQuote(base.remote)} --prune`,
+    `git rev-parse --verify ${shellQuote(base.remoteRef)}`,
+  ].join(' && ');
+}
+
+async function checkCodexBranchBases(
+  targetRoot: string,
+  config: CodexOrchestratorConfig,
+  shellExecutor: ShellCommandExecutor,
+): Promise<DoctorCheckResult> {
+  const base = baseBranchParts(config.branches.base);
+  const result = await shellExecutor(
+    `for branch in $(git for-each-ref --format='%(refname:short)' refs/heads/codex); do git merge-base --is-ancestor ${shellQuote(base.remoteRef)} "$branch" || echo "$branch"; done`,
+    { cwd: targetRoot },
+  );
+  if (result.exitCode !== 0) {
+    return check('codex-branch-bases', 'Codex branch bases', 'warn', result.stderr || result.stdout || 'could not inspect codex branches');
+  }
+  const mismatched = result.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  return check(
+    'codex-branch-bases',
+    'Codex branch bases',
+    mismatched.length === 0 ? 'pass' : 'warn',
+    mismatched.length === 0
+      ? `local codex branches contain configured base ${formatBaseBranch(config.branches.base)}`
+      : `${mismatched.length} local codex branch(es) do not contain configured base ${formatBaseBranch(config.branches.base)}`,
+    mismatched,
+  );
 }
 
 async function checkPromptUpdates(targetRoot: string): Promise<DoctorCheckResult> {

@@ -364,6 +364,35 @@ test('ensureIssueWorktree refuses unrelated dirty worktree at expected workspace
   );
 });
 
+test('ensureIssueWorktree refuses to resume a branch that does not contain the configured base sha', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const wrongBase = await git.getHead(repo);
+  await writeFile(join(repo, 'new-base.txt'), 'new base\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'new-base.txt']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'New configured base']);
+  const configuredBase = await git.getHead(repo);
+  const worktreePath = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: wrongBase,
+  });
+
+  await assert.rejects(
+    git.ensureIssueWorktree({
+      targetRoot: repo,
+      workspacePath: worktreePath,
+      branchName: 'codex/issue-1',
+      baseBranch: configuredBase,
+      requiredBaseSha: configuredBase,
+      allowResume: true,
+    }),
+    /was created from a different base/,
+  );
+});
+
 test('mergeBranch throws GitMergeConflictError and abortMerge cleans the merge state', async () => {
   const { root, repo } = await tempGitProject();
   const git = new GitWorktreeManager();

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { forbiddenRuntimeKeys } from '../config/constants.js';
-import type { CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy } from '../config/schema.js';
+import type { BaseBranchConfig, CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy } from '../config/schema.js';
 import { validateConfig } from '../config/schema.js';
 import type { WorkflowConfigMap } from './workflows.js';
 
@@ -11,6 +11,7 @@ export interface BuildProjectConfigInput {
   repo: string;
   prepareLabels: LabelPreparationPolicy;
   workflows: WorkflowConfigMap;
+  baseBranch?: BaseBranchConfig;
 }
 
 export const defaultLabels: CodexOrchestratorConfig['github']['labels'] = {
@@ -210,7 +211,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       additionalPathGlobs: [],
     },
     branches: {
-      base: 'main',
+      base: input.baseBranch ?? { mode: 'explicit', remote: 'origin', branch: 'main' },
       scopedIssue: 'codex/issue-${issueNumber}',
       issueTree: 'codex/tree-${parentIssueNumber}',
     },
@@ -364,6 +365,7 @@ export function mergeExistingProjectConfig(
     branches: {
       ...defaults.branches,
       ...existingBranches,
+      base: migrateBaseBranch(existingBranches?.base, defaults.branches.base),
     },
     pullRequests: {
       ...defaults.pullRequests,
@@ -462,6 +464,25 @@ function migrateCodexArgs(existingArgs: string[] | undefined, defaultArgs: strin
     migrated.push(arg);
   }
   return migrated;
+}
+
+function migrateBaseBranch(existingBase: unknown, defaultBase: BaseBranchConfig): BaseBranchConfig {
+  if (typeof existingBase === 'string' && existingBase.length > 0) {
+    return { mode: 'explicit', remote: 'origin', branch: existingBase };
+  }
+
+  const objectBase = readObject(existingBase);
+  if (
+    objectBase?.mode === 'explicit'
+    && typeof objectBase.remote === 'string'
+    && objectBase.remote.length > 0
+    && typeof objectBase.branch === 'string'
+    && objectBase.branch.length > 0
+  ) {
+    return { mode: 'explicit', remote: objectBase.remote, branch: objectBase.branch };
+  }
+
+  return defaultBase;
 }
 
 function readObject(value: unknown): Record<string, unknown> | undefined {

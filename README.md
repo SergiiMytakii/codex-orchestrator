@@ -290,7 +290,11 @@ their variable names through `envPassthrough`.
 For Android UI work, the implementation prompt asks Codex to use `adb` or an
 emulator-backed proof path instead of browser proof. Missing Android tooling or
 no usable device is reported as a warning with the concrete reason, not as an
-automatic release blocker.
+automatic release blocker. Native Android proof uses the project Gradle wrapper
+with a writable Gradle cache; Flutter-specific SDK cache recovery is used only
+for Flutter projects and only through a preconfigured writable SDK path in
+`CODEX_ORCHESTRATOR_FLUTTER_ROOT`. Native iOS proof uses Xcode simulator/device
+tooling with a writable DerivedData path.
 
 ## Safety Model
 

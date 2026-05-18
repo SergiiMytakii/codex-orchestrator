@@ -54,9 +54,44 @@ test('accepts the expanded valid config contract', () => {
       '${reportPath}',
       '-',
     ]);
-    assert.equal(result.value.branches.base, 'main');
+    assert.deepEqual(result.value.branches.base, { mode: 'explicit', remote: 'origin', branch: 'main' });
     assert.equal(result.value.branches.scopedIssue, 'codex/issue-${issueNumber}');
   }
+});
+
+test('accepts legacy string base branch config for migration compatibility', () => {
+  const result = validateConfig({
+    ...validConfig,
+    branches: {
+      ...validConfig.branches,
+      base: 'main',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.value.branches.base, 'main');
+  }
+});
+
+test('rejects invalid explicit base branch config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    branches: {
+      ...validConfig.branches,
+      base: {
+        mode: 'explicit',
+        remote: '',
+        branch: '',
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'branches.base.remote must be a non-empty string',
+    'branches.base.branch must be a non-empty string',
+  ]);
 });
 
 test('accepts phase-specific codex profiles with deterministic fallback fields', () => {

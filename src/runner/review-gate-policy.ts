@@ -10,6 +10,7 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
       `For visual/UI work, if you can produce screenshot proof, save it under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include it as screenshot artifacts.`,
       'For browser/web UI work, prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
       ...androidMobileProofPromptLines(),
+      ...iosMobileProofPromptLines(),
       'If screenshot proof is not possible in this environment, state that explicitly in skippedChecks along with the concrete reason (missing dependencies, missing credentials, dev server cannot start, etc.).',
     ];
   }
@@ -25,6 +26,7 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
     'For browser/web UI work, prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
     ...androidMobileProofPromptLines(),
+    ...iosMobileProofPromptLines(),
     'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
     'Do not report browser tool unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
     'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
@@ -41,8 +43,18 @@ function androidMobileProofPromptLines(): string[] {
     'If no physical Android device is listed by adb, run `emulator -list-avds`, start an available AVD in a separate shell with `emulator -avd <avd-name>`, then wait for it with `adb wait-for-device` before testing.',
     'If Test Android Apps skills are unavailable, try to enable or load that plugin through the available Codex plugin/tool discovery mechanism before falling back.',
     'After selecting the adb target, use Test Android Apps skills for app launch, navigation, screenshots, logs, and performance evidence.',
+    'For native Android projects, use the project Gradle wrapper (`./gradlew`) with a writable `GRADLE_USER_HOME`, build the relevant debug APK, then install and launch it through adb on the selected target.',
+    'For Flutter Android projects only, start Flutter rebuild/install with the detected Flutter SDK and writable `PUB_CACHE` and `GRADLE_USER_HOME` directories. If rebuild/install fails because the SDK cache is read-only, retry only when `CODEX_ORCHESTRATOR_FLUTTER_ROOT` points to a preconfigured writable Flutter SDK: set `FLUTTER_ROOT` to that path, prepend `$FLUTTER_ROOT/bin` to `PATH`, run `flutter precache --android`, then rebuild/install again. If no writable Flutter SDK is configured, report the concrete SDK cache permission error.',
     'Do not use Playwright as the primary proof path for Android mobile app verification.',
     'If Test Android Apps cannot be enabled, or no usable Android device or emulator is available, report the mobile proof as a warning/skipped check with the concrete plugin or adb/emulator reason; this is not a publication blocker by itself.',
+  ];
+}
+
+function iosMobileProofPromptLines(): string[] {
+  return [
+    'For native iOS app UI work, use simulator- or device-backed proof through Xcode tooling: run `xcrun simctl list devices available`, choose an available simulator when no device is provided, build with `xcodebuild` using a writable `-derivedDataPath`, then install and launch with `xcrun simctl install` and `xcrun simctl launch`.',
+    'Do not use Android or Flutter proof steps for native iOS projects unless the repository is explicitly a Flutter project targeting iOS.',
+    'If no usable iOS simulator/device or Xcode tooling is available, report the mobile proof as a warning/skipped check with the concrete xcodebuild/simctl reason; this is not a publication blocker by itself.',
   ];
 }
 

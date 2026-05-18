@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { validateConfig } from '../config/schema.js';
+import { formatBaseBranch } from '../git/base-branch.js';
 import { resolveCodexCommand, type CodexCommandResolver } from './codex-command-resolver.js';
 import { GhCliLabelAdapter } from './github-label-adapter.js';
 import type { GitHubLabelAdapter, LabelPlan } from './labels.js';
@@ -68,11 +69,13 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
   const workflows = await resolveWorkflowConfigs();
   const discoveredCodexCommand = await (options.codexCommandResolver ?? resolveCodexCommand)();
+  const inferredBaseBranch = existingConfigBase(existingConfig) ?? await inferCurrentUpstreamBaseBranch(options.targetRoot);
   const defaultConfig = buildProjectConfig({
     owner,
     repo,
     prepareLabels,
     workflows,
+    baseBranch: inferredBaseBranch,
   });
   const config = mergeExistingProjectConfig(defaultConfig, existingConfig);
   persistDiscoveredCodexCommand(config, discoveredCodexCommand);
@@ -239,11 +242,48 @@ function formatSetupOutput(
     `checks: ${Object.keys(config.checks).join(', ')}`,
     `gitignore runtime entries: ${runtimeGitignoreEntries(config).join(', ')}`,
     `codex command: ${config.codex.command} ${config.codex.args.join(' ')}`,
-    `branches: base ${config.branches.base}, ${config.branches.scopedIssue}, ${config.branches.issueTree}`,
+    `branches: base ${formatBaseBranch(config.branches.base)}, ${config.branches.scopedIssue}, ${config.branches.issueTree}`,
     `pull requests: ${config.pullRequests.scopedIssueTitle}, ${config.pullRequests.issueTreeTitle}`,
     'Codex will not be launched',
     'setup will not commit or open a pull request',
   ].join('\n');
+}
+
+function existingConfigBase(config: Record<string, unknown> | undefined): CodexOrchestratorConfig['branches']['base'] | undefined {
+  const branches = config?.branches;
+  if (typeof branches !== 'object' || branches === null || Array.isArray(branches)) {
+    return undefined;
+  }
+  const base = (branches as Record<string, unknown>).base;
+  if (typeof base === 'string' && base.length > 0) {
+    return base;
+  }
+  if (typeof base !== 'object' || base === null || Array.isArray(base)) {
+    return undefined;
+  }
+  const objectBase = base as Record<string, unknown>;
+  if (objectBase.mode === 'explicit' && typeof objectBase.remote === 'string' && typeof objectBase.branch === 'string') {
+    return { mode: 'explicit', remote: objectBase.remote, branch: objectBase.branch };
+  }
+  return undefined;
+}
+
+async function inferCurrentUpstreamBaseBranch(targetRoot: string): Promise<CodexOrchestratorConfig['branches']['base'] | undefined> {
+  try {
+    const result = await execFileAsync('git', ['-C', targetRoot, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    const upstream = result.stdout.trim();
+    const separator = upstream.indexOf('/');
+    if (separator <= 0 || separator === upstream.length - 1) {
+      return undefined;
+    }
+    return {
+      mode: 'explicit',
+      remote: upstream.slice(0, separator),
+      branch: upstream.slice(separator + 1),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function formatPromptSync(promptSync: PromptSyncResult | undefined): string {

@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { formatBaseBranch } from '../git/base-branch.js';
 import type { GitHubIssue } from '../github/issues.js';
 import { writeContextSnapshot } from './context-snapshot.js';
 import type { FreshContextReviewEvidence } from './handoff-evidence.js';
@@ -72,7 +73,7 @@ export async function runFreshContextReviewIfEnabled(input: {
     reportPath: reviewReportPath,
     logPath: reviewLogPath,
     branchName: input.branchName,
-    baseBranch: input.config.branches.base,
+    baseBranch: formatBaseBranch(input.config.branches.base),
   });
 
   let codexResult: CodexCommandRunResult;

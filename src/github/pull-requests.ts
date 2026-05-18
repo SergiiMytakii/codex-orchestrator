@@ -15,6 +15,7 @@ export interface CreateDraftPullRequestInput {
 
 export interface GitHubPullRequestAdapter {
   createDraftPullRequest(input: CreateDraftPullRequestInput): Promise<GitHubPullRequest>;
+  getPullRequest(number: number): Promise<GitHubPullRequest | undefined>;
   findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined>;
 }
 
@@ -39,7 +40,39 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
     };
   }
 
+  public async getPullRequest(number: number): Promise<GitHubPullRequest | undefined> {
+    const input = this.createdPullRequests[number - 1];
+    if (!input) {
+      return undefined;
+    }
+    return {
+      number,
+      url: `https://github.com/${this.owner}/${this.repo}/pull/${number}`,
+      isDraft: true,
+      headRefName: input.headBranch,
+      baseRefName: input.baseBranch,
+    };
+  }
+
   public async findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined> {
     return this.mergedPullRequests.find((pullRequest) => pullRequest.headRefName === headBranch);
   }
+}
+
+export async function verifyPullRequestRefs(
+  pullRequestAdapter: GitHubPullRequestAdapter,
+  pullRequest: GitHubPullRequest,
+  expectedHeadBranch: string,
+  expectedBaseBranch: string,
+): Promise<GitHubPullRequest> {
+  const refreshed = await pullRequestAdapter.getPullRequest(pullRequest.number);
+  if (!refreshed) {
+    throw new Error(`Created pull request #${pullRequest.number} could not be read back from GitHub`);
+  }
+  if (refreshed.headRefName !== expectedHeadBranch || refreshed.baseRefName !== expectedBaseBranch) {
+    throw new Error(
+      `Created pull request #${pullRequest.number} points to ${refreshed.headRefName} -> ${refreshed.baseRefName}; expected ${expectedHeadBranch} -> ${expectedBaseBranch}.`,
+    );
+  }
+  return refreshed;
 }

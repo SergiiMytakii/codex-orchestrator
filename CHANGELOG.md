@@ -6,9 +6,24 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-05-18
+
+### Added
+- Runner setup now records an explicit remote base branch so scoped and
+  issue-tree worktrees start from the same branch that PRs target.
+- Context snapshots and live smoke now prove the resolved remote base ref and
+  SHA used for autonomous runs.
+
 ### Changed
+- Doctor now checks the configured remote base branch instead of trusting the
+  currently checked-out local branch, and warns about legacy base config.
+- Existing Codex branches from a different base are blocked on resume instead
+  of being reset, deleted, or rebased automatically.
 - Prompt conflict reports now give agents explicit keep, merge, and replace
   actions so users get a concrete choice instead of a bare warning.
+- Mobile proof guidance now separates native Android, Flutter Android, and
+  native iOS validation paths so platform-specific cache/tooling recovery is not
+  applied to the wrong project type.
 
 ## [0.1.29] - 2026-05-18
 

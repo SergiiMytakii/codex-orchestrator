@@ -83,6 +83,14 @@ export interface LoopPolicyConfig {
   };
 }
 
+export interface ExplicitBaseBranchConfig {
+  mode: 'explicit';
+  remote: string;
+  branch: string;
+}
+
+export type BaseBranchConfig = string | ExplicitBaseBranchConfig;
+
 export interface CodexOrchestratorConfig {
   version: 1;
   github: {
@@ -180,7 +188,7 @@ export interface CodexOrchestratorConfig {
     additionalPathGlobs: string[];
   };
   branches: {
-    base: string;
+    base: BaseBranchConfig;
     scopedIssue: string;
     issueTree: string;
   };
@@ -297,7 +305,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   }
 
   if (branches) {
-    expectString(branches, 'branches.base', errors);
+    validateBaseBranch(branches, errors);
     expectString(branches, 'branches.scopedIssue', errors);
     expectString(branches, 'branches.issueTree', errors);
   }
@@ -458,6 +466,26 @@ function validateLabel(parent: ObjectRecord, path: string, errors: string[]): vo
   expectString(label, `${path}.name`, errors);
   expectString(label, `${path}.color`, errors);
   expectString(label, `${path}.description`, errors);
+}
+
+function validateBaseBranch(branches: ObjectRecord, errors: string[]): void {
+  const value = readPath(branches, 'branches.base');
+  if (typeof value === 'string') {
+    if (value.length === 0) {
+      errors.push('branches.base must be a non-empty string or explicit base branch object');
+    }
+    return;
+  }
+
+  const base = asObject(value);
+  if (!base) {
+    errors.push('branches.base must be a non-empty string or explicit base branch object');
+    return;
+  }
+
+  expectLiteral(base, 'branches.base.mode', 'explicit', errors);
+  expectString(base, 'branches.base.remote', errors);
+  expectString(base, 'branches.base.branch', errors);
 }
 
 function validateWorkflow(parent: ObjectRecord, path: string, errors: string[]): void {

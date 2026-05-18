@@ -7,6 +7,8 @@ import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
+import { verifyPullRequestRefs } from '../github/pull-requests.js';
+import { resolveBaseBranch } from '../git/base-branch.js';
 import { GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import {
@@ -75,6 +77,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   const git = options.git ?? new GitWorktreeManager();
   const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
   const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(config);
+  const resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
   const issue = await issueAdapter.getIssue(options.issueNumber);
 
   if (!issue) {
@@ -120,7 +123,8 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       targetRoot,
       workspacePath: worktreePath,
       branchName,
-      baseBranch: config.branches.base,
+      baseBranch: resolvedBase.sha,
+      requiredBaseSha: resolvedBase.sha,
       allowResume: true,
     });
     const maxReworkAttempts = config.loopPolicy.rework.maxAttempts;
@@ -166,7 +170,8 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         reportPath,
         logPath,
         branchName,
-        baseBranch: config.branches.base,
+        baseBranch: resolvedBase.prBaseBranch,
+        base: resolvedBase,
         createdAt: attemptNow,
       });
       snapshotPath = snapshot.path;
@@ -421,8 +426,9 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         durableRunSummary,
       }),
       headBranch: branchName,
-      baseBranch: config.branches.base,
+      baseBranch: resolvedBase.prBaseBranch,
     });
+    pullRequest = await verifyPullRequestRefs(pullRequestAdapter, pullRequest, branchName, resolvedBase.prBaseBranch);
     const reportComment = buildScopedReviewReport({
       config,
       branchName,

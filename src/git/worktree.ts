@@ -15,6 +15,7 @@ export interface CreateIssueWorktreeInput {
   workspacePath: string;
   branchName: string;
   baseBranch: string;
+  requiredBaseSha?: string;
 }
 
 export interface EnsureIssueWorktreeInput extends CreateIssueWorktreeInput {
@@ -113,6 +114,7 @@ export class GitWorktreeManager {
     const workspaceWorktree = worktrees.find((worktree) => samePath(worktree.path, input.workspacePath));
     if (workspaceWorktree) {
       if (workspaceWorktree.branch === expectedBranchRef) {
+        await this.assertBranchContainsRequiredBase(input);
         return;
       }
       throw new Error(
@@ -128,6 +130,7 @@ export class GitWorktreeManager {
     }
 
     if (await this.branchExists(input.targetRoot, input.branchName)) {
+      await this.assertBranchContainsRequiredBase(input);
       await this.git(['-C', input.targetRoot, 'worktree', 'add', input.workspacePath, input.branchName]);
       return;
     }
@@ -305,6 +308,25 @@ export class GitWorktreeManager {
     }
 
     await this.git(['-C', input.targetRoot, 'branch', '-d', input.branchName]);
+  }
+
+  private async assertBranchContainsRequiredBase(input: EnsureIssueWorktreeInput): Promise<void> {
+    if (!input.requiredBaseSha) {
+      return;
+    }
+    const ancestor = await this.executor('git', [
+      '-C',
+      input.targetRoot,
+      'merge-base',
+      '--is-ancestor',
+      input.requiredBaseSha,
+      input.branchName,
+    ]);
+    if (ancestor.exitCode !== 0) {
+      throw new Error(
+        `Existing branch ${input.branchName} was created from a different base; expected it to contain ${input.requiredBaseSha}. Create a clean branch or recover it manually.`,
+      );
+    }
   }
 }
 

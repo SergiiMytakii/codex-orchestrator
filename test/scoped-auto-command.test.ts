@@ -182,6 +182,74 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.match(pushed.stdout, /Codex: implement issue #155/);
 });
 
+test('scoped auto command starts from the resolved remote base instead of stale local main', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    branches: {
+      ...config.branches,
+      base: { mode: 'explicit', remote: 'origin', branch: 'sirbro-dev' },
+    },
+  }));
+  await writeFile(join(repo, 'local-main-only.txt'), 'wrong base\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'local-main-only.txt']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Local main only']);
+  await execFileAsync('git', ['-C', repo, 'switch', '-c', 'sirbro-dev', 'origin/main']);
+  await writeFile(join(repo, 'sirbro-dev.txt'), 'remote base\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'sirbro-dev.txt']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Remote sirbro dev base']);
+  await execFileAsync('git', ['-C', repo, 'push', '-u', 'origin', 'sirbro-dev']);
+  await execFileAsync('git', ['-C', repo, 'switch', 'main']);
+  const remoteBaseSha = (await execFileAsync('git', ['-C', repo, 'rev-parse', 'origin/sirbro-dev'])).stdout.trim();
+
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled change' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(pullRequestAdapter.createdPullRequests[0]?.baseBranch, 'sirbro-dev');
+  assert.equal(await readFile(join(result.worktreePath, 'sirbro-dev.txt'), 'utf8'), 'remote base\n');
+  await assert.rejects(readFile(join(result.worktreePath, 'local-main-only.txt'), 'utf8'), /ENOENT/);
+  const isAncestor = await execFileAsync('git', ['-C', repo, 'merge-base', '--is-ancestor', remoteBaseSha, 'codex/issue-155']);
+  assert.equal(isAncestor.stdout, '');
+  const snapshot = JSON.parse(
+    await readFile(join(repo, validConfig.runner.stateDir, 'snapshots', 'issue-155-issue-155-20260508120000.json'), 'utf8'),
+  ) as { repository?: { base?: { branch?: string; remote?: string; sha?: string } } };
+  assert.deepEqual(snapshot.repository?.base, {
+    remote: 'origin',
+    branch: 'sirbro-dev',
+    ref: 'refs/remotes/origin/sirbro-dev',
+    sha: remoteBaseSha,
+  });
+});
+
 test('diagnostics wave regression covers profile, snapshot, events, status JSON, and doctor', async () => {
   const repo = await tempGitProject((config) => ({
     ...config,

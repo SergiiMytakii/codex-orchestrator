@@ -194,9 +194,55 @@ test('prompt builder directs Android mobile proof to Test Android Apps with non-
   assert.match(prompt, /If Test Android Apps skills are unavailable/);
   assert.match(prompt, /try to enable or load that plugin/);
   assert.match(prompt, /After selecting the adb target, use Test Android Apps skills/);
+  assert.match(prompt, /For native Android projects/);
+  assert.match(prompt, /use the project Gradle wrapper/);
+  assert.match(prompt, /`\.\/gradlew`/);
+  assert.match(prompt, /For Flutter Android projects only/);
+  assert.match(prompt, /start Flutter rebuild\/install with the detected Flutter SDK/);
+  assert.match(prompt, /If rebuild\/install fails because the SDK cache is read-only/);
+  assert.match(prompt, /`CODEX_ORCHESTRATOR_FLUTTER_ROOT`/);
+  assert.match(prompt, /`FLUTTER_ROOT`/);
+  assert.match(prompt, /`PUB_CACHE`/);
+  assert.match(prompt, /`GRADLE_USER_HOME`/);
+  assert.match(prompt, /`flutter precache --android`/);
+  assert.doesNotMatch(prompt, /copy/i);
   assert.match(prompt, /Do not use Playwright as the primary proof path for Android mobile app verification/);
   assert.match(prompt, /If Test Android Apps cannot be enabled, or no usable Android device or emulator is available/);
   assert.match(prompt, /concrete plugin or adb\/emulator reason/);
+});
+
+test('prompt builder gives native iOS proof a separate Xcode path', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 156,
+      labels: ['agent:auto'],
+      title: 'Validate iOS checkout screen',
+      body: 'Fix the native iOS checkout UI and verify it on a simulator.',
+    }),
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        visualProof: {
+          ...validConfig.reviewGates.visualProof,
+          runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
+        },
+      },
+    },
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-156',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /For native iOS app UI work/);
+  assert.match(prompt, /`xcrun simctl list devices available`/);
+  assert.match(prompt, /`xcodebuild`/);
+  assert.match(prompt, /`-derivedDataPath`/);
+  assert.match(prompt, /`xcrun simctl install`/);
+  assert.match(prompt, /`xcrun simctl launch`/);
+  assert.match(prompt, /Do not use Android or Flutter proof steps for native iOS projects/);
 });
 
 test('package scoped workflow prompt requires strict TDD and review gates', async () => {

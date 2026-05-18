@@ -15,6 +15,7 @@ const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
   ['real-codex', runRealCodexScenario],
+  ['remote-base-branch', runRemoteBaseBranchScenario],
   ['scoped-runner-commit', runScopedRunnerCommitScenario],
   ['scoped-local-commit', runScopedLocalCommitScenario],
   ['run-scoped', runDirectScopedScenario],
@@ -260,6 +261,9 @@ async function configureTarget(context, overrides = {}) {
   if (overrides.additionalPathGlobs) {
     config.deny.additionalPathGlobs = overrides.additionalPathGlobs;
   }
+  if (overrides.baseBranch) {
+    config.branches.base = overrides.baseBranch;
+  }
   if (overrides.runnerValidationCommand) {
     config.reviewGates.visualProof.runnerValidationCommand = overrides.runnerValidationCommand;
   }
@@ -410,6 +414,28 @@ async function runRealCodexScenario(context) {
   const pullRequest = await findPullRequestByBranch(context, `codex/issue-${issue.number}`);
   const body = await getPullRequestBody(context, pullRequest.number);
   assertIncludes(body, `docs/${artifactName}`, 'real Codex PR should include the requested docs artifact');
+}
+
+async function runRemoteBaseBranchScenario(context) {
+  const remoteBase = await createRemoteBaseBranch(context);
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    baseBranch: { mode: 'explicit', remote: 'origin', branch: remoteBase.branchName },
+  });
+
+  const issue = await createIssue(
+    context,
+    'remote-base-branch',
+    ['agent:auto'],
+    `Remote base branch smoke. Codex PRs must target ${remoteBase.branchName}.`,
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, {
+    expectLocalCommit: false,
+    expectedBaseBranch: remoteBase.branchName,
+    expectedBaseSha: remoteBase.sha,
+    expectedBaseMarkerPath: remoteBase.markerPath,
+  });
 }
 
 async function runScopedRunnerCommitScenario(context) {
@@ -730,7 +756,14 @@ async function createIssue(context, scenario, labels, extraBody = '', options = 
 async function assertScopedSuccess(
   context,
   issueNumber,
-  { expectLocalCommit, expectScreenshotProof = false, expectLoopPolicyEvidence = false },
+  {
+    expectLocalCommit,
+    expectScreenshotProof = false,
+    expectLoopPolicyEvidence = false,
+    expectedBaseBranch,
+    expectedBaseSha,
+    expectedBaseMarkerPath,
+  },
 ) {
   const issue = await getIssue(context, issueNumber);
   assertHasLabel(issue, 'agent:review');
@@ -748,6 +781,12 @@ async function assertScopedSuccess(
   const pullRequest = await findPullRequestByBranch(context, branchName);
   assert(pullRequest, `expected draft PR for ${branchName}`);
   assert(pullRequest.isDraft === true, `expected ${branchName} PR to be a draft`);
+  if (expectedBaseBranch) {
+    assert(
+      pullRequest.baseRefName === expectedBaseBranch,
+      `expected ${branchName} PR base branch ${expectedBaseBranch}, got ${pullRequest.baseRefName}`,
+    );
+  }
   context.createdPullRequests.push(pullRequest.number);
   const body = await getPullRequestBody(context, pullRequest.number);
   assertIncludes(body, `Closes #${issueNumber}`, 'PR body should link issue');
@@ -780,6 +819,29 @@ async function assertScopedSuccess(
     );
     await assertPathExists(screenshotPath, 'runner visual proof screenshot was not written');
     await appendReport(context, `Screenshot proof: ${screenshotPath}\n\n`);
+  }
+  if (expectedBaseSha) {
+    await fetchRemoteBranch(context, branchName);
+    await runCommand('git', ['-C', context.targetRoot, 'merge-base', '--is-ancestor', expectedBaseSha, `origin/${branchName}`], {
+      timeoutMs: context.options.timeoutMs,
+    });
+  }
+  if (expectedBaseMarkerPath) {
+    const marker = await gitOutput(context.targetRoot, ['show', `origin/${branchName}:${expectedBaseMarkerPath}`]);
+    assertIncludes(marker, context.runId, 'remote issue branch should include marker from configured remote base');
+  }
+  if (expectedBaseBranch || expectedBaseSha) {
+    const snapshot = await readSnapshotForIssue(context, issueNumber);
+    const repository = snapshot.repository ?? {};
+    if (expectedBaseBranch) {
+      assert(repository.baseBranch === expectedBaseBranch, 'snapshot should record PR base branch');
+      assert(repository.base?.remote === 'origin', 'snapshot should record base remote');
+      assert(repository.base?.branch === expectedBaseBranch, 'snapshot should record resolved base branch');
+      assert(repository.base?.ref === `refs/remotes/origin/${expectedBaseBranch}`, 'snapshot should record resolved remote ref');
+    }
+    if (expectedBaseSha) {
+      assert(repository.base?.sha === expectedBaseSha, 'snapshot should record resolved base SHA');
+    }
   }
   await assertLogFileExists(context, issueNumber);
   await assertRunStateCleared(context, issueNumber);
@@ -929,6 +991,15 @@ async function assertRunStateCleared(context, issueNumber) {
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   const active = Array.isArray(state.runs) ? state.runs.some((run) => run.issueNumber === issueNumber) : false;
   assert(!active, `expected issue #${issueNumber} to be removed from active runner state`);
+}
+
+async function readSnapshotForIssue(context, issueNumber) {
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const snapshotRoot = join(context.targetRoot, config.runner.stateDir, 'snapshots');
+  const snapshots = existsSync(snapshotRoot) ? await walkFiles(snapshotRoot) : [];
+  const match = snapshots.find((file) => basename(file).startsWith(`issue-${issueNumber}-`) && file.endsWith('.json'));
+  assert(match, `expected context snapshot for issue #${issueNumber} under ${snapshotRoot}`);
+  return JSON.parse(await readFile(match, 'utf8'));
 }
 
 async function getIssue(context, issueNumber) {
@@ -1094,6 +1165,57 @@ async function defaultBranchFor(repo) {
   return name;
 }
 
+async function createRemoteBaseBranch(context) {
+  const branchName = `live-smoke-base-${context.runId}`;
+  const markerPath = `live-smoke-base/${context.runId}.txt`;
+  const worktreePath = join(context.root, `base-${context.runId}`);
+  const defaultBranch = await defaultBranchFor(context.repo);
+
+  await gitOutput(context.targetRoot, ['fetch', 'origin', '--prune']);
+  await runCommand('git', [
+    '-C',
+    context.targetRoot,
+    'worktree',
+    'add',
+    '--no-track',
+    '-b',
+    branchName,
+    worktreePath,
+    `origin/${defaultBranch}`,
+  ], { timeoutMs: context.options.timeoutMs });
+  await mkdir(dirname(join(worktreePath, markerPath)), { recursive: true });
+  await writeFile(join(worktreePath, markerPath), `live smoke remote base ${context.runId}\n`, 'utf8');
+  await runCommand('git', ['-C', worktreePath, 'add', markerPath], { timeoutMs: context.options.timeoutMs });
+  await runCommand('git', [
+    '-C',
+    worktreePath,
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'user.name=live-smoke',
+    '-c',
+    'user.email=live-smoke@example.invalid',
+    'commit',
+    '--no-verify',
+    '-m',
+    `Live smoke remote base ${context.runId}`,
+  ], { timeoutMs: context.options.timeoutMs });
+  const sha = (await gitOutput(worktreePath, ['rev-parse', 'HEAD'])).trim();
+  await runCommand('git', ['-C', worktreePath, 'push', '-u', 'origin', branchName], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  context.createdBranches.push(branchName);
+  await runCommand('git', ['-C', context.targetRoot, 'worktree', 'remove', worktreePath], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  await runCommand('git', ['-C', context.targetRoot, 'branch', '-D', branchName], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  await fetchRemoteBranch(context, branchName);
+  await appendReport(context, `Remote base branch: origin/${branchName}@${sha}\n\n`);
+  return { branchName, markerPath, sha };
+}
+
 function ownerOf(repo) {
   return repo.split('/')[0];
 }
@@ -1112,6 +1234,17 @@ async function runPackagedCli(context, args) {
 async function gitOutput(cwd, args) {
   const result = await runCommand('git', ['-C', cwd, ...args], { timeoutMs: defaultTimeoutMs });
   return result.stdout;
+}
+
+async function fetchRemoteBranch(context, branchName) {
+  await runCommand('git', [
+    '-C',
+    context.targetRoot,
+    'fetch',
+    'origin',
+    `+refs/heads/${branchName}:refs/remotes/origin/${branchName}`,
+    '--prune',
+  ], { timeoutMs: context.options.timeoutMs });
 }
 
 async function runCommand(command, args, options = {}) {
@@ -1261,7 +1394,8 @@ if (prompt.includes('# Fresh-Context Review')) {
   process.exit(0);
 }
 
-switch (scenario) {
+  switch (scenario) {
+  case 'remote-base-branch':
   case 'scoped-runner-commit':
   case 'diagnostics':
     writeCodeChange(issueNumber, runId, 'runner');
