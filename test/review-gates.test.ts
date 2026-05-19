@@ -64,6 +64,23 @@ test('quality gate accepts TDD red-to-green proof split across passed validation
   assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
 });
 
+test('quality gate accepts red evidence wording and plural tests passed in separate entries', () => {
+  const result = evaluateTddGate([
+    {
+      command: 'TDD red evidence observed',
+      status: 'passed',
+      summary: 'Baseline run failed as expected before implementation.',
+    },
+    {
+      command: 'flutter test test/foo_test.dart',
+      status: 'passed',
+      summary: '37 focused tests passed.',
+    },
+  ]);
+
+  assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
+});
+
 test('quality gate rejects TDD proof with only red evidence', () => {
   const result = evaluateTddGate([
     {

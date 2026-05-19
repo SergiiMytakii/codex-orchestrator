@@ -74,6 +74,7 @@ async function main() {
     context.visualProofPath = await writeVisualProofScript(root);
     context.targetRoot = await prepareTargetRepository(context);
     await runPackagedCli(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoNameOf(context.repo), '--prepare-labels']);
+    await ensureLiveSmokeLabels(context);
     context.realCodexConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')).codex;
     await configureTarget(context, { allowAgentLocalCommits: true });
 
@@ -236,6 +237,36 @@ async function prepareTargetRepository(context) {
   });
   await appendReport(context, `Target repository: ${target}\n\n`);
   return target;
+}
+
+async function ensureLiveSmokeLabels(context) {
+  await ensureGitHubLabel(context, {
+    name: 'priority:loop',
+    color: '5319E7',
+    description: 'Live smoke priority label for loop policy scenarios',
+  });
+}
+
+async function ensureGitHubLabel(context, label) {
+  const existing = await runCommand('gh', ['label', 'list', '--repo', context.repo, '--limit', '200', '--json', 'name'], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  const labels = JSON.parse(existing.stdout);
+  if (labels.some((entry) => entry.name === label.name)) {
+    return;
+  }
+  await runCommand('gh', [
+    'label',
+    'create',
+    label.name,
+    '--repo',
+    context.repo,
+    '--color',
+    label.color,
+    '--description',
+    label.description,
+  ], { timeoutMs: context.options.timeoutMs });
+  await appendReport(context, `Created live smoke label: ${label.name}\n\n`);
 }
 
 async function configureTarget(context, overrides = {}) {

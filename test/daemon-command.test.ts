@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
@@ -64,6 +65,7 @@ test('daemon once reports no eligible issues without executing work', async () =
       `repo: ${validConfig.github.owner}/${validConfig.github.repo}`,
       `target: ${resolve(targetRoot)}`,
       'intervalMs: 300000',
+      'concurrency: 3',
       '[2026-05-08T10:00:00.000Z] no eligible issues',
     ].join('\n'),
   );
@@ -118,6 +120,84 @@ test('daemon selection keeps issue-number ascending as the priority tie-breaker'
   assert.deepEqual(executed, [2]);
   assert.deepEqual(result.executed, [2]);
   assert.match(result.output, /running #2 scoped-issue/);
+});
+
+test('daemon rejects invalid direct concurrency options', async () => {
+  const targetRoot = await tempRepo();
+
+  await assert.rejects(
+    runDaemonCommand({
+      targetRoot,
+      issueAdapter: new InMemoryGitHubIssueAdapter([]),
+      concurrency: 0,
+      once: true,
+    }),
+    /daemon concurrency must be an integer between 1 and 3/,
+  );
+});
+
+test('daemon can execute disjoint scoped issues concurrently', async () => {
+  const targetRoot = await tempRepo();
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 1, labels: [labels.auto.name], body: scopedIssueBody(['src/a.ts']) }),
+    issueFixture({ number: 2, labels: [labels.auto.name], body: scopedIssueBody(['src/b.ts']) }),
+    issueFixture({ number: 3, labels: [labels.auto.name], body: scopedIssueBody(['src/c.ts']) }),
+  ]);
+  const started: number[] = [];
+  let active = 0;
+  let maxActive = 0;
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: adapter,
+    concurrency: 3,
+    once: true,
+    executeIssue: async (issueNumber) => {
+      started.push(issueNumber);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      const deadline = Date.now() + 100;
+      while (started.length < 3 && Date.now() < deadline) {
+        await sleep(1);
+      }
+      active -= 1;
+      return { reportComment: 'ok' };
+    },
+    now: () => new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.deepEqual(started, [1, 2, 3]);
+  assert.equal(maxActive, 3);
+  assert.deepEqual(result.executed, [1, 2, 3]);
+  assert.match(result.output, /running #1 scoped-issue/);
+  assert.match(result.output, /running #2 scoped-issue/);
+  assert.match(result.output, /running #3 scoped-issue/);
+});
+
+test('daemon excludes scoped issues with overlapping ownership from the same concurrent batch', async () => {
+  const targetRoot = await tempRepo();
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 1, labels: [labels.auto.name], body: scopedIssueBody(['src/shared.ts']) }),
+    issueFixture({ number: 2, labels: [labels.auto.name], body: scopedIssueBody(['src/shared.ts']) }),
+    issueFixture({ number: 3, labels: [labels.auto.name], body: scopedIssueBody(['src/other.ts']) }),
+  ]);
+  const started: number[] = [];
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: adapter,
+    concurrency: 3,
+    once: true,
+    executeIssue: async (issueNumber) => {
+      started.push(issueNumber);
+      return { reportComment: 'ok' };
+    },
+    now: () => new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.deepEqual(started, [1, 3]);
+  assert.deepEqual(result.executed, [1, 3]);
+  assert.doesNotMatch(result.output, /running #2 scoped-issue/);
 });
 
 test('daemon keeps polling until maxRuns is reached', async () => {
@@ -246,3 +326,13 @@ test('daemon preserves active and dirty merged worktrees', async () => {
   assert.doesNotMatch(result.output, /cleaned worktree .*issue-155/);
   assert.match(result.output, /skipped dirty worktree .*issue-156/);
 });
+
+function scopedIssueBody(ownershipScope: string[]): string {
+  return [
+    'Implement scoped work.',
+    '',
+    '## codex-orchestrator metadata',
+    'Ownership:',
+    ...ownershipScope.map((scope) => `- ${scope}`),
+  ].join('\n');
+}

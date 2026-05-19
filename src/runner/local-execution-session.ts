@@ -71,6 +71,7 @@ export type ImplementationPublishabilityResult =
       status: 'blocked';
       reasons: string[];
       changedFiles: string[];
+      validation?: RunnerValidationLine[];
       skippedChecks: string[];
       residualRisks: string[];
       commits: SessionCommitInfo[];
@@ -151,6 +152,7 @@ export async function runImplementationPublishabilityCheck(
       status: 'blocked',
       reasons: localSessionBlockReasons(localSession.phaseResults),
       changedFiles: changeSet.changedPaths,
+      validation: [...report.validation, ...localSession.phaseResults.flatMap((phase) => phase.validation)],
       skippedChecks: report.skippedChecks,
       residualRisks: [...report.residualRisks, ...localSession.phaseResults.flatMap((phase) => phase.residualRisks)],
       commits: changeSet.commits,
@@ -174,6 +176,7 @@ export async function runImplementationPublishabilityCheck(
       status: 'blocked',
       reasons: ['Codex completed without file changes'],
       changedFiles: [],
+      validation: report.validation,
       skippedChecks: report.skippedChecks,
       residualRisks: report.residualRisks,
       commits: changeSet.commits,
@@ -189,6 +192,7 @@ export async function runImplementationPublishabilityCheck(
       status: 'blocked',
       reasons: violations.map((violation) => violation.message),
       changedFiles,
+      validation: report.validation,
       skippedChecks: report.skippedChecks,
       residualRisks: report.residualRisks,
       commits: changeSet.commits,
@@ -246,6 +250,7 @@ export async function runImplementationPublishabilityCheck(
         ...failedValidation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
       ],
       changedFiles,
+      validation,
       skippedChecks: report.skippedChecks,
       residualRisks,
       commits: changeSet.commits,
@@ -266,6 +271,7 @@ export async function runImplementationPublishabilityCheck(
       status: 'blocked',
       reasons: reviewGate.reasons,
       changedFiles,
+      validation,
       skippedChecks: report.skippedChecks,
       residualRisks,
       commits: changeSet.commits,

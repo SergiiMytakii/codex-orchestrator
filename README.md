@@ -59,6 +59,12 @@ Use `agent:auto` for one clear standalone implementation issue. Do not use it
 for child issues created by `agent:plan-auto`; those are marked with
 `agent:child` and are executed only by the parent issue-tree flow.
 
+When a daemon is allowed to run more than one scoped issue at a time, parallel
+`agent:auto` selection is conservative. An issue must include a
+`## codex-orchestrator metadata` section with an `Ownership:` bullet list, and
+same-batch issues must not overlap by exact path or supported glob. Issues
+without ownership metadata still run, but only one at a time.
+
 The runner:
 
 1. Checks that the issue is allowed to run.
@@ -163,6 +169,12 @@ Run the daemon:
 
 ```sh
 codex-orchestrator daemon --target .
+```
+
+Run up to three independent scoped issues in one daemon batch:
+
+```sh
+codex-orchestrator daemon --target . --concurrency 3
 ```
 
 ## Agent-Assisted Setup
@@ -341,7 +353,8 @@ codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
 codex-orchestrator status --target <path> [--dry-run] [--json]
 codex-orchestrator run --target <path> --issue <number>
 codex-orchestrator daemon --target <path> [--once] \
-  [--interval-seconds <seconds>] [--max-runs <count>]
+  [--interval-seconds <seconds>] [--max-runs <count>] \
+  [--concurrency <count>]
 ```
 
 `setup` creates project-local config and prompt files under
@@ -373,9 +386,13 @@ and local recovery state.
 opens one scoped draft PR. `agent:plan-auto` runs parent planning, child waves,
 final validation, and one integration draft PR.
 
-`daemon` polls for eligible work and runs one issue at a time. It also cleans up
-runner-owned worktrees after their PRs are merged, while preserving dirty,
-blocked, active, or unpublished worktrees for inspection.
+`daemon` polls for eligible work. By default, fresh setup config allows up to
+three scoped issues per batch through `runner.maxParallelScopedIssues`; legacy
+configs without that field remain sequential unless `--concurrency` is passed.
+Only scoped issues with non-overlapping ownership metadata can share a batch.
+`agent:plan-auto` runs remain exclusive. The daemon also cleans up runner-owned
+worktrees after their PRs are merged, while preserving dirty, blocked, active,
+or unpublished worktrees for inspection.
 
 ## Current Scope
 

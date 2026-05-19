@@ -10,6 +10,7 @@ test('accepts the expanded valid config contract', () => {
   if (result.ok) {
     assert.equal(result.value.github.labels.auto.name, 'agent:auto');
     assert.equal(result.value.runner.maxParallelChildren, 3);
+    assert.equal(result.value.runner.maxParallelScopedIssues, 3);
     assert.equal(result.value.runner.allowAgentLocalCommits, false);
     assert.equal(result.value.workflows.prd.source, 'package-bundled-prompt');
     assert.equal(result.value.codex.command, 'codex');
@@ -72,6 +73,23 @@ test('accepts legacy string base branch config for migration compatibility', () 
   if (result.ok) {
     assert.equal(result.value.branches.base, 'main');
   }
+});
+
+test('accepts config without scoped issue daemon concurrency for migration compatibility', () => {
+  const legacyConfig = {
+    ...validConfig,
+    runner: {
+      workspaceRoot: validConfig.runner.workspaceRoot,
+      maxParallelChildren: validConfig.runner.maxParallelChildren,
+      stateDir: validConfig.runner.stateDir,
+      allowAgentLocalCommits: validConfig.runner.allowAgentLocalCommits,
+      worktreeCleanup: validConfig.runner.worktreeCleanup,
+    },
+  };
+
+  const result = validateConfig(legacyConfig);
+
+  assert.equal(result.ok, true);
 });
 
 test('rejects invalid explicit base branch config', () => {
@@ -174,6 +192,21 @@ test('rejects invalid codex command contract', () => {
     'codex.idleTimeoutMs must be a positive integer when provided',
     'codex.promptFileEnv must be CODEX_ORCHESTRATOR_PROMPT_FILE',
     'codex.reportFileEnv must be CODEX_ORCHESTRATOR_REPORT_FILE',
+  ]);
+});
+
+test('rejects invalid scoped issue daemon concurrency', () => {
+  const result = validateConfig({
+    ...validConfig,
+    runner: {
+      ...validConfig.runner,
+      maxParallelScopedIssues: 4,
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'runner.maxParallelScopedIssues must be an integer between 1 and 3 when provided',
   ]);
 });
 

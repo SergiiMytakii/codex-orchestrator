@@ -209,6 +209,10 @@ test('daemon command validates required arguments', async () => {
   const invalidMaxRuns = await runCli(['daemon', '--target', '/tmp/repo', '--max-runs', '0']);
   assert.equal(invalidMaxRuns.status, 2);
   assert.match(invalidMaxRuns.stderr, /daemon requires --max-runs <positive integer>/);
+
+  const invalidConcurrency = await runCli(['daemon', '--target', '/tmp/repo', '--concurrency', '4']);
+  assert.equal(invalidConcurrency.status, 2);
+  assert.match(invalidConcurrency.stderr, /daemon requires --concurrency <integer between 1 and 3>/);
 });
 
 test('runs status dry-run without launching Codex', async () => {

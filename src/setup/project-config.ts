@@ -36,6 +36,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
     runner: {
       workspaceRoot: '.codex-orchestrator/workspaces',
       maxParallelChildren: 3,
+      maxParallelScopedIssues: 3,
       stateDir: '.codex-orchestrator/state',
       allowAgentLocalCommits: false,
       worktreeCleanup: {

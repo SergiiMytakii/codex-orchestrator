@@ -152,12 +152,17 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
 }
 
 function hasTddRedEvidence(text: string): boolean {
-  return /\bred\s*:/iu.test(text) || /\b(?:test|spec|check)\b[\s\S]{0,120}\bfail(?:ed|ing)?\b/iu.test(text);
+  return /\bred\s*:/iu.test(text)
+    || /\bred\b[\s\S]{0,160}\bfail(?:ed|ing)?\b/iu.test(text)
+    || /\bfail(?:ed|ing)?\b[\s\S]{0,160}\bred\b/iu.test(text)
+    || /\b(?:test|tests|spec|specs|check|checks)\b[\s\S]{0,120}\bfail(?:ed|ing)?\b/iu.test(text);
 }
 
 function hasTddGreenEvidence(text: string): boolean {
   return /\bgreen\s*:/iu.test(text)
-    || /\b(?:test|spec|jest|vitest|playwright|pytest)\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text)
+    || /\bgreen\b[\s\S]{0,160}\bpass(?:ed|ing)?\b/iu.test(text)
+    || /\bpass(?:ed|ing)?\b[\s\S]{0,160}\bgreen\b/iu.test(text)
+    || /\b(?:test|tests|spec|specs|check|checks|jest|vitest|playwright|pytest)\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text)
     || /\b(?:flutter|dart|npm|pnpm|yarn)\s+(?:run\s+)?test\b[\s\S]{0,120}\bpass(?:ed|ing)?\b/iu.test(text);
 }
 

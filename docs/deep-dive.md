@@ -81,11 +81,19 @@ Executes one selected issue when its labels and state allow autonomous work.
 
 ### `daemon`
 
-Polls GitHub Issues for eligible autonomous work and runs one issue at a time.
+Polls GitHub Issues for eligible autonomous work. Scoped `agent:auto` issues can
+run concurrently up to the daemon concurrency limit when their runner metadata
+declares non-overlapping ownership. `agent:plan-auto` parent runs are exclusive.
 
 The daemon applies the configured issue selection policy after safety filters.
 By default, priority labels sort eligible issues and issue number is the
 deterministic tie-breaker.
+
+Parallel scoped issue selection uses the issue body section
+`## codex-orchestrator metadata` and its `Ownership:` bullet list. Issues without
+that metadata are treated as unknown ownership and run one at a time. Two scoped
+issues cannot share a batch when their ownership entries are the same path or
+match each other as supported path globs.
 
 After polling, the daemon can clean up runner-owned worktrees whose pull
 requests have already been merged. Dirty, blocked, active, or unpublished
@@ -159,8 +167,10 @@ The parent flow can:
 - validate the integration branch;
 - open one integration draft PR.
 
-Parallel child execution is bounded by `runner.maxParallelChildren`. Child work
-uses separate worktrees so concurrent runs do not share a mutable workspace.
+Parallel child execution is bounded by `runner.maxParallelChildren`. Parallel
+standalone scoped execution is bounded by `runner.maxParallelScopedIssues` or
+the daemon `--concurrency` override. Child and standalone work use separate
+worktrees so concurrent runs do not share a mutable workspace.
 
 ## Full Change-Set Awareness
 

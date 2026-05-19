@@ -309,7 +309,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         sessionId,
         outcome: 'blocked',
         changedFiles: publishability.changedFiles,
-        validation: [],
+        validation: publishability.validation ?? [],
         blockers: publishability.reasons,
         skippedChecks: publishability.skippedChecks,
         residualRisks: publishability.residualRisks,

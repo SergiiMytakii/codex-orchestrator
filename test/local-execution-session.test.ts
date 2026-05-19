@@ -125,6 +125,54 @@ test('implementation publishability blocks failed configured checks before publi
   assert.equal(await git.isWorktreeClean(repo), false);
 });
 
+test('implementation publishability keeps validation evidence when quality gate blocks publication', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const validation = [
+    {
+      command: 'TDD red evidence observed',
+      status: 'passed' as const,
+      summary: 'Baseline run failed as expected before implementation.',
+    },
+    {
+      command: '$code-review',
+      status: 'passed' as const,
+      summary: 'No blocking findings.',
+    },
+  ];
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, { changes: ['src/feature.ts'], validation });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: {
+          tdd: { requireTestChange: false },
+          cleanupReview: { enabled: false },
+        },
+      },
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /TDD red-to-green proof/);
+  assert.deepEqual(result.status === 'blocked' ? result.validation : [], validation);
+});
+
 test('implementation publishability does not fail when an npm script check is missing (skips with warning)', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -241,7 +289,10 @@ function config(overrides: Partial<CodexOrchestratorConfig> = {}): CodexOrchestr
 
 async function writeScopedReport(
   reportPath: string,
-  overrides: Partial<{ changes: string[] }> = {},
+  overrides: Partial<{
+    changes: string[];
+    validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>;
+  }> = {},
 ): Promise<void> {
   await mkdir(join(reportPath, '..'), { recursive: true });
   await writeFile(
@@ -249,7 +300,7 @@ async function writeScopedReport(
     JSON.stringify({
       status: 'completed',
       changes: overrides.changes ?? ['README.md'],
-      validation: [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
+      validation: overrides.validation ?? [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],

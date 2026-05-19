@@ -760,7 +760,7 @@ async function executeChild(input: {
       sessionId,
       outcome: 'blocked',
       changedFiles: publishability.changedFiles,
-      validation: [],
+      validation: publishability.validation ?? [],
       blockers: publishability.reasons,
       skippedChecks: publishability.skippedChecks,
       residualRisks: publishability.residualRisks,

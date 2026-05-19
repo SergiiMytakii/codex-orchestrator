@@ -24,7 +24,7 @@ Usage:
   codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--sync-prompts <mode>]
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
-  codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>]
+  codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
 
 Commands:
   health       Run a no-op local health check.
@@ -76,6 +76,7 @@ interface DaemonCliArgs {
   intervalSeconds?: number;
   once: boolean;
   maxRuns?: number;
+  concurrency?: number;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -202,6 +203,7 @@ async function main(args: string[]): Promise<number> {
         intervalMs: parsed.value.intervalSeconds * 1000,
         once: parsed.value.once,
         maxRuns: parsed.value.maxRuns,
+        concurrency: parsed.value.concurrency,
         onEvent: (line) => {
           process.stdout.write(`${line}\n`);
         },
@@ -379,6 +381,13 @@ function parseDaemonArgs(
           return { ok: false, error: 'daemon requires --max-runs <positive integer>' };
         }
         parsed.maxRuns = Number(next);
+        index += 1;
+        break;
+      case '--concurrency':
+        if (!next || next.startsWith('--') || !Number.isInteger(Number(next)) || Number(next) < 1 || Number(next) > 3) {
+          return { ok: false, error: 'daemon requires --concurrency <integer between 1 and 3>' };
+        }
+        parsed.concurrency = Number(next);
         index += 1;
         break;
       default:

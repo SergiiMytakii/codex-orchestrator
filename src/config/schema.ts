@@ -110,6 +110,7 @@ export interface CodexOrchestratorConfig {
   runner: {
     workspaceRoot: string;
     maxParallelChildren: number;
+    maxParallelScopedIssues?: number;
     stateDir: string;
     allowAgentLocalCommits: boolean;
     worktreeCleanup?: {
@@ -253,6 +254,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
   if (runner) {
     expectString(runner, 'runner.workspaceRoot', errors);
     expectParallelLimit(runner, errors);
+    expectOptionalParallelLimit(runner, 'runner.maxParallelScopedIssues', errors);
     expectString(runner, 'runner.stateDir', errors);
     expectBoolean(runner, 'runner.allowAgentLocalCommits', errors);
     validateWorktreeCleanup(runner, errors);
@@ -424,6 +426,20 @@ function expectParallelLimit(parent: ObjectRecord, errors: string[]): number | u
 
   if (!Number.isInteger(value) || typeof value !== 'number' || value < 1 || value > 3) {
     errors.push('runner.maxParallelChildren must be an integer between 1 and 3');
+    return undefined;
+  }
+
+  return value;
+}
+
+function expectOptionalParallelLimit(parent: ObjectRecord, path: string, errors: string[]): number | undefined {
+  const value = readPath(parent, path);
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isInteger(value) || typeof value !== 'number' || value < 1 || value > 3) {
+    errors.push(`${path} must be an integer between 1 and 3 when provided`);
     return undefined;
   }
 
