@@ -44,13 +44,13 @@ This file is the short routing layer for agents working on
   run; it creates or updates real GitHub issues and PRs.
 
 ### Latest Release
-- `0.1.30` (2026-05-18):
-  - Setup stores an explicit remote base branch for Codex PRs.
-  - Scoped and issue-tree root branches start from the resolved remote base SHA.
-  - PR creation verifies GitHub opened the draft against the expected base
-    branch.
-  - Doctor reports configured remote base readiness and warns about legacy or
-    mismatched Codex branches.
+- `0.1.32` (2026-05-19):
+  - Setup uses the package-owned mobile visual proof command by default.
+  - Flutter and native Android proof resolve SDK tooling across macOS, Linux,
+    and Windows defaults.
+  - Mobile proof falls back to iOS Simulator on macOS when Android tooling or
+    devices are unavailable and an iOS target exists.
+  - Native iOS projects launch through Xcode simulator tooling directly.
 
 ## Final Response
 Keep final answers short: state what changed, what was verified, and any

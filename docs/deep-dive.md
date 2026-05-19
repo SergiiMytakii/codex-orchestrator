@@ -258,13 +258,19 @@ Screenshot files created under the proof directory are attached to the PR and
 issue review report. If a proof command exits successfully but does not create
 the configured minimum number of screenshots, the runner reports a warning.
 
-For Android UI work, the implementation prompt uses device-backed proof through
-`adb` or an emulator. Missing Android tooling or no usable device is reported as
-a concrete warning instead of a release blocker by itself. Native Android proof
-uses the project Gradle wrapper with a writable Gradle cache. Flutter SDK cache
-recovery applies only to Flutter projects and only through a preconfigured
-writable SDK path in `CODEX_ORCHESTRATOR_FLUTTER_ROOT`. Native iOS proof uses
-Xcode simulator/device tooling with a writable DerivedData path.
+For mobile UI work, setup uses the package-owned
+`codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The
+command detects Flutter, native Android, and native iOS projects. It tries
+Android first when an Android target exists, resolving SDK tools from
+environment variables, `PATH`, and the default macOS, Linux, and Windows SDK
+locations. If Android tooling or devices are unavailable on macOS and an iOS
+target exists, it falls back to the iOS simulator. Native iOS projects go
+directly through Xcode simulator tooling with a writable DerivedData path. Repos
+that need a specific Flutter launch config, flavor, Gradle install task, package
+name, iOS scheme, or bundle id pass that through command flags or
+`CODEX_ORCHESTRATOR_*` environment variables. Missing mobile tooling or no
+usable device is reported as a concrete warning instead of a release blocker by
+itself.
 
 ## Loop Policy
 

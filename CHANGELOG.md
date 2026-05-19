@@ -6,6 +6,24 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-05-19
+
+### Added
+- Added package-owned `visual-proof mobile`, `visual-proof android`, and
+  `visual-proof ios` commands for reusable UI launch proof across installed
+  repositories.
+- Mobile visual proof now supports Flutter Android, native Android, Flutter iOS,
+  and native iOS projects, with screenshots saved into runner proof artifacts.
+
+### Changed
+- Setup now defaults visual proof to
+  `codex-orchestrator visual-proof mobile --issue ${issueNumber}` instead of a
+  target-repo local proof script.
+- Android proof resolves SDK tools from environment variables, `PATH`, and
+  default macOS, Linux, and Windows SDK locations.
+- On macOS, mobile proof falls back to the iOS simulator when Android tooling or
+  devices are unavailable and the repo has an iOS target.
+
 ## [0.1.30] - 2026-05-18
 
 ### Added

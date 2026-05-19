@@ -11,6 +11,9 @@ import { runDoctorCommand } from './runner/doctor-command.js';
 import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { runStatusCommand } from './runner/status-command.js';
+import { parseAndroidVisualProofArgs, runAndroidVisualProofCommand } from './runner/android-visual-proof-command.js';
+import { parseIosVisualProofArgs, runIosVisualProofCommand } from './runner/ios-visual-proof-command.js';
+import { parseMobileVisualProofArgs, runMobileVisualProofCommand } from './runner/mobile-visual-proof-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
 import { promptSyncModes, type PromptSyncMode } from './setup/prompt-sync.js';
 
@@ -25,6 +28,9 @@ Usage:
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
+  codex-orchestrator visual-proof mobile --issue <number> [--target <path>]
+  codex-orchestrator visual-proof android --issue <number> [--target <path>]
+  codex-orchestrator visual-proof ios --issue <number> [--target <path>]
 
 Commands:
   health       Run a no-op local health check.
@@ -33,6 +39,7 @@ Commands:
   status       Show eligible/skipped issue work and local recovery state.
   run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
   daemon       Poll GitHub Issues and execute eligible autonomous work until stopped.
+  visual-proof Run package-owned proof commands used by review gates.
 
 Options:
   --help, -h      Show this help.
@@ -211,6 +218,46 @@ async function main(args: string[]): Promise<number> {
       return 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'daemon failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
+  if (command === 'visual-proof') {
+    const [kind, ...rest] = args.slice(1);
+    if (kind !== 'mobile' && kind !== 'android' && kind !== 'ios') {
+      process.stderr.write('visual-proof requires a supported kind: mobile, android, or ios\nRun codex-orchestrator --help for usage.\n');
+      return 2;
+    }
+    try {
+      if (kind === 'mobile') {
+        const parsed = parseMobileVisualProofArgs(rest);
+        if (!parsed.ok) {
+          process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+          return 2;
+        }
+        await runMobileVisualProofCommand(parsed.value);
+        process.stdout.write(`mobile visual proof captured for issue #${parsed.value.issueNumber}\n`);
+      } else if (kind === 'ios') {
+        const parsed = parseIosVisualProofArgs(rest);
+        if (!parsed.ok) {
+          process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+          return 2;
+        }
+        await runIosVisualProofCommand(parsed.value);
+        process.stdout.write(`ios visual proof captured for issue #${parsed.value.issueNumber}\n`);
+      } else {
+        const parsed = parseAndroidVisualProofArgs(rest);
+        if (!parsed.ok) {
+          process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+          return 2;
+        }
+        await runAndroidVisualProofCommand(parsed.value);
+        process.stdout.write(`android visual proof captured for issue #${parsed.value.issueNumber}\n`);
+      }
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'visual proof failed';
       process.stderr.write(`${message}\n`);
       return 1;
     }

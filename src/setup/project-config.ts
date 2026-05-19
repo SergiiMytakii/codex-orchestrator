@@ -122,7 +122,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'runner visual proof',
         ],
         minScreenshotArtifacts: 1,
-        runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
+        runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
         runnerTimeoutMs: 900_000,
         envPassthrough: [],
       },

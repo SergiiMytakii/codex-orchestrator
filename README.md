@@ -299,14 +299,32 @@ Screenshots created under `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR
 and issue review report. Keep login credentials outside config and expose only
 their variable names through `envPassthrough`.
 
-For Android UI work, the implementation prompt asks Codex to use `adb` or an
-emulator-backed proof path instead of browser proof. Missing Android tooling or
-no usable device is reported as a warning with the concrete reason, not as an
-automatic release blocker. Native Android proof uses the project Gradle wrapper
-with a writable Gradle cache; Flutter-specific SDK cache recovery is used only
-for Flutter projects and only through a preconfigured writable SDK path in
-`CODEX_ORCHESTRATOR_FLUTTER_ROOT`. Native iOS proof uses Xcode simulator/device
-tooling with a writable DerivedData path.
+For mobile UI work, setup points at the package-owned command:
+
+```json
+{
+  "reviewGates": {
+    "visualProof": {
+      "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}"
+    }
+  }
+}
+```
+
+That command runs from the issue worktree. For Flutter/native Android it
+resolves Android SDK tools from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `PATH`, and
+OS defaults (`~/Library/Android/sdk`, `~/Android/Sdk`, and
+`%LOCALAPPDATA%\\Android\\Sdk`), then builds/installs/launches the app and saves
+`android-launch.png`. If Android tooling or devices are unavailable on macOS and
+the repo has an iOS target, it falls back to the iOS simulator and saves
+`ios-launch.png`. Native iOS projects go straight through Xcode simulator
+tooling. Use command flags or environment variables such as
+`CODEX_ORCHESTRATOR_FLUTTER_LAUNCH_CONFIG`,
+`CODEX_ORCHESTRATOR_ANDROID_FLAVOR`, `CODEX_ORCHESTRATOR_ANDROID_PACKAGE`,
+`CODEX_ORCHESTRATOR_IOS_SCHEME`, and `CODEX_ORCHESTRATOR_IOS_BUNDLE_ID` when a
+repo needs a specific flavor, target, package, scheme, or bundle id. Missing
+mobile tooling or no usable simulator/device is reported as a warning with the
+concrete reason, not as an automatic release blocker.
 
 ## Safety Model
 
@@ -352,6 +370,9 @@ codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
   [--github-repo <repo>] [--dry-run] [--prepare-labels]
 codex-orchestrator status --target <path> [--dry-run] [--json]
 codex-orchestrator run --target <path> --issue <number>
+codex-orchestrator visual-proof mobile --issue <number> [--target <path>]
+codex-orchestrator visual-proof android --issue <number> [--target <path>]
+codex-orchestrator visual-proof ios --issue <number> [--target <path>]
 codex-orchestrator daemon --target <path> [--once] \
   [--interval-seconds <seconds>] [--max-runs <count>] \
   [--concurrency <count>]
