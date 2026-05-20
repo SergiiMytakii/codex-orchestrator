@@ -137,7 +137,7 @@ For an `agent:auto` issue, the runner follows this lifecycle:
 8. Read the Codex completion report.
 9. Collect the full local change set.
 10. Run configured validation checks.
-11. Run visual proof when required.
+11. Run acceptance proof when required.
 12. Evaluate quality gates and deny rules.
 13. Optionally run bounded rework for machine-checkable blockers.
 14. Optionally run Fresh-Context Review.
@@ -237,22 +237,24 @@ Runtime and test paths are configurable through:
 - `reviewGates.quality.runtimeChangedPathGlobs`;
 - `reviewGates.quality.testChangedPathGlobs`.
 
-The visual proof gate can require screenshots or another runner-owned proof
-command when issue text or changed paths indicate UI work.
+The acceptance proof gate can require runner-owned proof artifacts when issue
+text or changed paths indicate UI, API, worker, CLI, or smoke-verifiable work.
+`reviewGates.acceptanceProof` is canonical; `reviewGates.visualProof` remains a
+compatibility adapter for existing screenshot and mobile proof policy.
 
-## Visual Proof
+## Acceptance Proof
 
-Visual proof is intentionally runner-owned. Codex can implement the UI, but the
-runner decides whether proof is required and executes the configured proof
-command after implementation. Runtime config loading backfills the package-owned
-mobile proof command for older configs where visual proof is enabled but no
-runner command is set.
+Acceptance proof is intentionally runner-owned. Codex can implement product
+behavior, but the runner decides whether proof is required and executes the
+configured proof command after implementation. Runtime config loading backfills
+the package-owned mobile proof command for older configs where visual proof is
+enabled but no runner command is set.
 
 Child Codex processes receive a mobile-device guard directory at the front of
 `PATH`. The guard blocks direct device/emulator control through `adb`,
 `emulator`, Flutter device-control subcommands, and `xcrun simctl`. Runner-owned
-visual proof commands do not run through that guarded Codex environment; they use
-the shared mobile lease described below.
+acceptance proof commands do not run through that guarded Codex environment;
+they use the shared mobile lease described below.
 
 The proof command usually runs browser automation, such as Playwright. The
 runner provides environment variables for:
@@ -266,9 +268,10 @@ runner provides environment variables for:
 - target root and shared state directory when the runner knows them;
 - mobile device lock directory for runner-owned Android proof.
 
-Screenshot files created under the proof directory are attached to the PR and
-issue review report. If a proof command exits successfully but does not create
-the configured minimum number of screenshots, the runner reports a warning.
+Proof artifacts created under the proof directory are attached to the PR and
+issue review report. Screenshots remain supported for visual proof. Product-code
+changes made during the proof phase are blockers; proof script repair must stay
+inside configured proof-owned paths.
 
 For mobile UI work, setup uses the package-owned
 `codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The
@@ -375,7 +378,7 @@ The top-level config areas are:
 - `project` for config and prompt directories;
 - `workflows` for prompt or skill routing;
 - `checks` and `checksPolicy` for validation commands;
-- `reviewGates` for quality and visual proof requirements;
+- `reviewGates` for quality and acceptance proof requirements;
 - `loopPolicy` for issue selection, rework, review, summaries, and suggestions;
 - `deny` for secret and unsafe-action protection;
 - `branches` for branch templates;

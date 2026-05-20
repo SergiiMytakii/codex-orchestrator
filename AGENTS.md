@@ -59,13 +59,12 @@ See `docs/agents/domain.md`.
   run; it creates or updates real GitHub issues and PRs.
 
 ### Latest Release
-- `0.1.32` (2026-05-19):
-  - Setup uses the package-owned mobile visual proof command by default.
-  - Flutter and native Android proof resolve SDK tooling across macOS, Linux,
-    and Windows defaults.
-  - Mobile proof falls back to iOS Simulator on macOS when Android tooling or
-    devices are unavailable and an iOS target exists.
-  - Native iOS projects launch through Xcode simulator tooling directly.
+- `0.1.33` (2026-05-20):
+  - Acceptance Proof is the canonical runner-owned proof gate.
+  - Proof reports require high-confidence criterion-to-artifact evidence.
+  - Proof-phase product-code diffs block Draft PR Handoff.
+  - Live smoke covers proof pass, rework, low-confidence blocking, and
+    proof-phase product-diff blocking.
 
 ## Final Response
 Keep final answers short: state what changed, what was verified, and any

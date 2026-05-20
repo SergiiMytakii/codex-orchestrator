@@ -17,6 +17,8 @@ Run focused subsets while developing:
 npm run smoke:live -- --scenario package-install --cleanup
 npm run smoke:live -- --scenario discovery-matrix --cleanup
 npm run smoke:live -- --scenario quality-gates --cleanup
+npm run smoke:live -- --scenario acceptance-proof --cleanup
+npm run smoke:live -- --scenario acceptance-proof-blocking --cleanup
 npm run smoke:live -- --scenario diagnostics --cleanup
 npm run smoke:live -- --scenario plan-auto-blocking --cleanup
 ```
@@ -45,6 +47,12 @@ npm run smoke:live -- --cleanup
   phase-specific profile selection, lifecycle event evidence, and context
   snapshot artifact references.
 - `visual-proof` - runner-owned screenshot proof is attached to the PR.
+- `acceptance-proof` - canonical machine-readable Acceptance Proof report is
+  validated and attached to the PR.
+- `acceptance-proof-rework` - failed Acceptance Proof requests implementation
+  rework and then passes within the proof loop.
+- `acceptance-proof-blocking` - low-confidence proof and proof-phase product
+  diffs block Draft PR Handoff.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
 - `local-commit-blocked` - blocks agent local commits when policy disallows them.
@@ -280,25 +288,32 @@ Expected result: unsafe or unverifiable work never gets pushed or opened as a PR
 Expected result: quality gates match configured policy and do not over-block
 non-runtime changes.
 
-## Visual proof gate
+## Acceptance proof gate
 
-- [ ] Create a UI/visual smoke issue whose text matches the visual proof
+- [ ] Create a UI/visual smoke issue whose text matches the acceptance proof
       trigger patterns.
-- [ ] Fake Codex changes a configured frontend path without screenshot artifact.
-- [ ] Verify the run is not blocked solely on missing visual proof, but reports a warning.
-- [ ] Configure `reviewGates.visualProof.runnerValidationCommand` to create a
-      smoke screenshot artifact under the issue proof directory.
-- [ ] Rerun with visual validation evidence.
-- [ ] Verify the PR and issue report include the screenshot artifact link.
-- [ ] Verify the screenshot artifact file exists under
+- [ ] Fake Codex changes a configured frontend path without proof artifacts.
+- [ ] Verify the run is blocked on missing acceptance proof before Draft PR
+      Handoff.
+- [ ] Configure `reviewGates.acceptanceProof.runnerValidationCommand` to create
+      a machine-readable proof report under the issue proof directory.
+- [ ] Rerun with canonical acceptance validation evidence.
+- [ ] Verify the PR and issue report include the smoke-output artifact link.
+- [ ] Verify the proof artifact file exists under
       `.codex-orchestrator/proofs/issue-<number>/`.
 - [ ] Verify runner-owned visual proof environment variables are available to
       the command.
-- [ ] Verify skipped browser or screenshot proof is surfaced as a warning when
-      the proof command cannot produce artifacts.
+- [ ] Verify failed browser, screenshot, or smoke proof blocks publication with
+      preserved artifacts.
+- [ ] Verify low-confidence proof reports block publication instead of becoming
+      Draft PR Handoff.
+- [ ] Verify product-code changes created during proof block publication even
+      when the proof report itself claims success.
+- [ ] Verify a proof rework request keeps the issue in the runner-owned loop and
+      can pass after implementation rework.
 
-Expected result: visual proof is runner-owned when configured, and missing proof
-is surfaced without blocking unrelated progress.
+Expected result: acceptance proof is runner-owned when configured, missing proof
+blocks handoff, and legacy visual proof artifacts remain attached when present.
 
 ## Promotion and clarification
 

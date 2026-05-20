@@ -123,6 +123,44 @@
     }
   },
   "reviewGates": {
+    "acceptanceProof": {
+      "enabled": true,
+      "artifactDir": ".codex-orchestrator/proofs",
+      "issueTextPatterns": [
+        "\\bUI\\b",
+        "frontend",
+        "responsive",
+        "layout",
+        "visual",
+        "screenshot",
+        "acceptance",
+        "proof",
+        "smoke",
+        "\\bAPI\\b",
+        "worker",
+        "\\bCLI\\b",
+        "скриншот",
+        "скріншот",
+        "viewport",
+        "dark theme",
+        "мобіл",
+        "mobile"
+      ],
+      "changedPathGlobs": [
+        "src/frontend/**",
+        "frontend/**",
+        "app/**",
+        "pages/**",
+        "components/**"
+      ],
+      "proofOwnedPathGlobs": [
+        ".codex-orchestrator/proofs/**"
+      ],
+      "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}",
+      "runnerTimeoutMs": 900000,
+      "envPassthrough": [],
+      "maxIterations": 5
+    },
     "visualProof": {
       "enabled": true,
       "artifactDir": ".codex-orchestrator/proofs",
@@ -234,7 +272,8 @@
         "invalid-completion-report",
         "no-changed-files",
         "failed-configured-checks",
-        "missing-quality-gate-evidence"
+        "missing-quality-gate-evidence",
+        "failed-acceptance-proof"
       ]
     },
     "freshContextReview": {

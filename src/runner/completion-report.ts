@@ -5,6 +5,8 @@ import { validatePlanGraph } from './issue-tree.js';
 
 export type CompletionStatus = 'completed' | 'needs-promotion';
 export type ValidationStatus = 'passed' | 'failed' | 'skipped';
+export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
+export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
 export type ProhibitedActionType =
   | 'secret-file-read'
   | 'secret-file-change'
@@ -15,7 +17,7 @@ export interface ScopedCompletionReport {
   status: CompletionStatus;
   changes: string[];
   validation: Array<{ command: string; status: ValidationStatus; summary: string }>;
-  artifacts: Array<{ type: 'screenshot' | 'log' | 'other'; path?: string; url?: string; description: string }>;
+  artifacts: Array<{ type: ScopedArtifactType; path?: string; url?: string; description: string }>;
   skippedChecks: string[];
   residualRisks: string[];
   prohibitedActions: Array<{ type: ProhibitedActionType; description: string }>;
@@ -225,7 +227,7 @@ function assertArtifacts(value: unknown): void {
     const record = item as Record<string, unknown>;
     if (
       typeof record.type !== 'string'
-      || !['screenshot', 'log', 'other'].includes(record.type)
+      || !scopedArtifactTypes.includes(record.type as ScopedArtifactType)
       || typeof record.description !== 'string'
       || record.description.trim().length === 0
     ) {

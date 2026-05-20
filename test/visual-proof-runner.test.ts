@@ -209,6 +209,145 @@ test('runner visual proof warns when the command succeeds without producing a sc
   assert.deepEqual(result.artifacts, []);
 });
 
+test('runner visual proof evaluates machine-readable acceptance proof reports', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-'));
+
+  const shellExecutor: ShellCommandExecutor = async (_command, options) => {
+    const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofReportPath);
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, 'smoke-output.txt'), 'smoke ok\n', 'utf8');
+    await writeFile(proofReportPath, JSON.stringify({
+      status: 'passed',
+      criteria: [{
+        id: 'ac-1',
+        description: 'CLI smoke proves behavior.',
+        status: 'passed',
+        confidence: 'high',
+        reasoningSummary: 'Smoke output matched the expected observable contract.',
+        artifactRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+      }],
+      artifacts: [{
+        type: 'smoke-output',
+        path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+        description: 'CLI smoke output',
+      }],
+      proofPhaseDiff: {
+        allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+        forbiddenProductPaths: [],
+      },
+      residualRisks: [],
+    }), 'utf8');
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runRunnerVisualProof({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'node proof.mjs',
+          issueTextPatterns: ['acceptance proof'],
+        },
+        visualProof: {
+          ...validConfig.reviewGates.visualProof,
+          issueTextPatterns: ['visual-only'],
+        },
+      },
+    },
+    issue: issueFixture({ number: 155, title: 'Acceptance proof for CLI smoke', body: 'Needs acceptance proof.' }),
+    issueNumber: 155,
+    worktreePath,
+    changedFiles: ['src/cli.ts'],
+    report: {
+      status: 'completed',
+      changes: [],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+    shellExecutor,
+  });
+
+  assert.equal(result.validation[0]?.status, 'passed');
+  assert.match(result.validation[0]?.summary ?? '', /runner acceptance proof passed/);
+  assert.deepEqual(result.artifacts, [{
+    type: 'smoke-output',
+    path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+    description: 'CLI smoke output',
+  }]);
+});
+
+test('runner visual proof fails when the command exits nonzero despite a passing report', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-'));
+
+  const shellExecutor: ShellCommandExecutor = async (_command, options) => {
+    const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofReportPath);
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, 'smoke-output.txt'), 'smoke failed late\n', 'utf8');
+    await writeFile(proofReportPath, JSON.stringify({
+      status: 'passed',
+      criteria: [{
+        id: 'ac-1',
+        description: 'CLI smoke proves behavior.',
+        status: 'passed',
+        confidence: 'high',
+        reasoningSummary: 'Smoke output matched the expected observable contract.',
+        artifactRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+      }],
+      artifacts: [{
+        type: 'smoke-output',
+        path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+        description: 'CLI smoke output',
+      }],
+      proofPhaseDiff: {
+        allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+        forbiddenProductPaths: [],
+      },
+      residualRisks: [],
+    }), 'utf8');
+    return { stdout: '', stderr: 'late smoke failure', exitCode: 1 };
+  };
+
+  const result = await runRunnerVisualProof({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'node proof.mjs',
+          issueTextPatterns: ['acceptance proof'],
+        },
+      },
+    },
+    issue: issueFixture({ number: 155, title: 'Acceptance proof for CLI smoke', body: 'Needs acceptance proof.' }),
+    issueNumber: 155,
+    worktreePath,
+    changedFiles: ['src/cli.ts'],
+    report: {
+      status: 'completed',
+      changes: [],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+    shellExecutor,
+  });
+
+  assert.equal(result.validation[0]?.status, 'failed');
+  assert.match(result.validation[0]?.summary ?? '', /late smoke failure/);
+});
+
 test('runner visual proof ignores screenshots inside runner-owned browser internals', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
 

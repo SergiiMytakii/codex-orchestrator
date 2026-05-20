@@ -72,8 +72,8 @@ flowchart TD
 ```
 
 The important boundary is simple: Codex writes code, but the runner decides
-whether that code can be handed to humans. The runner owns checks, visual proof,
-labels, comments, branch pushes, and draft PR creation.
+whether that code can be handed to humans. The runner owns checks, acceptance
+proof, labels, comments, branch pushes, and draft PR creation.
 
 There are two main ways to run work.
 
@@ -240,18 +240,17 @@ Before a result becomes a draft PR, the runner checks the whole local result:
 - the completion report Codex was required to write;
 - configured commands such as tests or type checks;
 - review gates such as TDD evidence, changed tests, cleanup review, code review,
-  or visual proof when enabled;
+  or acceptance proof when enabled;
 - blocked paths and unsafe actions.
 
 If the result passes, the runner pushes the branch and opens a draft PR. If it
 does not pass, the runner marks the issue blocked, keeps the useful local
 evidence, and explains what needs attention.
 
-For UI work, visual proof is runner-owned. Codex can change the UI, but the
-runner runs the proof command afterwards and attaches screenshots or other
-artifacts to the PR and issue report. For mobile projects, the default proof
-command can build, install, launch, and capture Android or iOS proof when local
-tooling is available.
+Acceptance proof is runner-owned. Codex can change product behavior, but the
+runner runs proof afterwards and attaches screenshots, UI dumps, logs, smoke
+outputs, or other artifacts to the PR and issue report. Legacy visual proof
+config still works as a compatibility adapter for UI/mobile repositories.
 
 ## Repository Policy
 

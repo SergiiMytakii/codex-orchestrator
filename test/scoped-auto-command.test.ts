@@ -560,7 +560,14 @@ test('scoped auto command writes durable summary for promotion requests', async 
 });
 
 test('scoped auto command uses mobile codex timeout for Flutter and Android issues', async () => {
-  const repo = await tempGitProject();
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    reviewGates: {
+      ...config.reviewGates,
+      acceptanceProof: { ...config.reviewGates.acceptanceProof, enabled: false },
+      visualProof: { ...config.reviewGates.visualProof, enabled: false },
+    },
+  }));
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({
       number: 155,
@@ -1350,9 +1357,7 @@ test('scoped auto command no longer blocks on missing UI visual proof (but can s
 
   assert.equal(result.status, 'blocked');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
-  assert.match(result.reportComment, /Quality gate requires TDD/);
-  assert.match(result.reportComment, /Quality gate requires passed code-review/);
-  assert.doesNotMatch(result.reportComment, /Visual proof gate requires/);
+  assert.match(result.reportComment, /runner acceptance proof failed: missing proof script/);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
 });
 
@@ -1403,8 +1408,7 @@ test('scoped auto command does not add visual proof gate blockers for missing sc
 
   assert.equal(result.status, 'blocked');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
-  assert.match(result.reportComment, /Quality gate requires/);
-  assert.doesNotMatch(result.reportComment, /Visual proof gate requires/);
+  assert.match(result.reportComment, /runner acceptance proof failed: missing proof script/);
 });
 
 test('scoped auto command can satisfy UI proof gate with runner-owned visual validation command', async () => {
@@ -1520,7 +1524,14 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
 });
 
 test('scoped auto command includes screenshot proof artifacts in review report', async () => {
-  const repo = await tempGitProject();
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    reviewGates: {
+      ...config.reviewGates,
+      acceptanceProof: { ...config.reviewGates.acceptanceProof, enabled: false },
+      visualProof: { ...config.reviewGates.visualProof, enabled: false },
+    },
+  }));
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires screenshot proof.' }),
   ]);

@@ -44,9 +44,13 @@ Run code-review before completion when the issue or repo policy requires it, or 
 
 For compact low-risk changes, focused validation plus a clear completion report is enough unless repo policy says otherwise.
 
-## UI And Visual Proof
+## Acceptance Proof
 
-For browser UI work, prepare runner-owned visual proof artifacts when configured. Prefer Playwright for web UI proof, but let the runner execute configured proof commands when the prompt says so.
+Prepare runner-owned acceptance proof artifacts when configured. For visual work,
+screenshots must be tied back to the acceptance criteria; for non-visual work,
+use smoke outputs, logs, or other observable artifacts. Let the runner execute
+configured proof commands when the prompt says so, and keep proof script repair
+inside proof-owned paths.
 
 For Android mobile app UI work, use device-backed proof instead of Playwright:
 

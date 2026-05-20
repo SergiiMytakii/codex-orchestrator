@@ -31,6 +31,47 @@ export const packageOwnedDefaultChecks: CodexOrchestratorConfig['checks'] = {
 
 export const packageOwnedMobileVisualProofCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
 
+export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
+  return {
+    enabled: true,
+    artifactDir: '.codex-orchestrator/proofs',
+    issueTextPatterns: [
+      '\\bUI\\b',
+      'frontend',
+      'responsive',
+      'layout',
+      'visual',
+      'screenshot',
+      'acceptance',
+      'proof',
+      'smoke',
+      '\\bAPI\\b',
+      'worker',
+      '\\bCLI\\b',
+      'скриншот',
+      'скріншот',
+      'viewport',
+      'dark theme',
+      'мобіл',
+      'mobile',
+    ],
+    changedPathGlobs: [
+      'src/frontend/**',
+      'frontend/**',
+      'app/**',
+      'pages/**',
+      'components/**',
+    ],
+    proofOwnedPathGlobs: [
+      '.codex-orchestrator/proofs/**',
+    ],
+    runnerValidationCommand: packageOwnedMobileVisualProofCommand,
+    runnerTimeoutMs: 900_000,
+    envPassthrough: [],
+    maxIterations: 5,
+  };
+}
+
 export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchestratorConfig {
   return {
     version: 1,
@@ -87,6 +128,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       },
     },
     reviewGates: {
+      acceptanceProof: defaultAcceptanceProofConfig(),
       visualProof: {
         enabled: true,
         artifactDir: '.codex-orchestrator/proofs',
@@ -194,6 +236,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'no-changed-files',
           'failed-configured-checks',
           'missing-quality-gate-evidence',
+          'failed-acceptance-proof',
         ],
       },
       freshContextReview: {
@@ -257,6 +300,7 @@ export function mergeExistingProjectConfig(
   const existingChecks = readStringRecord(existing.checks);
   const existingChecksPolicy = readObject(existing.checksPolicy);
   const existingReviewGates = readObject(existing.reviewGates);
+  const existingAcceptanceProof = readObject(existingReviewGates?.acceptanceProof);
   const existingVisualProof = readObject(existingReviewGates?.visualProof);
   const existingQuality = readObject(existingReviewGates?.quality);
   const existingLoopPolicy = readObject(existing.loopPolicy);
@@ -318,6 +362,11 @@ export function mergeExistingProjectConfig(
     reviewGates: {
       ...defaults.reviewGates,
       ...existingReviewGates,
+      acceptanceProof: migrateAcceptanceProofConfig(
+        defaults.reviewGates.acceptanceProof,
+        existingAcceptanceProof,
+        existingVisualProof,
+      ),
       visualProof: migrateVisualProofConfig(defaults.reviewGates.visualProof, existingVisualProof),
       quality: {
         ...defaults.reviewGates.quality,
@@ -346,6 +395,10 @@ export function mergeExistingProjectConfig(
       rework: {
         ...defaults.loopPolicy.rework,
         ...existingRework,
+        retryableBlockers: migrateRetryableBlockers(
+          defaults.loopPolicy.rework.retryableBlockers,
+          readStringArray(existingRework?.retryableBlockers),
+        ),
       },
       freshContextReview: {
         ...defaults.loopPolicy.freshContextReview,
@@ -389,6 +442,11 @@ export async function applyTargetPackageConfigDefaults(
     checks: await adaptPackageOwnedChecks(targetRoot, config),
     reviewGates: {
       ...config.reviewGates,
+      acceptanceProof: migrateAcceptanceProofConfig(
+        config.reviewGates.acceptanceProof,
+        config.reviewGates.acceptanceProof,
+        config.reviewGates.visualProof,
+      ),
       visualProof: migrateVisualProofConfig(config.reviewGates.visualProof, config.reviewGates.visualProof),
     },
   };
@@ -503,6 +561,35 @@ function migrateVisualProofConfig(
     visualProof.runnerValidationCommand = packageOwnedMobileVisualProofCommand;
   }
   return visualProof;
+}
+
+function migrateAcceptanceProofConfig(
+  defaults: CodexOrchestratorConfig['reviewGates']['acceptanceProof'],
+  existing: Record<string, unknown> | CodexOrchestratorConfig['reviewGates']['acceptanceProof'] | undefined,
+  legacyVisualProof: Record<string, unknown> | CodexOrchestratorConfig['reviewGates']['visualProof'] | undefined,
+): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
+  const visualProof = legacyVisualProof as CodexOrchestratorConfig['reviewGates']['visualProof'] | undefined;
+  const acceptanceProof = {
+    ...defaults,
+    enabled: visualProof?.enabled ?? defaults.enabled,
+    artifactDir: visualProof?.artifactDir ?? defaults.artifactDir,
+    runnerValidationCommand: visualProof?.runnerValidationCommand ?? defaults.runnerValidationCommand,
+    runnerTimeoutMs: visualProof?.runnerTimeoutMs ?? defaults.runnerTimeoutMs,
+    envPassthrough: visualProof?.envPassthrough ?? defaults.envPassthrough,
+    ...existing,
+  } as CodexOrchestratorConfig['reviewGates']['acceptanceProof'];
+  const command = acceptanceProof.runnerValidationCommand?.trim();
+  if (acceptanceProof.enabled && !command) {
+    acceptanceProof.runnerValidationCommand = packageOwnedMobileVisualProofCommand;
+  }
+  return acceptanceProof;
+}
+
+function migrateRetryableBlockers(
+  defaults: CodexOrchestratorConfig['loopPolicy']['rework']['retryableBlockers'],
+  existing: string[] | undefined,
+): CodexOrchestratorConfig['loopPolicy']['rework']['retryableBlockers'] {
+  return Array.from(new Set([...(existing ?? defaults), ...defaults])) as CodexOrchestratorConfig['loopPolicy']['rework']['retryableBlockers'];
 }
 
 function label(name: string, color: string, description: string): LabelDefinition {

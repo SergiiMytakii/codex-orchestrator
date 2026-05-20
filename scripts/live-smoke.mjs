@@ -22,6 +22,9 @@ const scenarioDefinitions = new Map([
   ['loop-policy', runLoopPolicyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['visual-proof', runVisualProofScenario],
+  ['acceptance-proof', runAcceptanceProofScenario],
+  ['acceptance-proof-rework', runAcceptanceProofReworkScenario],
+  ['acceptance-proof-blocking', runAcceptanceProofBlockingScenario],
   ['quality-gates', runQualityGatesScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
   ['denied-secret', runDeniedSecretScenario],
@@ -61,6 +64,7 @@ async function main() {
     notes: [],
     fakeAgentPath: '',
     visualProofPath: '',
+    acceptanceProofPath: '',
     targetRoot: '',
     cliPath: '',
     repo: options.repo ?? await inferRepo(),
@@ -72,6 +76,7 @@ async function main() {
     context.cliPath = await preparePackagedCli(context);
     context.fakeAgentPath = await writeFakeAgent(root);
     context.visualProofPath = await writeVisualProofScript(root);
+    context.acceptanceProofPath = await writeAcceptanceProofScript(root);
     context.targetRoot = await prepareTargetRepository(context);
     await runPackagedCli(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoNameOf(context.repo), '--prepare-labels']);
     await ensureLiveSmokeLabels(context);
@@ -250,6 +255,7 @@ async function ensureLiveSmokeLabels(context) {
 async function ensureGitHubLabel(context, label) {
   const existing = await runCommand('gh', ['label', 'list', '--repo', context.repo, '--limit', '200', '--json', 'name'], {
     timeoutMs: context.options.timeoutMs,
+    retryTransient: true,
   });
   const labels = JSON.parse(existing.stdout);
   if (labels.some((entry) => entry.name === label.name)) {
@@ -297,6 +303,15 @@ async function configureTarget(context, overrides = {}) {
   }
   if (overrides.runnerValidationCommand) {
     config.reviewGates.visualProof.runnerValidationCommand = overrides.runnerValidationCommand;
+  }
+  config.reviewGates.acceptanceProof = {
+    ...config.reviewGates.acceptanceProof,
+    // Every synthetic issue title contains "live-smoke"; keep Acceptance Proof opt-in per scenario.
+    issueTextPatterns: ['ACCEPTANCE_PROOF_LIVE_SMOKE'],
+    ...(overrides.acceptanceProof ?? {}),
+  };
+  if (overrides.acceptanceRunnerValidationCommand) {
+    config.reviewGates.acceptanceProof.runnerValidationCommand = overrides.acceptanceRunnerValidationCommand;
   }
   if (overrides.loopPolicy) {
     config.loopPolicy = mergeLoopPolicy(config.loopPolicy, overrides.loopPolicy);
@@ -618,6 +633,70 @@ async function runVisualProofScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectScreenshotProof: true });
 }
 
+async function runAcceptanceProofScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} pass`,
+  });
+  const issue = await createIssue(
+    context,
+    'acceptance-proof',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: pass. This should trigger canonical acceptance proof with a machine-readable report.',
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectAcceptanceProof: true });
+}
+
+async function runAcceptanceProofReworkScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} rework`,
+  });
+  const issue = await createIssue(
+    context,
+    'acceptance-proof-rework',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: rework. The first proof attempt should fail, then implementation rework should satisfy the proof.',
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectAcceptanceProof: true });
+}
+
+async function runAcceptanceProofBlockingScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} low-confidence`,
+    acceptanceProof: { maxIterations: 1 },
+  });
+  const lowConfidence = await createIssue(
+    context,
+    'acceptance-proof-low-confidence',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: low-confidence. This should block because the proof report is not high confidence.',
+  );
+  await runDaemonOnce(context, lowConfidence.number, 'scoped-issue');
+  await assertBlockedIssue(context, lowConfidence.number, 'Acceptance proof criterion ac-live-smoke has confidence medium');
+  await assertNoPullRequestForBranch(context, `codex/issue-${lowConfidence.number}`);
+  await assertNoRemoteBranch(context, `codex/issue-${lowConfidence.number}`);
+
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} product-diff`,
+    acceptanceProof: { maxIterations: 1 },
+  });
+  const productDiff = await createIssue(
+    context,
+    'acceptance-proof-product-diff',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: product-diff. This should block because proof edits product code.',
+  );
+  await runDaemonOnce(context, productDiff.number, 'scoped-issue');
+  await assertBlockedIssue(context, productDiff.number, 'Acceptance proof produced product-code changes during acceptance proof');
+  await assertNoPullRequestForBranch(context, `codex/issue-${productDiff.number}`);
+  await assertNoRemoteBranch(context, `codex/issue-${productDiff.number}`);
+}
+
 async function runQualityGatesScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true });
   const cases = [
@@ -790,6 +869,7 @@ async function assertScopedSuccess(
   {
     expectLocalCommit,
     expectScreenshotProof = false,
+    expectAcceptanceProof = false,
     expectLoopPolicyEvidence = false,
     expectedBaseBranch,
     expectedBaseSha,
@@ -850,6 +930,23 @@ async function assertScopedSuccess(
     );
     await assertPathExists(screenshotPath, 'runner visual proof screenshot was not written');
     await appendReport(context, `Screenshot proof: ${screenshotPath}\n\n`);
+  }
+  if (expectAcceptanceProof) {
+    assertIncludes(body, 'runner acceptance proof passed', 'PR body should include acceptance proof validation evidence');
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/live-smoke-proof.txt`, 'PR body should link acceptance proof artifact path');
+    const proofPath = join(
+      context.targetRoot,
+      '.codex-orchestrator',
+      'workspaces',
+      `live-smoke-${context.runId}`,
+      `issue-${issueNumber}`,
+      '.codex-orchestrator',
+      'proofs',
+      `issue-${issueNumber}`,
+      'live-smoke-proof.txt',
+    );
+    await assertPathExists(proofPath, 'runner acceptance proof artifact was not written');
+    await appendReport(context, `Acceptance proof artifact: ${proofPath}\n\n`);
   }
   if (expectedBaseSha) {
     await fetchRemoteBranch(context, branchName);
@@ -1042,7 +1139,7 @@ async function getIssue(context, issueNumber) {
     context.repo,
     '--json',
     'number,title,body,url,state,labels,comments',
-  ], { timeoutMs: context.options.timeoutMs });
+  ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
   return JSON.parse(result.stdout);
 }
 
@@ -1058,7 +1155,7 @@ async function listIssuesByRunId(context) {
     '1000',
     '--json',
     'number,title,body,url,state,labels,comments',
-  ], { timeoutMs: context.options.timeoutMs });
+  ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
   return JSON.parse(result.stdout).filter((issue) => issue.title.includes(`[live-smoke:${context.runId}]`));
 }
 
@@ -1076,7 +1173,7 @@ async function findPullRequestByBranch(context, branchName) {
     'number,url,isDraft,headRefName,baseRefName,title',
     '--limit',
     '10',
-  ], { timeoutMs: context.options.timeoutMs });
+  ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
   const pullRequests = JSON.parse(result.stdout);
   return pullRequests[0];
 }
@@ -1090,7 +1187,7 @@ async function getPullRequestBody(context, number) {
     context.repo,
     '--json',
     'body',
-  ], { timeoutMs: context.options.timeoutMs });
+  ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
   return JSON.parse(result.stdout).body;
 }
 
@@ -1178,7 +1275,11 @@ async function bestEffort(context, label, fn) {
 }
 
 async function inferRepo() {
-  const result = await runCommand('gh', ['repo', 'view', '--json', 'nameWithOwner'], { cwd: sourceRoot, timeoutMs: defaultTimeoutMs });
+  const result = await runCommand('gh', ['repo', 'view', '--json', 'nameWithOwner'], {
+    cwd: sourceRoot,
+    timeoutMs: defaultTimeoutMs,
+    retryTransient: true,
+  });
   const parsed = JSON.parse(result.stdout);
   if (typeof parsed.nameWithOwner !== 'string') {
     throw new Error('Could not infer GitHub repo from gh repo view');
@@ -1187,7 +1288,10 @@ async function inferRepo() {
 }
 
 async function defaultBranchFor(repo) {
-  const result = await runCommand('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef'], { timeoutMs: defaultTimeoutMs });
+  const result = await runCommand('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef'], {
+    timeoutMs: defaultTimeoutMs,
+    retryTransient: true,
+  });
   const parsed = JSON.parse(result.stdout);
   const name = parsed.defaultBranchRef?.name;
   if (typeof name !== 'string' || name.length === 0) {
@@ -1256,9 +1360,11 @@ function repoNameOf(repo) {
 }
 
 async function runPackagedCli(context, args) {
+  const readOnly = isReadOnlyPackagedCliArgs(args);
   return runCommand(process.execPath, [context.cliPath, ...args], {
     cwd: context.targetRoot || sourceRoot,
     timeoutMs: context.options.timeoutMs,
+    retryTransient: readOnly,
   });
 }
 
@@ -1278,7 +1384,34 @@ async function fetchRemoteBranch(context, branchName) {
   ], { timeoutMs: context.options.timeoutMs });
 }
 
+function isReadOnlyPackagedCliArgs(args) {
+  const command = args[0];
+  return command === '--help'
+    || command === '--version'
+    || command === 'health'
+    || command === 'doctor'
+    || command === 'status'
+    || (command === 'setup' && args.includes('--dry-run'));
+}
+
 async function runCommand(command, args, options = {}) {
+  const attempts = options.retryTransient ? 3 : 1;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await runCommandOnce(command, args, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isTransientCommandError(error)) {
+        throw error;
+      }
+      await sleep(1000 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function runCommandOnce(command, args, options = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -1319,6 +1452,19 @@ async function runCommand(command, args, options = {}) {
       reject(new Error(`Command failed (${status}): ${command} ${args.join(' ')}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
     });
   });
+}
+
+function isTransientCommandError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /stream error: stream ID \d+; CANCEL; received from peer/iu.test(message)
+    || /HTTP 5\d\d/iu.test(message)
+    || /TLS handshake timeout/iu.test(message)
+    || /connection reset by peer/iu.test(message)
+    || /network is unreachable/iu.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 async function appendReport(context, text) {
@@ -1371,6 +1517,13 @@ async function writeVisualProofScript(root) {
   return scriptPath;
 }
 
+async function writeAcceptanceProofScript(root) {
+  const scriptPath = join(root, 'live-smoke-acceptance-proof.mjs');
+  await writeFile(scriptPath, acceptanceProofSource(), 'utf8');
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 function visualProofSource() {
   return String.raw`#!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
@@ -1392,6 +1545,71 @@ try {
 }
 
 process.stdout.write('live smoke screenshot proof written to ' + screenshotPath + '\n');
+`;
+}
+
+function acceptanceProofSource() {
+  return String.raw`#!/usr/bin/env node
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+const mode = process.argv[2] ?? 'pass';
+const proofDir = process.env.CODEX_ORCHESTRATOR_PROOF_DIR;
+const reportPath = process.env.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+const issueNumber = Number(process.env.CODEX_ORCHESTRATOR_ISSUE_NUMBER ?? 0);
+const artifactDir = process.env.CODEX_ORCHESTRATOR_ARTIFACT_DIR ?? '.codex-orchestrator/proofs';
+
+if (!proofDir || !reportPath || !Number.isInteger(issueNumber) || issueNumber < 1) {
+  throw new Error('acceptance proof requires CODEX_ORCHESTRATOR_PROOF_DIR, CODEX_ORCHESTRATOR_PROOF_REPORT_PATH, and CODEX_ORCHESTRATOR_ISSUE_NUMBER');
+}
+
+mkdirSync(proofDir, { recursive: true });
+const artifactPath = join(proofDir, 'live-smoke-proof.txt');
+const artifactRef = artifactDir.replace(/\/+$/, '') + '/issue-' + issueNumber + '/live-smoke-proof.txt';
+writeFileSync(artifactPath, 'live smoke acceptance proof for #' + issueNumber + ' mode=' + mode + '\n', 'utf8');
+
+if (mode === 'product-diff') {
+  const productPath = join('src', 'live-smoke', 'proof-side-effect-' + issueNumber + '.ts');
+  mkdirSync(dirname(productPath), { recursive: true });
+  writeFileSync(productPath, 'export const proofSideEffect' + issueNumber + ' = true;\n', 'utf8');
+}
+
+const proofReady = existsSync(join('src', 'live-smoke', 'issue-' + issueNumber + '-proof-ready.ts'));
+const shouldPass = mode === 'pass' || mode === 'low-confidence' || mode === 'product-diff' || (mode === 'rework' && proofReady);
+const confidence = mode === 'low-confidence' ? 'medium' : 'high';
+const reportStatus = shouldPass ? 'passed' : 'needs-rework';
+const criterionStatus = shouldPass ? 'passed' : 'failed';
+
+writeFileSync(reportPath, JSON.stringify({
+  status: reportStatus,
+  criteria: [{
+    id: 'ac-live-smoke',
+    description: 'Live smoke acceptance proof artifact exists and maps to the issue acceptance marker.',
+    status: criterionStatus,
+    confidence,
+    reasoningSummary: shouldPass
+      ? 'The runner-owned proof command produced a durable smoke-output artifact for the acceptance criterion.'
+      : 'The implementation has not produced the proof-ready marker required by this scenario.',
+    artifactRefs: [artifactRef],
+  }],
+  artifacts: [{
+    type: 'smoke-output',
+    path: artifactRef,
+    description: 'Live smoke acceptance proof output',
+  }],
+  proofPhaseDiff: {
+    allowedProofPaths: [artifactRef],
+    forbiddenProductPaths: [],
+  },
+  residualRisks: [],
+  reworkRequest: shouldPass ? undefined : {
+    summary: 'Implementation rework must create the proof-ready live smoke marker.',
+    requiredChanges: ['Create src/live-smoke/issue-' + issueNumber + '-proof-ready.ts during implementation rework.'],
+    evidenceRefs: [artifactRef],
+  },
+}, null, 2), 'utf8');
+
+process.stdout.write('live smoke acceptance proof wrote ' + reportPath + '\n');
 `;
 }
 
@@ -1461,6 +1679,27 @@ if (prompt.includes('# Fresh-Context Review')) {
     writeVisualChange(issueNumber, runId);
     writeScopedReport(reportPath, ['components/live-smoke/issue-' + issueNumber + '.tsx', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
+  case 'acceptance-proof':
+  case 'acceptance-proof-low-confidence':
+  case 'acceptance-proof-product-diff':
+    writeAcceptanceChange(issueNumber, runId, scenario, false);
+    writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
+    break;
+  case 'acceptance-proof-rework': {
+    const acceptanceProofReady = prompt.includes('automatic rework attempt (#1)');
+    writeAcceptanceChange(issueNumber, runId, scenario, acceptanceProofReady);
+    writeScopedReport(
+      reportPath,
+      acceptanceProofReady
+        ? [
+          'src/live-smoke/issue-' + issueNumber + '.ts',
+          'src/live-smoke/issue-' + issueNumber + '-proof-ready.ts',
+          'test/live-smoke/issue-' + issueNumber + '.test.ts',
+        ]
+        : ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+    );
+    break;
+  }
   case 'quality-missing-tdd':
     writeCodeChange(issueNumber, runId, 'quality-missing-tdd');
     writeScopedReport(
@@ -1576,6 +1815,28 @@ function writeVisualChange(issue, run) {
     'export const LiveSmokeVisualIssue' + issue + ' = ' + JSON.stringify({ issue, run, kind: 'visual-proof' }) + ';\n',
     'utf8',
   );
+  writeFileSync(
+    join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
+    'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
+    'utf8',
+  );
+}
+
+function writeAcceptanceChange(issue, run, kind, proofReady) {
+  mkdirSync('src/live-smoke', { recursive: true });
+  mkdirSync('test/live-smoke', { recursive: true });
+  writeFileSync(
+    join('src', 'live-smoke', 'issue-' + issue + '.ts'),
+    'export const liveSmokeAcceptanceIssue' + issue + ' = ' + JSON.stringify({ issue, run, kind, proofReady }) + ';\n',
+    'utf8',
+  );
+  if (proofReady) {
+    writeFileSync(
+      join('src', 'live-smoke', 'issue-' + issue + '-proof-ready.ts'),
+      'export const liveSmokeAcceptanceProofReady' + issue + ' = true;\n',
+      'utf8',
+    );
+  }
   writeFileSync(
     join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
     'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',

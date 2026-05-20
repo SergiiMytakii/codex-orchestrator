@@ -39,7 +39,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { shouldRequestImplementationRework } from './rework-policy.js';
+import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -127,7 +127,10 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       requiredBaseSha: resolvedBase.sha,
       allowResume: true,
     });
-    const maxReworkAttempts = config.loopPolicy.rework.maxAttempts;
+    const maxReworkAttempts = Math.max(
+      config.loopPolicy.rework.maxAttempts,
+      config.reviewGates.acceptanceProof.maxIterations - 1,
+    );
     let rework: { attempt: number; blockedReasons: string[] } | undefined;
     let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
 
@@ -248,7 +251,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
 
       if (
         publishability.status === 'blocked'
-        && attempt < maxReworkAttempts
+        && attempt < maxReworkAttemptsForReasons(publishability.reasons, config)
         && shouldRequestImplementationRework(publishability.reasons, config)
       ) {
         rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };

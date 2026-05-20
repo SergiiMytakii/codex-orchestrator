@@ -16,6 +16,7 @@ import {
   isRunnerVisualValidation,
   isStrongVisualValidation,
   regexMatches,
+  runnerVisualProofPolicy,
   shouldApplyVisualProofGate,
   validationText,
 } from './review-gate-policy.js';
@@ -48,7 +49,8 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
   }
 
   const visualProof = input.config.reviewGates.visualProof;
-  const runnerCommand = visualProof.runnerValidationCommand?.trim() ?? '';
+  const runnerPolicy = runnerVisualProofPolicy(input.config);
+  const runnerCommand = runnerPolicy.commandTemplate ?? '';
 
   const runnerVisualValidation = input.validation.filter(isRunnerVisualValidation);
   const hasPassedRunnerVisualValidation = runnerVisualValidation.some((line) =>
@@ -68,7 +70,7 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     const worktreePath = input.worktreePath;
     return acceptsScreenshotArtifactPath({
       artifactPath: artifact.path,
-      artifactDir: visualProof.artifactDir,
+      artifactDir: runnerPolicy.artifactDir,
       changedFiles: input.changedFiles,
       hasPassedRunnerVisualValidation,
       exists: worktreePath ? (path) => existsSync(join(worktreePath, path)) : undefined,
@@ -87,7 +89,7 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
 
   if (screenshotArtifacts.length < visualProof.minScreenshotArtifacts) {
     warnings.push(
-      `Visual proof warning: expected at least ${visualProof.minScreenshotArtifacts} screenshot artifact under ${visualProof.artifactDir} or a screenshot URL.`,
+      `Visual proof warning: expected at least ${visualProof.minScreenshotArtifacts} screenshot artifact under ${runnerPolicy.artifactDir} or a screenshot URL.`,
     );
   }
 
@@ -153,6 +155,6 @@ function hasPassedRunnerVisualProofEvidence(input: ReviewGateInput): boolean {
   }
 
   return input.changedFiles.some((file) => {
-    return isRunnerVisualProofCodeArtifactPath(file, input.config.reviewGates.visualProof.artifactDir);
+    return isRunnerVisualProofCodeArtifactPath(file, runnerVisualProofPolicy(input.config).artifactDir);
   });
 }

@@ -117,12 +117,12 @@ async function collectReadinessChecks(
     'phase profile config is valid and missing profiles fall back to global Codex config',
   ));
   checks.push(check(
-    'visual-proof',
-    'Visual proof prerequisites',
-    config.reviewGates.visualProof.enabled && !config.reviewGates.visualProof.runnerValidationCommand ? 'warn' : 'pass',
-    config.reviewGates.visualProof.enabled
-      ? 'visual proof gate is enabled'
-      : 'visual proof gate is disabled',
+    'acceptance-proof',
+    'Acceptance proof prerequisites',
+    config.reviewGates.acceptanceProof.enabled && !config.reviewGates.acceptanceProof.runnerValidationCommand ? 'warn' : 'pass',
+    config.reviewGates.acceptanceProof.enabled
+      ? 'acceptance proof gate is enabled'
+      : 'acceptance proof gate is disabled',
   ));
   return checks;
 }

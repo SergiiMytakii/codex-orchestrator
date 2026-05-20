@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,11 @@ import { normalizePath } from '../path-policy.js';
 import type { ShellCommandExecutor } from '../process/command.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+import {
+  assertAcceptanceProofReport,
+  evaluateAcceptanceProofReport,
+  type AcceptanceProofReport,
+} from './acceptance-proof.js';
 import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
 
 interface ScreenshotArtifactSnapshot {
@@ -49,11 +55,12 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   const runtimeDir = runnerVisualProofRuntimeDir(input.worktreePath, input.issueNumber);
   const playwrightProfileDir = join(runtimeDir, 'playwright-profile');
   const playwrightBrowsersDir = join(runtimeDir, 'ms-playwright');
+  const proofReportPath = join(proofDir, 'acceptance-proof-report.json');
   await mkdir(proofDir, { recursive: true });
   await mkdir(playwrightProfileDir, { recursive: true });
   await mkdir(playwrightBrowsersDir, { recursive: true });
 
-  const command = renderVisualProofCommand(commandTemplate, input, proofDir);
+  const command = renderVisualProofCommand(commandTemplate, input, proofDir, policy.artifactDir);
   const before = new Map((await listScreenshotArtifacts(input.worktreePath, proofDir)).map((artifact) => [artifact.path, artifact]));
   const result = await input.shellExecutor(command, {
     cwd: input.worktreePath,
@@ -64,6 +71,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: policy.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
+      CODEX_ORCHESTRATOR_PROOF_REPORT_PATH: proofReportPath,
       CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR: playwrightProfileDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
@@ -84,13 +92,52 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     path,
     description: `runner visual proof ${path.split('/').at(-1) ?? path}`,
   }));
+  const proofReport = await readAcceptanceProofReport(proofReportPath);
+  if (proofReport.kind === 'invalid') {
+    return {
+      validation: [{
+        command,
+        status: 'failed',
+        summary: proofReport.message,
+      }],
+      artifacts,
+    };
+  }
+  if (proofReport.kind === 'valid') {
+    const evaluation = evaluateAcceptanceProofReport({
+      config: input.config,
+      report: proofReport.report,
+      proofPhaseChangedFiles: [],
+      artifactExists: (path) => existsSync(join(input.worktreePath, path)),
+    });
+    if (result.exitCode !== 0) {
+      return {
+        validation: [{
+          command,
+          status: 'failed',
+          summary: `runner acceptance proof failed: command exited ${result.exitCode}; ${result.stderr || result.stdout || 'no output'}`,
+        }],
+        artifacts: mergeProofArtifacts(artifacts, proofReport.report.artifacts),
+      };
+    }
+    return {
+      validation: [{
+        command,
+        status: evaluation.ok ? 'passed' : 'failed',
+        summary: evaluation.ok
+          ? `runner acceptance proof passed: ${proofReport.report.criteria.length} criterion/criteria mapped to artifacts.`
+          : `runner acceptance proof failed: ${evaluation.reasons.join('; ')}`,
+      }],
+      artifacts: mergeProofArtifacts(artifacts, proofReport.report.artifacts),
+    };
+  }
 
   if (result.exitCode !== 0) {
     return {
       validation: [{
         command,
-        status: 'skipped',
-        summary: `runner visual proof warning: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`,
+        status: policy.blockOnMissingProof ? 'failed' : 'skipped',
+        summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`,
       }],
       artifacts,
     };
@@ -101,8 +148,8 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     return {
       validation: [{
         command,
-        status: 'skipped',
-        summary: `runner visual proof warning: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
+        status: policy.blockOnMissingProof ? 'failed' : 'skipped',
+        summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
       }],
       artifacts,
     };
@@ -116,6 +163,49 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     }],
     artifacts,
   };
+}
+
+type AcceptanceProofReportReadResult =
+  | { kind: 'missing' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'valid'; report: AcceptanceProofReport };
+
+async function readAcceptanceProofReport(path: string): Promise<AcceptanceProofReportReadResult> {
+  let content = '';
+  try {
+    content = await readFile(path, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return { kind: 'missing' };
+    }
+    throw error;
+  }
+
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    assertAcceptanceProofReport(parsed);
+    return { kind: 'valid', report: parsed };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid acceptance proof report';
+    return { kind: 'invalid', message };
+  }
+}
+
+function mergeProofArtifacts(
+  screenshots: ScopedCompletionReport['artifacts'],
+  proofArtifacts: ScopedCompletionReport['artifacts'],
+): ScopedCompletionReport['artifacts'] {
+  const seen = new Set(screenshots.map((artifact) => artifact.url ?? artifact.path ?? artifact.description));
+  const merged = [...screenshots];
+  for (const artifact of proofArtifacts) {
+    const key = artifact.url ?? artifact.path ?? artifact.description;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(artifact);
+  }
+  return merged;
 }
 
 function runnerSharedStateEnv(input: RunnerVisualProofInput): Record<string, string> {
@@ -190,10 +280,15 @@ function runnerPassthroughEnv(names: string[]): Record<string, string> {
   return env;
 }
 
-function renderVisualProofCommand(command: string, input: RunnerVisualProofInput, proofDir: string): string {
+function renderVisualProofCommand(
+  command: string,
+  input: RunnerVisualProofInput,
+  proofDir: string,
+  artifactDir: string,
+): string {
   return command
     .replaceAll('${issueNumber}', String(input.issueNumber))
-    .replaceAll('${artifactDir}', input.config.reviewGates.visualProof.artifactDir)
+    .replaceAll('${artifactDir}', artifactDir)
     .replaceAll('${proofDir}', proofDir)
     .replaceAll('${worktreePath}', input.worktreePath);
 }

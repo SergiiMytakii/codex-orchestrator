@@ -200,6 +200,65 @@ test('implementation publishability does not fail when an npm script check is mi
   assert.match(result.status === 'publish-ready' ? result.validation.map((l) => l.status).join(',') : '', /skipped/);
 });
 
+test('implementation publishability blocks product-code changes created during acceptance proof', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: ['src/feature.ts'],
+    validation: [
+      {
+        command: 'TDD red-to-green',
+        status: 'passed',
+        summary: 'Focused behavior test failed before implementation and passed after implementation.',
+      },
+      { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+    ],
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: { tdd: { requireTestChange: false }, cleanupReview: { enabled: false } },
+        acceptanceProof: {
+          runnerValidationCommand: 'node proof.mjs',
+          issueTextPatterns: ['acceptance proof'],
+          changedPathGlobs: ['src/**'],
+          proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
+        },
+        visualProof: {
+          runnerValidationCommand: 'node proof.mjs',
+          issueTextPatterns: ['acceptance proof'],
+          changedPathGlobs: ['src/**'],
+        },
+      } as any,
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Acceptance proof for API change', body: 'Needs acceptance proof.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => {
+      await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "proof changed product code";\n', 'utf8');
+      await writeFile(join(repo, 'src', 'proof-side-effect.ts'), 'export const leaked = true;\n', 'utf8');
+      return { stdout: 'proof edited product code', stderr: '', exitCode: 0 };
+    },
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /product-code changes during acceptance proof/i);
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /src\/feature\.ts/);
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /src\/proof-side-effect\.ts/);
+});
+
 test('implementation publishability can allow repo-wide lint failures when touched-files lint passes (policy touched-only)', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -229,7 +288,11 @@ test('implementation publishability can allow repo-wide lint failures when touch
         missingNpmScript: 'skip',
         lintBaseline: { mode: 'touched-only', touchedFilesCommand: 'npm run lint:touched' },
       },
-      reviewGates: { quality: { enabled: false } } as any,
+      reviewGates: {
+        quality: { enabled: false },
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
+      } as any,
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({ number: 155, title: '[UI] Lint baseline', body: 'Fix only touched files.' }),
     worktreePath: repo,
@@ -282,6 +345,7 @@ function config(overrides: Partial<CodexOrchestratorConfig> = {}): CodexOrchestr
         },
         codeReview: { ...base.reviewGates.quality.codeReview, ...overrides.reviewGates?.quality?.codeReview },
       },
+      acceptanceProof: { ...base.reviewGates.acceptanceProof, ...overrides.reviewGates?.acceptanceProof },
       visualProof: { ...base.reviewGates.visualProof, ...overrides.reviewGates?.visualProof },
     },
   };

@@ -12,8 +12,8 @@ This document holds repo-specific execution rules that are too detailed for
 - `docs/adr/0001-runner-owned-loop-policy.md` records the decision that loop
   policy, rework bounds, durable memory, and publication remain runner-owned.
 - `.codex-orchestrator/config.json` is this repository's live runner policy for
-  checks, review gates, visual proof, deny rules, branches, issue labels, and
-  workflow prompt paths.
+  checks, review gates, acceptance proof, deny rules, branches, issue labels,
+  and workflow prompt paths.
 - `package.json` is the source of truth for local npm scripts.
 - `tsconfig.json` is the source of truth for TypeScript strictness and module
   resolution.
@@ -30,7 +30,8 @@ branch policy, or publication behavior.
    - `docs/adr/0001-runner-owned-loop-policy.md` for loop ownership and
      publication authority.
    - `.codex-orchestrator/config.json` for configured checks, review gates,
-     deny paths, branch templates, and workflow prompt routing.
+     acceptance proof, deny paths, branch templates, and workflow prompt
+     routing.
    - `package.json` before adding, removing, or relying on npm scripts.
    - `tsconfig.json` before changing TypeScript module or import behavior.
 2. Confirm whether the change affects runtime paths covered by
@@ -76,9 +77,10 @@ smoke suite creates or updates real GitHub issues, branches, and draft PRs.
 - Release changes: update `CHANGELOG.md`, keep release guidance concise in
   `AGENTS.md`, and avoid manual `npm publish` unless the GitHub release
   workflow is unavailable.
-- Visual proof work: follow `reviewGates.visualProof` in
-  `.codex-orchestrator/config.json` and `docs/live-smoke-checklist.md`; missing
-  local browser/device tooling must be reported as a concrete limitation.
+- Acceptance proof work: follow `reviewGates.acceptanceProof` in
+  `.codex-orchestrator/config.json`; `reviewGates.visualProof` is a
+  compatibility adapter for screenshot/mobile proof. Missing local
+  browser/device tooling must be reported as a concrete limitation.
 
 ## Review Gates
 

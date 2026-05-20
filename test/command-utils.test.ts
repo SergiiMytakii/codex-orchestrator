@@ -27,6 +27,8 @@ test('runner config reader backfills package-owned proof command and drops unsup
     workflows: fallbackWorkflows,
   });
   delete staleConfig.reviewGates.visualProof.runnerValidationCommand;
+  staleConfig.loopPolicy.rework.retryableBlockers = staleConfig.loopPolicy.rework.retryableBlockers
+    .filter((blocker) => blocker !== 'failed-acceptance-proof');
   await writeFile(
     join(targetRoot, '.codex-orchestrator', 'config.json'),
     JSON.stringify(staleConfig),
@@ -40,4 +42,5 @@ test('runner config reader backfills package-owned proof command and drops unsup
     config.reviewGates.visualProof.runnerValidationCommand,
     'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
   );
+  assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
 });

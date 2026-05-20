@@ -17,7 +17,8 @@ export type RetryableReworkBlocker =
   | 'invalid-completion-report'
   | 'no-changed-files'
   | 'failed-configured-checks'
-  | 'missing-quality-gate-evidence';
+  | 'missing-quality-gate-evidence'
+  | 'failed-acceptance-proof';
 export type FreshContextReviewMode = 'advisory';
 export const codexPhaseKeys = [
   'plan-parent',
@@ -151,6 +152,17 @@ export interface CodexOrchestratorConfig {
     };
   };
   reviewGates: {
+    acceptanceProof: {
+      enabled: boolean;
+      artifactDir: string;
+      issueTextPatterns: string[];
+      changedPathGlobs: string[];
+      proofOwnedPathGlobs: string[];
+      runnerValidationCommand?: string;
+      runnerTimeoutMs?: number;
+      envPassthrough?: string[];
+      maxIterations: number;
+    };
     visualProof: {
       enabled: boolean;
       artifactDir: string;
@@ -603,6 +615,21 @@ function validateChecksPolicy(policy: ObjectRecord, errors: string[]): void {
 }
 
 function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
+  const acceptanceProof = expectObject(parent, 'reviewGates.acceptanceProof', errors);
+  if (acceptanceProof) {
+    expectBoolean(acceptanceProof, 'reviewGates.acceptanceProof.enabled', errors);
+    expectString(acceptanceProof, 'reviewGates.acceptanceProof.artifactDir', errors);
+    expectStringArray(acceptanceProof, 'reviewGates.acceptanceProof.issueTextPatterns', errors);
+    expectStringArray(acceptanceProof, 'reviewGates.acceptanceProof.changedPathGlobs', errors);
+    expectStringArray(acceptanceProof, 'reviewGates.acceptanceProof.proofOwnedPathGlobs', errors);
+    expectPositiveInteger(acceptanceProof, 'reviewGates.acceptanceProof.maxIterations', errors);
+    expectOptionalString(acceptanceProof, 'reviewGates.acceptanceProof.runnerValidationCommand', errors);
+    expectOptionalPositiveInteger(acceptanceProof, 'reviewGates.acceptanceProof.runnerTimeoutMs', errors);
+    expectOptionalStringArray(acceptanceProof, 'reviewGates.acceptanceProof.envPassthrough', errors);
+    validateEnvironmentVariableNames(acceptanceProof, 'reviewGates.acceptanceProof.envPassthrough', errors);
+    validateRegexArray(acceptanceProof, 'reviewGates.acceptanceProof.issueTextPatterns', errors);
+  }
+
   const visualProof = expectObject(parent, 'reviewGates.visualProof', errors);
   if (visualProof) {
     expectBoolean(visualProof, 'reviewGates.visualProof.enabled', errors);
@@ -753,6 +780,7 @@ function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): Retrya
     'no-changed-files',
     'failed-configured-checks',
     'missing-quality-gate-evidence',
+    'failed-acceptance-proof',
   ] as const;
   const value = readPath(parent, 'loopPolicy.rework.retryableBlockers');
 

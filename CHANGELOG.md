@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.33] - 2026-05-20
+
+### Added
+- Added canonical `reviewGates.acceptanceProof` policy with proof-owned path
+  classification and machine validation for high-confidence proof reports.
+- Added live smoke scenarios for canonical Acceptance Proof pass, proof rework,
+  low-confidence blocking, and proof-phase product-diff blocking.
+
+### Changed
+- Kept `reviewGates.visualProof` as a compatibility adapter while routing
+  runner prompts and proof policy through Acceptance Proof.
+- Proof-phase product-code changes now block publishability instead of being
+  silently committed as verification output.
+
 ## [0.1.32] - 2026-05-19
 
 ### Added

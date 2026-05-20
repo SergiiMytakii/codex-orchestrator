@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import { applyTargetPackageConfigDefaults, projectConfigPath } from '../setup/project-config.js';
+import { applyTargetPackageConfigDefaults, defaultAcceptanceProofConfig, projectConfigPath } from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
@@ -30,15 +30,59 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
     return value;
   }
   const runner = root.runner as Record<string, unknown>;
-  if ('allowAgentLocalCommits' in runner) {
-    return value;
-  }
+  const reviewGates = typeof root.reviewGates === 'object' && root.reviewGates !== null && !Array.isArray(root.reviewGates)
+    ? root.reviewGates as Record<string, unknown>
+    : undefined;
+  const visualProof = typeof reviewGates?.visualProof === 'object' && reviewGates.visualProof !== null && !Array.isArray(reviewGates.visualProof)
+    ? reviewGates.visualProof as Record<string, unknown>
+    : undefined;
+  const acceptanceProof = typeof reviewGates?.acceptanceProof === 'object' && reviewGates.acceptanceProof !== null && !Array.isArray(reviewGates.acceptanceProof)
+    ? reviewGates.acceptanceProof as Record<string, unknown>
+    : undefined;
+  const defaultAcceptanceProof = defaultAcceptanceProofConfig();
+  const loopPolicy = typeof root.loopPolicy === 'object' && root.loopPolicy !== null && !Array.isArray(root.loopPolicy)
+    ? root.loopPolicy as Record<string, unknown>
+    : undefined;
+  const rework = typeof loopPolicy?.rework === 'object' && loopPolicy.rework !== null && !Array.isArray(loopPolicy.rework)
+    ? loopPolicy.rework as Record<string, unknown>
+    : undefined;
+  const retryableBlockers = Array.isArray(rework?.retryableBlockers)
+    ? rework.retryableBlockers.filter((item): item is string => typeof item === 'string')
+    : undefined;
   return {
     ...root,
     runner: {
       ...runner,
-      allowAgentLocalCommits: false,
+      allowAgentLocalCommits: 'allowAgentLocalCommits' in runner ? runner.allowAgentLocalCommits : false,
     },
+    ...(reviewGates
+      ? {
+          reviewGates: {
+            ...reviewGates,
+            acceptanceProof: acceptanceProof ?? {
+              ...defaultAcceptanceProof,
+              enabled: visualProof?.enabled ?? defaultAcceptanceProof.enabled,
+              artifactDir: visualProof?.artifactDir ?? defaultAcceptanceProof.artifactDir,
+              issueTextPatterns: visualProof?.issueTextPatterns ?? defaultAcceptanceProof.issueTextPatterns,
+              changedPathGlobs: visualProof?.changedPathGlobs ?? defaultAcceptanceProof.changedPathGlobs,
+              runnerValidationCommand: visualProof?.runnerValidationCommand,
+              runnerTimeoutMs: visualProof?.runnerTimeoutMs,
+              envPassthrough: visualProof?.envPassthrough ?? defaultAcceptanceProof.envPassthrough,
+            },
+          },
+        }
+      : {}),
+    ...(loopPolicy && rework && retryableBlockers
+      ? {
+          loopPolicy: {
+            ...loopPolicy,
+            rework: {
+              ...rework,
+              retryableBlockers: Array.from(new Set([...retryableBlockers, 'failed-acceptance-proof'])),
+            },
+          },
+        }
+      : {}),
   };
 }
 

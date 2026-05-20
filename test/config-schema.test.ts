@@ -22,6 +22,10 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
     assert.equal(result.value.reviewGates.visualProof.runnerTimeoutMs, 900_000);
     assert.deepEqual(result.value.reviewGates.visualProof.envPassthrough, []);
+    assert.equal(result.value.reviewGates.acceptanceProof.enabled, true);
+    assert.equal(result.value.reviewGates.acceptanceProof.artifactDir, '.codex-orchestrator/proofs');
+    assert.equal(result.value.reviewGates.acceptanceProof.maxIterations, 5);
+    assert.deepEqual(result.value.reviewGates.acceptanceProof.proofOwnedPathGlobs, ['.codex-orchestrator/proofs/**']);
     assert.equal(result.value.reviewGates.quality.enabled, true);
     assert.equal(result.value.reviewGates.quality.tdd.requireTestChange, true);
     assert.equal(result.value.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
@@ -34,6 +38,7 @@ test('accepts the expanded valid config contract', () => {
       'no-changed-files',
       'failed-configured-checks',
       'missing-quality-gate-evidence',
+      'failed-acceptance-proof',
     ]);
     assert.equal(result.value.loopPolicy.freshContextReview.enabled, false);
     assert.equal(result.value.loopPolicy.freshContextReview.mode, 'advisory');
@@ -285,6 +290,32 @@ test('rejects invalid visual proof gate config', () => {
   ]);
 });
 
+test('rejects invalid acceptance proof gate config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        issueTextPatterns: ['['],
+        proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**', ''],
+        maxIterations: 0,
+        runnerTimeoutMs: 0,
+        envPassthrough: ['CODEX_ORCHESTRATOR_LOGIN_EMAIL', 'bad-name'],
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'reviewGates.acceptanceProof.proofOwnedPathGlobs must be an array of non-empty strings',
+    'reviewGates.acceptanceProof.maxIterations must be a positive integer',
+    'reviewGates.acceptanceProof.runnerTimeoutMs must be a positive integer when provided',
+    'reviewGates.acceptanceProof.envPassthrough must contain valid environment variable names',
+    'reviewGates.acceptanceProof.issueTextPatterns contains invalid regular expression [',
+  ]);
+});
+
 test('rejects invalid quality gate config', () => {
   const result = validateConfig({
     ...validConfig,
@@ -347,7 +378,7 @@ test('rejects invalid loop policy config', () => {
     'loopPolicy.issueSelection.priorityLabels must be an array of non-empty strings',
     'loopPolicy.issueSelection.tieBreaker must be one of issue-number-asc',
     'loopPolicy.rework.maxAttempts must be a non-negative integer',
-    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence',
+    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof',
     'loopPolicy.freshContextReview.enabled must be a boolean',
     'loopPolicy.freshContextReview.mode must be one of advisory',
     'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations must be a boolean',

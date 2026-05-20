@@ -51,7 +51,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { shouldRequestImplementationRework } from './rework-policy.js';
+import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -648,7 +648,11 @@ async function executeChild(input: {
 
   let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
   let rework: { attempt: number; blockedReasons: string[] } | undefined;
-  for (let attempt = 0; attempt <= input.config.loopPolicy.rework.maxAttempts; attempt++) {
+  const maxReworkAttempts = Math.max(
+    input.config.loopPolicy.rework.maxAttempts,
+    input.config.reviewGates.acceptanceProof.maxIterations - 1,
+  );
+  for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
     const attemptNow = new Date(input.now.getTime() + attempt);
     const attemptPromptText = rework
       ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\nAddress the blockers, then produce a fresh completion report JSON for the runner.`
@@ -728,7 +732,7 @@ async function executeChild(input: {
 
     if (
       publishability.status === 'blocked'
-      && attempt < input.config.loopPolicy.rework.maxAttempts
+      && attempt < maxReworkAttemptsForReasons(publishability.reasons, input.config)
       && shouldRequestImplementationRework(publishability.reasons, input.config)
     ) {
       rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };

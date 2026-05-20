@@ -4,33 +4,41 @@ import { globMatches } from '../path-policy.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
-  const command = config.reviewGates.visualProof.runnerValidationCommand?.trim();
+  const acceptanceProof = config.reviewGates.acceptanceProof;
+  const policy = runnerVisualProofPolicy(config);
+  const command = policy.commandTemplate;
   if (!command) {
     return [
-      `For visual/UI work, if you can produce screenshot proof, save it under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include it as screenshot artifacts.`,
+      `For acceptance proof, save proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts.`,
+      'For visual/UI work, screenshots must be analyzed against the issue acceptance criteria; screenshot existence alone is not enough proof.',
       'For browser/web UI work, prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
       ...androidMobileProofPromptLines(),
       ...iosMobileProofPromptLines(),
-      'If screenshot proof is not possible in this environment, state that explicitly in skippedChecks along with the concrete reason (missing dependencies, missing credentials, dev server cannot start, etc.).',
+      'For non-visual acceptance criteria, prefer a live smoke proof that exercises observable product behavior and records the output as an artifact.',
+      'If acceptance proof is not possible in this environment, state that explicitly in skippedChecks along with the concrete reason (missing dependencies, missing credentials, dev server cannot start, etc.).',
     ];
   }
 
-  const envNames = config.reviewGates.visualProof.envPassthrough ?? [];
+  const envNames = policy.envPassthrough;
   const loginEnvLine = envNames.length > 0
-    ? `The runner visual proof command will receive these project environment variables when they exist: ${envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
-    : 'If authentication is required, make the visual proof script read credentials from environment variables configured in reviewGates.visualProof.envPassthrough; never hardcode credentials.';
+    ? `The runner acceptance proof command will receive these project environment variables when they exist: ${envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
+    : 'If authentication is required, make the acceptance proof script read credentials from environment variables configured in reviewGates.acceptanceProof.envPassthrough; never hardcode credentials.';
 
   return [
-    `For visual/UI work, prepare screenshot proof files under ${config.reviewGates.visualProof.artifactDir}/issue-${issueNumber}/ and include them as screenshot artifacts when you create them.`,
-    `After your run, the runner will execute this visual proof command outside the child Codex sandbox: ${command}.`,
+    `For acceptance proof, prepare proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts when you create them.`,
+    `After your run, the runner will execute this visual proof command outside the child Codex sandbox as the configured acceptance proof command: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
+    `Proof script repair is allowed only in these proof-owned paths: ${acceptanceProof.proofOwnedPathGlobs.join(', ')}.`,
+    'Product-code changes made during the proof phase are blockers; route missing behavior back through implementation instead.',
+    'Every required acceptance criterion must map to high-confidence artifact evidence before Draft PR Handoff.',
     'For browser/web UI work, prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
     ...androidMobileProofPromptLines(),
     ...iosMobileProofPromptLines(),
     'When this runner-owned proof command can validate the visual behavior, treat it as the primary visual proof path.',
     'Do not report browser tool unavailability as a skipped check or residual risk when the runner-owned proof command is prepared.',
     'For UI layout fixes, a focused visual proof script with concrete assertions can be the TDD evidence when regular unit tests cannot observe the layout.',
-    'Do not claim the runner-owned visual proof passed; the runner will append the passed/failed result after your run.',
+    'For non-visual acceptance criteria, prefer a live smoke proof that exercises observable product behavior and records the output as an artifact.',
+    'Do not claim the runner-owned visual proof passed or acceptance proof passed; the runner will append the passed/failed result after your run.',
     'The runner will expose CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR for proof scripts that need a stable Playwright user data directory.',
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
@@ -80,18 +88,21 @@ export function shouldApplyVisualProofGate(input: {
   issue: GitHubIssue;
   changedFiles: string[];
 }): boolean {
+  const acceptanceProof = input.config.reviewGates.acceptanceProof;
   const visualProof = input.config.reviewGates.visualProof;
-  if (!visualProof.enabled) {
+  if (!acceptanceProof.enabled) {
     return false;
   }
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
-  const issueLooksVisual = visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
-  const changedUiFiles = input.changedFiles.filter((path) =>
-    visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
+  const issueNeedsAcceptanceProof = acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText))
+    || (visualProof.enabled && visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText)));
+  const changedProofFiles = input.changedFiles.filter((path) =>
+    acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path))
+      || (visualProof.enabled && visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path))),
   );
 
-  return issueLooksVisual || changedUiFiles.length > 0;
+  return issueNeedsAcceptanceProof || changedProofFiles.length > 0;
 }
 
 export function hasPassedValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
@@ -127,7 +138,7 @@ export function isStrongVisualValidation(line: RunnerValidationLine): boolean {
 }
 
 export function isRunnerVisualValidation(line: RunnerValidationLine): boolean {
-  return /runner visual proof/iu.test(validationText(line));
+  return /runner (?:visual|acceptance) proof/iu.test(validationText(line));
 }
 
 export function regexMatches(pattern: string, text: string): boolean {
@@ -140,15 +151,38 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
   envPassthrough: string[];
   timeoutMs?: number;
   minScreenshotArtifacts: number;
+  blockOnMissingProof: boolean;
 } {
   const visualProof = config.reviewGates.visualProof;
+  const acceptanceProof = config.reviewGates.acceptanceProof;
+  const preferLegacyVisual = isLegacyVisualProofOverride(acceptanceProof, visualProof);
+  const commandTemplate = preferLegacyVisual
+    ? visualProof.runnerValidationCommand?.trim()
+    : acceptanceProof.runnerValidationCommand?.trim() || visualProof.runnerValidationCommand?.trim();
   return {
-    commandTemplate: visualProof.runnerValidationCommand?.trim() || undefined,
-    artifactDir: visualProof.artifactDir,
-    envPassthrough: visualProof.envPassthrough ?? [],
-    timeoutMs: visualProof.runnerTimeoutMs,
+    commandTemplate: commandTemplate || undefined,
+    artifactDir: preferLegacyVisual ? visualProof.artifactDir : acceptanceProof.artifactDir,
+    envPassthrough: preferLegacyVisual
+      ? visualProof.envPassthrough ?? acceptanceProof.envPassthrough ?? []
+      : acceptanceProof.envPassthrough?.length
+        ? acceptanceProof.envPassthrough
+        : visualProof.envPassthrough ?? [],
+    timeoutMs: preferLegacyVisual
+      ? visualProof.runnerTimeoutMs ?? acceptanceProof.runnerTimeoutMs
+      : acceptanceProof.runnerTimeoutMs ?? visualProof.runnerTimeoutMs,
     minScreenshotArtifacts: visualProof.minScreenshotArtifacts,
+    blockOnMissingProof: !preferLegacyVisual,
   };
+}
+
+function isLegacyVisualProofOverride(
+  acceptanceProof: CodexOrchestratorConfig['reviewGates']['acceptanceProof'],
+  visualProof: CodexOrchestratorConfig['reviewGates']['visualProof'],
+): boolean {
+  const defaultMobileCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
+  return (acceptanceProof.runnerValidationCommand?.trim() || '') === defaultMobileCommand
+    && Boolean(visualProof.runnerValidationCommand?.trim())
+    && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand;
 }
 
 function hasTddRedEvidence(text: string): boolean {

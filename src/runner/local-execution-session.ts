@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitWorktreeManager, SessionCommitInfo } from '../git/worktree.js';
 import type { GitHubIssue } from '../github/issues.js';
@@ -5,6 +9,7 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+import { classifyAcceptanceProofDiff } from './acceptance-proof.js';
 import { evaluateReviewGates } from './review-gates.js';
 import {
   validateChangedPaths,
@@ -22,7 +27,7 @@ export interface LocalExecutionPhaseResult {
   phaseId: string;
   status: 'passed' | 'failed';
   validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>;
-  artifacts: Array<{ type: 'log' | 'screenshot' | 'other'; path?: string; url?: string; description: string }>;
+  artifacts: ScopedCompletionReport['artifacts'];
   residualRisks: string[];
 }
 
@@ -218,6 +223,7 @@ export async function runImplementationPublishabilityCheck(
       residualRisks: [...report.residualRisks, ...checkWarnings],
     };
   }
+  const beforeProofFileHashes = await snapshotFileHashes(input.worktreePath, changedFiles);
   const runnerVisualProof = await runRunnerVisualProof({
     config: input.config,
     issue: input.issue,
@@ -233,12 +239,31 @@ export async function runImplementationPublishabilityCheck(
     ...report,
     artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
   };
-  if (runnerVisualProof.artifacts.length > 0) {
+  if (runnerVisualProof.validation.length > 0 || runnerVisualProof.artifacts.length > 0) {
+    const beforeProofChangedFiles = new Set(changedFiles);
     changeSet = await input.git.collectSessionChangeSet({
       worktreePath: input.worktreePath,
       baseHead: input.beforeHead,
     });
+    const proofPhaseChangedFiles = [
+      ...changeSet.changedPaths.filter((path) => !beforeProofChangedFiles.has(path)),
+      ...await changedFileHashes(input.worktreePath, beforeProofFileHashes),
+    ];
     changedFiles = changeSet.changedPaths;
+    const proofDiff = classifyAcceptanceProofDiff(input.config, proofPhaseChangedFiles);
+    if (proofDiff.forbiddenProductPaths.length > 0) {
+      return {
+        status: 'blocked',
+        reasons: [
+          `Acceptance proof produced product-code changes during acceptance proof: ${proofDiff.forbiddenProductPaths.join(', ')}.`,
+        ],
+        changedFiles,
+        validation,
+        skippedChecks: report.skippedChecks,
+        residualRisks: report.residualRisks,
+        commits: changeSet.commits,
+      };
+    }
   }
 
   const residualRisks = [...report.residualRisks];
@@ -305,6 +330,35 @@ export async function runImplementationPublishabilityCheck(
     residualRisks,
     commits: changeSet.commits,
   };
+}
+
+async function snapshotFileHashes(worktreePath: string, paths: string[]): Promise<Map<string, string | undefined>> {
+  const hashes = new Map<string, string | undefined>();
+  await Promise.all(paths.map(async (path) => {
+    hashes.set(path, await fileHash(join(worktreePath, path)));
+  }));
+  return hashes;
+}
+
+async function changedFileHashes(worktreePath: string, before: Map<string, string | undefined>): Promise<string[]> {
+  const changed: string[] = [];
+  await Promise.all(Array.from(before.entries()).map(async ([path, hash]) => {
+    if (await fileHash(join(worktreePath, path)) !== hash) {
+      changed.push(path);
+    }
+  }));
+  return changed.sort((left, right) => left.localeCompare(right));
+}
+
+async function fileHash(path: string): Promise<string | undefined> {
+  try {
+    return createHash('sha256').update(await readFile(path)).digest('hex');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 async function defaultPassingLocalPhaseExecutor(input: { phaseId: string; worktreePath: string }) {

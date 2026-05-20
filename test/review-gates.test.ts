@@ -192,6 +192,11 @@ test('visual proof policy uses configured issue text and changed path globs with
     ...validConfig,
     reviewGates: {
       ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        issueTextPatterns: ['needs visual proof'],
+        changedPathGlobs: ['apps/web/**/*.tsx'],
+      },
       visualProof: {
         ...validConfig.reviewGates.visualProof,
         issueTextPatterns: ['needs visual proof'],
