@@ -12,6 +12,7 @@ import type { GitHubLabelAdapter, LabelPlan } from './labels.js';
 import { planLabels } from './labels.js';
 import {
   assertNoRuntimeState,
+  applyTargetPackageConfigDefaults,
   buildProjectConfig,
   mergeExistingProjectConfig,
   projectConfigPath,
@@ -77,7 +78,10 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
     workflows,
     baseBranch: inferredBaseBranch,
   });
-  const config = mergeExistingProjectConfig(defaultConfig, existingConfig);
+  const config = await applyTargetPackageConfigDefaults(
+    options.targetRoot,
+    mergeExistingProjectConfig(defaultConfig, existingConfig),
+  );
   persistDiscoveredCodexCommand(config, discoveredCodexCommand);
   const validation = validateConfig(config);
 

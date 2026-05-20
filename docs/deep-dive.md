@@ -210,8 +210,10 @@ Typical checks include commands such as:
 }
 ```
 
-By default, a missing `npm run <script>` command is reported as a skipped
-warning instead of a hard failure. Repositories can change that with
+Setup and runtime config loading adapt package-owned default `npm run <script>`
+checks to the target `package.json`: unsupported default npm checks are omitted
+when `checksPolicy.missingNpmScript` is `skip`, while custom checks are
+preserved. Repositories can make missing scripts fail with
 `checksPolicy.missingNpmScript`.
 
 For repositories with existing lint debt, `checksPolicy.lintBaseline.mode` can
@@ -242,7 +244,15 @@ command when issue text or changed paths indicate UI work.
 
 Visual proof is intentionally runner-owned. Codex can implement the UI, but the
 runner decides whether proof is required and executes the configured proof
-command after implementation.
+command after implementation. Runtime config loading backfills the package-owned
+mobile proof command for older configs where visual proof is enabled but no
+runner command is set.
+
+Child Codex processes receive a mobile-device guard directory at the front of
+`PATH`. The guard blocks direct device/emulator control through `adb`,
+`emulator`, Flutter device-control subcommands, and `xcrun simctl`. Runner-owned
+visual proof commands do not run through that guarded Codex environment; they use
+the shared mobile lease described below.
 
 The proof command usually runs browser automation, such as Playwright. The
 runner provides environment variables for:
@@ -252,7 +262,9 @@ runner provides environment variables for:
 - proof directory;
 - Playwright profile directory;
 - worktree path;
-- changed files.
+- changed files;
+- target root and shared state directory when the runner knows them;
+- mobile device lock directory for runner-owned Android proof.
 
 Screenshot files created under the proof directory are attached to the PR and
 issue review report. If a proof command exits successfully but does not create
@@ -263,14 +275,16 @@ For mobile UI work, setup uses the package-owned
 command detects Flutter, native Android, and native iOS projects. It tries
 Android first when an Android target exists, resolving SDK tools from
 environment variables, `PATH`, and the default macOS, Linux, and Windows SDK
-locations. If Android tooling or devices are unavailable on macOS and an iOS
-target exists, it falls back to the iOS simulator. Native iOS projects go
-directly through Xcode simulator tooling with a writable DerivedData path. Repos
-that need a specific Flutter launch config, flavor, Gradle install task, package
-name, iOS scheme, or bundle id pass that through command flags or
-`CODEX_ORCHESTRATOR_*` environment variables. Missing mobile tooling or no
-usable device is reported as a concrete warning instead of a release blocker by
-itself.
+locations. Android proof takes a runner-owned mobile device lease under the
+shared state directory before selecting a connected device, starting an AVD, or
+using adb, so parallel issue work cannot race over one emulator. If Android
+tooling or devices are unavailable on macOS and an iOS target exists, it falls
+back to the iOS simulator. Native iOS projects go directly through Xcode
+simulator tooling with a writable DerivedData path. Repos that need a specific
+Flutter launch config, flavor, Gradle install task, package name, iOS scheme, or
+bundle id pass that through command flags or `CODEX_ORCHESTRATOR_*` environment
+variables. Missing mobile tooling or no usable device is reported as a concrete
+warning instead of a release blocker by itself.
 
 ## Loop Policy
 

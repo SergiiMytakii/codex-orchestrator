@@ -224,6 +224,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       publishability = await runImplementationPublishabilityCheck({
         config,
         issue,
+        targetRoot,
         worktreePath,
         reportPath,
         beforeHead,

@@ -24,6 +24,13 @@ export const defaultLabels: CodexOrchestratorConfig['github']['labels'] = {
   child: label('agent:child', 'C2E0C6', 'Child issue owned by an autonomous parent issue tree'),
 };
 
+export const packageOwnedDefaultChecks: CodexOrchestratorConfig['checks'] = {
+  typecheck: 'npm run typecheck',
+  test: 'npm test',
+};
+
+export const packageOwnedMobileVisualProofCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
+
 export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchestratorConfig {
   return {
     version: 1,
@@ -72,10 +79,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       promptsDir: '.codex-orchestrator/prompts',
     },
     workflows: input.workflows,
-    checks: {
-      typecheck: 'npm run typecheck',
-      test: 'npm test',
-    },
+    checks: packageOwnedDefaultChecks,
     checksPolicy: {
       missingNpmScript: 'skip',
       lintBaseline: {
@@ -122,7 +126,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'runner visual proof',
         ],
         minScreenshotArtifacts: 1,
-        runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+        runnerValidationCommand: packageOwnedMobileVisualProofCommand,
         runnerTimeoutMs: 900_000,
         envPassthrough: [],
       },
@@ -314,10 +318,7 @@ export function mergeExistingProjectConfig(
     reviewGates: {
       ...defaults.reviewGates,
       ...existingReviewGates,
-      visualProof: {
-        ...defaults.reviewGates.visualProof,
-        ...existingVisualProof,
-      },
+      visualProof: migrateVisualProofConfig(defaults.reviewGates.visualProof, existingVisualProof),
       quality: {
         ...defaults.reviewGates.quality,
         ...existingQuality,
@@ -379,6 +380,20 @@ export function mergeExistingProjectConfig(
   } as CodexOrchestratorConfig;
 }
 
+export async function applyTargetPackageConfigDefaults(
+  targetRoot: string,
+  config: CodexOrchestratorConfig,
+): Promise<CodexOrchestratorConfig> {
+  return {
+    ...config,
+    checks: await adaptPackageOwnedChecks(targetRoot, config),
+    reviewGates: {
+      ...config.reviewGates,
+      visualProof: migrateVisualProofConfig(config.reviewGates.visualProof, config.reviewGates.visualProof),
+    },
+  };
+}
+
 export async function readExistingConfig(configPath: string): Promise<Record<string, unknown> | undefined> {
   try {
     const content = await readFile(configPath, 'utf8');
@@ -418,6 +433,76 @@ export async function writeProjectConfig(targetRoot: string, config: CodexOrches
 
 export function projectConfigPath(targetRoot: string): string {
   return join(targetRoot, '.codex-orchestrator', 'config.json');
+}
+
+async function adaptPackageOwnedChecks(
+  targetRoot: string,
+  config: CodexOrchestratorConfig,
+): Promise<CodexOrchestratorConfig['checks']> {
+  if ((config.checksPolicy?.missingNpmScript ?? 'skip') !== 'skip') {
+    return config.checks;
+  }
+
+  if (!Object.entries(config.checks).some(([name, command]) => isPackageOwnedDefaultCheck(name, command))) {
+    return config.checks;
+  }
+
+  const scripts = await readPackageScripts(targetRoot);
+  const entries = Object.entries(config.checks).filter(([name, command]) => {
+    if (!isPackageOwnedDefaultCheck(name, command)) {
+      return true;
+    }
+
+    const script = npmScriptName(command);
+    return script !== undefined && scripts.has(script);
+  });
+  return Object.fromEntries(entries);
+}
+
+async function readPackageScripts(targetRoot: string): Promise<Set<string>> {
+  let content = '';
+  try {
+    content = await readFile(join(targetRoot, 'package.json'), 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return new Set();
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(content) as { scripts?: unknown };
+  if (typeof parsed.scripts !== 'object' || parsed.scripts === null || Array.isArray(parsed.scripts)) {
+    return new Set();
+  }
+  return new Set(Object.entries(parsed.scripts)
+    .filter(([, value]) => typeof value === 'string')
+    .map(([name]) => name));
+}
+
+function isPackageOwnedDefaultCheck(name: string, command: string): boolean {
+  return packageOwnedDefaultChecks[name] === command;
+}
+
+function npmScriptName(command: string): string | undefined {
+  if (command === 'npm test') {
+    return 'test';
+  }
+  return /^npm\s+run(?:-script)?\s+([^\s]+)/u.exec(command)?.[1];
+}
+
+function migrateVisualProofConfig(
+  defaults: CodexOrchestratorConfig['reviewGates']['visualProof'],
+  existing: Record<string, unknown> | CodexOrchestratorConfig['reviewGates']['visualProof'] | undefined,
+): CodexOrchestratorConfig['reviewGates']['visualProof'] {
+  const visualProof = {
+    ...defaults,
+    ...existing,
+  } as CodexOrchestratorConfig['reviewGates']['visualProof'];
+  const command = visualProof.runnerValidationCommand?.trim();
+  if (visualProof.enabled && !command) {
+    visualProof.runnerValidationCommand = packageOwnedMobileVisualProofCommand;
+  }
+  return visualProof;
 }
 
 function label(name: string, color: string, description: string): LabelDefinition {

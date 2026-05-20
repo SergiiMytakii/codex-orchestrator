@@ -185,15 +185,14 @@ test('prompt builder directs Android mobile proof to Test Android Apps with non-
     worktreePath: '/worktree',
   });
 
-  assert.match(prompt, /For Android mobile app UI work, use device-backed proof/);
-  assert.match(prompt, /`adb devices -l`/);
-  assert.match(prompt, /`export ANDROID_SERIAL=<serial>`/);
-  assert.match(prompt, /`emulator -list-avds`/);
-  assert.match(prompt, /`emulator -avd <avd-name>`/);
-  assert.match(prompt, /`adb wait-for-device`/);
+  assert.match(prompt, /For Android mobile app UI work, use runner-owned device-backed proof/);
+  assert.match(prompt, /Do not start Android emulators from child Codex/);
+  assert.match(prompt, /serializes shared adb\/emulator access/);
+  assert.match(prompt, /document the desired `ANDROID_SERIAL` value/);
+  assert.match(prompt, /leave device selection and emulator startup to the runner-owned proof command/);
   assert.match(prompt, /If Test Android Apps skills are unavailable/);
   assert.match(prompt, /try to enable or load that plugin/);
-  assert.match(prompt, /After selecting the adb target, use Test Android Apps skills/);
+  assert.match(prompt, /When a target is already selected by the runner or provided through the environment/);
   assert.match(prompt, /For native Android projects/);
   assert.match(prompt, /use the project Gradle wrapper/);
   assert.match(prompt, /`\.\/gradlew`/);

@@ -5,6 +5,7 @@ import { forbiddenCodexProfileEnvKeys, type CodexOrchestratorConfig, type CodexP
 import type { ProcessExecutor } from '../process/command.js';
 import { defaultProcessExecutor } from '../process/command.js';
 import { RunLogWriter } from '../runner/run-log.js';
+import { ensureMobileDeviceGuardBin, prependPath } from './mobile-device-guard.js';
 
 export interface CodexCommandRunInput {
   targetRoot: string;
@@ -41,12 +42,13 @@ export class CodexCommandAdapter {
     const profileTimeoutMs = this.config.codex.profiles?.[phase]?.timeoutMs;
     const args = effectiveProfile.args.map((arg) => renderCodexArg(arg, input));
     const logWriter = input.logPath ? new RunLogWriter(input.logPath) : undefined;
+    const mobileDeviceGuardBin = await ensureMobileDeviceGuardBin({ targetRoot: input.targetRoot, config: input.config });
     await logWriter?.appendLifecycle(`starting ${effectiveProfile.command} ${args.join(' ')}`);
     try {
       const result = await this.executor(effectiveProfile.command, args, {
         cwd: input.worktreePath,
         stdin: input.promptText,
-        env: buildCodexProcessEnv(input, process.env, effectiveProfile.env),
+        env: buildCodexProcessEnv(input, process.env, effectiveProfile.env, mobileDeviceGuardBin),
         timeoutMs: profileTimeoutMs ?? input.timeoutMs ?? this.config.codex.timeoutMs,
         idleTimeoutMs: effectiveProfile.idleTimeoutMs,
         onStdoutChunk: logWriter ? (chunk) => logWriter.appendStdout(chunk) : undefined,
@@ -63,6 +65,7 @@ export function buildCodexProcessEnv(
   input: CodexCommandRunInput,
   sourceEnv: NodeJS.ProcessEnv,
   profileEnv: Record<string, string> = {},
+  mobileDeviceGuardBin?: string,
 ): Record<string, string> {
   const allowed = ['PATH', 'CODEX_HOME', 'LANG', 'LC_ALL', 'TMPDIR'];
   const env: Record<string, string> = {};
@@ -77,6 +80,10 @@ export function buildCodexProcessEnv(
     if (!forbiddenCodexProfileEnvKeys.has(key)) {
       env[key] = renderCodexArg(value, input);
     }
+  }
+  if (mobileDeviceGuardBin) {
+    env.PATH = prependPath(env.PATH, mobileDeviceGuardBin);
+    env.CODEX_ORCHESTRATOR_MOBILE_DEVICE_GUARD = '1';
   }
   env.HOME = input.isolatedHomePath;
   env[input.config.codex.promptFileEnv] = input.promptPath;

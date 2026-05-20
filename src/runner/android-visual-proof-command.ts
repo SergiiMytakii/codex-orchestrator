@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, win32, posix, delimiter as hostPathDelimiter } from 'node:path';
 import { homedir, platform as hostPlatform } from 'node:os';
 
+import { acquireMobileDeviceLease } from './mobile-device-lease.js';
+
 type AndroidProofProjectType = 'auto' | 'flutter' | 'android';
 type PathApi = typeof posix;
 
@@ -58,57 +60,68 @@ export async function runAndroidVisualProofCommand(input: AndroidVisualProofComm
   const projectType = await resolveProjectType(worktreePath, input.projectType ?? androidProjectTypeFromEnv(env.CODEX_ORCHESTRATOR_ANDROID_PROJECT_TYPE));
   const tools = await resolveAndroidProofTools({ env, platform, needsFlutter: projectType === 'flutter' });
   const commandEnv = await androidProofCommandEnv({ env, sdkRoot: tools.sdkRoot, runtimeDir });
-  const device = await selectAndroidDevice({ adb: tools.adb, emulator: tools.emulator, env: commandEnv });
-
-  await mkdir(proofDir, { recursive: true });
-  await mkdir(runtimeDir, { recursive: true });
-  await waitForBoot({ adb: tools.adb, serial: device.serial, env: commandEnv });
-
-  const packageName = await buildAndInstall({
+  const lease = await acquireMobileDeviceLease({
     worktreePath,
-    projectType,
-    input,
     env: commandEnv,
-    tools,
-    device,
-    platform,
+    issueNumber: input.issueNumber,
+    resourceName: 'android-device',
   });
-  const activity = await resolveMainActivity({ adb: tools.adb, serial: device.serial, packageName, env: commandEnv });
-  await runCommand(tools.adb, ['-s', device.serial, 'shell', 'am', 'start', '-n', activity], { env: commandEnv, platform });
-  await delay(input.launchSettleMs ?? numberFromEnv(env.CODEX_ORCHESTRATOR_ANDROID_LAUNCH_SETTLE_MS) ?? 5000);
 
-  const screenshot = await runCommand(tools.adb, ['-s', device.serial, 'exec-out', 'screencap', '-p'], {
-    env: commandEnv,
-    encoding: 'buffer',
-    platform,
-  });
-  await writeFile(join(proofDir, 'android-launch.png'), screenshot.stdout);
+  try {
+    const device = await selectAndroidDevice({ adb: tools.adb, emulator: tools.emulator, env: commandEnv });
 
-  const uiDump = await runCommand(tools.adb, ['-s', device.serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty'], {
-    env: commandEnv,
-    allowFailure: true,
-    platform,
-  });
-  await writeFile(join(proofDir, 'android-ui.xml'), String(uiDump.stdout || uiDump.stderr || ''));
+    await mkdir(proofDir, { recursive: true });
+    await mkdir(runtimeDir, { recursive: true });
+    await waitForBoot({ adb: tools.adb, serial: device.serial, env: commandEnv });
 
-  const logcat = await runCommand(tools.adb, ['-s', device.serial, 'logcat', '-d', '-t', '300'], {
-    env: commandEnv,
-    allowFailure: true,
-    platform,
-  });
-  await writeFile(join(proofDir, 'android-logcat.txt'), String(logcat.stdout || logcat.stderr || ''));
+    const packageName = await buildAndInstall({
+      worktreePath,
+      projectType,
+      input,
+      env: commandEnv,
+      tools,
+      device,
+      platform,
+    });
+    const activity = await resolveMainActivity({ adb: tools.adb, serial: device.serial, packageName, env: commandEnv });
+    await runCommand(tools.adb, ['-s', device.serial, 'shell', 'am', 'start', '-n', activity], { env: commandEnv, platform });
+    await delay(input.launchSettleMs ?? numberFromEnv(env.CODEX_ORCHESTRATOR_ANDROID_LAUNCH_SETTLE_MS) ?? 5000);
 
-  await writeFile(join(proofDir, 'android-ui-summary.txt'), [
-    'Android visual proof',
-    `issue: ${input.issueNumber}`,
-    `projectType: ${projectType}`,
-    `serial: ${device.serial}`,
-    `target: ${device.kind}`,
-    `adb: ${tools.adb}`,
-    `package: ${packageName}`,
-    `activity: ${activity}`,
-    'screenshot: android-launch.png',
-  ].join('\n'));
+    const screenshot = await runCommand(tools.adb, ['-s', device.serial, 'exec-out', 'screencap', '-p'], {
+      env: commandEnv,
+      encoding: 'buffer',
+      platform,
+    });
+    await writeFile(join(proofDir, 'android-launch.png'), screenshot.stdout);
+
+    const uiDump = await runCommand(tools.adb, ['-s', device.serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty'], {
+      env: commandEnv,
+      allowFailure: true,
+      platform,
+    });
+    await writeFile(join(proofDir, 'android-ui.xml'), String(uiDump.stdout || uiDump.stderr || ''));
+
+    const logcat = await runCommand(tools.adb, ['-s', device.serial, 'logcat', '-d', '-t', '300'], {
+      env: commandEnv,
+      allowFailure: true,
+      platform,
+    });
+    await writeFile(join(proofDir, 'android-logcat.txt'), String(logcat.stdout || logcat.stderr || ''));
+
+    await writeFile(join(proofDir, 'android-ui-summary.txt'), [
+      'Android visual proof',
+      `issue: ${input.issueNumber}`,
+      `projectType: ${projectType}`,
+      `serial: ${device.serial}`,
+      `target: ${device.kind}`,
+      `adb: ${tools.adb}`,
+      `package: ${packageName}`,
+      `activity: ${activity}`,
+      'screenshot: android-launch.png',
+    ].join('\n'));
+  } finally {
+    await lease.release();
+  }
 }
 
 export function parseAndroidVisualProofArgs(

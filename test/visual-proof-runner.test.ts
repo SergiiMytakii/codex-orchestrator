@@ -10,6 +10,7 @@ import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
 test('runner visual proof reports screenshots that are updated by the command', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
   const proofDir = join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-155');
   await mkdir(proofDir, { recursive: true });
@@ -20,6 +21,12 @@ test('runner visual proof reports screenshots that are updated by the command', 
   const shellExecutor: ShellCommandExecutor = async (_command, options) => {
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR, proofDir);
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_FLUTTER_BIN, '/opt/flutter/bin/flutter');
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_TARGET_ROOT, targetRoot);
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_STATE_DIR, join(targetRoot, validConfig.runner.stateDir));
+    assert.equal(
+      options?.env?.CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_DIR,
+      join(targetRoot, validConfig.runner.stateDir, 'mobile-device-locks'),
+    );
     const profileDir = options?.env?.CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR;
     const browsersDir = options?.env?.PLAYWRIGHT_BROWSERS_PATH;
     assert.ok(profileDir);
@@ -45,6 +52,7 @@ test('runner visual proof reports screenshots that are updated by the command', 
       },
       issue: issueFixture({ number: 155, title: '[UI] Fix responsive layout', body: 'Requires screenshots.' }),
       issueNumber: 155,
+      targetRoot,
       worktreePath,
       changedFiles: ['src/frontend/CampaignList.tsx'],
       report: {

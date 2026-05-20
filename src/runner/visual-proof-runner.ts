@@ -22,6 +22,7 @@ export interface RunnerVisualProofInput {
   config: CodexOrchestratorConfig;
   issue: GitHubIssue;
   issueNumber: number;
+  targetRoot?: string;
   worktreePath: string;
   changedFiles: string[];
   report: ScopedCompletionReport;
@@ -59,6 +60,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     env: {
       ...runnerCommandBaseEnv(),
       ...runnerPassthroughEnv(policy.envPassthrough),
+      ...runnerSharedStateEnv(input),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: policy.artifactDir,
       CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
@@ -116,6 +118,18 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   };
 }
 
+function runnerSharedStateEnv(input: RunnerVisualProofInput): Record<string, string> {
+  if (!input.targetRoot) {
+    return {};
+  }
+  const stateDir = join(input.targetRoot, input.config.runner.stateDir);
+  return {
+    CODEX_ORCHESTRATOR_TARGET_ROOT: input.targetRoot,
+    CODEX_ORCHESTRATOR_STATE_DIR: stateDir,
+    CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_DIR: join(stateDir, 'mobile-device-locks'),
+  };
+}
+
 function runnerCommandBaseEnv(): Record<string, string> {
   const keys = [
     'PATH',
@@ -134,6 +148,11 @@ function runnerCommandBaseEnv(): Record<string, string> {
     'GRADLE_USER_HOME',
     'CODEX_ORCHESTRATOR_ADB',
     'CODEX_ORCHESTRATOR_EMULATOR',
+    'CODEX_ORCHESTRATOR_TARGET_ROOT',
+    'CODEX_ORCHESTRATOR_STATE_DIR',
+    'CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_DIR',
+    'CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_TIMEOUT_MS',
+    'CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_STALE_MS',
     'CODEX_ORCHESTRATOR_FLUTTER_BIN',
     'CODEX_ORCHESTRATOR_FLUTTER_ROOT',
     'CODEX_ORCHESTRATOR_FLUTTER_LAUNCH_CONFIG',

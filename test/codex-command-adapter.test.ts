@@ -1,20 +1,25 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 import { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from '../src/codex/command-adapter.js';
 import type { ProcessExecutor } from '../src/process/command.js';
 import { validConfig } from './fixtures/config.js';
 
+const execFileAsync = promisify(execFile);
+const fixtureTargetRoot = join(tmpdir(), 'codex-orchestrator-codex-fixture-repo');
+
 const input = {
-  targetRoot: '/repo',
+  targetRoot: fixtureTargetRoot,
   config: validConfig,
-  worktreePath: '/repo/.codex-orchestrator/workspaces/issue-155',
-  promptPath: '/repo/.codex-orchestrator/state/prompts/issue-155.md',
+  worktreePath: join(fixtureTargetRoot, '.codex-orchestrator', 'workspaces', 'issue-155'),
+  promptPath: join(fixtureTargetRoot, '.codex-orchestrator', 'state', 'prompts', 'issue-155.md'),
   promptText: 'Prompt text',
-  reportPath: '/repo/.codex-orchestrator/state/reports/issue-155.json',
-  isolatedHomePath: '/repo/.codex-orchestrator/state/codex-home/issue-155',
+  reportPath: join(fixtureTargetRoot, '.codex-orchestrator', 'state', 'reports', 'issue-155.json'),
+  isolatedHomePath: join(fixtureTargetRoot, '.codex-orchestrator', 'state', 'codex-home', 'issue-155'),
   issueNumber: 155,
   sessionId: 'issue-155-20260508120000',
   branchName: 'codex/issue-155',
@@ -39,7 +44,7 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
     '--sandbox',
     'workspace-write',
     '--add-dir',
-    '/repo/.codex-orchestrator/state',
+    join(input.targetRoot, validConfig.runner.stateDir),
     '-c',
     'sandbox_workspace_write.network_access=true',
     '--output-last-message',
@@ -52,6 +57,32 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
   assert.equal(options?.idleTimeoutMs, 300_000);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROMPT_FILE, input.promptPath);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
+});
+
+test('codex command adapter blocks child mobile device control through a guard PATH', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-codex-guard-'));
+  const guardedInput = {
+    ...input,
+    targetRoot,
+    worktreePath: join(targetRoot, '.codex-orchestrator', 'workspaces', 'issue-155'),
+    promptPath: join(targetRoot, '.codex-orchestrator', 'state', 'prompts', 'issue-155.md'),
+    reportPath: join(targetRoot, '.codex-orchestrator', 'state', 'reports', 'issue-155.json'),
+    isolatedHomePath: join(targetRoot, '.codex-orchestrator', 'state', 'codex-home', 'issue-155'),
+  };
+  const executor: ProcessExecutor = async (_file, _args, options) => {
+    const guardBin = join(targetRoot, validConfig.runner.stateDir, 'mobile-device-guard', 'bin');
+    assert.equal(options?.env?.PATH?.split(':')[0], guardBin);
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_MOBILE_DEVICE_GUARD, '1');
+    assert.match(await readFile(join(guardBin, 'emulator'), 'utf8'), /runner-owned mobile visual proof/);
+    await assert.rejects(
+      execFileAsync(join(guardBin, 'emulator'), ['-list-avds'], { env: options?.env }),
+      /runner-owned mobile visual proof/,
+    );
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  await adapter.run(guardedInput);
 });
 
 test('codex command adapter writes durable stdout and stderr stream logs', async () => {

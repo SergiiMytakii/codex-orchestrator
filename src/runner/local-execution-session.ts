@@ -44,6 +44,7 @@ export interface LocalExecutionSessionResult {
 export interface ImplementationPublishabilityInput {
   config: CodexOrchestratorConfig;
   issue: GitHubIssue;
+  targetRoot?: string;
   worktreePath: string;
   reportPath: string;
   beforeHead: string;
@@ -221,6 +222,7 @@ export async function runImplementationPublishabilityCheck(
     config: input.config,
     issue: input.issue,
     issueNumber: input.issue.number,
+    targetRoot: input.targetRoot,
     worktreePath: input.worktreePath,
     changedFiles,
     report,

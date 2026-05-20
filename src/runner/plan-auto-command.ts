@@ -715,6 +715,7 @@ async function executeChild(input: {
     publishability = await runImplementationPublishabilityCheck({
       config: input.config,
       issue: input.child.issue,
+      targetRoot: input.targetRoot,
       worktreePath,
       reportPath,
       beforeHead,

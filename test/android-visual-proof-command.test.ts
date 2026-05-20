@@ -72,6 +72,55 @@ test('package-owned Android visual proof captures Flutter launch screenshot usin
   assert.match(summary, /package: com\.example\.app/);
 });
 
+test('Android visual proof serializes device selection through a shared mobile device lease', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-android-lease-'));
+  const home = join(root, 'home');
+  const sdk = join(home, 'Library', 'Android', 'sdk');
+  const adbPath = join(sdk, 'platform-tools', 'adb');
+  const emulatorPath = join(sdk, 'emulator', 'emulator');
+  const flutterPath = join(root, 'flutter-bin', 'flutter');
+  const logPath = join(root, 'adb.log');
+  const lockDir = join(root, 'mobile-device-locks');
+  const worktree1 = join(root, 'worktree-1');
+  const worktree2 = join(root, 'worktree-2');
+
+  await mkdir(join(sdk, 'platform-tools'), { recursive: true });
+  await mkdir(join(sdk, 'emulator'), { recursive: true });
+  await mkdir(join(root, 'flutter-bin'), { recursive: true });
+  await createFlutterAndroidFixture(worktree1);
+  await createFlutterAndroidFixture(worktree2);
+  await writeExecutable(adbPath, fakeAdbScript({ log: true }));
+  await writeExecutable(emulatorPath, '#!/usr/bin/env bash\nprintf "Pixel_7\\n"\n');
+  await writeExecutable(flutterPath, fakeFlutterScript());
+
+  await Promise.all([
+    runAndroidVisualProofCommand({
+      issueNumber: 81,
+      worktreePath: worktree1,
+      artifactDir: '.proofs',
+      env: proofEnv({ home, flutterPath, logPath, lockDir, issueNumber: 81 }),
+      launchSettleMs: 0,
+    }),
+    runAndroidVisualProofCommand({
+      issueNumber: 82,
+      worktreePath: worktree2,
+      artifactDir: '.proofs',
+      env: proofEnv({ home, flutterPath, logPath, lockDir, issueNumber: 82 }),
+      launchSettleMs: 0,
+    }),
+  ]);
+
+  const events = (await readFile(logPath, 'utf8')).trim().split(/\r?\n/u);
+  const firstDeviceIndex = events.findIndex((event) => event.startsWith('devices-'));
+  const firstIssue = events[firstDeviceIndex]?.split('-')[1];
+  assert.ok(firstIssue);
+  const firstScreencapIndex = events.findIndex((event) => event === `screencap-${firstIssue}`);
+  const secondDeviceIndex = events.findIndex((event, index) => index > firstDeviceIndex && event.startsWith('devices-'));
+
+  assert.ok(firstScreencapIndex > firstDeviceIndex);
+  assert.ok(secondDeviceIndex > firstScreencapIndex);
+});
+
 test('mobile visual proof falls back to iOS simulator when Android tooling is unavailable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-mobile-proof-'));
   const worktree = join(root, 'worktree');
@@ -181,10 +230,42 @@ async function writeExecutable(path: string, contents: string): Promise<void> {
   await writeFile(path, contents, { mode: 0o755 });
 }
 
-function fakeAdbScript(): string {
+async function createFlutterAndroidFixture(worktree: string): Promise<void> {
+  await mkdir(join(worktree, 'android', 'app'), { recursive: true });
+  await writeFile(join(worktree, 'pubspec.yaml'), 'name: app\n', 'utf8');
+  await writeFile(
+    join(worktree, 'android', 'app', 'build.gradle'),
+    'android { defaultConfig { applicationId = "com.example.app" } }\n',
+    'utf8',
+  );
+}
+
+function proofEnv(input: {
+  home: string;
+  flutterPath: string;
+  logPath: string;
+  lockDir: string;
+  issueNumber: number;
+}): NodeJS.ProcessEnv {
+  return {
+    HOME: input.home,
+    CODEX_ORCHESTRATOR_FLUTTER_BIN: input.flutterPath,
+    CODEX_ORCHESTRATOR_MOBILE_DEVICE_LOCK_DIR: input.lockDir,
+    CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
+    CODEX_TEST_LOG: input.logPath,
+    PATH: process.env.PATH ?? '',
+  };
+}
+
+function fakeAdbScript(options: { log?: boolean } = {}): string {
+  const logFunction = options.log
+    ? `log_event() { printf "%s\\n" "$1-$CODEX_ORCHESTRATOR_ISSUE_NUMBER" >> "$CODEX_TEST_LOG"; }\n`
+    : 'log_event() { :; }\n';
   return `#!/bin/bash
 set -euo pipefail
+${logFunction}
 if [[ "$*" == "devices -l" ]]; then
+  log_event devices
   printf "List of devices attached\\nZX1G22 device product:pixel model:Pixel_7 device:panther transport_id:1\\n"
   exit 0
 fi
@@ -207,6 +288,8 @@ if [[ "$*" == "-s ZX1G22 shell am start -n com.example.app/.MainActivity" ]]; th
   exit 0
 fi
 if [[ "$*" == "-s ZX1G22 exec-out screencap -p" ]]; then
+  log_event screencap
+  sleep 0.1
   printf "fake-png"
   exit 0
 fi

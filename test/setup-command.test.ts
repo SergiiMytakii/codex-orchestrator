@@ -412,6 +412,30 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(validateConfig(result.config).ok, true);
 });
 
+test('setup only configures package-owned npm checks that target package scripts support', async () => {
+  const targetRoot = await tempRepo();
+  await writeFile(
+    join(targetRoot, 'package.json'),
+    JSON.stringify({
+      scripts: {
+        test: 'node --test',
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.deepEqual(result.config.checks, { test: 'npm test' });
+  assert.match(result.output, /checks: test/);
+  assert.doesNotMatch(result.output, /typecheck/);
+});
+
 test('setup migrates the old default codex timeout but preserves custom values', async () => {
   const targetRoot = await tempRepo();
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });

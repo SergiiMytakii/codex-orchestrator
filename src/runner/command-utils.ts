@@ -2,13 +2,18 @@ import { readFile } from 'node:fs/promises';
 
 import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import { projectConfigPath } from '../setup/project-config.js';
+import { applyTargetPackageConfigDefaults, projectConfigPath } from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export async function readRunnerConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
   const content = await readFile(projectConfigPath(targetRoot), 'utf8');
-  const parsed = withRuntimeConfigDefaults(JSON.parse(content) as unknown);
+  const withDefaults = withRuntimeConfigDefaults(JSON.parse(content) as unknown);
+  const preValidation = validateConfig(withDefaults);
+  if (!preValidation.ok) {
+    throw new Error(`Invalid config: ${preValidation.errors.join('; ')}`);
+  }
+  const parsed = await applyTargetPackageConfigDefaults(targetRoot, preValidation.value);
   const validation = validateConfig(parsed);
   if (!validation.ok) {
     throw new Error(`Invalid config: ${validation.errors.join('; ')}`);

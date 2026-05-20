@@ -41,29 +41,45 @@ control to humans before anything is merged.
 - A repeatable way to send selected GitHub Issues to Codex.
 - One-off autonomous runs for scoped implementation tasks.
 - Parent planning for larger features, with child issues executed in safe waves.
-- Project-owned rules for labels, branches, prompts, checks, review gates, and
-  blocked actions.
-- Full change-set checks, including local commits, staged files, unstaged files,
-  and untracked files.
-- Durable logs and summaries when a run is interrupted, blocked, or ready for
-  review.
+- Project-owned rules for what Codex may run, how results are checked, and when
+  a human must step in.
+- Logs, summaries, and proof artifacts when available.
 - Draft PR handoff by default. No auto-merge.
 
 ## How It Works
 
-There are two main modes.
+At a high level, GitHub Issues are the queue, labels authorize work, isolated
+worktrees keep runs separate, and the runner owns validation and publication.
+
+```mermaid
+flowchart TD
+  A["Target repo"] --> B["codex-orchestrator setup"]
+  B --> C[".codex-orchestrator/config.json + prompts"]
+  C --> D["GitHub Issue gets agent:auto or agent:plan-auto"]
+  D --> E["status / daemon / run"]
+  E --> F{"Eligible?"}
+  F -- "no" --> G["Skipped with reason"]
+  F -- "yes" --> H["Runner claims issue: agent:running"]
+  H --> I["Create isolated branch + worktree"]
+  I --> J["Build Codex prompt from issue + repo policy"]
+  J --> K["Run Codex CLI"]
+  K --> L["Runner validates the full changeset"]
+  L --> M{"Gates pass?"}
+  M -- "no" --> N["Mark blocked, preserve evidence"]
+  M -- "yes" --> O["Push branch"]
+  O --> P["Open draft PR"]
+  P --> Q["Move issue to agent:review + post report"]
+```
+
+The important boundary is simple: Codex writes code, but the runner decides
+whether that code can be handed to humans. The runner owns checks, visual proof,
+labels, comments, branch pushes, and draft PR creation.
+
+There are two main ways to run work.
 
 ### `agent:auto`
 
-Use `agent:auto` for one clear standalone implementation issue. Do not use it
-for child issues created by `agent:plan-auto`; those are marked with
-`agent:child` and are executed only by the parent issue-tree flow.
-
-When a daemon is allowed to run more than one scoped issue at a time, parallel
-`agent:auto` selection is conservative. An issue must include a
-`## codex-orchestrator metadata` section with an `Ownership:` bullet list, and
-same-batch issues must not overlap by exact path or supported glob. Issues
-without ownership metadata still run, but only one at a time.
+Use `agent:auto` for one clear standalone implementation issue.
 
 The runner:
 
@@ -75,18 +91,22 @@ The runner:
 6. Pushes the branch and opens a draft PR only after the gates pass.
 7. Moves the issue to review and posts the run report.
 
+When the daemon runs more than one `agent:auto` issue at once, it only batches
+issues whose declared ownership does not overlap. Issues without ownership
+metadata still run, but conservatively.
+
 ### `agent:plan-auto`
 
-Use `agent:plan-auto` for work that needs planning first.
+Use `agent:plan-auto` for larger work that should be planned before
+implementation.
 
 The runner asks Codex to plan the parent issue, break it into child issues,
-triage them, run safe children in dependency order, and then open one
-integration draft PR.
+run safe children in dependency order, merge successful child branches into one
+integration branch, validate that integration branch, and then open one draft
+PR.
 
-Only child issues explicitly marked by the runner belong to the autonomous tree.
-Ordinary links, milestones, project fields, or casual references are not enough.
-Child issues use `agent:child`, not `agent:auto`, so the daemon cannot confuse
-parent-owned child work with standalone scoped work.
+Child issues created by this flow use `agent:child`, not `agent:auto`. They are
+owned by the parent run and are not picked up as standalone daemon work.
 
 ## Basic Workflow
 
@@ -100,7 +120,7 @@ parent-owned child work with standalone scoped work.
 
 The runner never auto-merges.
 
-## Installation
+## Install
 
 Requirements:
 
@@ -129,7 +149,7 @@ You can also run it with `npx`:
 npx codex-orchestrator --help
 ```
 
-## Quick Start
+## Set Up A Repository
 
 Open the repository that should receive autonomous Codex work:
 
@@ -143,19 +163,19 @@ Run setup and create missing labels:
 codex-orchestrator setup --prepare-labels
 ```
 
-By default, setup reads the GitHub owner and repository name from `git remote
-origin` and uses the current directory as the target repository. Use `--target`,
-`--github-owner`, and `--github-repo` only when you need to override those
-defaults.
-
 Commit the generated `.codex-orchestrator/` directory to your repository. It is
 the repository-owned policy for how autonomous work should run.
 
-Check eligible work:
+By default, setup reads the GitHub owner and repo from `git remote origin`. Use
+`--target`, `--github-owner`, or `--github-repo` only when you need to override
+that.
+
+## Run Work
+
+Check what the runner can see:
 
 ```sh
 codex-orchestrator status --target .
-codex-orchestrator status --target . --json
 codex-orchestrator doctor --target .
 ```
 
@@ -171,11 +191,15 @@ Run the daemon:
 codex-orchestrator daemon --target .
 ```
 
-Run up to three independent scoped issues in one daemon batch:
+Run up to three independent scoped issues at once:
 
 ```sh
 codex-orchestrator daemon --target . --concurrency 3
 ```
+
+`status` and `doctor` are read-only. `run` executes one selected issue.
+`daemon` polls for eligible work and starts safe runs according to the policy in
+`.codex-orchestrator/config.json`.
 
 ## Agent-Assisted Setup
 
@@ -205,144 +229,59 @@ working in the repository can find repository-local setup guidance.
 Use `--dry-run` only when you want a preview without writing files or creating
 labels.
 
-## Project Policy
+## What The Runner Checks
 
-Every installed repository owns its config:
+Before a result becomes a draft PR, the runner checks the whole local result:
+
+- committed changes;
+- staged changes;
+- unstaged changes;
+- untracked files;
+- the completion report Codex was required to write;
+- configured commands such as tests or type checks;
+- review gates such as TDD evidence, changed tests, cleanup review, code review,
+  or visual proof when enabled;
+- blocked paths and unsafe actions.
+
+If the result passes, the runner pushes the branch and opens a draft PR. If it
+does not pass, the runner marks the issue blocked, keeps the useful local
+evidence, and explains what needs attention.
+
+For UI work, visual proof is runner-owned. Codex can change the UI, but the
+runner runs the proof command afterwards and attaches screenshots or other
+artifacts to the PR and issue report. For mobile projects, the default proof
+command can build, install, launch, and capture Android or iOS proof when local
+tooling is available.
+
+## Repository Policy
+
+Every installed repository owns its automation policy in:
 
 ```sh
 .codex-orchestrator/config.json
 ```
 
-That config is where the repo decides how strict automation should be. It
-controls the GitHub repo, labels, base branch, branch names, validation checks,
-review gates, blocked paths, child issue concurrency, durable logs, PR titles,
-and the prompts used for planning and implementation.
+That config controls labels, branch names, checks, review gates, blocked paths,
+prompt files, child concurrency, and PR titles. The package provides defaults;
+the target repository decides how strict they should be.
 
-The package ships bundled workflow prompts, so a repository does not need local
-Codex `SKILL.md` files installed on the user's machine. Setup copies those
-prompts into `.codex-orchestrator/prompts/workflows/`, and the runner reads the
-copied prompt files during `agent:auto` and `agent:plan-auto` runs. Workflow
-`skillName` values in config are descriptive metadata for the workflow role;
-they are not a runtime dependency on the user's local Codex skill directory.
-Setup also writes `.codex-orchestrator/prompts/manifest.json`, which lets later
-setup runs tell apart untouched package prompts from prompts edited by the
-project. By default, setup refreshes untouched prompts and reports conflicts for
-locally edited prompts.
-
-Configured checks run before publication. By default, missing
-`npm run <script>` checks are reported as skipped warnings, not failures. You can
-change that with `checksPolicy.missingNpmScript`.
-
-For repos with existing lint debt, `checksPolicy.lintBaseline.mode` can be set
-to `touched-only`. That lets a repo-wide lint failure be downgraded when a
-separate touched-files lint command passes.
-
-The default quality gate is conservative for runtime code changes. It can
-require TDD evidence, changed tests, code review, cleanup review for larger
-changes, and visual proof for UI work.
-
-## Diagnostics
-
-`doctor` is a read-only readiness check for operators. It validates the target
-config, GitHub label visibility, git/base branch access, runner state paths,
-configured checks, the Codex command, phase profiles, and visual proof settings.
-It never launches Codex, creates worktrees, edits labels, or changes issues.
-
-```sh
-codex-orchestrator doctor --target .
-codex-orchestrator doctor --target . --json
-```
-
-`status --json` returns the same queue view as text status plus active local
-runs and recent lifecycle events. The JSON is designed for wrappers and
-dashboards; it includes bounded artifact paths such as context snapshots, but
-not raw Codex transcripts, secrets, prompt text, or full issue comments.
-
-Codex command profiles can be set per runner phase under `codex.profiles`.
-Supported phases are `plan-parent`, `scoped-issue`, `tree-child`,
-`fresh-context-review`, `visual-proof`, and `quality-review`. Missing profile
-fields fall back to the global `codex.command`, `codex.args`, `timeoutMs`, and
-`idleTimeoutMs`, so existing configs keep working.
-
-Each Codex session writes a bounded context snapshot before invocation and links
-it from lifecycle events under the runner state directory. Snapshots record the
-issue identity, runner decision, selected profile, workspace paths, and
-publication boundaries so a maintainer can reproduce why a session started
-without reading raw logs.
-
-## Visual Proof
-
-For browser UI work, configure a runner-owned proof command, usually a
-Playwright script:
-
-```json
-{
-  "reviewGates": {
-    "visualProof": {
-      "runnerValidationCommand": "npm run visual-proof -- --issue ${issueNumber}",
-      "runnerTimeoutMs": 900000,
-      "envPassthrough": [
-        "CODEX_ORCHESTRATOR_LOGIN_EMAIL",
-        "CODEX_ORCHESTRATOR_LOGIN_PASSWORD"
-      ]
-    }
-  }
-}
-```
-
-The runner executes this command from the issue worktree after Codex finishes
-and before review-gate evaluation. It sets environment variables for the issue
-number, artifact directory, proof directory, Playwright profile directory,
-worktree path, and changed files.
-
-Screenshots created under `CODEX_ORCHESTRATOR_PROOF_DIR` are attached to the PR
-and issue review report. Keep login credentials outside config and expose only
-their variable names through `envPassthrough`.
-
-For mobile UI work, setup points at the package-owned command:
-
-```json
-{
-  "reviewGates": {
-    "visualProof": {
-      "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}"
-    }
-  }
-}
-```
-
-That command runs from the issue worktree. For Flutter/native Android it
-resolves Android SDK tools from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `PATH`, and
-OS defaults (`~/Library/Android/sdk`, `~/Android/Sdk`, and
-`%LOCALAPPDATA%\\Android\\Sdk`), then builds/installs/launches the app and saves
-`android-launch.png`. If Android tooling or devices are unavailable on macOS and
-the repo has an iOS target, it falls back to the iOS simulator and saves
-`ios-launch.png`. Native iOS projects go straight through Xcode simulator
-tooling. Use command flags or environment variables such as
-`CODEX_ORCHESTRATOR_FLUTTER_LAUNCH_CONFIG`,
-`CODEX_ORCHESTRATOR_ANDROID_FLAVOR`, `CODEX_ORCHESTRATOR_ANDROID_PACKAGE`,
-`CODEX_ORCHESTRATOR_IOS_SCHEME`, and `CODEX_ORCHESTRATOR_IOS_BUNDLE_ID` when a
-repo needs a specific flavor, target, package, scheme, or bundle id. Missing
-mobile tooling or no usable simulator/device is reported as a warning with the
-concrete reason, not as an automatic release blocker.
+For the full config surface and technical behavior, see
+[docs/deep-dive.md](docs/deep-dive.md).
 
 ## Safety Model
 
 The package is PR-first and human-reviewed. The important guardrails are:
 
-- no automatic merge, and only draft PRs are opened;
+- no automatic merge;
+- draft PRs only;
 - Codex may change files, but the runner owns remote publication and GitHub
-  state;
+  state changes;
 - only explicitly authorized issues run;
 - child issues are never inferred from ordinary links or references;
-- committed and uncommitted changes are checked before publication;
-- secret files, destructive data/cache actions, and production deploy/release
-  actions are blocked by default;
-- malformed or missing completion reports block publication;
-- bounded rework stops at the configured limit;
-- Policy Suggestions are recommendations only;
-- underspecified work can be blocked for maintainer clarification instead of
-  letting Codex invent product decisions.
+- committed and uncommitted changes are checked;
+- missing or malformed completion reports block publication;
+- secret files, destructive data/cache actions, and production deploy or release
+  actions are blocked by default.
 
 ## Labels
 
@@ -378,42 +317,7 @@ codex-orchestrator daemon --target <path> [--once] \
   [--concurrency <count>]
 ```
 
-`setup` creates project-local config and prompt files under
-`.codex-orchestrator/`. Useful flags:
-
-- `--dry-run` - show the setup plan without writing files or creating labels;
-- `--prepare-labels` - create missing GitHub labels;
-- `--target <path>` - override the target directory, which defaults to the current directory;
-- `--github-owner <owner>` - override the GitHub owner inferred from `origin`;
-- `--github-repo <repo>` - override the GitHub repo inferred from `origin`;
-- `--sync-prompts <auto|keep|replace|merge>` - choose how package-bundled
-  prompt updates are applied. `auto` refreshes untouched prompts and reports
-  local-edit conflicts, `keep` preserves existing prompts, `replace` overwrites
-  with bundled prompts, and `merge` appends bundled updates to locally edited
-  prompts;
-- `--replace-package-skills` - refresh package-bundled prompt files. The flag
-  name is kept for compatibility and behaves like `--sync-prompts=replace`; it
-  does not install or require local Codex skills.
-
-Setup does not launch Codex, commit changes, or open pull requests.
-When the target repository already has a `package.json`, setup also adds
-`orchestrator:*` npm scripts. Daemon scripts run `doctor` first, then start the
-daemon only if the readiness check passes.
-
-`status` is read-only. It shows eligible issues, skipped issues with reasons,
-and local recovery state.
-
-`run` executes one selected issue when labels and state allow it. `agent:auto`
-opens one scoped draft PR. `agent:plan-auto` runs parent planning, child waves,
-final validation, and one integration draft PR.
-
-`daemon` polls for eligible work. By default, fresh setup config allows up to
-three scoped issues per batch through `runner.maxParallelScopedIssues`; legacy
-configs without that field remain sequential unless `--concurrency` is passed.
-Only scoped issues with non-overlapping ownership metadata can share a batch.
-`agent:plan-auto` runs remain exclusive. The daemon also cleans up runner-owned
-worktrees after their PRs are merged, while preserving dirty, blocked, active,
-or unpublished worktrees for inspection.
+Use `codex-orchestrator <command> --help` for command-specific flags.
 
 ## Current Scope
 

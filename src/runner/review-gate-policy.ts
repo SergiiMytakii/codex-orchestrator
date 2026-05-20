@@ -39,10 +39,10 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
 
 function androidMobileProofPromptLines(): string[] {
   return [
-    'For Android mobile app UI work, use device-backed proof instead of browser automation: run `adb devices -l`, prefer a connected non-emulator device serial, and run `export ANDROID_SERIAL=<serial>` for the proof session.',
-    'If no physical Android device is listed by adb, run `emulator -list-avds`, start an available AVD in a separate shell with `emulator -avd <avd-name>`, then wait for it with `adb wait-for-device` before testing.',
+    'For Android mobile app UI work, use runner-owned device-backed proof instead of browser automation. Do not start Android emulators from child Codex; the runner-owned mobile proof command serializes shared adb/emulator access.',
+    'If a specific connected Android target is required, document the desired `ANDROID_SERIAL` value or project environment requirement, but leave device selection and emulator startup to the runner-owned proof command.',
     'If Test Android Apps skills are unavailable, try to enable or load that plugin through the available Codex plugin/tool discovery mechanism before falling back.',
-    'After selecting the adb target, use Test Android Apps skills for app launch, navigation, screenshots, logs, and performance evidence.',
+    'When a target is already selected by the runner or provided through the environment, use Test Android Apps skills for app launch, navigation, screenshots, logs, and performance evidence.',
     'For native Android projects, use the project Gradle wrapper (`./gradlew`) with a writable `GRADLE_USER_HOME`, build the relevant debug APK, then install and launch it through adb on the selected target.',
     'For Flutter Android projects only, start Flutter rebuild/install with the detected Flutter SDK and writable `PUB_CACHE` and `GRADLE_USER_HOME` directories. If rebuild/install fails because the SDK cache is read-only, retry only when `CODEX_ORCHESTRATOR_FLUTTER_ROOT` points to a preconfigured writable Flutter SDK: set `FLUTTER_ROOT` to that path, prepend `$FLUTTER_ROOT/bin` to `PATH`, run `flutter precache --android`, then rebuild/install again. If no writable Flutter SDK is configured, report the concrete SDK cache permission error.',
     'Do not use Playwright as the primary proof path for Android mobile app verification.',

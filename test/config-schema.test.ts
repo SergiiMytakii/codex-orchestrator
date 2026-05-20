@@ -195,6 +195,27 @@ test('rejects invalid codex command contract', () => {
   ]);
 });
 
+test('rejects codex profile env attempts to disable mobile device guard', () => {
+  const result = validateConfig({
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      profiles: {
+        'scoped-issue': {
+          env: {
+            CODEX_ORCHESTRATOR_ALLOW_MOBILE_DEVICE_CONTROL: '1',
+          },
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'codex.profiles.scoped-issue.env must not contain forbidden key CODEX_ORCHESTRATOR_ALLOW_MOBILE_DEVICE_CONTROL',
+  ]);
+});
+
 test('rejects invalid scoped issue daemon concurrency', () => {
   const result = validateConfig({
     ...validConfig,
