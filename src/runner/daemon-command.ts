@@ -10,6 +10,8 @@ import { globMatches, normalizePath } from '../path-policy.js';
 import { readRunnerConfig } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { runPlanAutoCommand } from './plan-auto-command.js';
+import { RunnerStateStore } from './local-state.js';
+import { recoverScopedRun } from './scoped-recovery.js';
 import { runScopedAutoCommand } from './scoped-auto-command.js';
 import { cleanupMergedWorktrees, type WorktreeCleanupResult } from './worktree-cleanup.js';
 
@@ -74,6 +76,24 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
 
   while (true) {
     scanned += 1;
+    const recoveryStore = new RunnerStateStore(targetRoot, config);
+    const recoveryRuns = (await recoveryStore.load()).runs
+      .filter((run) => run.mode === 'scoped-issue')
+      .sort((left, right) => left.issueNumber - right.issueNumber);
+    for (const run of recoveryRuns) {
+      const recovered = await recoverScopedRun({
+        targetRoot,
+        issueNumber: run.issueNumber,
+        invocation: 'daemon',
+        issueAdapter: adapter,
+        pullRequestAdapter,
+        git,
+        now: now(),
+      });
+      if (recovered.status !== 'not-recoverable') {
+        emit(`[${now().toISOString()}] recovered #${run.issueNumber} ${recovered.status}`);
+      }
+    }
     const remainingRuns = maxRuns === undefined ? Number.POSITIVE_INFINITY : maxRuns - executed.length;
     const decisions = remainingRuns > 0
       ? await findNextEligibleIssues(adapter, config, Math.min(concurrency, remainingRuns))

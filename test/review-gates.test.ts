@@ -222,6 +222,26 @@ test('visual proof policy uses configured issue text and changed path globs with
   }), false);
 });
 
+test('visual proof policy does not treat internal Acceptance Proof module work as mobile UI proof', () => {
+  assert.equal(shouldApplyVisualProofGate({
+    config: validConfig,
+    issue: issueFixture({
+      number: 773,
+      title: 'Self-improvement: Deepen Acceptance Proof report loading',
+      body: [
+        'Acceptance Proof report assertion and evaluation live in the Acceptance Proof module.',
+        'Move the Proof Report read/classify helper into src/runner/acceptance-proof.ts.',
+      ].join('\n'),
+    }),
+    changedFiles: [
+      'src/runner/acceptance-proof.ts',
+      'src/runner/visual-proof-runner.ts',
+      'test/acceptance-proof.test.ts',
+      'test/visual-proof-runner.test.ts',
+    ],
+  }), false);
+});
+
 test('review gates accept runner-owned visual proof as UI layout test evidence', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-review-gates-'));
   const screenshotPath = '.codex-orchestrator/proofs/issue-155/390.png';

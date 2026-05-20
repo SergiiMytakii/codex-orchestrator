@@ -13,3 +13,4 @@ codex-orchestrator-*.tgz
 # codex-orchestrator runtime files
 .codex-orchestrator/workspaces/
 .codex-orchestrator/state/
+.codex-orchestrator/local/

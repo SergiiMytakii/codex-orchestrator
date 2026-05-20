@@ -7,9 +7,13 @@ import {
   type RunnerMode,
 } from './issue-state-machine.js';
 import type { RunnerStateStore } from './local-state.js';
+import { classifyScopedRecoveryRun } from './scoped-recovery.js';
 
 export type RecoveryStatus =
   | 'active'
+  | 'unknown-or-foreign'
+  | 'completed-pending-handoff'
+  | 'failed-pending-block'
   | 'stale'
   | 'missing'
   | 'completed'
@@ -32,12 +36,16 @@ export interface ReconcileRunnerStateInput {
   issueAdapter: GitHubIssueAdapter;
   config: CodexOrchestratorConfig;
   now: Date;
+  targetRoot?: string;
   allowClarificationResume?: boolean;
   updateLocalState?: boolean;
 }
 
 const recoveryReasons: Record<RecoveryStatus, string> = {
   active: 'GitHub still marks the issue running',
+  'unknown-or-foreign': 'local scoped run is not safely recoverable from available evidence',
+  'completed-pending-handoff': 'completed scoped run is pending runner-owned handoff',
+  'failed-pending-block': 'stale scoped run is pending runner-owned blocked recovery',
   stale: 'local run exists but GitHub no longer marks it running',
   missing: 'local run has no matching GitHub issue',
   completed: 'GitHub marks the work completed',
@@ -55,6 +63,26 @@ export async function reconcileRunnerState(input: ReconcileRunnerStateInput): Pr
   for (const run of state.runs) {
     const issue = await input.issueAdapter.getIssue(run.issueNumber);
     const status = classifyIssue(issue, input.config);
+    if (run.mode === 'scoped-issue' && status === 'active' && input.targetRoot) {
+      const scoped = await classifyScopedRecoveryRun({
+        targetRoot: input.targetRoot,
+        config: input.config,
+        run,
+        issue,
+        invocation: 'status',
+        now: input.now,
+      });
+      entries.push({
+        issueNumber: run.issueNumber,
+        mode: run.mode,
+        status: scoped.status,
+        reason: scoped.reason,
+        workspacePath: run.workspacePath,
+        sessionId: run.sessionId,
+        retryCount: run.retryCount,
+      });
+      continue;
+    }
 
     if (status === 'clarification-resumable' && allowClarificationResume) {
       await clearClarificationGate(input.issueAdapter, input.config, run.issueNumber, input.now);

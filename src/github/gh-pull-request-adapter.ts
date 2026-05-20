@@ -85,4 +85,28 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
 
     return pullRequest;
   }
+
+  public async findOpenPullRequestByHeadAndBase(
+    headBranch: string,
+    baseBranch: string,
+  ): Promise<GitHubPullRequest | undefined> {
+    const result = await this.executor('gh', [
+      'pr',
+      'list',
+      '--repo',
+      this.repo,
+      '--state',
+      'open',
+      '--head',
+      headBranch,
+      '--base',
+      baseBranch,
+      '--json',
+      'number,url,isDraft,headRefName,baseRefName',
+      '--limit',
+      '1',
+    ]);
+    const pullRequests = JSON.parse(result.stdout) as GitHubPullRequest[];
+    return pullRequests[0];
+  }
 }

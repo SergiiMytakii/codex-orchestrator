@@ -17,6 +17,7 @@ export interface GitHubPullRequestAdapter {
   createDraftPullRequest(input: CreateDraftPullRequestInput): Promise<GitHubPullRequest>;
   getPullRequest(number: number): Promise<GitHubPullRequest | undefined>;
   findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined>;
+  findOpenPullRequestByHeadAndBase(headBranch: string, baseBranch: string): Promise<GitHubPullRequest | undefined>;
 }
 
 export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapter {
@@ -56,6 +57,19 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
 
   public async findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined> {
     return this.mergedPullRequests.find((pullRequest) => pullRequest.headRefName === headBranch);
+  }
+
+  public async findOpenPullRequestByHeadAndBase(
+    headBranch: string,
+    baseBranch: string,
+  ): Promise<GitHubPullRequest | undefined> {
+    for (let index = 0; index < this.createdPullRequests.length; index += 1) {
+      const input = this.createdPullRequests[index];
+      if (input?.headBranch === headBranch && input.baseBranch === baseBranch) {
+        return this.getPullRequest(index + 1);
+      }
+    }
+    return undefined;
   }
 }
 

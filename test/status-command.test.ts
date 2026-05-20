@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -22,6 +23,20 @@ async function tempRepo(): Promise<string> {
 test('status command returns structured result and ordered output without mutations', async () => {
   const targetRoot = await tempRepo();
   const store = new RunnerStateStore(targetRoot, validConfig);
+  const reportPath = join(targetRoot, 'report.json');
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['feature.txt'],
+      validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    }),
+    'utf8',
+  );
   await store.save({
     version: 1,
     runs: [
@@ -33,6 +48,12 @@ test('status command returns structured result and ordered output without mutati
         retryCount: 0,
         createdAt: '2026-05-08T10:00:00.000Z',
         updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/issue-3',
+        reportPath,
+        host: hostname(),
+        ownerPid: 99999999,
+        leaseUpdatedAt: '2026-05-08T10:00:00.000Z',
+        baseSha: 'base-sha',
       },
     ],
   });
@@ -61,7 +82,7 @@ test('status command returns structured result and ordered output without mutati
       '  - #2 manual-label: manual label is present',
       '  - #3 already-running: running label is present',
       'recovery:',
-      '  - #3 active: GitHub still marks the issue running',
+      '  - #3 completed-pending-handoff: completed scoped run is pending runner-owned handoff',
     ].join('\n'),
   );
   assert.deepEqual(adapter.addedLabels, []);

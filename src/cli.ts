@@ -10,6 +10,7 @@ import { runDaemonCommand } from './runner/daemon-command.js';
 import { runDoctorCommand } from './runner/doctor-command.js';
 import { runPlanAutoCommand } from './runner/plan-auto-command.js';
 import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
+import { recoverScopedRun } from './runner/scoped-recovery.js';
 import { runStatusCommand } from './runner/status-command.js';
 import { parseAndroidVisualProofArgs, runAndroidVisualProofCommand } from './runner/android-visual-proof-command.js';
 import { parseIosVisualProofArgs, runIosVisualProofCommand } from './runner/ios-visual-proof-command.js';
@@ -277,6 +278,15 @@ async function runIssueCommand(targetRootInput: string, issueNumber: number): Pr
   }
   const decision = discoverIssueWork([issue], config)[0];
   if (!decision || decision.kind !== 'eligible') {
+    const recovered = await recoverScopedRun({
+      targetRoot,
+      issueNumber,
+      invocation: 'targeted',
+      issueAdapter,
+    });
+    if (recovered.status !== 'not-recoverable') {
+      return { reportComment: recovered.reportComment };
+    }
     const reason = decision?.kind === 'skipped' ? decision.reason : 'not eligible';
     throw new Error(`Issue #${issueNumber} is not eligible for autonomous work: ${reason}`);
   }

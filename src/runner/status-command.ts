@@ -66,6 +66,7 @@ export async function runStatusCommand(options: StatusCommandOptions): Promise<S
     store,
     issueAdapter: adapter,
     config,
+    targetRoot,
     now: new Date(),
     allowClarificationResume: false,
     updateLocalState: false,

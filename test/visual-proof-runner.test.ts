@@ -535,6 +535,63 @@ test('runner visual proof keeps browser runtime directories outside the worktree
   }
 });
 
+test('runner visual proof resolves package-owned CLI before ambient PATH entries', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = ['/opt/homebrew/bin', '/usr/bin'].join(delimiter);
+
+  const shellExecutor: ShellCommandExecutor = async (command, options) => {
+    assert.equal(command, 'codex-orchestrator visual-proof mobile --issue 155');
+    const pathEntries = String(options?.env?.PATH ?? '').split(delimiter);
+    assert.match(pathEntries[0] ?? '', /codex-orchestrator-visual-proof-runtime/);
+    assert.equal(pathEntries[1], '/opt/homebrew/bin');
+    assert.equal((await stat(join(pathEntries[0] ?? '', 'codex-orchestrator'))).isFile(), true);
+    assert.equal((await stat(join(pathEntries[0] ?? '', 'codex-orchestrator.cmd'))).isFile(), true);
+
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  try {
+    const result = await runRunnerVisualProof({
+      config: {
+        ...validConfig,
+        reviewGates: {
+          ...validConfig.reviewGates,
+          visualProof: {
+            ...validConfig.reviewGates.visualProof,
+            runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+          },
+        },
+      },
+      issue: issueFixture({ number: 155, title: '[UI] Fix responsive layout', body: 'Requires screenshots.' }),
+      issueNumber: 155,
+      worktreePath,
+      changedFiles: ['src/frontend/CampaignList.tsx'],
+      report: {
+        status: 'completed',
+        changes: [],
+        validation: [],
+        artifacts: [],
+        skippedChecks: [],
+        residualRisks: [],
+        prohibitedActions: [],
+      },
+      shellExecutor,
+    });
+
+    assert.equal(result.validation[0]?.status, 'passed');
+  } finally {
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+  }
+});
+
 function isPathInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path.length === 0 || (!path.startsWith('..') && !isAbsolute(path));

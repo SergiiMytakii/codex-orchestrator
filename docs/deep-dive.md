@@ -350,6 +350,76 @@ Durable evidence can include:
 The runner preserves worktrees when deleting them would hide useful evidence,
 for example when they are dirty, blocked, active, or unpublished.
 
+### Interrupted Scoped Handoff Recovery
+
+The main recovery case is an interrupted scoped issue run. This can happen when
+Codex already wrote a completed report and left valid local changes in the
+issue worktree, but the outer runner stopped before it pushed the branch,
+opened the draft PR, posted the review report, and moved the issue from
+`agent:running` to `agent:review`.
+
+Recovery is runner-owned. It does not ask Codex to implement the issue again.
+Instead, the runner treats the preserved worktree and completion report as the
+candidate output, then runs the same publication gates used by a normal scoped
+handoff.
+
+```mermaid
+flowchart TD
+  A["status / daemon / targeted run --issue"] --> B["Read runner-state.json"]
+  B --> C["Fetch matching GitHub issue"]
+  C --> D{"Local metadata proves ownership?"}
+  D -- "no" --> E["unknown-or-foreign: report only"]
+  D -- "yes" --> F{"Live runner still plausible?"}
+  F -- "yes" --> G["active: do not mutate"]
+  F -- "no" --> H{"Completed report + base evidence?"}
+  H -- "yes" --> I["completed-pending-handoff"]
+  I --> J["Reuse worktree and completed report"]
+  J --> K["Run normal publishability gates"]
+  K --> L{"Gates pass?"}
+  L -- "yes" --> M["Push branch, create/reuse draft PR"]
+  M --> N["agent:running -> agent:review, post report, clear local run"]
+  L -- "no" --> O["agent:blocked with recovery evidence"]
+  H -- "no" --> P{"Stale runner-owned failure?"}
+  P -- "yes" --> O
+  P -- "no" --> E
+```
+
+The local run metadata must match the GitHub issue and the preserved workspace:
+issue number, mode, branch, worktree path, report path, session id, and base
+evidence. New scoped runs also record a runner lease with host, process id, and
+timestamps. Daemon recovery mutates GitHub only when that lease is stale and the
+same-host process is gone. If the process still looks alive, the host is
+unknown, or the metadata is incomplete, recovery stays read-only.
+
+Targeted `run --issue <number>` can recover a legacy interrupted run when the
+local context snapshot contains the base SHA and the operator explicitly picked
+that issue. This is how old runs that predate lease metadata can still be
+finished without allowing the daemon to mutate them automatically.
+
+Recoverable runs are classified with explicit states:
+
+- `active` means a live runner may still own the issue, so nothing changes.
+- `completed-pending-handoff` means the completed report, worktree, branch, and
+  base evidence are sufficient to retry runner-owned publication.
+- `failed-pending-block` means the stale runner-owned run cannot satisfy
+  publication preconditions and should be moved to `agent:blocked` with
+  concrete evidence.
+- `unknown-or-foreign` means ownership or safety cannot be proven, so the runner
+  does not mutate GitHub.
+
+When a matching open draft PR already exists for the branch and base, recovery
+verifies those refs and completes the remaining label, comment, lifecycle, and
+local-state cleanup instead of creating a duplicate PR. Blocked recovery uses a
+stable marker in the GitHub comment so repeated recovery attempts do not post
+the same blocked report again.
+
+Recovery is intentionally narrow. It does not scan every `agent:running` issue
+blindly, does not recover runs from another repository, does not recover
+plan-parent or tree-child publication in the scoped path, does not auto-merge,
+and does not rerun Codex just to finish a handoff. The package live-smoke suite
+is not part of the default recovery gate because it creates or updates real
+GitHub issues and pull requests.
+
 ## Prompt and Workflow System
 
 Workflows are configured in `config.json`.

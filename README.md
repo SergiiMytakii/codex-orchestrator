@@ -44,6 +44,8 @@ control to humans before anything is merged.
 - Project-owned rules for what Codex may run, how results are checked, and when
   a human must step in.
 - Logs, summaries, and proof artifacts when available.
+- Recovery for interrupted runner handoff when Codex finished locally but the
+  draft PR was not created yet.
 - Draft PR handoff by default. No auto-merge.
 
 ## How It Works
@@ -57,7 +59,9 @@ flowchart TD
   B --> C[".codex-orchestrator/config.json + prompts"]
   C --> D["GitHub Issue gets agent:auto or agent:plan-auto"]
   D --> E["status / daemon / run"]
-  E --> F{"Eligible?"}
+  E --> R{"Recover interrupted handoff?"}
+  R -- "yes" --> L
+  R -- "no" --> F{"Eligible?"}
   F -- "no" --> G["Skipped with reason"]
   F -- "yes" --> H["Runner claims issue: agent:running"]
   H --> I["Create isolated branch + worktree"]
@@ -107,6 +111,10 @@ PR.
 
 Child issues created by this flow use `agent:child`, not `agent:auto`. They are
 owned by the parent run and are not picked up as standalone daemon work.
+
+If a runner stops after Codex finished locally but before draft PR handoff, the
+runner can recover from its local state and completed report without rerunning
+Codex. See [docs/deep-dive.md](docs/deep-dive.md) for the recovery rules.
 
 ## Basic Workflow
 

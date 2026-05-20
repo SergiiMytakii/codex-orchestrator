@@ -1,4 +1,5 @@
 import { mkdir, readFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
@@ -29,6 +30,7 @@ import { writeContextSnapshot } from './context-snapshot.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import {
   runImplementationPublishabilityCheck,
+  type ImplementationPublishabilityResult,
   type LocalExecutionPhaseExecutor,
 } from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
@@ -190,6 +192,12 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         retryCount: attempt,
         createdAt: now.toISOString(),
         updatedAt: attemptNow.toISOString(),
+        ownerPid: process.pid,
+        host: hostname(),
+        leaseUpdatedAt: attemptNow.toISOString(),
+        attemptStartedAt: attemptNow.toISOString(),
+        baseSha: resolvedBase.sha,
+        snapshotPath,
       });
       await safeAppendEvent(events, {
         timestamp: attemptNow,
@@ -412,45 +420,24 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       logPath,
       reportPath,
     });
-    await git.pushBranch({ worktreePath, branchName });
-    pullRequest = await pullRequestAdapter.createDraftPullRequest({
-      title: renderTemplate(config.pullRequests.scopedIssueTitle, options.issueNumber),
-      body: buildScopedPullRequestBody({
-        config,
-        branchName,
-        issueNumber: options.issueNumber,
-        changedFiles: publishability.changedFiles,
-        validation: publishability.validation,
-        artifacts: publishability.artifacts,
-        skippedChecks: publishability.skippedChecks,
-        residualRisks: publishability.residualRisks,
-        logPath,
-        commits: publishability.commits,
-        freshContextReview,
-        durableRunSummary,
-      }),
-      headBranch: branchName,
-      baseBranch: resolvedBase.prBaseBranch,
-    });
-    pullRequest = await verifyPullRequestRefs(pullRequestAdapter, pullRequest, branchName, resolvedBase.prBaseBranch);
-    const reportComment = buildScopedReviewReport({
-      config,
-      branchName,
+    const handoff = await finishScopedReviewReadyHandoff({
       issueNumber: options.issueNumber,
-      pullRequest,
-      changedFiles: publishability.changedFiles,
-      validation: publishability.validation,
-      artifacts: publishability.artifacts,
-      skippedChecks: publishability.skippedChecks,
-      residualRisks: publishability.residualRisks,
+      branchName,
+      baseBranch: resolvedBase.prBaseBranch,
+      worktreePath,
       logPath,
-      commits: publishability.commits,
+      config,
+      git,
+      pullRequestAdapter,
+      issueAdapter,
+      publishability,
       freshContextReview,
       durableRunSummary,
+      onPullRequestReady: (createdPullRequest) => {
+        pullRequest = createdPullRequest;
+      },
     });
-    await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
-    await issueAdapter.postComment(options.issueNumber, reportComment);
+    pullRequest = handoff.pullRequest;
     await store.removeRun(options.issueNumber);
     await safeAppendEvent(events, {
       issueNumber: options.issueNumber,
@@ -469,7 +456,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       ...baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
       status: 'review-ready',
       pullRequest,
-      reportComment,
+      reportComment: handoff.reportComment,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'scoped execution failed';
@@ -559,20 +546,125 @@ async function finishBlocked(
   freshContextReview?: FreshContextReviewEvidence,
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
 ): Promise<ScopedAutoCommandResult> {
-  const reportComment = buildScopedBlockedReport({
+  const handoff = await finishScopedBlockedHandoff({
     issueNumber: result.issueNumber,
+    logPath: result.logPath,
+    issueAdapter,
+    config,
     reasons,
     changedFiles,
-    logPath: result.logPath,
     skippedChecks,
     residualRisks,
     freshContextReview,
     durableRunSummary,
   });
-  await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
-  await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
-  await issueAdapter.postComment(result.issueNumber, reportComment);
-  return { ...result, status: 'blocked', reportComment };
+  return { ...result, status: 'blocked', reportComment: handoff.reportComment };
+}
+
+export interface FinishScopedReviewReadyHandoffInput {
+  issueNumber: number;
+  branchName: string;
+  baseBranch: string;
+  worktreePath: string;
+  logPath: string;
+  config: CodexOrchestratorConfig;
+  git: Pick<GitWorktreeManager, 'pushBranch'>;
+  pullRequestAdapter: GitHubPullRequestAdapter;
+  issueAdapter: GitHubIssueAdapter;
+  publishability: Extract<ImplementationPublishabilityResult, { status: 'publish-ready' }>;
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
+  onPullRequestReady?: (pullRequest: GitHubPullRequest) => void;
+}
+
+export async function finishScopedReviewReadyHandoff(
+  input: FinishScopedReviewReadyHandoffInput,
+): Promise<{ pullRequest: GitHubPullRequest; reportComment: string }> {
+  await input.git.pushBranch({ worktreePath: input.worktreePath, branchName: input.branchName });
+  let pullRequest = await input.pullRequestAdapter.findOpenPullRequestByHeadAndBase(input.branchName, input.baseBranch);
+  if (!pullRequest) {
+    pullRequest = await input.pullRequestAdapter.createDraftPullRequest({
+      title: renderTemplate(input.config.pullRequests.scopedIssueTitle, input.issueNumber),
+      body: buildScopedPullRequestBody({
+        config: input.config,
+        branchName: input.branchName,
+        issueNumber: input.issueNumber,
+        changedFiles: input.publishability.changedFiles,
+        validation: input.publishability.validation,
+        artifacts: input.publishability.artifacts,
+        skippedChecks: input.publishability.skippedChecks,
+        residualRisks: input.publishability.residualRisks,
+        logPath: input.logPath,
+        commits: input.publishability.commits,
+        freshContextReview: input.freshContextReview,
+        durableRunSummary: input.durableRunSummary,
+      }),
+      headBranch: input.branchName,
+      baseBranch: input.baseBranch,
+    });
+  }
+  pullRequest = await verifyPullRequestRefs(input.pullRequestAdapter, pullRequest, input.branchName, input.baseBranch);
+  input.onPullRequestReady?.(pullRequest);
+  const reportComment = buildScopedReviewReport({
+    config: input.config,
+    branchName: input.branchName,
+    issueNumber: input.issueNumber,
+    pullRequest,
+    changedFiles: input.publishability.changedFiles,
+    validation: input.publishability.validation,
+    artifacts: input.publishability.artifacts,
+    skippedChecks: input.publishability.skippedChecks,
+    residualRisks: input.publishability.residualRisks,
+    logPath: input.logPath,
+    commits: input.publishability.commits,
+    freshContextReview: input.freshContextReview,
+    durableRunSummary: input.durableRunSummary,
+  });
+  await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);
+  await input.issueAdapter.addLabels(input.issueNumber, [input.config.github.labels.review.name]);
+  await input.issueAdapter.postComment(input.issueNumber, reportComment);
+  return { pullRequest, reportComment };
+}
+
+export interface FinishScopedBlockedHandoffInput {
+  issueNumber: number;
+  logPath: string;
+  issueAdapter: GitHubIssueAdapter;
+  config: CodexOrchestratorConfig;
+  reasons: string[];
+  changedFiles: string[];
+  skippedChecks: string[];
+  residualRisks: string[];
+  freshContextReview?: FreshContextReviewEvidence;
+  durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
+  commentPrefix?: string;
+  skipCommentIfIncludes?: string;
+}
+
+export async function finishScopedBlockedHandoff(
+  input: FinishScopedBlockedHandoffInput,
+): Promise<{ reportComment: string; postedComment: boolean }> {
+  const reportComment = [
+    input.commentPrefix,
+    buildScopedBlockedReport({
+      issueNumber: input.issueNumber,
+      reasons: input.reasons,
+      changedFiles: input.changedFiles,
+      logPath: input.logPath,
+      skippedChecks: input.skippedChecks,
+      residualRisks: input.residualRisks,
+      freshContextReview: input.freshContextReview,
+      durableRunSummary: input.durableRunSummary,
+    }),
+  ].filter(Boolean).join('\n');
+  await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);
+  await input.issueAdapter.addLabels(input.issueNumber, [input.config.github.labels.blocked.name]);
+  const issue = input.skipCommentIfIncludes ? await input.issueAdapter.getIssue(input.issueNumber) : undefined;
+  const alreadyPosted = Boolean(input.skipCommentIfIncludes && issue?.comments.some((comment) => comment.body.includes(input.skipCommentIfIncludes ?? '')));
+  if (!alreadyPosted) {
+    await input.issueAdapter.postComment(input.issueNumber, reportComment);
+  }
+  return { reportComment, postedComment: !alreadyPosted };
 }
 
 async function finishPromotionRequested(

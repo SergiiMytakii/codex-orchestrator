@@ -19,6 +19,12 @@ export interface RunnerProcessMetadata {
   promptPath?: string;
   reportPath?: string;
   logPath?: string;
+  ownerPid?: number;
+  host?: string;
+  leaseUpdatedAt?: string;
+  attemptStartedAt?: string;
+  baseSha?: string;
+  snapshotPath?: string;
 }
 
 export interface RunnerStateFile {
@@ -96,6 +102,12 @@ const runKeys = new Set([
   'promptPath',
   'reportPath',
   'logPath',
+  'ownerPid',
+  'host',
+  'leaseUpdatedAt',
+  'attemptStartedAt',
+  'baseSha',
+  'snapshotPath',
 ]);
 
 function assertValidStateFile(value: unknown): asserts value is RunnerStateFile {
@@ -141,9 +153,17 @@ function assertValidRun(value: unknown): asserts value is RunnerProcessMetadata 
   if ('lastRecoveredAt' in record && typeof record.lastRecoveredAt !== 'string') {
     throw new Error('runner metadata lastRecoveredAt must be a string');
   }
+  if ('ownerPid' in record && !Number.isInteger(record.ownerPid)) {
+    throw new Error('runner metadata ownerPid must be an integer');
+  }
   for (const key of ['branchName', 'promptPath', 'reportPath', 'logPath']) {
     if (key in record && typeof record[key] !== 'string') {
       throw new Error(`runner metadata ${key} must be a string`);
+    }
+  }
+  for (const key of ['host', 'leaseUpdatedAt', 'attemptStartedAt', 'baseSha', 'snapshotPath']) {
+    if (key in record && (typeof record[key] !== 'string' || record[key].length === 0)) {
+      throw new Error(`runner metadata ${key} must be a non-empty string`);
     }
   }
 }

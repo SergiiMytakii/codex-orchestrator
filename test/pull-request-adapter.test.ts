@@ -31,6 +31,27 @@ test('in-memory pull request adapter records draft PR requests', async () => {
   });
 });
 
+test('finds open pull request by head and base', async () => {
+  const adapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+
+  await adapter.createDraftPullRequest({
+    title: 'Codex: issue #155',
+    body: 'Closes #155',
+    headBranch: 'codex/issue-155',
+    baseBranch: 'main',
+  });
+  await adapter.createDraftPullRequest({
+    title: 'Codex: issue #155 for dev',
+    body: 'Closes #155',
+    headBranch: 'codex/issue-155',
+    baseBranch: 'dev',
+  });
+
+  assert.equal((await adapter.findOpenPullRequestByHeadAndBase('codex/issue-155', 'main'))?.number, 1);
+  assert.equal((await adapter.findOpenPullRequestByHeadAndBase('codex/issue-155', 'dev'))?.number, 2);
+  assert.equal(await adapter.findOpenPullRequestByHeadAndBase('codex/issue-155', 'release'), undefined);
+});
+
 test('gh pull request adapter uses draft create command and parses URL', async () => {
   const calls: string[][] = [];
   const executor: CommandExecutor = async (_file, args) => {
@@ -62,6 +83,46 @@ test('gh pull request adapter uses draft create command and parses URL', async (
     '--draft',
   ]);
   assert.equal(pullRequest.number, 42);
+});
+
+test('gh pull request adapter finds open pull requests by head and base', async () => {
+  const calls: string[][] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    calls.push(args);
+    return {
+      stdout: JSON.stringify([
+        {
+          number: 42,
+          url: 'https://github.com/example/repo/pull/42',
+          isDraft: true,
+          headRefName: 'codex/issue-155',
+          baseRefName: 'main',
+        },
+      ]),
+      stderr: '',
+    };
+  };
+  const adapter = new GhCliPullRequestAdapter('example', 'repo', executor);
+
+  const pullRequest = await adapter.findOpenPullRequestByHeadAndBase('codex/issue-155', 'main');
+
+  assert.deepEqual(calls[0], [
+    'pr',
+    'list',
+    '--repo',
+    'example/repo',
+    '--state',
+    'open',
+    '--head',
+    'codex/issue-155',
+    '--base',
+    'main',
+    '--json',
+    'number,url,isDraft,headRefName,baseRefName',
+    '--limit',
+    '1',
+  ]);
+  assert.equal(pullRequest?.number, 42);
 });
 
 test('gh pull request adapter finds merged PRs by head branch', async () => {

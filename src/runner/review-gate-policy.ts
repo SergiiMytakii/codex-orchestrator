@@ -94,15 +94,32 @@ export function shouldApplyVisualProofGate(input: {
     return false;
   }
 
+  const policy = runnerVisualProofPolicy(input.config);
+  if (!policy.commandTemplate) {
+    return false;
+  }
+
   const issueText = `${input.issue.title}\n${input.issue.body}`;
-  const issueNeedsAcceptanceProof = acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText))
-    || (visualProof.enabled && visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText)));
+  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
+  const canRunGenericAcceptanceProof = Boolean(acceptanceCommand) && !isMobileVisualProofCommand(acceptanceCommand);
+  const issueNeedsAcceptanceProof = canRunGenericAcceptanceProof
+    && acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
+  const internalRunnerProofOnlyChange = input.changedFiles.length > 0
+    && input.changedFiles.every(isInternalRunnerProofPath);
+  const issueNeedsVisualProof = visualProof.enabled
+    && !internalRunnerProofOnlyChange
+    && visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
   const changedProofFiles = input.changedFiles.filter((path) =>
-    acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path))
+    (canRunGenericAcceptanceProof && acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)))
       || (visualProof.enabled && visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path))),
   );
 
-  return issueNeedsAcceptanceProof || changedProofFiles.length > 0;
+  return issueNeedsAcceptanceProof || issueNeedsVisualProof || changedProofFiles.length > 0;
+}
+
+function isInternalRunnerProofPath(path: string): boolean {
+  return /^src\/runner\/(?:acceptance-proof|visual-proof-runner)\.ts$/u.test(path)
+    || /^test\/(?:acceptance-proof|visual-proof-runner)\.test\.ts$/u.test(path);
 }
 
 export function hasPassedValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
@@ -183,6 +200,10 @@ function isLegacyVisualProofOverride(
   return (acceptanceProof.runnerValidationCommand?.trim() || '') === defaultMobileCommand
     && Boolean(visualProof.runnerValidationCommand?.trim())
     && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand;
+}
+
+function isMobileVisualProofCommand(command: string | undefined): boolean {
+  return /\bcodex-orchestrator\s+visual-proof\s+(?:mobile|android|ios)\b/iu.test(command ?? '');
 }
 
 function hasTddRedEvidence(text: string): boolean {

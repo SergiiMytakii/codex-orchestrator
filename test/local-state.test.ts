@@ -51,6 +51,33 @@ test('local state upserts, removes, and persists metadata-only shape', async () 
   assert.deepEqual(Object.keys(persisted).sort(), ['runs', 'version']);
 });
 
+test('local state accepts recovery lease/base metadata and preserves legacy metadata', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+  const legacy = metadata(1);
+  const recoveryReady: RunnerProcessMetadata = {
+    ...metadata(2),
+    ownerPid: 12345,
+    host: 'runner-host',
+    leaseUpdatedAt: '2026-05-08T10:01:00.000Z',
+    attemptStartedAt: '2026-05-08T10:00:00.000Z',
+    baseSha: 'abc123',
+    snapshotPath: '.codex-orchestrator/state/snapshots/issue-2-session-2.json',
+  };
+
+  await store.save({ version: 1, runs: [legacy, recoveryReady] });
+
+  assert.deepEqual(await store.load(), { version: 1, runs: [legacy, recoveryReady] });
+  await assert.rejects(
+    store.save({ version: 1, runs: [{ ...recoveryReady, ownerPid: 1.5 }] }),
+    /runner metadata ownerPid must be an integer/,
+  );
+  await assert.rejects(
+    store.save({ version: 1, runs: [{ ...recoveryReady, baseSha: '' }] }),
+    /runner metadata baseSha must be a non-empty string/,
+  );
+});
+
 test('local state concurrent saves do not collide on temp file names', async () => {
   const targetRoot = await tempRepo();
   const store = new RunnerStateStore(targetRoot, validConfig);

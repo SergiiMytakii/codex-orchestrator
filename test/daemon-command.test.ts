@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -95,6 +95,53 @@ test('daemon once executes the first eligible issue by policy order', async () =
   assert.match(result.output, /running #3 plan-parent/);
   assert.match(result.output, /selection: priority priority:high, tie-breaker issue-number-asc/);
   assert.match(result.output, /completed #3/);
+});
+
+test('daemon runs recovery before selection without counting max-runs', async () => {
+  const targetRoot = await tempRepo();
+  await new RunnerStateStore(targetRoot, validConfig).save({
+    version: 1,
+    runs: [
+      {
+        issueNumber: 155,
+        mode: 'scoped-issue',
+        workspacePath: '.codex-orchestrator/workspaces/issue-155',
+        sessionId: 'issue-155-session',
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/issue-155',
+        reportPath: join(targetRoot, 'missing-report.json'),
+        host: hostname(),
+        ownerPid: 99999999,
+        leaseUpdatedAt: '2026-05-08T10:00:00.000Z',
+        baseSha: 'base-sha',
+      },
+    ],
+  });
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+    issueFixture({ number: 1, labels: [labels.auto.name] }),
+  ]);
+  const executed: number[] = [];
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: adapter,
+    once: true,
+    maxRuns: 1,
+    executeIssue: async (issueNumber) => {
+      executed.push(issueNumber);
+      return { reportComment: 'ok' };
+    },
+    now: () => new Date('2026-05-08T12:00:00.000Z'),
+  });
+
+  assert.deepEqual(executed, [1]);
+  assert.deepEqual(result.executed, [1]);
+  assert.match(result.output, /recovered #155 blocked/);
+  assert.ok(result.output.indexOf('recovered #155 blocked') < result.output.indexOf('running #1 scoped-issue'));
+  assert.equal(adapter.postedComments.length, 1);
 });
 
 test('daemon selection keeps issue-number ascending as the priority tie-breaker', async () => {
