@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
@@ -11,9 +12,8 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
-  assertAcceptanceProofReport,
   evaluateAcceptanceProofReport,
-  type AcceptanceProofReport,
+  readAcceptanceProofReport,
 } from './acceptance-proof.js';
 import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
 
@@ -55,6 +55,7 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   const runtimeDir = runnerVisualProofRuntimeDir(input.worktreePath, input.issueNumber);
   const playwrightProfileDir = join(runtimeDir, 'playwright-profile');
   const playwrightBrowsersDir = join(runtimeDir, 'ms-playwright');
+  const packageBinDir = await ensureRunnerPackageBin(runtimeDir);
   const proofReportPath = join(proofDir, 'acceptance-proof-report.json');
   await mkdir(proofDir, { recursive: true });
   await mkdir(playwrightProfileDir, { recursive: true });
@@ -62,11 +63,15 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
 
   const command = renderVisualProofCommand(commandTemplate, input, proofDir, policy.artifactDir);
   const before = new Map((await listScreenshotArtifacts(input.worktreePath, proofDir)).map((artifact) => [artifact.path, artifact]));
+  const baseEnv = {
+    ...runnerCommandBaseEnv(),
+    ...runnerPassthroughEnv(policy.envPassthrough),
+  };
   const result = await input.shellExecutor(command, {
     cwd: input.worktreePath,
     env: {
-      ...runnerCommandBaseEnv(),
-      ...runnerPassthroughEnv(policy.envPassthrough),
+      ...baseEnv,
+      PATH: prependPath(baseEnv.PATH, packageBinDir),
       ...runnerSharedStateEnv(input),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: policy.artifactDir,
@@ -165,32 +170,6 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   };
 }
 
-type AcceptanceProofReportReadResult =
-  | { kind: 'missing' }
-  | { kind: 'invalid'; message: string }
-  | { kind: 'valid'; report: AcceptanceProofReport };
-
-async function readAcceptanceProofReport(path: string): Promise<AcceptanceProofReportReadResult> {
-  let content = '';
-  try {
-    content = await readFile(path, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return { kind: 'missing' };
-    }
-    throw error;
-  }
-
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    assertAcceptanceProofReport(parsed);
-    return { kind: 'valid', report: parsed };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Invalid acceptance proof report';
-    return { kind: 'invalid', message };
-  }
-}
-
 function mergeProofArtifacts(
   screenshots: ScopedCompletionReport['artifacts'],
   proofArtifacts: ScopedCompletionReport['artifacts'],
@@ -267,6 +246,28 @@ function runnerCommandBaseEnv(): Record<string, string> {
     }
   }
   return env;
+}
+
+async function ensureRunnerPackageBin(runtimeDir: string): Promise<string> {
+  const binDir = join(runtimeDir, 'bin');
+  await mkdir(binDir, { recursive: true });
+  const shimPath = join(binDir, 'codex-orchestrator');
+  const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
+  await writeFile(
+    shimPath,
+    `#!/usr/bin/env sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  await chmod(shimPath, 0o755);
+  return binDir;
+}
+
+function prependPath(path: string | undefined, entry: string): string {
+  return path ? `${entry}${delimiter}${path}` : entry;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function runnerPassthroughEnv(names: string[]): Record<string, string> {

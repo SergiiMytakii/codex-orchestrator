@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { delimiter, isAbsolute, join, relative } from 'node:path';
 import { test } from 'node:test';
 
 import type { ShellCommandExecutor } from '../src/process/command.js';
@@ -207,6 +207,78 @@ test('runner visual proof warns when the command succeeds without producing a sc
   assert.equal(result.validation[0]?.status, 'skipped');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
+});
+
+test('runner visual proof resolves package-owned CLI before ambient PATH entries', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = '/opt/homebrew/bin';
+
+  const shellExecutor: ShellCommandExecutor = async (command, options) => {
+    assert.equal(command, 'codex-orchestrator visual-proof mobile --issue 155');
+    const pathEntries = (options?.env?.PATH ?? '').split(delimiter);
+    const packageBinDir = pathEntries[0];
+    assert.ok(packageBinDir);
+    assert.notEqual(packageBinDir, '/opt/homebrew/bin');
+    const shim = await readFile(join(packageBinDir, 'codex-orchestrator'), 'utf8');
+    assert.match(shim, /cli\.js/);
+
+    const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofReportPath);
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, 'smoke-output.txt'), 'smoke ok\n', 'utf8');
+    await writeFile(proofReportPath, JSON.stringify({
+      status: 'passed',
+      criteria: [{
+        id: 'ac-1',
+        description: 'CLI smoke proves behavior.',
+        status: 'passed',
+        confidence: 'high',
+        reasoningSummary: 'Smoke output matched the expected observable contract.',
+        artifactRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+      }],
+      artifacts: [{
+        type: 'smoke-output',
+        path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+        description: 'CLI smoke output',
+      }],
+      proofPhaseDiff: {
+        allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+        forbiddenProductPaths: [],
+      },
+      residualRisks: [],
+    }), 'utf8');
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  try {
+    const result = await runRunnerVisualProof({
+      config: validConfig,
+      issue: issueFixture({ number: 155, title: 'Acceptance proof for CLI smoke', body: 'Needs acceptance proof.' }),
+      issueNumber: 155,
+      worktreePath,
+      changedFiles: ['src/cli.ts'],
+      report: {
+        status: 'completed',
+        changes: [],
+        validation: [],
+        artifacts: [],
+        skippedChecks: [],
+        residualRisks: [],
+        prohibitedActions: [],
+      },
+      shellExecutor,
+    });
+
+    assert.equal(result.validation[0]?.status, 'passed');
+  } finally {
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+  }
 });
 
 test('runner visual proof evaluates machine-readable acceptance proof reports', async () => {
