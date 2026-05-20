@@ -110,6 +110,11 @@
       "skillName": "issue-orchestrator",
       "source": "package-bundled-prompt",
       "promptPath": ".codex-orchestrator/prompts/workflows/issue-tree-orchestration.md"
+    },
+    "acceptanceProof": {
+      "skillName": "spec-implementer",
+      "source": "package-bundled-prompt",
+      "promptPath": ".codex-orchestrator/prompts/workflows/acceptance-proof.md"
     }
   },
   "checks": {

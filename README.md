@@ -43,6 +43,8 @@ control to humans before anything is merged.
 - Parent planning for larger features, with child issues executed in safe waves.
 - Project-owned rules for what Codex may run, how results are checked, and when
   a human must step in.
+- Adaptive Acceptance Proof for runner-owned verification of UI, API, worker,
+  CLI, browser, mobile, and live-smoke behavior before draft PR handoff.
 - Logs, summaries, and proof artifacts when available.
 - Recovery for interrupted runner handoff when Codex finished locally but the
   draft PR was not created yet.
@@ -67,7 +69,13 @@ flowchart TD
   H --> I["Create isolated branch + worktree"]
   I --> J["Build Codex prompt from issue + repo policy"]
   J --> K["Run Codex CLI"]
-  K --> L["Runner validates the full changeset"]
+  K --> AAP{"Adaptive Acceptance Proof required?"}
+  AAP -- "no" --> L["Runner validates the full changeset"]
+  AAP -- "yes" --> AP["Run proof phase and collect artifacts"]
+  AP --> APR{"Proof result"}
+  APR -- "passed" --> L
+  APR -- "needs rework" --> J
+  APR -- "blocked" --> N
   L --> M{"Gates pass?"}
   M -- "no" --> N["Mark blocked, preserve evidence"]
   M -- "yes" --> O["Push branch"]
@@ -78,6 +86,21 @@ flowchart TD
 The important boundary is simple: Codex writes code, but the runner decides
 whether that code can be handed to humans. The runner owns checks, acceptance
 proof, labels, comments, branch pushes, and draft PR creation.
+
+### Adaptive Acceptance Proof
+
+Adaptive Acceptance Proof is the runner-owned verification phase for work that
+needs observable product proof. After implementation, the runner can start a
+separate proof phase that inspects the issue, changed files, and acceptance
+criteria; runs focused browser, mobile, API, worker, CLI, or live-smoke checks;
+and writes a machine-readable proof report with artifact links.
+
+A result can reach draft PR handoff only when every required criterion maps to
+high-confidence artifact evidence. If proof finds missing behavior, it returns a
+concrete rework request and the runner loops back through implementation within
+the configured iteration limit. If proof is malformed, low-confidence, lacks
+artifacts, or changes product code during verification, the runner blocks
+publication and preserves the evidence.
 
 There are two main ways to run work.
 
@@ -263,8 +286,10 @@ evidence, and explains what needs attention.
 
 Acceptance proof is runner-owned. Codex can change product behavior, but the
 runner runs proof afterwards and attaches screenshots, UI dumps, logs, smoke
-outputs, or other artifacts to the PR and issue report. Legacy visual proof
-config still works as a compatibility adapter for UI/mobile repositories.
+outputs, or other artifacts to the PR and issue report. The proof phase must
+produce a structured report that maps each required criterion to high-confidence
+evidence. Legacy visual proof config still works as a compatibility adapter for
+UI/mobile repositories.
 
 ## Repository Policy
 

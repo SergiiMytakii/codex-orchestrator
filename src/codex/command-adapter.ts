@@ -21,6 +21,7 @@ export interface CodexCommandRunInput {
   phase?: CodexPhase;
   timeoutMs?: number;
   logPath?: string;
+  env?: Record<string, string>;
 }
 
 export interface CodexCommandRunResult {
@@ -84,6 +85,11 @@ export function buildCodexProcessEnv(
   if (mobileDeviceGuardBin) {
     env.PATH = prependPath(env.PATH, mobileDeviceGuardBin);
     env.CODEX_ORCHESTRATOR_MOBILE_DEVICE_GUARD = '1';
+  }
+  for (const [key, value] of Object.entries(input.env ?? {})) {
+    if (!forbiddenCodexProfileEnvKeys.has(key)) {
+      env[key] = value;
+    }
   }
   env.HOME = input.isolatedHomePath;
   env[input.config.codex.promptFileEnv] = input.promptPath;

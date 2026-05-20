@@ -47,6 +47,11 @@ async function tempGitProject(configOverride?: (config: CodexOrchestratorConfig)
     'Scoped workflow',
     'utf8',
   );
+  await writeFile(
+    join(repo, '.codex-orchestrator', 'prompts', 'workflows', 'acceptance-proof.md'),
+    'Adaptive proof workflow',
+    'utf8',
+  );
   return repo;
 }
 
@@ -180,6 +185,137 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/issue-155', '-1']);
   assert.match(pushed.stdout, /Codex: implement issue #155/);
+});
+
+test('scoped auto command invokes adaptive proof phase and records durable evidence', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    codex: {
+      ...config.codex,
+      profiles: {
+        ...config.codex.profiles,
+        'acceptance-proof': {},
+      },
+    },
+    checks: {},
+    reviewGates: {
+      ...config.reviewGates,
+      quality: {
+        ...config.reviewGates.quality,
+        enabled: false,
+      },
+      acceptanceProof: {
+        ...config.reviewGates.acceptanceProof,
+        issueTextPatterns: ['adaptive proof'],
+        changedPathGlobs: ['feature.txt'],
+        proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
+        runnerValidationCommand: '',
+      },
+      visualProof: {
+        ...config.reviewGates.visualProof,
+        enabled: false,
+        runnerValidationCommand: '',
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({
+      number: 155,
+      labels: [labels.auto.name],
+      title: 'Needs adaptive proof',
+      body: 'Implement controlled change with adaptive proof.',
+    }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const proofInputs: CodexCommandRunInput[] = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.phase === 'acceptance-proof') {
+        proofInputs.push(input);
+        await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
+        await writeFile(
+          join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155', 'smoke-output.txt'),
+          'observable smoke passed\n',
+          'utf8',
+        );
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'passed',
+            criteria: [{
+              id: 'ac-1',
+              description: 'Controlled change is observable',
+              status: 'passed',
+              confidence: 'high',
+              reasoningSummary: 'Smoke output proves the changed behavior.',
+              artifactRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+            }],
+            artifacts: [{
+              type: 'smoke-output',
+              path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+              description: 'observable smoke output',
+            }],
+            proofPhaseDiff: {
+              allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+              forbiddenProductPaths: [],
+            },
+            residualRisks: [],
+          }),
+          'utf8',
+        );
+        return { stdout: 'proof ok', stderr: '', exitCode: 0 };
+      }
+
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(proofInputs.length, 1);
+  const proofInput = proofInputs[0]!;
+  assert.equal(proofInput.phase, 'acceptance-proof');
+  assert.match(proofInput.reportPath, /\.codex-orchestrator\/proofs\/issue-155\/acceptance-proof-report\.json$/);
+  assert.match(proofInput.promptText, /Adaptive Proof Agent/);
+  assert.match(proofInput.promptText, /feature\.txt/);
+  assert.match(proofInput.promptText, /\.codex-orchestrator\/proofs\/\*\*/);
+  assert.match(proofInput.promptText, /do not have GitHub write authority/i);
+  await assert.rejects(stat(proofInput.isolatedHomePath), /ENOENT/);
+
+  const summary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-155-issue-155-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, any>;
+  assert.equal(summary.acceptanceProof.status, 'passed');
+  assert.match(JSON.stringify(summary.acceptanceProof), /acceptance-proof-report\.json/);
+  assert.match(issueAdapter.postedComments.at(-1)?.body ?? '', /Acceptance Proof/);
+  const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
+  assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'started'), true);
+  assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'completed'), true);
 });
 
 test('scoped auto command starts from the resolved remote base instead of stale local main', async () => {

@@ -35,6 +35,7 @@ import {
 } from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
 import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
+import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import {
   buildScopedImplementationPrompt,
   sessionPromptPath,
@@ -98,6 +99,11 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   }
   const workflowPromptPath = join(targetRoot, workflowPath);
   const workflowPromptText = await readWorkflowPrompt(workflowPromptPath);
+  const acceptanceProofWorkflowPath = config.workflows.acceptanceProof.promptPath;
+  if (!acceptanceProofWorkflowPath) {
+    throw new Error('Acceptance proof workflow prompt not found at undefined');
+  }
+  const acceptanceProofWorkflowText = await readWorkflowPrompt(join(targetRoot, acceptanceProofWorkflowPath));
   const branchName = renderBranchTemplate(config.branches.scopedIssue, { issueNumber: options.issueNumber });
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `issue-${options.issueNumber}`);
   const codexTimeoutMs = selectCodexTimeoutMs(config, issue);
@@ -246,6 +252,20 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         commitMessage: `Codex: implement issue #${options.issueNumber}`,
         localPhases: options.localPhases,
         localPhaseExecutor: options.localPhaseExecutor,
+        acceptanceProof: {
+          targetRoot,
+          sessionId,
+          branchName,
+          workflowPromptText: acceptanceProofWorkflowText,
+          codexAdapter,
+          onAttemptEvent: (event) => appendAcceptanceProofEvent({
+            events,
+            issueNumber: options.issueNumber,
+            mode: 'scoped-issue',
+            sessionId,
+            event,
+          }),
+        },
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -329,6 +349,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
         logPath,
         reportPath,
+        acceptanceProof: publishability.acceptanceProofAttempt,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -349,6 +370,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         publishability.residualRisks,
         undefined,
         durableRunSummary,
+        publishability.acceptanceProofAttempt,
       );
     }
 
@@ -378,6 +400,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         nextAction: 'Review the Fresh-Context Review blocker before draft PR handoff.',
         logPath,
         reportPath,
+        acceptanceProof: publishability.acceptanceProofAttempt,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -398,6 +421,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         [...publishability.residualRisks, ...freshContextReview.residualRisks],
         freshContextReview,
         durableRunSummary,
+        publishability.acceptanceProofAttempt,
       );
     }
 
@@ -419,6 +443,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       nextAction: 'Review the draft pull request before merge.',
       logPath,
       reportPath,
+      acceptanceProof: publishability.acceptanceProofAttempt,
     });
     const handoff = await finishScopedReviewReadyHandoff({
       issueNumber: options.issueNumber,
@@ -433,6 +458,7 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       publishability,
       freshContextReview,
       durableRunSummary,
+      acceptanceProof: publishability.acceptanceProofAttempt,
       onPullRequestReady: (createdPullRequest) => {
         pullRequest = createdPullRequest;
       },
@@ -524,6 +550,34 @@ async function safeAppendEvent(
   }
 }
 
+async function appendAcceptanceProofEvent(input: {
+  events: RunnerLifecycleEventStore;
+  issueNumber: number;
+  mode: 'scoped-issue';
+  sessionId: string;
+  event: {
+    status: 'started' | 'passed' | 'needs-rework' | 'blocked';
+    evidence?: AcceptanceProofAttemptEvidence;
+  };
+}): Promise<void> {
+  const evidence = input.event.evidence;
+  await safeAppendEvent(input.events, {
+    issueNumber: input.issueNumber,
+    mode: input.mode,
+    sessionId: input.sessionId,
+    phase: 'acceptance-proof',
+    status: input.event.status === 'passed' ? 'completed' : input.event.status,
+    summary: input.event.status === 'started'
+      ? 'Starting Adaptive Proof Agent session.'
+      : `Adaptive Proof Agent finished with ${input.event.status}.`,
+    artifacts: evidence ? [
+      { kind: 'prompt', path: evidence.promptPath, description: 'Acceptance proof prompt path' },
+      { kind: 'report', path: evidence.reportPath, description: 'Acceptance proof report path' },
+      ...evidence.artifactPaths.map((path) => ({ kind: 'other' as const, path, description: 'Acceptance proof artifact' })),
+    ] : undefined,
+  });
+}
+
 async function readWorkflowPrompt(path: string): Promise<string> {
   try {
     return await readFile(path, 'utf8');
@@ -545,6 +599,7 @@ async function finishBlocked(
   residualRisks: string[],
   freshContextReview?: FreshContextReviewEvidence,
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
+  acceptanceProof?: AcceptanceProofAttemptEvidence,
 ): Promise<ScopedAutoCommandResult> {
   const handoff = await finishScopedBlockedHandoff({
     issueNumber: result.issueNumber,
@@ -557,6 +612,7 @@ async function finishBlocked(
     residualRisks,
     freshContextReview,
     durableRunSummary,
+    acceptanceProof,
   });
   return { ...result, status: 'blocked', reportComment: handoff.reportComment };
 }
@@ -574,6 +630,7 @@ export interface FinishScopedReviewReadyHandoffInput {
   publishability: Extract<ImplementationPublishabilityResult, { status: 'publish-ready' }>;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
   onPullRequestReady?: (pullRequest: GitHubPullRequest) => void;
 }
 
@@ -598,6 +655,7 @@ export async function finishScopedReviewReadyHandoff(
         commits: input.publishability.commits,
         freshContextReview: input.freshContextReview,
         durableRunSummary: input.durableRunSummary,
+        acceptanceProof: input.acceptanceProof,
       }),
       headBranch: input.branchName,
       baseBranch: input.baseBranch,
@@ -619,6 +677,7 @@ export async function finishScopedReviewReadyHandoff(
     commits: input.publishability.commits,
     freshContextReview: input.freshContextReview,
     durableRunSummary: input.durableRunSummary,
+    acceptanceProof: input.acceptanceProof,
   });
   await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);
   await input.issueAdapter.addLabels(input.issueNumber, [input.config.github.labels.review.name]);
@@ -637,6 +696,7 @@ export interface FinishScopedBlockedHandoffInput {
   residualRisks: string[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
   commentPrefix?: string;
   skipCommentIfIncludes?: string;
 }
@@ -655,6 +715,7 @@ export async function finishScopedBlockedHandoff(
       residualRisks: input.residualRisks,
       freshContextReview: input.freshContextReview,
       durableRunSummary: input.durableRunSummary,
+      acceptanceProof: input.acceptanceProof,
     }),
   ].filter(Boolean).join('\n');
   await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);

@@ -74,6 +74,7 @@ async function writeWorkflowPrompts(repo: string): Promise<void> {
   await writeFile(join(dir, 'breakdown-review.md'), 'Breakdown review workflow', 'utf8');
   await writeFile(join(dir, 'triage.md'), 'Triage workflow', 'utf8');
   await writeFile(join(dir, 'issue-tree-orchestration.md'), 'Issue tree workflow', 'utf8');
+  await writeFile(join(dir, 'acceptance-proof.md'), 'Adaptive proof workflow', 'utf8');
 }
 
 function completedReport(): PlanAutoCompletionReport {
@@ -445,6 +446,126 @@ test('plan-auto command blocks child failed configured checks before merge or pu
     execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'rev-parse', 'codex/tree-156']),
     /unknown revision|ambiguous argument|Needed a single revision/,
   );
+});
+
+test('plan-auto command blocks parent publication when child acceptance proof fails', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    codex: {
+      ...config.codex,
+      profiles: {
+        ...config.codex.profiles,
+        'acceptance-proof': {},
+      },
+    },
+    checks: {},
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: {
+        ...config.loopPolicy.rework,
+        maxAttempts: 0,
+      },
+    },
+    reviewGates: {
+      ...config.reviewGates,
+      quality: {
+        ...config.reviewGates.quality,
+        enabled: false,
+      },
+      acceptanceProof: {
+        ...config.reviewGates.acceptanceProof,
+        issueTextPatterns: ['acceptance proof'],
+        changedPathGlobs: ['child-*.txt'],
+        maxIterations: 1,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+  const proofInputs: CodexCommandRunInput[] = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      } else if (input.phase === 'acceptance-proof') {
+        proofInputs.push(input);
+        await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', `issue-${input.issueNumber}`), { recursive: true });
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'needs-rework',
+            criteria: [{
+              id: 'ac-1',
+              description: 'Child behavior is proven',
+              status: 'failed',
+              confidence: 'low',
+              reasoningSummary: 'No smoke artifact proves the child behavior.',
+              artifactRefs: [],
+            }],
+            artifacts: [],
+            proofPhaseDiff: { allowedProofPaths: [], forbiddenProductPaths: [] },
+            reworkRequest: {
+              summary: 'Add observable child proof.',
+              requiredChanges: ['Produce smoke-output artifact for child behavior.'],
+              evidenceRefs: [],
+            },
+            residualRisks: ['No child proof artifact.'],
+          }),
+          'utf8',
+        );
+      } else {
+        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: [`child-${input.issueNumber}.txt`],
+            validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(proofInputs.length, 1);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Acceptance proof needs-rework|Acceptance proof criterion ac-1/i);
+  const childBlocked = [...issueAdapter.postedComments].reverse().find((entry) => entry.issueNumber === 157)?.body ?? '';
+  assert.match(childBlocked, /Acceptance Proof/);
+  assert.match(childBlocked, /Add observable child proof/);
+  assert.match(childBlocked, /Durable Run Summary/);
+  const childSummary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-157-tree-156-issue-157-20260508120000.json'),
+      'utf8',
+    ),
+  ) as Record<string, any>;
+  assert.equal(childSummary.acceptanceProof.status, 'needs-rework');
+  const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
+  assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'started'), true);
+  assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'needs-rework'), true);
 });
 
 test('plan-auto command blocks failed parent integration checks before publication', async () => {

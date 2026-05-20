@@ -29,6 +29,11 @@ export const workflowDefinitions: readonly WorkflowDefinition[] = [
     skillName: 'issue-orchestrator',
     promptPath: '.codex-orchestrator/prompts/workflows/issue-tree-orchestration.md',
   },
+  {
+    id: 'acceptanceProof',
+    skillName: 'spec-implementer',
+    promptPath: '.codex-orchestrator/prompts/workflows/acceptance-proof.md',
+  },
 ] as const;
 
 export type WorkflowConfigMap = Record<WorkflowId, WorkflowConfig>;

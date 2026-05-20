@@ -43,6 +43,7 @@ import {
 } from './issue-tree.js';
 import { runImplementationPublishabilityCheck } from './local-execution-session.js';
 import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
+import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import { RunnerStateStore } from './local-state.js';
 import {
   buildIssueTreeChildPrompt,
@@ -113,6 +114,7 @@ interface ChildExecutionResult {
   residualRisks: string[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
 class ChildExecutionBlockedError extends Error {
@@ -120,6 +122,7 @@ class ChildExecutionBlockedError extends Error {
     message: string,
     public readonly durableRunSummary?: DurableRunSummaryEvidence,
     public readonly freshContextReview?: FreshContextReviewEvidence,
+    public readonly acceptanceProof?: AcceptanceProofAttemptEvidence,
   ) {
     super(message);
   }
@@ -149,6 +152,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
 
   const workflowPrompts = await readPlanWorkflowPrompts(targetRoot, config);
   const issueTreeWorkflowPrompt = await readIssueTreeWorkflowPrompt(targetRoot, config);
+  const acceptanceProofWorkflowPrompt = await readAcceptanceProofWorkflowPrompt(targetRoot, config);
   const branchName = renderBranchTemplate(config.branches.issueTree, { parentIssueNumber: options.issueNumber });
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `tree-${options.issueNumber}`);
   let promptPath = '';
@@ -332,6 +336,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         codexAdapter,
         shellExecutor,
         issueTreeWorkflowPrompt,
+        acceptanceProofWorkflowPrompt,
         now,
         events,
       })));
@@ -340,6 +345,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         message: string;
         durableRunSummary?: DurableRunSummaryEvidence;
         freshContextReview?: FreshContextReviewEvidence;
+        acceptanceProof?: AcceptanceProofAttemptEvidence;
       }> = [];
       for (const [index, result] of settled.entries()) {
         if (result.status === 'fulfilled') {
@@ -350,6 +356,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
           message: result.reason instanceof Error ? result.reason.message : 'child execution failed',
           durableRunSummary: result.reason instanceof ChildExecutionBlockedError ? result.reason.durableRunSummary : undefined,
           freshContextReview: result.reason instanceof ChildExecutionBlockedError ? result.reason.freshContextReview : undefined,
+          acceptanceProof: result.reason instanceof ChildExecutionBlockedError ? result.reason.acceptanceProof : undefined,
         });
       }
       if (failures.length > 0) {
@@ -547,6 +554,14 @@ async function readIssueTreeWorkflowPrompt(targetRoot: string, config: CodexOrch
   );
 }
 
+async function readAcceptanceProofWorkflowPrompt(targetRoot: string, config: CodexOrchestratorConfig): Promise<string> {
+  return readWorkflowPrompt(
+    targetRoot,
+    config.workflows.acceptanceProof.promptPath,
+    'Acceptance proof workflow prompt',
+  );
+}
+
 async function readWorkflowPrompt(targetRoot: string, promptPath: string | undefined, promptName: string): Promise<string> {
   const absolutePath = promptPath ? join(targetRoot, promptPath) : 'undefined';
   try {
@@ -571,6 +586,7 @@ async function executeChild(input: {
   codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
   shellExecutor: ShellCommandExecutor;
   issueTreeWorkflowPrompt: string;
+  acceptanceProofWorkflowPrompt: string;
   now: Date;
   events: RunnerLifecycleEventStore;
 }): Promise<ChildExecutionResult> {
@@ -728,6 +744,20 @@ async function executeChild(input: {
       git: input.git,
       shellExecutor: input.shellExecutor,
       commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
+      acceptanceProof: {
+        targetRoot: input.targetRoot,
+        sessionId,
+        branchName,
+        workflowPromptText: input.acceptanceProofWorkflowPrompt,
+        codexAdapter: input.codexAdapter,
+        onAttemptEvent: (event) => appendAcceptanceProofEvent({
+          events: input.events,
+          issueNumber: childIssueNumber,
+          parentIssueNumber: input.parentIssue.number,
+          sessionId,
+          event,
+        }),
+      },
     });
 
     if (
@@ -772,8 +802,9 @@ async function executeChild(input: {
       nextAction: 'Parent issue-tree execution is blocked until this child is resolved.',
       logPath,
       reportPath,
+      acceptanceProof: publishability.acceptanceProofAttempt,
     });
-    throw new ChildExecutionBlockedError(publishability.reasons.join('; '), durableRunSummary);
+    throw new ChildExecutionBlockedError(publishability.reasons.join('; '), durableRunSummary, undefined, publishability.acceptanceProofAttempt);
   }
 
   const freshContextReview = await runFreshContextReviewIfEnabled({
@@ -802,11 +833,13 @@ async function executeChild(input: {
       nextAction: 'Parent issue-tree execution is blocked until this child review finding is resolved.',
       logPath,
       reportPath,
+      acceptanceProof: publishability.acceptanceProofAttempt,
     });
     throw new ChildExecutionBlockedError(
       ['Fresh-Context Review blocked publication', ...freshContextReview.findings].join('; '),
       durableRunSummary,
       freshContextReview,
+      publishability.acceptanceProofAttempt,
     );
   }
 
@@ -825,6 +858,7 @@ async function executeChild(input: {
     nextAction: 'Parent issue-tree integration should merge this child branch.',
     logPath,
     reportPath,
+    acceptanceProof: publishability.acceptanceProofAttempt,
   });
 
   return {
@@ -842,6 +876,7 @@ async function executeChild(input: {
     residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
     freshContextReview,
     durableRunSummary,
+    acceptanceProof: publishability.acceptanceProofAttempt,
   };
 }
 
@@ -854,6 +889,7 @@ async function blockFailedBatch(
     message: string;
     durableRunSummary?: DurableRunSummaryEvidence;
     freshContextReview?: FreshContextReviewEvidence;
+    acceptanceProof?: AcceptanceProofAttemptEvidence;
   }>,
   successfulUnmerged: ChildExecutionResult[],
 ): Promise<void> {
@@ -872,6 +908,7 @@ async function blockFailedBatch(
         details: ['Worktree preserved for maintainer inspection.'],
         freshContextReview: failure.freshContextReview,
         durableRunSummary: failure.durableRunSummary,
+        acceptanceProof: failure.acceptanceProof,
       }),
     );
   }
@@ -887,6 +924,7 @@ async function blockFailedBatch(
         branchName: result.branchName,
         worktreePath: result.worktreePath,
         durableRunSummary: result.durableRunSummary,
+        acceptanceProof: result.acceptanceProof,
       }),
     );
   }
@@ -932,6 +970,7 @@ async function handleMergeConflict(
         })),
         gitOutput: error.stderr || error.stdout || 'no git output',
         durableRunSummary: result.durableRunSummary,
+        acceptanceProof: result.acceptanceProof,
       }),
     );
   }
@@ -978,6 +1017,7 @@ async function blockCompletedChildren(
           `- Parent worktree preserved: ${parentWorktreePath}`,
         ],
         durableRunSummary: result.durableRunSummary,
+        acceptanceProof: result.acceptanceProof,
       }),
     );
     await store.removeRun(result.child.issue.number);
@@ -1049,6 +1089,35 @@ async function safeAppendEvent(
   } catch {
     // Diagnostics evidence must not alter the runner publication outcome.
   }
+}
+
+async function appendAcceptanceProofEvent(input: {
+  events: RunnerLifecycleEventStore;
+  issueNumber: number;
+  parentIssueNumber: number;
+  sessionId: string;
+  event: {
+    status: 'started' | 'passed' | 'needs-rework' | 'blocked';
+    evidence?: AcceptanceProofAttemptEvidence;
+  };
+}): Promise<void> {
+  const evidence = input.event.evidence;
+  await safeAppendEvent(input.events, {
+    issueNumber: input.issueNumber,
+    parentIssueNumber: input.parentIssueNumber,
+    mode: 'tree-child',
+    sessionId: input.sessionId,
+    phase: 'acceptance-proof',
+    status: input.event.status === 'passed' ? 'completed' : input.event.status,
+    summary: input.event.status === 'started'
+      ? 'Starting tree-child Adaptive Proof Agent session.'
+      : `Tree-child Adaptive Proof Agent finished with ${input.event.status}.`,
+    artifacts: evidence ? [
+      { kind: 'prompt', path: evidence.promptPath, description: 'Acceptance proof prompt path' },
+      { kind: 'report', path: evidence.reportPath, description: 'Acceptance proof report path' },
+      ...evidence.artifactPaths.map((path) => ({ kind: 'other' as const, path, description: 'Acceptance proof artifact' })),
+    ] : undefined,
+  });
 }
 
 function baseResult(

@@ -7,6 +7,7 @@ export const workflowKeys = [
   'triage',
   'scopedImplementation',
   'issueTreeOrchestration',
+  'acceptanceProof',
 ] as const;
 
 export const labelPreparationPolicies = ['report-only', 'create-missing'] as const;

@@ -1,0 +1,8 @@
+## Contract Test Ledger
+
+| Invariant | Risk It Prevents | First Test / Proof | Status |
+| --- | --- | --- | --- |
+| Scoped runs invoke Adaptive Proof as a separate `acceptance-proof` Codex phase with proof report path, artifact directory, changed-file context, and proof-owned path policy. | Implementation agents silently own proof or proof sessions lack the data needed to produce machine-validated reports. | `scoped auto command invokes adaptive proof phase and records durable evidence` | green |
+| Missing or malformed proof reports block before draft PR handoff and preserve proof attempt evidence. | A runner publishes changes without machine-readable acceptance proof. | `scoped auto command invokes adaptive proof phase and records durable evidence`; `plan-auto command blocks parent publication when child acceptance proof fails` | green |
+| Tree-child execution uses the same proof attempt contract and blocks parent publication when child proof fails. | Parent issue-tree PRs publish even though a child acceptance proof failed or requested rework. | `plan-auto command blocks parent publication when child acceptance proof fails` | green |
+| Durable summaries and lifecycle events expose proof attempt start and terminal outcomes without breaking older readers. | Operators cannot reconstruct proof attempts after interruption or blocked child waves. | `scoped auto command invokes adaptive proof phase and records durable evidence`; `plan-auto command blocks parent publication when child acceptance proof fails` | green |

@@ -24,6 +24,7 @@ export const codexPhaseKeys = [
   'plan-parent',
   'scoped-issue',
   'tree-child',
+  'acceptance-proof',
   'fresh-context-review',
   'visual-proof',
   'quality-review',
@@ -142,6 +143,7 @@ export interface CodexOrchestratorConfig {
     triage: WorkflowConfig;
     scopedImplementation: WorkflowConfig;
     issueTreeOrchestration: WorkflowConfig;
+    acceptanceProof: WorkflowConfig;
   };
   checks: Record<string, string>;
   checksPolicy?: {

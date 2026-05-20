@@ -257,10 +257,10 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
   try {
     const result = await runRunnerVisualProof({
       config: validConfig,
-      issue: issueFixture({ number: 155, title: 'Acceptance proof for CLI smoke', body: 'Needs acceptance proof.' }),
+      issue: issueFixture({ number: 155, title: '[UI] Acceptance proof for CLI smoke', body: 'Needs mobile visual proof.' }),
       issueNumber: 155,
       worktreePath,
-      changedFiles: ['src/cli.ts'],
+      changedFiles: ['src/frontend/CampaignList.tsx'],
       report: {
         status: 'completed',
         changes: [],

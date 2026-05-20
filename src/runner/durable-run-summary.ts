@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export interface DurableRunSummary {
@@ -20,6 +21,7 @@ export interface DurableRunSummary {
     logPath: string;
     reportPath: string;
   };
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
 export interface DurableRunSummaryEvidence {
@@ -43,6 +45,7 @@ export async function writeDurableRunSummary(input: {
   nextAction: string;
   logPath: string;
   reportPath: string;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): Promise<DurableRunSummaryEvidence | undefined> {
   if (!input.config.loopPolicy.durableRunSummaries.enabled) {
     return undefined;
@@ -64,6 +67,7 @@ export async function writeDurableRunSummary(input: {
       logPath: input.logPath,
       reportPath: input.reportPath,
     },
+    acceptanceProof: input.acceptanceProof,
   };
   const path = join(
     input.targetRoot,
@@ -81,6 +85,7 @@ export async function writeDurableRunSummary(input: {
       `next action: ${summary.nextAction}`,
       `confirmed facts: ${summary.confirmedFacts.length === 0 ? 'none' : summary.confirmedFacts.join('; ')}`,
       `residual risks: ${summary.residualRisks.length === 0 ? 'none' : summary.residualRisks.join('; ')}`,
+      `acceptance proof: ${summary.acceptanceProof?.status ?? 'not-run'}`,
       `policy suggestions: ${summary.policySuggestions.length === 0 ? 'none' : summary.policySuggestions.join('; ')}`,
     ],
   };

@@ -6,7 +6,7 @@ import type { CodexPhase } from '../config/schema.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { RunnerMode } from './issue-state-machine.js';
 
-export type LifecycleEventStatus = 'started' | 'completed' | 'blocked' | 'failed' | 'skipped';
+export type LifecycleEventStatus = 'started' | 'completed' | 'needs-rework' | 'blocked' | 'failed' | 'skipped';
 export type LifecycleArtifactKind =
   | 'prompt'
   | 'report'

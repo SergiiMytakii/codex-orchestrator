@@ -71,12 +71,12 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.33` (2026-05-20):
-  - Acceptance Proof is the canonical runner-owned proof gate.
-  - Proof reports require high-confidence criterion-to-artifact evidence.
-  - Proof-phase product-code diffs block Draft PR Handoff.
-  - Live smoke covers proof pass, rework, low-confidence blocking, and
-    proof-phase product-diff blocking.
+- `0.1.34` (2026-05-20):
+  - Adaptive Proof Agent runs as a runner-owned Codex phase.
+  - Proof attempts persist prompt, report, artifacts, blockers, and rework
+    evidence.
+  - Parent child-wave execution blocks publication on failed child proof.
+  - Setup installs the bundled Acceptance Proof workflow prompt.
 
 ## Final Response
 

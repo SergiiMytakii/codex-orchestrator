@@ -5,6 +5,7 @@ import type { SessionCommitInfo } from '../git/worktree.js';
 import type { AutonomousChildNode } from './issue-tree.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { DurableRunSummaryEvidence } from './durable-run-summary.js';
+import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 
 export interface RunnerValidationLine {
   command: string;
@@ -35,6 +36,7 @@ export interface ScopedHandoffEvidence {
   commits: CommitEvidence[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
 export interface ChildHandoffEvidence {
@@ -49,6 +51,7 @@ export interface ChildHandoffEvidence {
   logPath: string;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
 export function buildScopedReviewReport(
@@ -64,6 +67,7 @@ export function buildScopedReviewReport(
     ...renderValidationEvidence(input.validation),
     'Proof Artifacts',
     ...renderScopedProofArtifacts(input),
+    ...renderAcceptanceProofEvidence(input.acceptanceProof),
     'Log',
     ...bulletList([input.logPath]),
     'Local Commits',
@@ -89,6 +93,7 @@ export function buildScopedPullRequestBody(input: ScopedHandoffEvidence): string
     '',
     'Proof artifacts:',
     ...renderScopedProofArtifacts(input),
+    ...renderAcceptanceProofEvidence(input.acceptanceProof),
     '',
     'Log:',
     ...bulletList([input.logPath]),
@@ -115,6 +120,7 @@ export function buildScopedBlockedReport(input: {
   residualRisks: string[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): string {
   return [
     `codex-orchestrator blocked scoped execution for #${input.issueNumber}`,
@@ -126,6 +132,7 @@ export function buildScopedBlockedReport(input: {
     ...bulletList([input.logPath]),
     ...renderFreshContextReviewEvidence(input.freshContextReview),
     ...renderDurableRunSummaryEvidence(input.durableRunSummary),
+    ...renderAcceptanceProofEvidence(input.acceptanceProof),
     'Skipped Checks',
     ...bulletList(input.skippedChecks),
     'Residual Risks',
@@ -153,6 +160,25 @@ function renderDurableRunSummaryPullRequestSection(evidence: DurableRunSummaryEv
     `- ${evidence.path}`,
     ...evidence.excerpt.map((line) => `- ${line}`),
     '',
+  ];
+}
+
+function renderAcceptanceProofEvidence(evidence: AcceptanceProofAttemptEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    'Acceptance Proof',
+    `- status: ${evidence.status}`,
+    `- prompt: ${evidence.promptPath}`,
+    `- report: ${evidence.reportPath}`,
+    `- artifact dir: ${evidence.artifactDir}`,
+    'Acceptance Proof Artifacts',
+    ...bulletList(evidence.artifactPaths),
+    'Acceptance Proof Validation',
+    ...renderValidationEvidence(evidence.validation),
+    'Acceptance Proof Blockers',
+    ...bulletList(evidence.blockers),
   ];
 }
 
@@ -328,6 +354,7 @@ export function buildChildBlockedReport(input: {
   gitOutput?: string;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): string {
   return [
     `codex-orchestrator blocked child #${input.childIssueNumber} for parent #${input.parentIssueNumber}`,
@@ -338,6 +365,7 @@ export function buildChildBlockedReport(input: {
     ...(input.worktreePath ? [`- Worktree preserved: ${input.worktreePath}`] : []),
     ...renderFreshContextReviewEvidence(input.freshContextReview),
     ...renderDurableRunSummaryEvidence(input.durableRunSummary),
+    ...renderAcceptanceProofEvidence(input.acceptanceProof),
     ...(input.batchChildren ? ['Batch Children', ...bulletList(input.batchChildren.map((child) => `#${child.issueNumber} ${child.branchName}`))] : []),
     ...(input.gitOutput ? ['Git Output', ...bulletList([input.gitOutput])] : []),
   ].join('\n');

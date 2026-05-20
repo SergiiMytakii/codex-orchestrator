@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { GitWorktreeManager, SessionCommitInfo } from '../git/worktree.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ShellCommandExecutor } from '../process/command.js';
@@ -17,6 +18,11 @@ import {
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
+import {
+  runAcceptanceProofAttempt,
+  shouldRunAcceptanceProofAttempt,
+  type AcceptanceProofAttemptEvidence,
+} from './acceptance-proof-runner.js';
 
 export interface LocalExecutionPhaseInput {
   phaseId: string;
@@ -60,6 +66,17 @@ export interface ImplementationPublishabilityInput {
   commitMessage: string;
   localPhases?: string[];
   localPhaseExecutor?: LocalExecutionPhaseExecutor;
+  acceptanceProof?: {
+    targetRoot: string;
+    sessionId: string;
+    branchName: string;
+    workflowPromptText: string;
+    codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
+    onAttemptEvent?: (event: {
+      status: 'started' | 'passed' | 'needs-rework' | 'blocked';
+      evidence?: AcceptanceProofAttemptEvidence;
+    }) => Promise<void>;
+  };
 }
 
 export type ImplementationPublishabilityResult =
@@ -72,6 +89,7 @@ export type ImplementationPublishabilityResult =
       skippedChecks: string[];
       residualRisks: string[];
       commits: SessionCommitInfo[];
+      acceptanceProofAttempt?: AcceptanceProofAttemptEvidence;
     }
   | {
       status: 'blocked';
@@ -81,6 +99,7 @@ export type ImplementationPublishabilityResult =
       skippedChecks: string[];
       residualRisks: string[];
       commits: SessionCommitInfo[];
+      acceptanceProofAttempt?: AcceptanceProofAttemptEvidence;
     }
   | {
       status: 'promotion-requested';
@@ -223,23 +242,83 @@ export async function runImplementationPublishabilityCheck(
       residualRisks: [...report.residualRisks, ...checkWarnings],
     };
   }
-  const beforeProofFileHashes = await snapshotFileHashes(input.worktreePath, changedFiles);
-  const runnerVisualProof = await runRunnerVisualProof({
-    config: input.config,
-    issue: input.issue,
-    issueNumber: input.issue.number,
-    targetRoot: input.targetRoot,
-    worktreePath: input.worktreePath,
-    changedFiles,
-    report,
-    shellExecutor: input.shellExecutor,
-  });
+  const residualRisks = [...report.residualRisks];
+  let acceptanceProofAttempt: AcceptanceProofAttemptEvidence | undefined;
+  const adaptiveProofConfigured = input.acceptanceProof
+    && input.targetRoot
+    && (
+      Boolean(input.config.codex.profiles?.['acceptance-proof'])
+      || !input.config.reviewGates.acceptanceProof.runnerValidationCommand?.trim()
+    )
+    && shouldRunAcceptanceProofAttempt({
+      config: input.config,
+      issue: input.issue,
+      changedFiles,
+    });
+
+  if (adaptiveProofConfigured && input.acceptanceProof) {
+    await input.acceptanceProof.onAttemptEvent?.({ status: 'started' });
+    const proofResult = await runAcceptanceProofAttempt({
+      config: input.config,
+      issue: input.issue,
+      targetRoot: input.acceptanceProof.targetRoot,
+      worktreePath: input.worktreePath,
+      changedFiles,
+      implementationReport: report,
+      codexAdapter: input.acceptanceProof.codexAdapter,
+      git: input.git,
+      beforeHead: input.beforeHead,
+      sessionId: input.acceptanceProof.sessionId,
+      branchName: input.acceptanceProof.branchName,
+      workflowPromptText: input.acceptanceProof.workflowPromptText,
+    });
+    acceptanceProofAttempt = proofResult.evidence;
+    await input.acceptanceProof.onAttemptEvent?.({
+      status: proofResult.evidence.status,
+      evidence: proofResult.evidence,
+    });
+    validation = [...validation, ...proofResult.validation];
+    report = {
+      ...report,
+      artifacts: mergeArtifacts(report.artifacts, proofResult.artifacts),
+      residualRisks: [...report.residualRisks, ...proofResult.residualRisks],
+    };
+    residualRisks.push(...proofResult.residualRisks);
+    changedFiles = proofResult.changedFiles;
+
+    if (proofResult.status === 'blocked') {
+      return {
+        status: 'blocked',
+        reasons: proofResult.blockers,
+        changedFiles,
+        validation,
+        skippedChecks: report.skippedChecks,
+        residualRisks,
+        commits: changeSet.commits,
+        acceptanceProofAttempt,
+      };
+    }
+  }
+
+  const beforeProofFileHashes = adaptiveProofConfigured ? undefined : await snapshotFileHashes(input.worktreePath, changedFiles);
+  const runnerVisualProof = adaptiveProofConfigured
+    ? { validation: [], artifacts: [] }
+    : await runRunnerVisualProof({
+      config: input.config,
+      issue: input.issue,
+      issueNumber: input.issue.number,
+      targetRoot: input.targetRoot,
+      worktreePath: input.worktreePath,
+      changedFiles,
+      report,
+      shellExecutor: input.shellExecutor,
+    });
   validation = [...validation, ...runnerVisualProof.validation];
   report = {
     ...report,
     artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
   };
-  if (runnerVisualProof.validation.length > 0 || runnerVisualProof.artifacts.length > 0) {
+  if (!adaptiveProofConfigured && (runnerVisualProof.validation.length > 0 || runnerVisualProof.artifacts.length > 0)) {
     const beforeProofChangedFiles = new Set(changedFiles);
     changeSet = await input.git.collectSessionChangeSet({
       worktreePath: input.worktreePath,
@@ -247,7 +326,7 @@ export async function runImplementationPublishabilityCheck(
     });
     const proofPhaseChangedFiles = [
       ...changeSet.changedPaths.filter((path) => !beforeProofChangedFiles.has(path)),
-      ...await changedFileHashes(input.worktreePath, beforeProofFileHashes),
+      ...await changedFileHashes(input.worktreePath, beforeProofFileHashes ?? new Map()),
     ];
     changedFiles = changeSet.changedPaths;
     const proofDiff = classifyAcceptanceProofDiff(input.config, proofPhaseChangedFiles);
@@ -262,11 +341,11 @@ export async function runImplementationPublishabilityCheck(
         skippedChecks: report.skippedChecks,
         residualRisks: report.residualRisks,
         commits: changeSet.commits,
+        acceptanceProofAttempt,
       };
     }
   }
 
-  const residualRisks = [...report.residualRisks];
   const failedValidation = validation.filter((line) => line.status === 'failed');
   if (failedValidation.length > 0) {
     residualRisks.push('One or more configured checks failed.');
@@ -281,6 +360,7 @@ export async function runImplementationPublishabilityCheck(
       skippedChecks: report.skippedChecks,
       residualRisks,
       commits: changeSet.commits,
+      acceptanceProofAttempt,
     };
   }
 
@@ -302,6 +382,7 @@ export async function runImplementationPublishabilityCheck(
       skippedChecks: report.skippedChecks,
       residualRisks,
       commits: changeSet.commits,
+      acceptanceProofAttempt,
     };
   }
   if (reviewGate.warnings.length > 0) {
@@ -329,6 +410,7 @@ export async function runImplementationPublishabilityCheck(
     skippedChecks: report.skippedChecks,
     residualRisks,
     commits: changeSet.commits,
+    acceptanceProofAttempt,
   };
 }
 

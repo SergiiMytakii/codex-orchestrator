@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-05-20
+
+### Added
+- Added an Adaptive Proof Agent Codex phase for scoped and issue-tree child
+  runs, with runner-provided proof report paths, artifact directories, changed
+  file context, and proof-owned repair policy.
+- Added durable Acceptance Proof attempt evidence in lifecycle events, run
+  summaries, blocked comments, review reports, and issue-tree PR handoff.
+- Added package-bundled Acceptance Proof workflow prompts and setup routing for
+  the new proof phase.
+
+### Changed
+- Parent `agent:plan-auto` child waves now block parent publication when a child
+  Acceptance Proof attempt fails, requests rework, or is blocked.
+- Proof attempts now use isolated Codex homes and preserve proof artifacts while
+  keeping publication authority runner-owned.
+
 ## [0.1.33] - 2026-05-20
 
 ### Added

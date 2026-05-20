@@ -245,19 +245,71 @@ compatibility adapter for existing screenshot and mobile proof policy.
 ## Acceptance Proof
 
 Acceptance proof is intentionally runner-owned. Codex can implement product
-behavior, but the runner decides whether proof is required and executes the
-configured proof command after implementation. Runtime config loading backfills
-the package-owned mobile proof command for older configs where visual proof is
-enabled but no runner command is set.
+behavior, but the runner decides whether proof is required, starts the proof
+phase after implementation, validates the proof report, and makes the final
+publishability decision. Runtime config loading still preserves package-owned
+visual proof behavior for older configs where visual proof is enabled but no
+runner command is set.
+
+Adaptive Acceptance Proof is the canonical proof model. Instead of treating a
+screenshot or a final agent sentence as enough evidence, the runner can launch a
+separate `acceptance-proof` Codex phase with the issue, changed files,
+implementation evidence, and repository proof policy. Repositories opt into that
+adaptive Codex proof session by configuring `codex.profiles.acceptance-proof`;
+existing runner-owned visual/mobile proof commands remain the compatibility
+path. The adaptive phase can navigate a browser, inspect mobile UI state, run API
+or CLI checks, inspect logs, or create a focused live-smoke check for observable
+product behavior. The proof phase writes artifacts under the runner-owned proof
+directory and writes a machine-readable `acceptance-proof-report.json`.
+
+The gate is selected when `reviewGates.acceptanceProof.enabled` is true and
+either:
+
+- the issue title or body matches `reviewGates.acceptanceProof.issueTextPatterns`;
+  or
+- the implementation changed a path matched by
+  `reviewGates.acceptanceProof.changedPathGlobs`.
+
+The proof phase is not an implementation phase. It has no publication authority
+and must not edit GitHub issues, labels, comments, branches, pull requests,
+releases, or deployments. If a proof script needs repair, edits must stay inside
+`reviewGates.acceptanceProof.proofOwnedPathGlobs`. Product-code changes during
+proof are blockers, even when the proof report claims success.
+
+The proof report has three top-level outcomes:
+
+- `passed` means every required acceptance criterion has `status: "passed"`,
+  `confidence: "high"`, and at least one artifact reference.
+- `needs-rework` means proof found missing or uncertain product behavior and
+  returns a concrete rework request for the next implementation attempt.
+- `blocked` means proof could not continue safely, for example because the
+  environment is missing required credentials or tooling.
+
+The runner validates the report independently. It rejects malformed JSON, empty
+criteria, low or medium confidence, failed or unknown criteria, missing artifact
+references, artifact paths that do not exist, and forbidden product-code diffs
+from the proof phase.
+
+When proof returns `needs-rework`, the runner feeds the rework request back into
+the bounded implementation loop. The maximum number of implementation-plus-proof
+iterations is controlled by `reviewGates.acceptanceProof.maxIterations`; the
+runner keeps the issue claimed while the loop continues. A successful proof can
+continue to the normal publishability gates and draft PR handoff. A terminal
+proof blocker marks the issue blocked and preserves the proof prompt, report
+path, artifact directory, validation line, residual risks, and blocker summary in
+runner evidence.
 
 Child Codex processes receive a mobile-device guard directory at the front of
 `PATH`. The guard blocks direct device/emulator control through `adb`,
-`emulator`, Flutter device-control subcommands, and `xcrun simctl`. Runner-owned
-acceptance proof commands do not run through that guarded Codex environment;
-they use the shared mobile lease described below.
+`emulator`, Flutter device-control subcommands, and `xcrun simctl`. Adaptive
+proof Codex phases keep that guard, so they can inspect and verify behavior
+without independently owning shared devices. Runner-owned mobile proof commands
+use the shared mobile lease described below.
 
-The proof command usually runs browser automation, such as Playwright. The
-runner provides environment variables for:
+The proof phase often runs browser automation, such as Playwright, but the same
+contract applies to non-visual proof. A live-smoke proof can exercise an API,
+worker, CLI, or other observable behavior and save the command output as a
+`smoke-output` artifact. The runner provides environment variables for:
 
 - issue number;
 - artifact directory;
@@ -269,9 +321,10 @@ runner provides environment variables for:
 - mobile device lock directory for runner-owned Android proof.
 
 Proof artifacts created under the proof directory are attached to the PR and
-issue review report. Screenshots remain supported for visual proof. Product-code
-changes made during the proof phase are blockers; proof script repair must stay
-inside configured proof-owned paths.
+issue review report. Supported artifact types include screenshots, UI dumps,
+logs, smoke outputs, and other explicit artifacts. Screenshots remain supported
+for visual proof, but screenshot existence alone is not sufficient: each required
+criterion must map to high-confidence artifact evidence in the proof report.
 
 For mobile UI work, setup uses the package-owned
 `codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The
