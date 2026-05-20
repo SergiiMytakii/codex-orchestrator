@@ -120,6 +120,12 @@ owned by the parent run and are not picked up as standalone daemon work.
 
 The runner never auto-merges.
 
+## Agent Memory
+
+Repo-local Dreaming-lite memory lives in `docs/agents/memory/`. It is a small
+curated lessons cache for repeated runner/debug/agent-workflow patterns, not a
+replacement for `AGENTS.md`, ADRs, `docs/deep-dive.md`, or package prompts.
+
 ## Install
 
 Requirements:

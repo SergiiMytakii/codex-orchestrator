@@ -1,15 +1,20 @@
 # Repository Routing
+
 ## Start Here
+
 This file is the short routing layer for agents working on
 `codex-orchestrator`. Keep detailed rules in linked docs.
+
 - Product workflow: `README.md`.
 - Runner architecture and policy model: `docs/deep-dive.md`.
 - Runner-owned loop ADR: `docs/adr/0001-runner-owned-loop-policy.md`.
 - Agent execution and quality preflight: `docs/agents/execution-routing.md`.
+- Repo-local Dreaming-lite memory: `docs/agents/memory/README.md`.
 - Live smoke coverage: `docs/live-smoke-checklist.md`.
 - Release history: `CHANGELOG.md`.
 
 ## Repo Map
+
 - `src/` contains the TypeScript package source.
 - `test/` contains Node test runner coverage.
 - `prompts/` contains package-bundled workflow prompts copied by setup.
@@ -17,6 +22,7 @@ This file is the short routing layer for agents working on
   rules, branches, and workflow prompt routing.
 
 ## Non-Negotiables
+
 - Never read, print, or edit secret files such as `.env` or `.env.*`.
 - Keep reusable orchestration logic in the package and target-repo policy under
   `.codex-orchestrator/`.
@@ -25,8 +31,12 @@ This file is the short routing layer for agents working on
   unavailable.
 
 ## Task Routing
+
 - For behavior-changing code, use the global TDD routing rule before editing.
 - For docs-only changes, do not use TDD and do not run live smoke.
+- For repeated runner/debug/agent-workflow lessons, use
+  `docs/agents/memory/README.md` as a curated recall cache, not as mandatory
+  policy.
 - For medium or large implementation changes, apply cleanup and final review
   gates before handoff.
 - When imports, modules, jobs, services, scripts, cross-module wiring, runner
@@ -52,6 +62,7 @@ This is a single-context repo with root `CONTEXT.md` and root `docs/adr/`.
 See `docs/agents/domain.md`.
 
 ## Release
+
 - When cutting a release, update the latest release summary below with 2-6
   functional bullets.
 - Update `CHANGELOG.md` with human-readable "what got better" notes.
@@ -59,6 +70,7 @@ See `docs/agents/domain.md`.
   run; it creates or updates real GitHub issues and PRs.
 
 ### Latest Release
+
 - `0.1.33` (2026-05-20):
   - Acceptance Proof is the canonical runner-owned proof gate.
   - Proof reports require high-confidence criterion-to-artifact evidence.
@@ -67,5 +79,6 @@ See `docs/agents/domain.md`.
     proof-phase product-diff blocking.
 
 ## Final Response
+
 Keep final answers short: state what changed, what was verified, and any
 remaining risk or skipped validation.
