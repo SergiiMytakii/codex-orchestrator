@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
   evaluateAcceptanceProofReport,
+  readAcceptanceProofReport,
   type AcceptanceProofReport,
 } from '../src/runner/acceptance-proof.js';
 import { validConfig } from './fixtures/config.js';
@@ -95,4 +99,24 @@ test('acceptance proof rejects proof-phase product code changes outside proof-ow
   assert.equal(result.ok, false);
   assert.match(result.reasons.join('\n'), /product-code changes during acceptance proof/i);
   assert.match(result.reasons.join('\n'), /src\/runner\/scoped-auto-command\.ts/);
+});
+
+test('acceptance proof loads and classifies missing, invalid, and valid proof reports', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-'));
+  const invalidReportPath = join(tempDir, 'invalid-report.json');
+  const validReportPath = join(tempDir, 'valid-report.json');
+  await writeFile(invalidReportPath, '{"status":"passed"}', 'utf8');
+  await writeFile(validReportPath, JSON.stringify(passingReport), 'utf8');
+
+  assert.deepEqual(await readAcceptanceProofReport(join(tempDir, 'missing-report.json')), {
+    kind: 'missing',
+  });
+  assert.deepEqual(await readAcceptanceProofReport(invalidReportPath), {
+    kind: 'invalid',
+    message: 'Invalid acceptance proof report: criteria must be an array',
+  });
+  assert.deepEqual(await readAcceptanceProofReport(validReportPath), {
+    kind: 'valid',
+    report: passingReport,
+  });
 });

@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { globMatches, normalizePath } from '../path-policy.js';
 import { scopedArtifactTypes, type ScopedArtifactType } from './completion-report.js';
@@ -54,6 +56,32 @@ export interface AcceptanceProofEvaluationResult {
   ok: boolean;
   reasons: string[];
   warnings: string[];
+}
+
+export type AcceptanceProofReportReadResult =
+  | { kind: 'missing' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'valid'; report: AcceptanceProofReport };
+
+export async function readAcceptanceProofReport(path: string): Promise<AcceptanceProofReportReadResult> {
+  let content = '';
+  try {
+    content = await readFile(path, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return { kind: 'missing' };
+    }
+    throw error;
+  }
+
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    assertAcceptanceProofReport(parsed);
+    return { kind: 'valid', report: parsed };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid acceptance proof report';
+    return { kind: 'invalid', message };
+  }
 }
 
 export function evaluateAcceptanceProofReport(input: AcceptanceProofEvaluationInput): AcceptanceProofEvaluationResult {
