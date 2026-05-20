@@ -222,6 +222,8 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
     assert.notEqual(packageBinDir, '/opt/homebrew/bin');
     const shim = await readFile(join(packageBinDir, 'codex-orchestrator'), 'utf8');
     assert.match(shim, /cli\.js/);
+    const cmdShim = await readFile(join(packageBinDir, 'codex-orchestrator.cmd'), 'utf8');
+    assert.match(cmdShim, /cli\.js/);
 
     const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
     const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;

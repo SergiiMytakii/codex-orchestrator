@@ -252,11 +252,17 @@ async function ensureRunnerPackageBin(runtimeDir: string): Promise<string> {
   const binDir = join(runtimeDir, 'bin');
   await mkdir(binDir, { recursive: true });
   const shimPath = join(binDir, 'codex-orchestrator');
+  const cmdShimPath = join(binDir, 'codex-orchestrator.cmd');
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
   await writeFile(
     shimPath,
     `#!/usr/bin/env sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`,
     { mode: 0o755 },
+  );
+  await writeFile(
+    cmdShimPath,
+    `@"${process.execPath}" "${cliPath}" %*\r\n`,
+    'utf8',
   );
   await chmod(shimPath, 0o755);
   return binDir;
