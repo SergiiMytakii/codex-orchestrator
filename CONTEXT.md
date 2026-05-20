@@ -44,6 +44,38 @@ _Avoid_: self-review
 A runner-enforced condition that must pass before a result can be handed off for human review.
 _Avoid_: suggestion, guideline
 
+**Acceptance Proof**:
+A runner-owned verification phase that gathers evidence that an issue's acceptance criteria are satisfied.
+_Avoid_: screenshot check, agent QA
+
+**Adaptive Proof Agent**:
+A proof-phase Codex session that can adaptively inspect and drive the running product to produce acceptance evidence, without owning issue state or publication.
+_Avoid_: implementation agent, publisher, autonomous QA owner
+
+**Proof Artifact**:
+A persisted evidence file from **Acceptance Proof**, such as a screenshot, UI dump, log, smoke output, or proof report.
+_Avoid_: attachment, random output
+
+**Proof Report**:
+A structured **Acceptance Proof** result that maps acceptance criteria to status, confidence, reasoning summary, and **Proof Artifacts**.
+_Avoid_: agent says it passed, screenshot only
+
+**Proof Script Repair**:
+A limited proof-phase change to repository-owned verification scripts needed to make **Acceptance Proof** executable.
+_Avoid_: feature fix, product code change
+
+**Proof Rework Request**:
+A runner-owned handoff back to implementation when **Acceptance Proof** finds that product code or acceptance behavior is incomplete.
+_Avoid_: agent label update, hidden retry
+
+**Acceptance Proof Loop**:
+A bounded runner-owned cycle that alternates implementation/rework and **Acceptance Proof** until the acceptance criteria pass or the configured iteration limit is reached.
+_Avoid_: infinite QA loop, keep trying
+
+**Live Smoke Proof**:
+A non-visual **Acceptance Proof** that exercises a running product path and verifies acceptance criteria through observable behavior.
+_Avoid_: unit test, static check
+
 **Durable Run Summary**:
 A persisted summary of what happened in a run, including decisions, validation, blockers, residual risks, and next action.
 _Avoid_: chat transcript
@@ -66,6 +98,13 @@ _Avoid_: completion, merge
 - A **Loop Policy** contains the **Issue Selection Policy**, **Rework Loop**, **Fresh-Context Review**, **Durable Run Summary**, and **Policy Suggestion** rules.
 - An **Agent** works inside a runner-prepared worktree and must not cross the **Runner-Owned Publication Boundary**.
 - A **Review Gate** can block a **Draft PR Handoff**.
+- **Acceptance Proof** is a **Review Gate** when issue policy requires live evidence.
+- An **Adaptive Proof Agent** runs inside **Acceptance Proof** and produces a **Proof Report** plus **Proof Artifacts** for the **Runner** to validate.
+- An **Adaptive Proof Agent** may perform **Proof Script Repair** only in proof-owned paths, but product code changes require a **Proof Rework Request**.
+- A **Proof Rework Request** is applied by the **Runner**, not by the **Adaptive Proof Agent**, because labels and comments remain inside the **Runner-Owned Publication Boundary**.
+- A **Proof Report** passes only when acceptance criteria are linked to **Proof Artifacts** with high confidence.
+- An **Acceptance Proof Loop** must stop at the configured iteration limit.
+- A **Live Smoke Proof** uses the same **Acceptance Proof** boundary as visual proof.
 - A **Rework Loop** may retry only machine-checkable blockers and must stop at a configured limit.
 - A **Fresh-Context Review** reduces Agent self-review bias before **Draft PR Handoff**.
 - A **Policy Suggestion** may recommend changing prompts or config, but does not mutate project policy by itself.
@@ -77,9 +116,23 @@ _Avoid_: completion, merge
 >
 > **Dev:** "If the Review Gate fails, should we keep looping?"
 > **Domain expert:** "Only through the bounded Rework Loop, and only for machine-checkable blockers. Product uncertainty becomes blocked maintainer input."
+>
+> **Dev:** "Can the proof Agent update labels when the app needs more work?"
+> **Domain expert:** "No. The Adaptive Proof Agent writes a Proof Rework Request. The Runner updates issue state because labels are inside the Runner-Owned Publication Boundary."
+>
+> **Dev:** "Can proof change code?"
+> **Domain expert:** "Only Proof Script Repair is allowed during Acceptance Proof. Product code changes go back through implementation and another Acceptance Proof Loop iteration."
+>
+> **Dev:** "Is a screenshot enough proof?"
+> **Domain expert:** "No. The Proof Report must map the screenshot or other Proof Artifacts to acceptance criteria with high confidence."
 
 ## Flagged Ambiguities
 
 - "Ralph loop" was used as a broad automation metaphor. Resolved: in this project the canonical term is **Loop Policy**, and it remains runner-owned rather than LLM-selected.
 - "Agent" was used loosely for both the orchestrating process and Codex session. Resolved: **Runner** is trusted orchestration; **Agent** is the local Codex implementation session.
 - "Done" was overloaded between local completion and human acceptance. Resolved: the runner produces a **Draft PR Handoff**; merge or release is outside autonomous completion.
+- "Subagent for proof" was ambiguous between another implementation Agent and a verification operator. Resolved: the canonical term is **Adaptive Proof Agent**, and it runs inside **Acceptance Proof**.
+- "Full shell" during proof could imply publication authority. Resolved: shell access is proof-phase tool access only; issue state and publication remain runner-owned.
+- "Update labels" from proof could imply Agent-owned GitHub mutation. Resolved: the **Adaptive Proof Agent** emits a **Proof Rework Request**, and the **Runner** mutates labels or comments.
+- "Visual proof" was too narrow for API, worker, CLI, and live smoke acceptance checks. Resolved: **Acceptance Proof** is the umbrella term; visual proof and **Live Smoke Proof** are variants.
+- "`visualProof` as a config name predates the broader model. Resolved: **Acceptance Proof** is the canonical domain term; legacy visual-proof configuration can remain as a compatibility adapter.

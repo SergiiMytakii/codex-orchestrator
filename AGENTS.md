@@ -17,9 +17,6 @@ This file is the short routing layer for agents working on
   rules, branches, and workflow prompt routing.
 
 ## Non-Negotiables
-- The runner owns GitHub publication: agents must not push, open PRs, merge,
-  publish, deploy, or mutate GitHub issues, labels, or comments outside runner
-  code paths.
 - Never read, print, or edit secret files such as `.env` or `.env.*`.
 - Keep reusable orchestration logic in the package and target-repo policy under
   `.codex-orchestrator/`.
@@ -35,6 +32,24 @@ This file is the short routing layer for agents working on
 - When imports, modules, jobs, services, scripts, cross-module wiring, runner
   policy, or publication boundaries change, run the quality preflight in
   `docs/agents/execution-routing.md` first.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for
+`SergiiMytakii/codex-orchestrator`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the default mattpocock/skills labels: `needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with root `CONTEXT.md` and root `docs/adr/`.
+See `docs/agents/domain.md`.
 
 ## Release
 - When cutting a release, update the latest release summary below with 2-6
