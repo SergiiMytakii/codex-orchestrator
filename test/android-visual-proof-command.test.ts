@@ -61,6 +61,7 @@ test('package-owned Android visual proof captures Flutter launch screenshot usin
       CODEX_ORCHESTRATOR_FLUTTER_BIN: flutterPath,
       PATH: process.env.PATH ?? '',
     },
+    platform: 'darwin',
     launchSettleMs: 0,
   });
 
@@ -99,6 +100,7 @@ test('Android visual proof serializes device selection through a shared mobile d
       worktreePath: worktree1,
       artifactDir: '.proofs',
       env: proofEnv({ home, flutterPath, logPath, lockDir, issueNumber: 81 }),
+      platform: 'darwin',
       launchSettleMs: 0,
     }),
     runAndroidVisualProofCommand({
@@ -106,6 +108,7 @@ test('Android visual proof serializes device selection through a shared mobile d
       worktreePath: worktree2,
       artifactDir: '.proofs',
       env: proofEnv({ home, flutterPath, logPath, lockDir, issueNumber: 82 }),
+      platform: 'darwin',
       launchSettleMs: 0,
     }),
   ]);
