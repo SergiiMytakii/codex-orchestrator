@@ -359,6 +359,16 @@ for visual proof, but screenshot existence alone is not sufficient: each require
 criterion must map to high-confidence artifact evidence in the proof report, and
 UI artifacts must satisfy the UI Evidence Contract.
 
+Visual proof reporting separates desire from capability. UI-like issue text or
+changed frontend paths can make visual proof desirable, but the runner only emits
+missing-screenshot artifact warnings when a runner-owned provider is configured
+and has not reported a tooling/provider capability gap. If proof is desirable
+but no command, device, emulator, or platform tooling is available, the review
+report records a capability note instead of an actionable-looking artifact
+warning. Repositories that intentionally want visual-desirable work to block
+review-ready publication until proof is produced can set
+`reviewGates.visualProof.requireWhenDesirable` to `true`.
+
 For mobile UI work, setup uses the package-owned
 `codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The
 command detects Flutter, native Android, and native iOS projects. It tries

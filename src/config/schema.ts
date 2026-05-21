@@ -173,6 +173,7 @@ export interface CodexOrchestratorConfig {
       requiredValidationPatterns: string[];
       blockOnSkippedPatterns: string[];
       minScreenshotArtifacts: number;
+      requireWhenDesirable?: boolean;
       runnerValidationCommand?: string;
       runnerTimeoutMs?: number;
       envPassthrough?: string[];
@@ -399,6 +400,20 @@ function expectBoolean(parent: ObjectRecord, path: string, errors: string[]): bo
 
   if (typeof value !== 'boolean') {
     errors.push(`${path} must be a boolean`);
+    return undefined;
+  }
+
+  return value;
+}
+
+function expectOptionalBoolean(parent: ObjectRecord, path: string, errors: string[]): boolean | undefined {
+  const value = readPath(parent, path);
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'boolean') {
+    errors.push(`${path} must be a boolean when provided`);
     return undefined;
   }
 
@@ -641,6 +656,7 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
     expectStringArray(visualProof, 'reviewGates.visualProof.requiredValidationPatterns', errors);
     expectStringArray(visualProof, 'reviewGates.visualProof.blockOnSkippedPatterns', errors);
     expectPositiveInteger(visualProof, 'reviewGates.visualProof.minScreenshotArtifacts', errors);
+    expectOptionalBoolean(visualProof, 'reviewGates.visualProof.requireWhenDesirable', errors);
     expectOptionalString(visualProof, 'reviewGates.visualProof.runnerValidationCommand', errors);
     expectOptionalPositiveInteger(visualProof, 'reviewGates.visualProof.runnerTimeoutMs', errors);
     expectOptionalStringArray(visualProof, 'reviewGates.visualProof.envPassthrough', errors);

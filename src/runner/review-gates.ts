@@ -13,6 +13,7 @@ import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
   hasPassedTddValidation,
   hasPassedValidation,
+  isVisualProofDesirable,
   isRunnerVisualValidation,
   isStrongVisualValidation,
   regexMatches,
@@ -44,7 +45,9 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
   const warnings: string[] = [];
   reasons.push(...evaluateQualityGate(input));
 
-  if (!shouldApplyVisualProofGate(input)) {
+  const visualProofDesirable = isVisualProofDesirable(input);
+  const visualProofGateApplies = shouldApplyVisualProofGate(input);
+  if (!visualProofDesirable && !visualProofGateApplies) {
     return { ok: reasons.length === 0, reasons, warnings };
   }
 
@@ -57,6 +60,10 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     line.status === 'passed' && isStrongVisualValidation(line),
   );
   const nonPassingRunnerVisualValidation = runnerVisualValidation.filter((line) => line.status !== 'passed');
+  const capabilityUnavailableRunnerValidation = nonPassingRunnerVisualValidation.filter(isVisualProofCapabilityUnavailable);
+  const otherNonPassingRunnerVisualValidation = nonPassingRunnerVisualValidation.filter((line) =>
+    !capabilityUnavailableRunnerValidation.includes(line),
+  );
   const screenshotArtifacts = input.report.artifacts.filter((artifact) => {
     if (artifact.type !== 'screenshot') {
       return false;
@@ -77,23 +84,49 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     });
   });
 
-  if (!runnerCommand) {
-    warnings.push(
-      'Visual proof was applicable for this issue, but no runner-owned visual proof command is configured; skipping screenshot proof.',
-    );
+  const proofPossible = Boolean(runnerCommand) && capabilityUnavailableRunnerValidation.length === 0;
+  const strictVisualProofRequired = visualProofDesirable && runnerPolicy.requireWhenDesirable;
+  if (!runnerCommand && visualProofDesirable) {
+    const message = strictVisualProofRequired
+      ? 'Visual proof is required by strict visual proof config, but no runner-owned visual proof command/provider is configured.'
+      : 'Visual proof capability note: visual proof is desirable, but no runner-owned visual proof command/provider is configured; not required for review-ready outcome.';
+    (strictVisualProofRequired ? reasons : warnings).push(message);
   }
 
-  for (const line of nonPassingRunnerVisualValidation) {
-    warnings.push(`Visual proof validation warning: ${line.command} - ${line.summary}`);
+  for (const line of capabilityUnavailableRunnerValidation) {
+    if (strictVisualProofRequired) {
+      reasons.push(`Visual proof is required by strict visual proof config, but proof capability is unavailable: ${line.command} - ${line.summary}.`);
+    } else {
+      warnings.push(`Visual proof capability note: ${line.command} - ${line.summary}; not required for review-ready outcome.`);
+    }
   }
 
-  if (screenshotArtifacts.length < visualProof.minScreenshotArtifacts) {
-    warnings.push(
-      `Visual proof warning: expected at least ${visualProof.minScreenshotArtifacts} screenshot artifact under ${runnerPolicy.artifactDir} or a screenshot URL.`,
-    );
+  for (const line of otherNonPassingRunnerVisualValidation) {
+    const message = strictVisualProofRequired
+      ? `Visual proof validation failed under strict visual proof config: ${line.command} - ${line.summary}`
+      : `Visual proof validation warning: ${line.command} - ${line.summary}`;
+    (strictVisualProofRequired ? reasons : warnings).push(message);
+  }
+
+  if (visualProofDesirable
+    && (proofPossible || runnerPolicy.requireWhenDesirable)
+    && screenshotArtifacts.length < visualProof.minScreenshotArtifacts) {
+    const message = strictVisualProofRequired
+      ? `Visual proof is required by strict visual proof config, but expected at least ${visualProof.minScreenshotArtifacts} screenshot artifact under ${runnerPolicy.artifactDir} or a screenshot URL.`
+      : `Visual proof warning: expected at least ${visualProof.minScreenshotArtifacts} screenshot artifact under ${runnerPolicy.artifactDir} or a screenshot URL.`;
+    (strictVisualProofRequired ? reasons : warnings).push(message);
   }
 
   return { ok: reasons.length === 0, reasons, warnings };
+}
+
+function isVisualProofCapabilityUnavailable(line: RunnerValidationLine): boolean {
+  if (line.status !== 'skipped') {
+    return false;
+  }
+
+  return /(?:no runner-owned|not configured|no .*provider|unavailable|not available|not installed|not found|missing tool|no devices? connected|no usable .*device|adb|emulator|xcodebuild|simctl|flutter .*requires flutter|flutter was not found)/iu
+    .test(line.summary);
 }
 
 function evaluateQualityGate(input: ReviewGateInput): string[] {

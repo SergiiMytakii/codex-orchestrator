@@ -94,7 +94,6 @@ export function shouldApplyVisualProofGate(input: {
   changedFiles: string[];
 }): boolean {
   const acceptanceProof = input.config.reviewGates.acceptanceProof;
-  const visualProof = input.config.reviewGates.visualProof;
   if (!acceptanceProof.enabled) {
     return false;
   }
@@ -109,17 +108,34 @@ export function shouldApplyVisualProofGate(input: {
   const canRunGenericAcceptanceProof = Boolean(acceptanceCommand) && !isMobileVisualProofCommand(acceptanceCommand);
   const issueNeedsAcceptanceProof = canRunGenericAcceptanceProof
     && acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
+  const changedAcceptanceProofFiles = canRunGenericAcceptanceProof
+    && input.changedFiles.some((path) =>
+      acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
+    );
+  return issueNeedsAcceptanceProof || changedAcceptanceProofFiles || isVisualProofDesirable(input);
+}
+
+export function isVisualProofDesirable(input: {
+  config: CodexOrchestratorConfig;
+  issue: GitHubIssue;
+  changedFiles: string[];
+}): boolean {
+  const visualProof = input.config.reviewGates.visualProof;
+  if (!visualProof.enabled) {
+    return false;
+  }
+
+  const issueText = `${input.issue.title}\n${input.issue.body}`;
   const internalRunnerProofOnlyChange = input.changedFiles.length > 0
     && input.changedFiles.every(isInternalRunnerProofPath);
   const issueNeedsVisualProof = visualProof.enabled
     && !internalRunnerProofOnlyChange
     && visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
   const changedProofFiles = input.changedFiles.filter((path) =>
-    (canRunGenericAcceptanceProof && acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)))
-      || (visualProof.enabled && visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path))),
+    visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
   );
 
-  return issueNeedsAcceptanceProof || issueNeedsVisualProof || changedProofFiles.length > 0;
+  return issueNeedsVisualProof || changedProofFiles.length > 0;
 }
 
 function isInternalRunnerProofPath(path: string): boolean {
@@ -173,6 +189,7 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
   envPassthrough: string[];
   timeoutMs?: number;
   minScreenshotArtifacts: number;
+  requireWhenDesirable: boolean;
   blockOnMissingProof: boolean;
 } {
   const visualProof = config.reviewGates.visualProof;
@@ -193,6 +210,7 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
       ? visualProof.runnerTimeoutMs ?? acceptanceProof.runnerTimeoutMs
       : acceptanceProof.runnerTimeoutMs ?? visualProof.runnerTimeoutMs,
     minScreenshotArtifacts: visualProof.minScreenshotArtifacts,
+    requireWhenDesirable: visualProof.requireWhenDesirable ?? false,
     blockOnMissingProof: !preferLegacyVisual,
   };
 }

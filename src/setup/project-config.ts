@@ -168,6 +168,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'runner visual proof',
         ],
         minScreenshotArtifacts: 1,
+        requireWhenDesirable: false,
         runnerValidationCommand: packageOwnedMobileVisualProofCommand,
         runnerTimeoutMs: 900_000,
         envPassthrough: [],

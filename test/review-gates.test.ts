@@ -222,6 +222,32 @@ test('visual proof policy uses configured issue text and changed path globs with
   }), false);
 });
 
+test('visual proof policy still applies generic acceptance proof for configured acceptance paths', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        runnerValidationCommand: 'npm run acceptance-proof',
+        issueTextPatterns: ['needs acceptance proof'],
+        changedPathGlobs: ['src/api/**'],
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        issueTextPatterns: ['needs visual proof'],
+        changedPathGlobs: ['src/frontend/**'],
+      },
+    },
+  };
+
+  assert.equal(shouldApplyVisualProofGate({
+    config,
+    issue: issueFixture({ number: 782, title: 'Backend cleanup', body: 'No visual proof.' }),
+    changedFiles: ['src/api/routes.ts'],
+  }), true);
+});
+
 test('visual proof policy does not treat internal Acceptance Proof module work as mobile UI proof', () => {
   assert.equal(shouldApplyVisualProofGate({
     config: validConfig,
@@ -341,6 +367,10 @@ test('review gates warn when no runner-owned visual proof command is configured'
     ...validConfig,
     reviewGates: {
       ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        runnerValidationCommand: '',
+      },
       quality: {
         ...validConfig.reviewGates.quality,
         enabled: false,
@@ -372,4 +402,139 @@ test('review gates warn when no runner-owned visual proof command is configured'
   assert.deepEqual(result.reasons, []);
   assert.equal(result.ok, true);
   assert.match(result.warnings.join('\n'), /visual proof/i);
+  assert.doesNotMatch(result.warnings.join('\n'), /expected at least .* screenshot artifact/i);
+});
+
+test('review gates do not warn about missing screenshot artifacts when proof tooling is unavailable', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        enabled: false,
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        runnerValidationCommand: 'node visual-proof.mjs',
+      },
+    },
+  };
+
+  const result = evaluateReviewGates({
+    config,
+    issue: issueFixture({ number: 155, title: '[UI] Fix responsive campaign layout', body: 'Requires screenshots.' }),
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    validation: [
+      {
+        command: 'node visual-proof.mjs',
+        status: 'skipped',
+        summary: 'runner visual proof warning: adb not installed and no devices connected.',
+      },
+      { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+    ],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/frontend/CampaignList.tsx'],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+  });
+
+  assert.deepEqual(result.reasons, []);
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /Visual proof capability note/i);
+  assert.doesNotMatch(result.warnings.join('\n'), /expected at least .* screenshot artifact/i);
+});
+
+test('review gates still warn about missing screenshots when only the proof command name mentions tooling', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        enabled: false,
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        runnerValidationCommand: 'adb screenshot',
+      },
+    },
+  };
+
+  const result = evaluateReviewGates({
+    config,
+    issue: issueFixture({ number: 155, title: '[UI] Fix responsive campaign layout', body: 'Requires screenshots.' }),
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    validation: [
+      {
+        command: 'adb screenshot',
+        status: 'skipped',
+        summary: 'runner visual proof warning: command completed but did not produce a screenshot artifact.',
+      },
+      { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+    ],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/frontend/CampaignList.tsx'],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+  });
+
+  assert.match(result.warnings.join('\n'), /Visual proof validation warning/i);
+  assert.match(result.warnings.join('\n'), /expected at least .* screenshot artifact/i);
+  assert.doesNotMatch(result.warnings.join('\n'), /Visual proof capability note/i);
+});
+
+test('review gates block missing screenshot proof in strict visual proof mode', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        runnerValidationCommand: '',
+      },
+      quality: {
+        ...validConfig.reviewGates.quality,
+        enabled: false,
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        runnerValidationCommand: '',
+        requireWhenDesirable: true,
+      },
+    },
+  };
+
+  const result = evaluateReviewGates({
+    config,
+    issue: issueFixture({ number: 155, title: '[UI] Fix responsive campaign layout', body: 'Requires screenshots.' }),
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    validation: [{ command: '$code-review', status: 'passed', summary: 'No blocking findings.' }],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/frontend/CampaignList.tsx'],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join('\n'), /strict visual proof/i);
+  assert.match(result.reasons.join('\n'), /expected at least .* screenshot artifact/i);
 });
