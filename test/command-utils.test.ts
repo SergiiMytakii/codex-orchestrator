@@ -40,7 +40,7 @@ test('runner config reader backfills package-owned proof command and drops unsup
   assert.deepEqual(config.checks, { test: 'npm test' });
   assert.equal(
     config.reviewGates.visualProof.runnerValidationCommand,
-    'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+    'codex-orchestrator visual-proof auto --issue ${issueNumber}',
   );
   assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
 });

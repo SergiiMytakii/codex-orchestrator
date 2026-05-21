@@ -17,6 +17,7 @@ Run focused subsets while developing:
 npm run smoke:live -- --scenario package-install --cleanup
 npm run smoke:live -- --scenario discovery-matrix --cleanup
 npm run smoke:live -- --scenario quality-gates --cleanup
+npm run smoke:live -- --scenario browser-proof --cleanup
 npm run smoke:live -- --scenario acceptance-proof --cleanup
 npm run smoke:live -- --scenario acceptance-proof-ui-evidence --cleanup
 npm run smoke:live -- --scenario acceptance-proof-blocking --cleanup
@@ -49,6 +50,11 @@ npm run smoke:live -- --cleanup
   phase-specific profile selection, lifecycle event evidence, and context
   snapshot artifact references.
 - `visual-proof` - runner-owned screenshot proof is attached to the PR.
+- `browser-proof` - fake agent prepares a proof-owned browser scenario, then
+  packaged `visual-proof auto` dispatches to browser proof and writes screenshot,
+  DOM, console, network, run-summary, and UI Evidence artifacts. The package
+  first reuses an existing local browser executable or Playwright browser cache;
+  Chromium download is only a fallback when no installed browser can launch.
 - `acceptance-proof` - canonical machine-readable Acceptance Proof report is
   validated and attached to the PR.
 - `acceptance-proof-ui-evidence` - canonical screenshot proof includes the
@@ -315,6 +321,11 @@ non-runtime changes.
       `.codex-orchestrator/proofs/issue-<number>/`.
 - [ ] Verify runner-owned visual proof environment variables are available to
       the command.
+- [ ] `browser-proof` verifies a web/frontend change can prepare a browser proof
+      scenario and pass through packaged `visual-proof auto`.
+- [ ] Verify browser proof screenshot, DOM snapshot, console log, network log,
+      and run summary artifacts are linked from the PR body and exist under the
+      issue proof directory.
 - [ ] Verify failed browser, screenshot, or smoke proof blocks publication with
       preserved artifacts.
 - [ ] `acceptance-proof-ui-evidence-blocking` verifies screenshot proof without

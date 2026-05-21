@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-05-21
+
+### Added
+- Added package-owned browser visual proof for web UI Acceptance Proof, with
+  scenario-driven navigation, screenshots, DOM snapshots, console/network logs,
+  and machine-readable UI Evidence reports.
+- Added `visual-proof auto` dispatch so setup can route web changes to browser
+  proof and mobile changes to device-backed proof from one package-owned
+  command.
+- Added live smoke coverage for the browser proof path, including packaged CLI
+  execution and browser runtime evidence.
+
+### Changed
+- Browser proof now prefers an explicit or locally installed Chrome, Chromium,
+  or Edge executable before falling back to Playwright-managed Chromium
+  download.
+- Live smoke daemon retries now tolerate transient GitHub failures during
+  browser-proof runs.
+
 ## [0.1.35] - 2026-05-21
 
 ### Added

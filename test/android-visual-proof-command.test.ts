@@ -215,7 +215,7 @@ test('mobile visual proof parser accepts native iOS command flags', () => {
   assert.equal(parsed.value.iosScheme, 'NativeApp');
 });
 
-test('setup default uses the package-owned mobile visual proof command', () => {
+test('setup default uses the package-owned auto visual proof command', () => {
   const config = buildProjectConfig({
     owner: 'example',
     repo: 'mobile-app',
@@ -225,7 +225,7 @@ test('setup default uses the package-owned mobile visual proof command', () => {
 
   assert.equal(
     config.reviewGates.visualProof.runnerValidationCommand,
-    'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+    'codex-orchestrator visual-proof auto --issue ${issueNumber}',
   );
 });
 

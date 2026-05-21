@@ -71,12 +71,15 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.35` (2026-05-21):
-  - Acceptance Proof reports include runner-validated UI Evidence for workflow,
-    viewport, freshness, layout, copy, and source inputs.
-  - Screenshot and UI-dump proof now fail without the UI Evidence Contract.
-  - Visual proof no longer passes on screenshot-only output.
-  - Live smoke covers UI Evidence pass and blocking scenarios.
+- `0.1.36` (2026-05-21):
+  - Package-owned browser proof captures web UI screenshots, DOM snapshots,
+    console/network logs, and UI Evidence reports.
+  - `visual-proof auto` routes web changes to browser proof and mobile changes
+    to device-backed proof.
+  - Browser proof prefers explicit or installed Chrome/Chromium/Edge before a
+    Playwright Chromium download fallback.
+  - Live smoke covers the packaged browser-proof path and transient GitHub
+    retry behavior.
 
 ## Final Response
 

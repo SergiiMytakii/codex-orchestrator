@@ -13,10 +13,12 @@ import { runScopedAutoCommand } from './runner/scoped-auto-command.js';
 import { recoverScopedRun } from './runner/scoped-recovery.js';
 import { runStatusCommand } from './runner/status-command.js';
 import { parseAndroidVisualProofArgs, runAndroidVisualProofCommand } from './runner/android-visual-proof-command.js';
+import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand } from './runner/browser-visual-proof-command.js';
 import { parseIosVisualProofArgs, runIosVisualProofCommand } from './runner/ios-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand } from './runner/mobile-visual-proof-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
 import { promptSyncModes, type PromptSyncMode } from './setup/prompt-sync.js';
+import { runAutoVisualProofCommand } from './runner/auto-visual-proof-command.js';
 
 const helpText = `codex-orchestrator
 
@@ -29,6 +31,8 @@ Usage:
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
+  codex-orchestrator visual-proof auto --issue <number> [--target <path>]
+  codex-orchestrator visual-proof browser --issue <number> [--target <path>] [--scenario <path>] [--base-url <url>]
   codex-orchestrator visual-proof mobile --issue <number> [--target <path>]
   codex-orchestrator visual-proof android --issue <number> [--target <path>]
   codex-orchestrator visual-proof ios --issue <number> [--target <path>]
@@ -226,12 +230,24 @@ async function main(args: string[]): Promise<number> {
 
   if (command === 'visual-proof') {
     const [kind, ...rest] = args.slice(1);
-    if (kind !== 'mobile' && kind !== 'android' && kind !== 'ios') {
-      process.stderr.write('visual-proof requires a supported kind: mobile, android, or ios\nRun codex-orchestrator --help for usage.\n');
+    if (kind !== 'auto' && kind !== 'browser' && kind !== 'mobile' && kind !== 'android' && kind !== 'ios') {
+      process.stderr.write('visual-proof requires a supported kind: auto, browser, mobile, android, or ios\nRun codex-orchestrator --help for usage.\n');
       return 2;
     }
     try {
-      if (kind === 'mobile') {
+      if (kind === 'auto') {
+        const config = await readRunnerConfig(visualProofTargetFromArgs(rest) ?? process.cwd());
+        const result = await runAutoVisualProofCommand({ args: rest, config });
+        process.stdout.write(`auto visual proof selected ${result.target}\n`);
+      } else if (kind === 'browser') {
+        const parsed = parseBrowserVisualProofArgs(rest);
+        if (!parsed.ok) {
+          process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+          return 2;
+        }
+        const result = await runBrowserVisualProofCommand(parsed.value);
+        process.stdout.write(`browser visual proof ${result.status} for issue #${parsed.value.issueNumber}\n`);
+      } else if (kind === 'mobile') {
         const parsed = parseMobileVisualProofArgs(rest);
         if (!parsed.ok) {
           process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
@@ -266,6 +282,18 @@ async function main(args: string[]): Promise<number> {
 
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+function visualProofTargetFromArgs(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg !== '--target' && arg !== '--worktree') {
+      continue;
+    }
+    const value = args[index + 1];
+    return value && !value.startsWith('--') ? value : undefined;
+  }
+  return undefined;
 }
 
 async function runIssueCommand(targetRootInput: string, issueNumber: number): Promise<{ reportComment: string }> {

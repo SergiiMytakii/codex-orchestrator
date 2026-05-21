@@ -31,6 +31,13 @@ test('runner visual proof fails screenshot-only output without acceptance proof 
     const browsersDir = options?.env?.PLAYWRIGHT_BROWSERS_PATH;
     assert.ok(profileDir);
     assert.ok(browsersDir);
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_BROWSER_CACHE_DIR, browsersDir);
+    assert.equal(
+      options?.env?.CODEX_ORCHESTRATOR_BROWSER_PROOF_SCENARIO_PATH,
+      join(proofDir, 'browser-proof-scenario.json'),
+    );
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_BROWSER_STRICT_CONSOLE, 'false');
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_BROWSER_STRICT_NETWORK, 'false');
     assert.equal(isPathInside(worktreePath, profileDir), false);
     assert.equal(isPathInside(worktreePath, browsersDir), false);
     await writeFile(join(proofDir, '390.png'), 'fresh screenshot\n', 'utf8');
@@ -219,7 +226,7 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
   process.env.PATH = '/opt/homebrew/bin';
 
   const shellExecutor: ShellCommandExecutor = async (command, options) => {
-    assert.equal(command, 'codex-orchestrator visual-proof mobile --issue 155');
+    assert.equal(command, 'codex-orchestrator visual-proof auto --issue 155');
     const pathEntries = (options?.env?.PATH ?? '').split(delimiter);
     const packageBinDir = pathEntries[0];
     assert.ok(packageBinDir);
@@ -426,6 +433,72 @@ test('runner visual proof fails when the command exits nonzero despite a passing
   assert.match(result.validation[0]?.summary ?? '', /late smoke failure/);
 });
 
+test('runner visual proof blocks product-code changes reported by browser proof', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-browser-proof-'));
+
+  const shellExecutor: ShellCommandExecutor = async (_command, options) => {
+    const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofReportPath);
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, 'browser-summary.json'), 'summary\n', 'utf8');
+    await writeFile(proofReportPath, JSON.stringify({
+      status: 'passed',
+      criteria: [{
+        id: 'ac-1',
+        description: 'Browser proof reached the expected page.',
+        status: 'passed',
+        confidence: 'high',
+        reasoningSummary: 'Browser summary says the flow completed.',
+        artifactRefs: ['.codex-orchestrator/proofs/issue-886/browser-summary.json'],
+      }],
+      artifacts: [{
+        type: 'other',
+        path: '.codex-orchestrator/proofs/issue-886/browser-summary.json',
+        description: 'Browser proof run summary',
+      }],
+      proofPhaseDiff: {
+        allowedProofPaths: ['.codex-orchestrator/proofs/issue-886/browser-summary.json'],
+        forbiddenProductPaths: ['src/frontend/App.tsx'],
+      },
+      residualRisks: [],
+    }), 'utf8');
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runRunnerVisualProof({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'codex-orchestrator visual-proof browser --issue ${issueNumber}',
+          issueTextPatterns: ['browser proof'],
+        },
+      },
+    },
+    issue: issueFixture({ number: 886, title: 'Browser proof', body: 'Needs browser proof.' }),
+    issueNumber: 886,
+    worktreePath,
+    changedFiles: ['src/frontend/App.tsx'],
+    report: {
+      status: 'completed',
+      changes: [],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+    shellExecutor,
+  });
+
+  assert.equal(result.validation[0]?.status, 'failed');
+  assert.match(result.validation[0]?.summary ?? '', /product-code changes during acceptance proof/);
+  assert.match(result.validation[0]?.summary ?? '', /src\/frontend\/App\.tsx/);
+});
+
 test('runner visual proof ignores screenshots inside runner-owned browser internals', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
 
@@ -549,7 +622,7 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
   process.env.PATH = ['/opt/homebrew/bin', '/usr/bin'].join(delimiter);
 
   const shellExecutor: ShellCommandExecutor = async (command, options) => {
-    assert.equal(command, 'codex-orchestrator visual-proof mobile --issue 155');
+    assert.equal(command, 'codex-orchestrator visual-proof auto --issue 155');
     const pathEntries = String(options?.env?.PATH ?? '').split(delimiter);
     assert.match(pathEntries[0] ?? '', /codex-orchestrator-visual-proof-runtime/);
     assert.equal(pathEntries[1], '/opt/homebrew/bin');

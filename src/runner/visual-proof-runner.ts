@@ -15,6 +15,7 @@ import {
   evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
 } from './acceptance-proof.js';
+import { browserProofRuntimeEnv } from './browser-proof-contract.js';
 import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
 
 interface ScreenshotArtifactSnapshot {
@@ -75,12 +76,22 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       ...runnerSharedStateEnv(input),
       CODEX_ORCHESTRATOR_ISSUE_NUMBER: String(input.issueNumber),
       CODEX_ORCHESTRATOR_ARTIFACT_DIR: policy.artifactDir,
-      CODEX_ORCHESTRATOR_PROOF_DIR: proofDir,
-      CODEX_ORCHESTRATOR_PROOF_REPORT_PATH: proofReportPath,
-      CODEX_ORCHESTRATOR_PLAYWRIGHT_PROFILE_DIR: playwrightProfileDir,
+      [browserProofRuntimeEnv.proofDir]: proofDir,
+      [browserProofRuntimeEnv.reportPath]: proofReportPath,
+      [browserProofRuntimeEnv.playwrightProfileDir]: playwrightProfileDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
-      PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersDir,
+      [browserProofRuntimeEnv.playwrightBrowsersPath]: playwrightBrowsersDir,
+      [browserProofRuntimeEnv.browserCacheDir]: playwrightBrowsersDir,
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: input.issue.title,
+      CODEX_ORCHESTRATOR_ISSUE_BODY: input.issue.body,
+      CODEX_ORCHESTRATOR_BROWSER_PROOF_SCENARIO_PATH: policy.browserProof.scenarioPath
+        ? renderVisualProofCommand(policy.browserProof.scenarioPath, input, proofDir, policy.artifactDir)
+        : join(proofDir, 'browser-proof-scenario.json'),
+      ...(policy.browserProof.baseUrl ? { CODEX_ORCHESTRATOR_BROWSER_BASE_URL: policy.browserProof.baseUrl } : {}),
+      CODEX_ORCHESTRATOR_BROWSER_ENV_PASSTHROUGH: policy.envPassthrough.join('\n'),
+      CODEX_ORCHESTRATOR_BROWSER_STRICT_CONSOLE: String(policy.browserProof.strictConsoleErrors),
+      CODEX_ORCHESTRATOR_BROWSER_STRICT_NETWORK: String(policy.browserProof.strictNetworkFailures),
     },
     timeoutMs: policy.timeoutMs,
   });

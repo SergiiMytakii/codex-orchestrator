@@ -25,7 +25,12 @@ test('accepts the expanded valid config contract', () => {
     assert.deepEqual(result.value.reviewGates.visualProof.envPassthrough, []);
     assert.equal(result.value.reviewGates.acceptanceProof.enabled, true);
     assert.equal(result.value.reviewGates.acceptanceProof.artifactDir, '.codex-orchestrator/proofs');
+    assert.equal(result.value.reviewGates.acceptanceProof.runnerValidationCommand, 'codex-orchestrator visual-proof auto --issue ${issueNumber}');
     assert.equal(result.value.reviewGates.acceptanceProof.maxIterations, 5);
+    assert.deepEqual(result.value.reviewGates.acceptanceProof.browserProof, {
+      strictConsoleErrors: false,
+      strictNetworkFailures: false,
+    });
     assert.deepEqual(result.value.reviewGates.acceptanceProof.proofOwnedPathGlobs, ['.codex-orchestrator/proofs/**']);
     assert.equal(result.value.reviewGates.quality.enabled, true);
     assert.equal(result.value.reviewGates.quality.tdd.requireTestChange, true);
@@ -305,6 +310,12 @@ test('rejects invalid acceptance proof gate config', () => {
         maxIterations: 0,
         runnerTimeoutMs: 0,
         envPassthrough: ['CODEX_ORCHESTRATOR_LOGIN_EMAIL', 'bad-name'],
+        browserProof: {
+          scenarioPath: 12,
+          baseUrl: 34,
+          strictConsoleErrors: 'yes',
+          strictNetworkFailures: 'no',
+        },
       },
     },
   });
@@ -314,6 +325,10 @@ test('rejects invalid acceptance proof gate config', () => {
     'reviewGates.acceptanceProof.proofOwnedPathGlobs must be an array of non-empty strings',
     'reviewGates.acceptanceProof.maxIterations must be a positive integer',
     'reviewGates.acceptanceProof.runnerTimeoutMs must be a positive integer when provided',
+    'reviewGates.acceptanceProof.browserProof.scenarioPath must be a string when provided',
+    'reviewGates.acceptanceProof.browserProof.baseUrl must be a string when provided',
+    'reviewGates.acceptanceProof.browserProof.strictConsoleErrors must be a boolean',
+    'reviewGates.acceptanceProof.browserProof.strictNetworkFailures must be a boolean',
     'reviewGates.acceptanceProof.envPassthrough must contain valid environment variable names',
     'reviewGates.acceptanceProof.issueTextPatterns contains invalid regular expression [',
   ]);

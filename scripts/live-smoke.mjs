@@ -22,6 +22,7 @@ const scenarioDefinitions = new Map([
   ['loop-policy', runLoopPolicyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['visual-proof', runVisualProofScenario],
+  ['browser-proof', runBrowserProofScenario],
   ['acceptance-proof', runAcceptanceProofScenario],
   ['acceptance-proof-ui-evidence', runAcceptanceProofUiEvidenceScenario],
   ['acceptance-proof-rework', runAcceptanceProofReworkScenario],
@@ -66,6 +67,7 @@ async function main() {
     notes: [],
     fakeAgentPath: '',
     visualProofPath: '',
+    browserProofPath: '',
     acceptanceProofPath: '',
     targetRoot: '',
     cliPath: '',
@@ -78,6 +80,7 @@ async function main() {
     context.cliPath = await preparePackagedCli(context);
     context.fakeAgentPath = await writeFakeAgent(root);
     context.visualProofPath = await writeVisualProofScript(root);
+    context.browserProofPath = await writeBrowserProofScript(root, context.cliPath, context.sourceRoot);
     context.acceptanceProofPath = await writeAcceptanceProofScript(root);
     context.targetRoot = await prepareTargetRepository(context);
     await runPackagedCli(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoNameOf(context.repo), '--prepare-labels']);
@@ -635,6 +638,27 @@ async function runVisualProofScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectScreenshotProof: true });
 }
 
+async function runBrowserProofScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.browserProofPath)}`,
+  });
+  const issue = await createIssue(
+    context,
+    'browser-proof',
+    ['agent:auto'],
+    [
+      'ACCEPTANCE_PROOF_LIVE_SMOKE: browser-proof. This should exercise visual-proof auto through package-owned browser proof.',
+      'Acceptance Criteria:',
+      '- Browser proof navigates to the live smoke web page.',
+      '- Browser proof captures screenshot and DOM evidence mapped to this criterion.',
+      '- Browser proof report satisfies the UI Evidence Contract.',
+    ].join('\n'),
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectBrowserProof: true });
+}
+
 async function runAcceptanceProofScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -900,9 +924,32 @@ async function runDirectIssue(context, issueNumber, mode) {
 
 async function runDaemonOnce(context, issueNumber, mode) {
   await assertOnlyEligibleIssue(context, issueNumber, mode);
-  const result = await runPackagedCli(context, ['daemon', '--target', context.targetRoot, '--once', '--max-runs', '1']);
-  assertIncludes(result.stdout, `running #${issueNumber} ${mode}`, `daemon should pick issue #${issueNumber}`);
-  assertIncludes(result.stdout, `completed #${issueNumber}`, `daemon should complete issue #${issueNumber}`);
+  let lastResult;
+  let lastOutput = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      lastResult = await runPackagedCli(context, ['daemon', '--target', context.targetRoot, '--once', '--max-runs', '1']);
+      lastOutput = lastResult.stdout;
+    } catch (error) {
+      lastOutput = error instanceof Error ? error.message : String(error);
+      if (!isTransientCommandOutput(lastOutput) || attempt >= 3) {
+        throw error;
+      }
+      await appendReport(context, `Daemon transient failure for #${issueNumber}; retrying attempt ${attempt + 1}.\n\n`);
+      await sleep(1000 * attempt);
+      continue;
+    }
+    assertIncludes(lastResult.stdout, `running #${issueNumber} ${mode}`, `daemon should pick issue #${issueNumber}`);
+    if (lastResult.stdout.includes(`completed #${issueNumber}`)) {
+      return;
+    }
+    if (!isTransientCommandOutput(lastResult.stdout)) {
+      break;
+    }
+    await appendReport(context, `Daemon transient failure for #${issueNumber}; retrying attempt ${attempt + 1}.\n\n`);
+    await sleep(1000 * attempt);
+  }
+  assertIncludes(lastOutput, `completed #${issueNumber}`, `daemon should complete issue #${issueNumber}`);
 }
 
 async function createIssue(context, scenario, labels, extraBody = '', options = {}) {
@@ -945,6 +992,7 @@ async function assertScopedSuccess(
     expectedBaseSha,
     expectedBaseMarkerPath,
     expectUiEvidenceProof = false,
+    expectBrowserProof = false,
   },
 ) {
   const issue = await getIssue(context, issueNumber);
@@ -1034,6 +1082,26 @@ async function assertScopedSuccess(
     );
     await assertPathExists(screenshotPath, 'runner UI Evidence screenshot was not written');
     await appendReport(context, `UI Evidence screenshot: ${screenshotPath}\n\n`);
+  }
+  if (expectBrowserProof) {
+    assertIncludes(body, 'runner acceptance proof passed', 'PR body should include browser proof validation evidence');
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/browser-live-smoke-screenshot.png`, 'PR body should link browser screenshot artifact path');
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/browser-live-smoke-dom.html`, 'PR body should link browser DOM artifact path');
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/browser-summary.json`, 'PR body should link browser summary artifact path');
+    const proofRoot = join(
+      context.targetRoot,
+      '.codex-orchestrator',
+      'workspaces',
+      `live-smoke-${context.runId}`,
+      `issue-${issueNumber}`,
+      '.codex-orchestrator',
+      'proofs',
+      `issue-${issueNumber}`,
+    );
+    await assertPathExists(join(proofRoot, 'browser-live-smoke-screenshot.png'), 'browser proof screenshot was not written');
+    await assertPathExists(join(proofRoot, 'browser-live-smoke-dom.html'), 'browser proof DOM snapshot was not written');
+    await assertPathExists(join(proofRoot, 'browser-summary.json'), 'browser proof run summary was not written');
+    await appendReport(context, `Browser proof artifacts: ${proofRoot}\n\n`);
   }
   if (expectedBaseSha) {
     await fetchRemoteBranch(context, branchName);
@@ -1543,8 +1611,13 @@ function runCommandOnce(command, args, options = {}) {
 
 function isTransientCommandError(error) {
   const message = error instanceof Error ? error.message : String(error);
+  return isTransientCommandOutput(message);
+}
+
+function isTransientCommandOutput(message) {
   return /stream error: stream ID \d+; CANCEL; received from peer/iu.test(message)
     || /HTTP 5\d\d/iu.test(message)
+    || /non-200 OK status code: 5\d\d/iu.test(message)
     || /TLS handshake timeout/iu.test(message)
     || /connection reset by peer/iu.test(message)
     || /network is unreachable/iu.test(message);
@@ -1600,6 +1673,13 @@ async function writeFakeAgent(root) {
 async function writeVisualProofScript(root) {
   const scriptPath = join(root, 'live-smoke-visual-proof.mjs');
   await writeFile(scriptPath, visualProofSource(), 'utf8');
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeBrowserProofScript(root, cliPath, sourceRootPath) {
+  const scriptPath = join(root, 'live-smoke-browser-proof.mjs');
+  await writeFile(scriptPath, browserProofSource(cliPath, sourceRootPath), 'utf8');
   await chmod(scriptPath, 0o755);
   return scriptPath;
 }
@@ -1704,6 +1784,79 @@ function buildUiEvidence(artifactRef) {
       runtimeValidationRefs: ['runner visual proof command completed after implementation'],
     },
   };
+}
+`;
+}
+
+function browserProofSource(cliPath, sourceRootPath) {
+  const packageDir = dirname(dirname(dirname(cliPath)));
+  return String.raw`#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { join } from 'node:path';
+
+const cliPath = ${JSON.stringify(cliPath)};
+const packageDir = ${JSON.stringify(packageDir)};
+const sourceRoot = ${JSON.stringify(sourceRootPath)};
+const issueNumber = Number(process.env.CODEX_ORCHESTRATOR_ISSUE_NUMBER ?? 0);
+if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+  throw new Error('CODEX_ORCHESTRATOR_ISSUE_NUMBER is required for browser proof live smoke');
+}
+
+ensurePlaywrightCoreDependency();
+
+const html = '<!doctype html><html><head><title>Browser proof live smoke</title></head><body><main><h1>Browser proof live smoke ready</h1><p data-testid="status">Issue #' + issueNumber + ' rendered through package-owned browser proof.</p></main></body></html>';
+const server = createServer((request, response) => {
+  response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  response.end(html);
+});
+await new Promise((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', resolve);
+});
+const address = server.address();
+const baseUrl = 'http://127.0.0.1:' + address.port;
+
+try {
+  await run(process.execPath, [cliPath, 'visual-proof', 'auto', '--issue', String(issueNumber)], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      CODEX_ORCHESTRATOR_BROWSER_BASE_URL: baseUrl,
+    },
+  });
+} finally {
+  await new Promise((resolve) => server.close(resolve));
+}
+
+function ensurePlaywrightCoreDependency() {
+  const packagePlaywright = join(packageDir, 'node_modules', 'playwright-core');
+  if (existsSync(join(packagePlaywright, 'package.json'))) {
+    return;
+  }
+  const sourcePlaywright = join(sourceRoot, 'node_modules', 'playwright-core');
+  if (!existsSync(join(sourcePlaywright, 'package.json'))) {
+    throw new Error('playwright-core is not available in the source checkout; run npm install before browser-proof live smoke');
+  }
+  mkdirSync(join(packageDir, 'node_modules'), { recursive: true });
+  symlinkSync(sourcePlaywright, packagePlaywright, 'dir');
+}
+
+function run(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      stdio: 'inherit',
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      status === 0
+        ? resolve()
+        : reject(new Error('Command failed (' + status + '): ' + command + ' ' + args.join(' ')));
+    });
+  });
 }
 `;
 }
@@ -1911,6 +2064,14 @@ if (prompt.includes('# Fresh-Context Review')) {
     writeVisualChange(issueNumber, runId);
     writeScopedReport(reportPath, ['components/live-smoke/issue-' + issueNumber + '.tsx', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
+  case 'browser-proof':
+    writeBrowserProofChange(issueNumber, runId);
+    writeScopedReport(reportPath, [
+      'components/live-smoke/issue-' + issueNumber + '.tsx',
+      '.codex-orchestrator/proofs/issue-' + issueNumber + '/browser-proof-scenario.json',
+      'test/live-smoke/issue-' + issueNumber + '.test.ts',
+    ]);
+    break;
   case 'acceptance-proof':
   case 'acceptance-proof-ui-evidence':
   case 'acceptance-proof-low-confidence':
@@ -2055,6 +2216,70 @@ function writeVisualChange(issue, run) {
     'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
     'utf8',
   );
+}
+
+function writeBrowserProofChange(issue, run) {
+  mkdirSync('components/live-smoke', { recursive: true });
+  mkdirSync('test/live-smoke', { recursive: true });
+  mkdirSync(join('.codex-orchestrator', 'proofs', 'issue-' + issue), { recursive: true });
+  writeFileSync(
+    join('components', 'live-smoke', 'issue-' + issue + '.tsx'),
+    'export const LiveSmokeBrowserIssue' + issue + ' = ' + JSON.stringify({ issue, run, kind: 'browser-proof' }) + ';\n',
+    'utf8',
+  );
+  writeFileSync(
+    join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
+    'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
+    'utf8',
+  );
+  writeFileSync(
+    join('.codex-orchestrator', 'proofs', 'issue-' + issue, 'browser-proof-scenario.json'),
+    JSON.stringify(browserProofScenario(issue), null, 2) + '\n',
+    'utf8',
+  );
+}
+
+function browserProofScenario(issue) {
+  const artifactPrefix = '.codex-orchestrator/proofs/issue-' + issue;
+  return {
+    version: 1,
+    baseUrl: 'http://127.0.0.1:1',
+    viewports: [{
+      name: 'desktop-wide',
+      width: 1440,
+      height: 900,
+      requiredBy: 'desktop-web-layout',
+    }],
+    criteria: [{
+      id: 'browser-live-smoke',
+      description: 'Browser proof navigates to the live smoke page and captures mapped UI evidence.',
+    }],
+    sourceInputs: {
+      acceptanceCriteriaRefs: ['issue body: Browser proof live smoke acceptance criteria'],
+      implementationEvidenceRefs: ['completion report validation: red-green live smoke'],
+      runtimeValidationRefs: ['visual-proof auto dispatched to package-owned browser proof'],
+    },
+    auth: { mode: 'not-required' },
+    steps: [
+      { action: 'navigate', path: '/' },
+      { action: 'waitForText', text: 'Browser proof live smoke ready' },
+      { action: 'assertText', selector: 'body', text: 'Browser proof live smoke ready' },
+      {
+        action: 'screenshot',
+        checkpointId: 'browser-live-smoke-screen',
+        path: artifactPrefix + '/browser-live-smoke-screenshot.png',
+        viewportName: 'desktop-wide',
+        criteriaRefs: ['browser-live-smoke'],
+      },
+      {
+        action: 'domSnapshot',
+        checkpointId: 'browser-live-smoke-dom',
+        path: artifactPrefix + '/browser-live-smoke-dom.html',
+        viewportName: 'desktop-wide',
+        criteriaRefs: ['browser-live-smoke'],
+      },
+    ],
+  };
 }
 
 function writeAcceptanceChange(issue, run, kind, proofReady) {

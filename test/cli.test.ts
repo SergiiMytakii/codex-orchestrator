@@ -215,6 +215,36 @@ test('daemon command validates required arguments', async () => {
   assert.match(invalidConcurrency.stderr, /daemon requires --concurrency <integer between 1 and 3>/);
 });
 
+test('visual-proof auto reads config from --target instead of process cwd', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-proof-target-'));
+  const unrelatedCwd = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-proof-cwd-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    `${JSON.stringify(validConfig, null, 2)}\n`,
+    'utf8',
+  );
+
+  const result = await runCli(
+    ['visual-proof', 'auto', '--issue', '887', '--target', targetRoot],
+    {
+      ...process.env,
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'src/frontend/App.tsx',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Frontend UI proof',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: 'Web layout proof',
+    },
+    unrelatedCwd,
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, '');
+  assert.match(result.stdout, /auto visual proof selected browser/);
+  assert.match(
+    await readFile(join(targetRoot, '.codex-orchestrator', 'proofs', 'issue-887', 'acceptance-proof-report.json'), 'utf8'),
+    /Browser proof scenario file was not found/,
+  );
+});
+
 test('runs status dry-run without launching Codex', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-status-target-'));
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });

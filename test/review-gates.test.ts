@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { evaluateReviewGates, type ReviewGateInput } from '../src/runner/review-gates.js';
-import { shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
+import { classifyVisualProofDispatchTarget, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
@@ -266,6 +266,48 @@ test('visual proof policy does not treat internal Acceptance Proof module work a
       'test/visual-proof-runner.test.ts',
     ],
   }), false);
+});
+
+test('visual proof dispatch policy classifies web, mobile, mixed, and backend changes', () => {
+  const webIssue = issueFixture({ number: 882, title: 'Web UI proof', body: 'Frontend layout requires proof.' });
+  const mobileIssue = issueFixture({ number: 882, title: 'Flutter mobile proof', body: 'Mobile app visual proof for Flutter.' });
+  const backendIssue = issueFixture({ number: 882, title: 'Backend worker', body: 'No UI proof.' });
+
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: webIssue,
+    changedFiles: ['src/frontend/App.tsx'],
+  }), 'browser');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: webIssue,
+    changedFiles: ['app/page.tsx'],
+  }), 'browser');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: mobileIssue,
+    changedFiles: ['android/app/build.gradle'],
+  }), 'mobile');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: mobileIssue,
+    changedFiles: ['ios/App.xcodeproj/project.pbxproj'],
+  }), 'mobile');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: mobileIssue,
+    changedFiles: ['lib/main.dart'],
+  }), 'mobile');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: webIssue,
+    changedFiles: ['src/frontend/App.tsx', 'android/app/build.gradle'],
+  }), 'mobile');
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue: backendIssue,
+    changedFiles: ['src/server.ts'],
+  }), 'none');
 });
 
 test('review gates accept runner-owned visual proof as UI layout test evidence', async () => {

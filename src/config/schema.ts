@@ -163,6 +163,12 @@ export interface CodexOrchestratorConfig {
       runnerValidationCommand?: string;
       runnerTimeoutMs?: number;
       envPassthrough?: string[];
+      browserProof?: {
+        scenarioPath?: string;
+        baseUrl?: string;
+        strictConsoleErrors: boolean;
+        strictNetworkFailures: boolean;
+      };
       maxIterations: number;
     };
     visualProof: {
@@ -643,6 +649,7 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
     expectOptionalString(acceptanceProof, 'reviewGates.acceptanceProof.runnerValidationCommand', errors);
     expectOptionalPositiveInteger(acceptanceProof, 'reviewGates.acceptanceProof.runnerTimeoutMs', errors);
     expectOptionalStringArray(acceptanceProof, 'reviewGates.acceptanceProof.envPassthrough', errors);
+    validateBrowserProofConfig(acceptanceProof, errors);
     validateEnvironmentVariableNames(acceptanceProof, 'reviewGates.acceptanceProof.envPassthrough', errors);
     validateRegexArray(acceptanceProof, 'reviewGates.acceptanceProof.issueTextPatterns', errors);
   }
@@ -667,6 +674,17 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   }
 
   validateQualityGate(parent, errors);
+}
+
+function validateBrowserProofConfig(acceptanceProof: ObjectRecord, errors: string[]): void {
+  const browserProof = expectOptionalObject(acceptanceProof, 'reviewGates.acceptanceProof.browserProof', errors);
+  if (!browserProof) {
+    return;
+  }
+  expectOptionalString(browserProof, 'reviewGates.acceptanceProof.browserProof.scenarioPath', errors);
+  expectOptionalString(browserProof, 'reviewGates.acceptanceProof.browserProof.baseUrl', errors);
+  expectBoolean(browserProof, 'reviewGates.acceptanceProof.browserProof.strictConsoleErrors', errors);
+  expectBoolean(browserProof, 'reviewGates.acceptanceProof.browserProof.strictNetworkFailures', errors);
 }
 
 function validateLoopPolicy(parent: ObjectRecord, errors: string[]): void {

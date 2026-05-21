@@ -355,6 +355,9 @@ codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
   [--github-repo <repo>] [--dry-run] [--prepare-labels]
 codex-orchestrator status --target <path> [--dry-run] [--json]
 codex-orchestrator run --target <path> --issue <number>
+codex-orchestrator visual-proof auto --issue <number> [--target <path>]
+codex-orchestrator visual-proof browser --issue <number> [--target <path>] \
+  [--scenario <path>] [--base-url <url>]
 codex-orchestrator visual-proof mobile --issue <number> [--target <path>]
 codex-orchestrator visual-proof android --issue <number> [--target <path>]
 codex-orchestrator visual-proof ios --issue <number> [--target <path>]
@@ -364,6 +367,8 @@ codex-orchestrator daemon --target <path> [--once] \
 ```
 
 Use `codex-orchestrator <command> --help` for command-specific flags.
+Browser proof prefers an explicit or locally installed Chrome/Chromium/Edge
+browser before falling back to Playwright's Chromium download.
 
 ## Current Scope
 

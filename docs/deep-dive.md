@@ -369,9 +369,31 @@ warning. Repositories that intentionally want visual-desirable work to block
 review-ready publication until proof is produced can set
 `reviewGates.visualProof.requireWhenDesirable` to `true`.
 
-For mobile UI work, setup uses the package-owned
-`codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The
-command detects Flutter, native Android, and native iOS projects. It tries
+Setup now uses the package-owned
+`codex-orchestrator visual-proof auto --issue ${issueNumber}` command. Auto
+dispatch uses one shared policy owner: web/frontend paths route to browser
+proof, while Android, iOS, Flutter, and mobile app paths remain device-backed.
+Explicit legacy proof command overrides are preserved.
+
+For web UI work, `codex-orchestrator visual-proof browser` reads a proof-owned
+browser scenario, drives Playwright Core against an explicit base URL, and
+writes screenshots, DOM snapshots, console logs, network failure logs, a run
+summary, and `acceptance-proof-report.json` under the runner proof directory.
+Before downloading a browser, the command first uses an explicit
+`CODEX_ORCHESTRATOR_BROWSER_EXECUTABLE_PATH` when provided, then looks for an
+installed Chrome, Chromium, or Edge executable. If no installed browser is
+available, Playwright's existing browser cache is tried; only a missing-browser
+launch failure triggers `playwright-core install chromium` and one retry.
+Scenarios are versioned and must map criteria to named screenshot or DOM
+checkpoints. Missing scenarios, malformed scenarios, missing Playwright/browser
+runtime, blocked auth metadata, or browser launch failures produce blocked
+proof. Assertion failures produce `needs-rework`. Console and network failures
+are always recorded and can be configured as blockers through
+`reviewGates.acceptanceProof.browserProof`.
+
+For mobile UI work, the auto command selects the package-owned mobile proof
+path. The mobile command detects Flutter, native Android, and native iOS
+projects. It tries
 Android first when an Android target exists, resolving SDK tools from
 environment variables, `PATH`, and the default macOS, Linux, and Windows SDK
 locations. Android proof takes a runner-owned mobile device lease under the

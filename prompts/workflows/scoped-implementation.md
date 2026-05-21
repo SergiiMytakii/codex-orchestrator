@@ -52,6 +52,11 @@ use smoke outputs, logs, or other observable artifacts. Let the runner execute
 configured proof commands when the prompt says so, and keep proof script repair
 inside proof-owned paths.
 
+For web UI work, prepare a proof-owned browser proof scenario when the runner
+uses `visual-proof auto` or `visual-proof browser`. Use explicit base URLs,
+ordered actions/assertions, named screenshot and DOM checkpoints, and criteria
+refs. Do not run or claim the final runner-owned proof command yourself.
+
 For Android mobile app UI work, use device-backed proof instead of Playwright:
 
 1. Run `adb devices -l`.

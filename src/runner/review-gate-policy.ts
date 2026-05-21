@@ -104,15 +104,37 @@ export function shouldApplyVisualProofGate(input: {
   }
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
+  const internalRunnerProofOnlyChange = input.changedFiles.length > 0
+    && input.changedFiles.every(isInternalRunnerProofPath);
   const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
   const canRunGenericAcceptanceProof = Boolean(acceptanceCommand) && !isMobileVisualProofCommand(acceptanceCommand);
   const issueNeedsAcceptanceProof = canRunGenericAcceptanceProof
+    && !internalRunnerProofOnlyChange
     && acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
   const changedAcceptanceProofFiles = canRunGenericAcceptanceProof
     && input.changedFiles.some((path) =>
       acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
     );
   return issueNeedsAcceptanceProof || changedAcceptanceProofFiles || isVisualProofDesirable(input);
+}
+
+export type VisualProofDispatchTarget = 'browser' | 'mobile' | 'none';
+
+export function classifyVisualProofDispatchTarget(input: {
+  config: CodexOrchestratorConfig;
+  issue: GitHubIssue;
+  changedFiles: string[];
+}): VisualProofDispatchTarget {
+  const normalizedFiles = input.changedFiles.map((path) => path.replaceAll('\\', '/').replace(/^\.\//u, ''));
+  const issueText = `${input.issue.title}\n${input.issue.body}`;
+  if (normalizedFiles.some(isMobileProofPath) || normalizedFiles.some((path) => isFlutterEntrypoint(path) && isMobileIssueText(issueText))) {
+    return 'mobile';
+  }
+  if (normalizedFiles.some((path) => input.config.reviewGates.acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)))
+    || normalizedFiles.some((path) => input.config.reviewGates.visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)))) {
+    return 'browser';
+  }
+  return 'none';
 }
 
 export function isVisualProofDesirable(input: {
@@ -191,6 +213,12 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
   minScreenshotArtifacts: number;
   requireWhenDesirable: boolean;
   blockOnMissingProof: boolean;
+  browserProof: {
+    scenarioPath?: string;
+    baseUrl?: string;
+    strictConsoleErrors: boolean;
+    strictNetworkFailures: boolean;
+  };
 } {
   const visualProof = config.reviewGates.visualProof;
   const acceptanceProof = config.reviewGates.acceptanceProof;
@@ -212,6 +240,12 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
     minScreenshotArtifacts: visualProof.minScreenshotArtifacts,
     requireWhenDesirable: visualProof.requireWhenDesirable ?? false,
     blockOnMissingProof: !preferLegacyVisual,
+    browserProof: {
+      strictConsoleErrors: acceptanceProof.browserProof?.strictConsoleErrors ?? false,
+      strictNetworkFailures: acceptanceProof.browserProof?.strictNetworkFailures ?? false,
+      scenarioPath: acceptanceProof.browserProof?.scenarioPath,
+      baseUrl: acceptanceProof.browserProof?.baseUrl,
+    },
   };
 }
 
@@ -220,13 +254,30 @@ function isLegacyVisualProofOverride(
   visualProof: CodexOrchestratorConfig['reviewGates']['visualProof'],
 ): boolean {
   const defaultMobileCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
-  return (acceptanceProof.runnerValidationCommand?.trim() || '') === defaultMobileCommand
+  const defaultAutoCommand = 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
+  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim() || '';
+  return (acceptanceCommand === defaultMobileCommand || acceptanceCommand === defaultAutoCommand)
     && Boolean(visualProof.runnerValidationCommand?.trim())
-    && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand;
+    && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand
+    && visualProof.runnerValidationCommand?.trim() !== defaultAutoCommand;
 }
 
 function isMobileVisualProofCommand(command: string | undefined): boolean {
   return /\bcodex-orchestrator\s+visual-proof\s+(?:mobile|android|ios)\b/iu.test(command ?? '');
+}
+
+function isMobileProofPath(path: string): boolean {
+  return /^(?:android|ios)\//u.test(path)
+    || /\.(?:xcodeproj|xcworkspace)\//u.test(path)
+    || /(?:^|\/)(?:build\.gradle|build\.gradle\.kts|gradlew|gradlew\.bat)$/u.test(path);
+}
+
+function isFlutterEntrypoint(path: string): boolean {
+  return path === 'lib/main.dart' || path === 'pubspec.yaml';
+}
+
+function isMobileIssueText(text: string): boolean {
+  return /\b(?:android|ios|iphone|ipad|flutter|mobile|emulator|apk|aab|dart)\b/iu.test(text);
 }
 
 function hasTddRedEvidence(text: string): boolean {

@@ -30,6 +30,7 @@ export const packageOwnedDefaultChecks: CodexOrchestratorConfig['checks'] = {
 };
 
 export const packageOwnedMobileVisualProofCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
+export const packageOwnedAutoVisualProofCommand = 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
 
 export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
   return {
@@ -65,9 +66,13 @@ export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewG
     proofOwnedPathGlobs: [
       '.codex-orchestrator/proofs/**',
     ],
-    runnerValidationCommand: packageOwnedMobileVisualProofCommand,
+    runnerValidationCommand: packageOwnedAutoVisualProofCommand,
     runnerTimeoutMs: 900_000,
     envPassthrough: [],
+    browserProof: {
+      strictConsoleErrors: false,
+      strictNetworkFailures: false,
+    },
     maxIterations: 5,
   };
 }
@@ -169,7 +174,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         ],
         minScreenshotArtifacts: 1,
         requireWhenDesirable: false,
-        runnerValidationCommand: packageOwnedMobileVisualProofCommand,
+        runnerValidationCommand: packageOwnedAutoVisualProofCommand,
         runnerTimeoutMs: 900_000,
         envPassthrough: [],
       },
@@ -559,7 +564,7 @@ function migrateVisualProofConfig(
   } as CodexOrchestratorConfig['reviewGates']['visualProof'];
   const command = visualProof.runnerValidationCommand?.trim();
   if (visualProof.enabled && !command) {
-    visualProof.runnerValidationCommand = packageOwnedMobileVisualProofCommand;
+    visualProof.runnerValidationCommand = packageOwnedAutoVisualProofCommand;
   }
   return visualProof;
 }
@@ -581,7 +586,7 @@ function migrateAcceptanceProofConfig(
   } as CodexOrchestratorConfig['reviewGates']['acceptanceProof'];
   const command = acceptanceProof.runnerValidationCommand?.trim();
   if (acceptanceProof.enabled && !command) {
-    acceptanceProof.runnerValidationCommand = packageOwnedMobileVisualProofCommand;
+    acceptanceProof.runnerValidationCommand = packageOwnedAutoVisualProofCommand;
   }
   return acceptanceProof;
 }
