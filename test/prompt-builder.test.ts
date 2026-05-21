@@ -204,7 +204,7 @@ test('prompt builder directs Android mobile proof to Test Android Apps with non-
   assert.match(prompt, /`PUB_CACHE`/);
   assert.match(prompt, /`GRADLE_USER_HOME`/);
   assert.match(prompt, /`flutter precache --android`/);
-  assert.doesNotMatch(prompt, /copy/i);
+  assert.match(prompt, /copyReview/);
   assert.match(prompt, /Do not use Playwright as the primary proof path for Android mobile app verification/);
   assert.match(prompt, /If Test Android Apps cannot be enabled, or no usable Android device or emulator is available/);
   assert.match(prompt, /concrete plugin or adb\/emulator reason/);

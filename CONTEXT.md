@@ -60,6 +60,10 @@ _Avoid_: attachment, random output
 A structured **Acceptance Proof** result that maps acceptance criteria to status, confidence, reasoning summary, and **Proof Artifacts**.
 _Avoid_: agent says it passed, screenshot only
 
+**UI Evidence Contract**:
+The **Proof Report** section for UI proof that maps artifacts to the exact user workflow, viewport coverage, artifact freshness, visual layout review, and user-facing copy review.
+_Avoid_: harness, screenshot exists, visual vibes
+
 **Proof Script Repair**:
 A limited proof-phase change to repository-owned verification scripts needed to make **Acceptance Proof** executable.
 _Avoid_: feature fix, product code change
@@ -103,6 +107,7 @@ _Avoid_: completion, merge
 - An **Adaptive Proof Agent** may perform **Proof Script Repair** only in proof-owned paths, but product code changes require a **Proof Rework Request**.
 - A **Proof Rework Request** is applied by the **Runner**, not by the **Adaptive Proof Agent**, because labels and comments remain inside the **Runner-Owned Publication Boundary**.
 - A **Proof Report** passes only when acceptance criteria are linked to **Proof Artifacts** with high confidence.
+- A **Proof Report** that uses UI screenshots or UI dumps must satisfy the **UI Evidence Contract**; screenshot-only proof cannot pass.
 - An **Acceptance Proof Loop** must stop at the configured iteration limit.
 - A **Live Smoke Proof** uses the same **Acceptance Proof** boundary as visual proof.
 - A **Rework Loop** may retry only machine-checkable blockers and must stop at a configured limit.
@@ -125,6 +130,9 @@ _Avoid_: completion, merge
 >
 > **Dev:** "Is a screenshot enough proof?"
 > **Domain expert:** "No. The Proof Report must map the screenshot or other Proof Artifacts to acceptance criteria with high confidence."
+>
+> **Dev:** "Can the proof pass if the screenshot exists but does not show the requested user flow?"
+> **Domain expert:** "No. UI proof must satisfy the UI Evidence Contract: exact workflow, relevant viewport, fresh artifact, layout review, and copy review."
 
 ## Flagged Ambiguities
 
@@ -135,4 +143,5 @@ _Avoid_: completion, merge
 - "Full shell" during proof could imply publication authority. Resolved: shell access is proof-phase tool access only; issue state and publication remain runner-owned.
 - "Update labels" from proof could imply Agent-owned GitHub mutation. Resolved: the **Adaptive Proof Agent** emits a **Proof Rework Request**, and the **Runner** mutates labels or comments.
 - "Visual proof" was too narrow for API, worker, CLI, and live smoke acceptance checks. Resolved: **Acceptance Proof** is the umbrella term; visual proof and **Live Smoke Proof** are variants.
-- "`visualProof` as a config name predates the broader model. Resolved: **Acceptance Proof** is the canonical domain term; legacy visual-proof configuration can remain as a compatibility adapter.
+- "`visualProof` as a config name predates the broader model. Resolved: **Acceptance Proof** is the canonical domain term; visual-proof configuration can remain as a migration adapter, but screenshot-only fallback is not valid Acceptance Proof.
+- "Harness" was used for UI proof quality. Resolved: the canonical domain term is **UI Evidence Contract**; scripts and harnesses are implementation tools that produce evidence for that contract.

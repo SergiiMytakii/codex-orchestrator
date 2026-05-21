@@ -148,23 +148,23 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     };
   }
 
-  const requiredArtifactCount = policy.minScreenshotArtifacts;
-  if (artifacts.length < requiredArtifactCount) {
+  if (artifacts.length > 0) {
     return {
       validation: [{
         command,
-        status: policy.blockOnMissingProof ? 'failed' : 'skipped',
-        summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
+        status: 'failed',
+        summary: `runner acceptance proof failed: command completed and produced ${artifacts.length} screenshot artifact(s), but did not write a valid machine-readable acceptance proof report at ${proofReportPath}.`,
       }],
       artifacts,
     };
   }
 
+  const requiredArtifactCount = policy.minScreenshotArtifacts;
   return {
     validation: [{
       command,
-      status: 'passed',
-      summary: `runner visual proof passed: Playwright/screenshot command completed with ${artifacts.length} screenshot artifact(s).`,
+      status: policy.blockOnMissingProof ? 'failed' : 'skipped',
+      summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
     }],
     artifacts,
   };

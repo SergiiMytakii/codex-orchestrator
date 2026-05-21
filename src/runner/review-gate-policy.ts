@@ -1,6 +1,7 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import { globMatches } from '../path-policy.js';
+import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
@@ -10,7 +11,7 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
   if (!command) {
     return [
       `For acceptance proof, save proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts.`,
-      'For visual/UI work, screenshots must be analyzed against the issue acceptance criteria; screenshot existence alone is not enough proof.',
+      'For visual/UI work, screenshots and UI dumps require a Proof Report uiEvidence contract with workflowScope, viewportCoverage, artifactFreshness, layoutReview, copyReview, and sourceInputs; screenshot existence alone is not enough proof.',
       'For browser/web UI work, prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
       ...androidMobileProofPromptLines(),
       ...iosMobileProofPromptLines(),
@@ -31,6 +32,10 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     `Proof script repair is allowed only in these proof-owned paths: ${acceptanceProof.proofOwnedPathGlobs.join(', ')}.`,
     'Product-code changes made during the proof phase are blockers; route missing behavior back through implementation instead.',
     'Every required acceptance criterion must map to high-confidence artifact evidence before Draft PR Handoff.',
+    'For visual/UI work, screenshots and UI dumps require a Proof Report uiEvidence contract with workflowScope, viewportCoverage, artifactFreshness, layoutReview, copyReview, and sourceInputs.',
+    `UI Evidence failure dimensions are runner-owned and stable: ${uiEvidenceFailureDimensions.join(', ')}.`,
+    'For web layout proof, include wide desktop viewport coverage; include mobile coverage only when the issue or acceptance criteria call for mobile or responsive behavior.',
+    'Prefer real UI login when configured credentials exist; session or cookie seeding must be explained in uiEvidence.authShortcutReason.',
     'For browser/web UI work, prefer Playwright-based screenshot proof via the runner-owned command; do not rely on in-session browser plugins for proof.',
     ...androidMobileProofPromptLines(),
     ...iosMobileProofPromptLines(),

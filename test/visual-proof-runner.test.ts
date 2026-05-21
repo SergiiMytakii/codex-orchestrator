@@ -9,7 +9,7 @@ import { runRunnerVisualProof, type RunnerVisualProofResult } from '../src/runne
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
-test('runner visual proof reports screenshots that are updated by the command', async () => {
+test('runner visual proof fails screenshot-only output without acceptance proof report', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
   const proofDir = join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-155');
@@ -74,8 +74,8 @@ test('runner visual proof reports screenshots that are updated by the command', 
     }
   }
 
-  assert.equal(result.validation[0]?.status, 'passed');
-  assert.match(result.validation[0]?.summary ?? '', /1 screenshot artifact/);
+  assert.equal(result.validation[0]?.status, 'failed');
+  assert.match(result.validation[0]?.summary ?? '', /acceptance proof report/i);
   assert.deepEqual(result.artifacts, [{
     type: 'screenshot',
     path: '.codex-orchestrator/proofs/issue-155/390.png',
@@ -135,6 +135,10 @@ test('runner visual proof reports same-size screenshots when file content change
   const shellExecutor: ShellCommandExecutor = async () => {
     await writeFile(screenshotPath, 'after--image\n', 'utf8');
     await utimes(screenshotPath, originalStat.atime, originalStat.mtime);
+    await writeUiProofReport(
+      join(proofDir, 'acceptance-proof-report.json'),
+      '.codex-orchestrator/proofs/issue-155/390.png',
+    );
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };
 
@@ -494,6 +498,10 @@ test('runner visual proof keeps browser runtime directories outside the worktree
     assert.equal(isPathInside(worktreePath, profileDir), false);
     assert.equal(isPathInside(worktreePath, browsersDir), false);
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
+    await writeUiProofReport(
+      join(proofDir, 'acceptance-proof-report.json'),
+      '.codex-orchestrator/proofs/issue-155/390.png',
+    );
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };
 
@@ -551,6 +559,10 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
     const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
     assert.ok(proofDir);
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
+    await writeUiProofReport(
+      join(proofDir, 'acceptance-proof-report.json'),
+      '.codex-orchestrator/proofs/issue-155/390.png',
+    );
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };
 
@@ -595,4 +607,59 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
 function isPathInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path.length === 0 || (!path.startsWith('..') && !isAbsolute(path));
+}
+
+async function writeUiProofReport(reportPath: string, screenshotRef: string): Promise<void> {
+  await writeFile(reportPath, JSON.stringify({
+    status: 'passed',
+    criteria: [{
+      id: 'ac-ui',
+      description: 'UI proof maps the requested screen to final screenshot evidence.',
+      status: 'passed',
+      confidence: 'high',
+      reasoningSummary: 'The final screenshot shows the requested UI state with reviewed layout and copy.',
+      artifactRefs: [screenshotRef],
+    }],
+    artifacts: [{
+      type: 'screenshot',
+      path: screenshotRef,
+      description: 'final UI screenshot',
+    }],
+    uiEvidence: {
+      workflowScope: {
+        entrypoint: 'App launch',
+        path: ['Open app', 'Navigate to target screen'],
+        screenState: 'Target UI screen is visible',
+        authPath: 'not-required',
+      },
+      viewportCoverage: [{
+        name: 'wide desktop',
+        width: 1440,
+        height: 900,
+        artifactRefs: [screenshotRef],
+        requiredBy: 'desktop-web-layout',
+      }],
+      artifactFreshness: {
+        currentArtifactRefs: [screenshotRef],
+        checkedAfterFinalRun: true,
+      },
+      layoutReview: {
+        checked: true,
+        findings: [{ summary: 'Spacing, clipping, overlap, and alignment reviewed.', artifactRefs: [screenshotRef] }],
+      },
+      copyReview: {
+        checked: true,
+        findings: [{ summary: 'Visible copy is user-facing.', artifactRefs: [screenshotRef] }],
+      },
+      sourceInputs: {
+        acceptanceCriteriaRefs: ['issue-ui-proof'],
+        implementationEvidenceRefs: ['implementation-validation'],
+      },
+    },
+    proofPhaseDiff: {
+      allowedProofPaths: [screenshotRef],
+      forbiddenProductPaths: [],
+    },
+    residualRisks: [],
+  }), 'utf8');
 }

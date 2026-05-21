@@ -14,9 +14,11 @@ The proof phase becomes an evidence-producing agent workflow, not just a command
 
 The Proof Report must map each relevant acceptance criterion to a status, confidence, reasoning summary, and linked artifacts; a screenshot or smoke output without high-confidence analysis is not sufficient. Non-visual acceptance checks use the same adaptive proof model through Live Smoke Proof, where the agent can create and run a live smoke check and return observable evidence.
 
+UI proof must satisfy a UI Evidence Contract inside the Proof Report. Screenshot or UI-dump evidence has to identify the exact user workflow, relevant viewport coverage, current artifact freshness, visual layout review, and user-facing copy review; screenshot-only command success is rejected rather than treated as a compatibility pass.
+
 Android proof must use the Test Android Apps workflow and the runner-provided device lease rather than selecting or starting devices independently. The Android contract is hard: use the runner-provided `ANDROID_SERIAL`, drive the app through `adb -s`, derive tap coordinates from the UI tree, and save screenshot, UI dump, and logcat artifacts.
 
-The configuration model should introduce `reviewGates.acceptanceProof` as the canonical policy surface, while preserving `reviewGates.visualProof` as a backward-compatible adapter for existing repositories. During an Acceptance Proof Loop the issue remains claimed with the running label; the Runner changes issue labels only at terminal states: review-ready after proof passes, or blocked after the configured iteration limit is exhausted.
+The configuration model should introduce `reviewGates.acceptanceProof` as the canonical policy surface, while preserving `reviewGates.visualProof` only as a migration adapter for existing repository settings. During an Acceptance Proof Loop the issue remains claimed with the running label; the Runner changes issue labels only at terminal states: review-ready after proof passes, or blocked after the configured iteration limit is exhausted.
 
 The Runner validates the diff after every proof phase. Proof Script Repair is accepted only in allowlisted proof-owned paths; any product-code diff produced during proof blocks that proof result and must be routed back through implementation. The Adaptive Proof Agent may use full local proof-phase shell access, and network may be available when the proof requires live product behavior, but GitHub write authority and publication remain unavailable to the proof phase and are still checked by the safety gate.
 

@@ -240,7 +240,7 @@ Runtime and test paths are configurable through:
 The acceptance proof gate can require runner-owned proof artifacts when issue
 text or changed paths indicate UI, API, worker, CLI, or smoke-verifiable work.
 `reviewGates.acceptanceProof` is canonical; `reviewGates.visualProof` remains a
-compatibility adapter for existing screenshot and mobile proof policy.
+configuration migration adapter for existing screenshot and mobile proof policy.
 
 ## Acceptance Proof
 
@@ -249,18 +249,20 @@ behavior, but the runner decides whether proof is required, starts the proof
 phase after implementation, validates the proof report, and makes the final
 publishability decision. Runtime config loading still preserves package-owned
 visual proof behavior for older configs where visual proof is enabled but no
-runner command is set.
+runner command is set, but screenshot-only command success is not sufficient for
+Acceptance Proof.
 
 Adaptive Acceptance Proof is the canonical proof model. Instead of treating a
 screenshot or a final agent sentence as enough evidence, the runner can launch a
 separate `acceptance-proof` Codex phase with the issue, changed files,
 implementation evidence, and repository proof policy. Repositories opt into that
 adaptive Codex proof session by configuring `codex.profiles.acceptance-proof`;
-existing runner-owned visual/mobile proof commands remain the compatibility
-path. The adaptive phase can navigate a browser, inspect mobile UI state, run API
-or CLI checks, inspect logs, or create a focused live-smoke check for observable
-product behavior. The proof phase writes artifacts under the runner-owned proof
-directory and writes a machine-readable `acceptance-proof-report.json`.
+existing runner-owned visual/mobile proof commands remain evidence producers, not
+standalone pass conditions. The adaptive phase can navigate a browser, inspect
+mobile UI state, run API or CLI checks, inspect logs, or create a focused
+live-smoke check for observable product behavior. The proof phase writes
+artifacts under the runner-owned proof directory and writes a machine-readable
+`acceptance-proof-report.json`.
 
 The gate is selected when `reviewGates.acceptanceProof.enabled` is true and
 either:
@@ -289,6 +291,36 @@ The runner validates the report independently. It rejects malformed JSON, empty
 criteria, low or medium confidence, failed or unknown criteria, missing artifact
 references, artifact paths that do not exist, and forbidden product-code diffs
 from the proof phase.
+
+For UI proof, the proof report must satisfy the UI Evidence Contract. Screenshot
+or UI-dump artifacts must be mapped to:
+
+- the exact user workflow under test, including the relevant entrypoint and
+  create/edit/detail context;
+- viewport coverage, with wide desktop required for web layout proof and mobile
+  required when the issue or acceptance criteria mention responsive or mobile
+  behavior;
+- artifact freshness, so the report identifies the current post-run artifact
+  rather than an old or intermediate screenshot;
+- visual layout review for spacing, padding, clipping, overlap, alignment, and
+  the specific visual complaint being verified;
+- user-facing copy review, including absence of rejected implementation terms
+  when copy is part of the acceptance path;
+- source inputs that show how the proof derived task-specific checks from issue
+  criteria, implementation evidence, reproduction signals, runtime validation,
+  and any Manual QA Plan content.
+
+If authentication is required and smoke or admin credentials are available
+through configured environment variables, UI proof should use the real sign-in
+flow. Session or cookie seeding is allowed only when the report records why the
+normal UI login path is unavailable or irrelevant to the acceptance criteria.
+
+This borrows workflow discipline from UI proof systems such as Symphony:
+user-facing changes should have an end-to-end UI walkthrough, a reproduction
+signal when one exists, runtime/media evidence for app-touching work, and Manual
+QA Plan expectations when provided. Codex Orchestrator enforces those inputs
+through the runner-validated Proof Report rather than requiring Symphony's
+Linear workpad or PR media workflow.
 
 When proof returns `needs-rework`, the runner feeds the rework request back into
 the bounded implementation loop. The maximum number of implementation-plus-proof
@@ -324,7 +356,8 @@ Proof artifacts created under the proof directory are attached to the PR and
 issue review report. Supported artifact types include screenshots, UI dumps,
 logs, smoke outputs, and other explicit artifacts. Screenshots remain supported
 for visual proof, but screenshot existence alone is not sufficient: each required
-criterion must map to high-confidence artifact evidence in the proof report.
+criterion must map to high-confidence artifact evidence in the proof report, and
+UI artifacts must satisfy the UI Evidence Contract.
 
 For mobile UI work, setup uses the package-owned
 `codex-orchestrator visual-proof mobile --issue ${issueNumber}` command. The

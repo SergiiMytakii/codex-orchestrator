@@ -23,8 +23,10 @@ const scenarioDefinitions = new Map([
   ['diagnostics', runDiagnosticsScenario],
   ['visual-proof', runVisualProofScenario],
   ['acceptance-proof', runAcceptanceProofScenario],
+  ['acceptance-proof-ui-evidence', runAcceptanceProofUiEvidenceScenario],
   ['acceptance-proof-rework', runAcceptanceProofReworkScenario],
   ['acceptance-proof-blocking', runAcceptanceProofBlockingScenario],
+  ['acceptance-proof-ui-evidence-blocking', runAcceptanceProofUiEvidenceBlockingScenario],
   ['quality-gates', runQualityGatesScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
   ['denied-secret', runDeniedSecretScenario],
@@ -648,6 +650,32 @@ async function runAcceptanceProofScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectAcceptanceProof: true });
 }
 
+async function runAcceptanceProofUiEvidenceScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} pass-ui`,
+  });
+  const issue = await createIssue(
+    context,
+    'acceptance-proof-ui-evidence',
+    ['agent:auto'],
+    [
+      'ACCEPTANCE_PROOF_LIVE_SMOKE: pass-ui. This should trigger canonical UI Evidence Contract validation.',
+      'Acceptance Criteria:',
+      '- Desktop layout proof uses a wide viewport and current screenshot artifact.',
+      '- Copy proof verifies the live smoke heading is visible and no implementation-only placeholder term is visible.',
+      'Manual QA Plan:',
+      '- Open the live smoke UI route after the implementation run and inspect the final screen.',
+    ].join('\n'),
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, {
+    expectLocalCommit: false,
+    expectAcceptanceProof: true,
+    expectUiEvidenceProof: true,
+  });
+}
+
 async function runAcceptanceProofReworkScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -695,6 +723,48 @@ async function runAcceptanceProofBlockingScenario(context) {
   await assertBlockedIssue(context, productDiff.number, 'Acceptance proof produced product-code changes during acceptance proof');
   await assertNoPullRequestForBranch(context, `codex/issue-${productDiff.number}`);
   await assertNoRemoteBranch(context, `codex/issue-${productDiff.number}`);
+}
+
+async function runAcceptanceProofUiEvidenceBlockingScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} missing-ui-evidence`,
+    acceptanceProof: { maxIterations: 1 },
+  });
+  const missingUiEvidence = await createIssue(
+    context,
+    'acceptance-proof-ui-evidence-missing',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: missing-ui-evidence. This should block because screenshot proof has no UI Evidence Contract.',
+  );
+  await runDaemonOnce(context, missingUiEvidence.number, 'scoped-issue');
+  await assertBlockedIssue(
+    context,
+    missingUiEvidence.number,
+    'UI Evidence workflow: UI artifacts require a complete UI Evidence Contract.',
+  );
+  await assertNoPullRequestForBranch(context, `codex/issue-${missingUiEvidence.number}`);
+  await assertNoRemoteBranch(context, `codex/issue-${missingUiEvidence.number}`);
+
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} narrow-ui-viewport`,
+    acceptanceProof: { maxIterations: 1 },
+  });
+  const narrowViewport = await createIssue(
+    context,
+    'acceptance-proof-ui-evidence-narrow-viewport',
+    ['agent:auto'],
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: narrow-ui-viewport. This should block because desktop UI proof is not wide enough.',
+  );
+  await runDaemonOnce(context, narrowViewport.number, 'scoped-issue');
+  await assertBlockedIssue(
+    context,
+    narrowViewport.number,
+    'UI Evidence viewport: desktop-web-layout viewport width must be at least 1280.',
+  );
+  await assertNoPullRequestForBranch(context, `codex/issue-${narrowViewport.number}`);
+  await assertNoRemoteBranch(context, `codex/issue-${narrowViewport.number}`);
 }
 
 async function runQualityGatesScenario(context) {
@@ -874,6 +944,7 @@ async function assertScopedSuccess(
     expectedBaseBranch,
     expectedBaseSha,
     expectedBaseMarkerPath,
+    expectUiEvidenceProof = false,
   },
 ) {
   const issue = await getIssue(context, issueNumber);
@@ -947,6 +1018,22 @@ async function assertScopedSuccess(
     );
     await assertPathExists(proofPath, 'runner acceptance proof artifact was not written');
     await appendReport(context, `Acceptance proof artifact: ${proofPath}\n\n`);
+  }
+  if (expectUiEvidenceProof) {
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/live-smoke-ui-screenshot.png`, 'PR body should link UI Evidence screenshot artifact path');
+    const screenshotPath = join(
+      context.targetRoot,
+      '.codex-orchestrator',
+      'workspaces',
+      `live-smoke-${context.runId}`,
+      `issue-${issueNumber}`,
+      '.codex-orchestrator',
+      'proofs',
+      `issue-${issueNumber}`,
+      'live-smoke-ui-screenshot.png',
+    );
+    await assertPathExists(screenshotPath, 'runner UI Evidence screenshot was not written');
+    await appendReport(context, `UI Evidence screenshot: ${screenshotPath}\n\n`);
   }
   if (expectedBaseSha) {
     await fetchRemoteBranch(context, branchName);
@@ -1527,16 +1614,23 @@ async function writeAcceptanceProofScript(root) {
 function visualProofSource() {
   return String.raw`#!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const proofDir = process.env.CODEX_ORCHESTRATOR_PROOF_DIR;
+const reportPath = process.env.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+const issueNumber = Number(process.env.CODEX_ORCHESTRATOR_ISSUE_NUMBER ?? 0);
+const artifactDir = process.env.CODEX_ORCHESTRATOR_ARTIFACT_DIR ?? '.codex-orchestrator/proofs';
 if (!proofDir) {
   throw new Error('CODEX_ORCHESTRATOR_PROOF_DIR is required');
+}
+if (!reportPath || !Number.isInteger(issueNumber) || issueNumber < 1) {
+  throw new Error('CODEX_ORCHESTRATOR_PROOF_REPORT_PATH and CODEX_ORCHESTRATOR_ISSUE_NUMBER are required');
 }
 
 mkdirSync(proofDir, { recursive: true });
 const screenshotPath = join(proofDir, 'live-smoke-screenshot.png');
+const artifactRef = artifactDir.replace(/\/+$/, '') + '/issue-' + issueNumber + '/live-smoke-screenshot.png';
 
 try {
   execFileSync('screencapture', ['-x', screenshotPath], { stdio: 'ignore' });
@@ -1544,7 +1638,73 @@ try {
   throw new Error('screencapture failed; live smoke requires a real screenshot artifact: ' + error.message);
 }
 
+writeFileSync(reportPath, JSON.stringify({
+  status: 'passed',
+  criteria: [{
+    id: 'visual-live-smoke',
+    description: 'Runner-owned visual proof captured the final UI state.',
+    status: 'passed',
+    confidence: 'high',
+    reasoningSummary: 'The runner-owned screenshot artifact captures the live smoke UI after implementation.',
+    artifactRefs: [artifactRef],
+  }],
+  artifacts: [{
+    type: 'screenshot',
+    path: artifactRef,
+    description: 'Runner visual proof screenshot',
+  }],
+  uiEvidence: buildUiEvidence(artifactRef),
+  proofPhaseDiff: {
+    allowedProofPaths: [artifactRef],
+    forbiddenProductPaths: [],
+  },
+  residualRisks: [],
+}, null, 2), 'utf8');
+
 process.stdout.write('live smoke screenshot proof written to ' + screenshotPath + '\n');
+
+function buildUiEvidence(artifactRef) {
+  return {
+    workflowScope: {
+      entrypoint: 'live smoke visual proof command',
+      path: ['daemon once', 'scoped implementation', 'runner visual proof command'],
+      screenState: 'final implemented UI state after scoped run',
+      authPath: 'not-required',
+    },
+    viewportCoverage: [{
+      name: 'desktop wide',
+      width: 1440,
+      height: 900,
+      artifactRefs: [artifactRef],
+      requiredBy: 'desktop-web-layout',
+    }],
+    artifactFreshness: {
+      currentArtifactRefs: [artifactRef],
+      checkedAfterFinalRun: true,
+    },
+    layoutReview: {
+      checked: true,
+      findings: [{
+        summary: 'No overlap, clipping, or spacing regression is visible in the captured final UI state.',
+        artifactRefs: [artifactRef],
+      }],
+    },
+    copyReview: {
+      checked: true,
+      acceptedTerms: ['live smoke'],
+      rejectedTermsAbsent: ['placeholder'],
+      findings: [{
+        summary: 'Visible copy matches the live smoke visual proof expectation.',
+        artifactRefs: [artifactRef],
+      }],
+    },
+    sourceInputs: {
+      acceptanceCriteriaRefs: ['issue body: UI visual screenshot smoke'],
+      implementationEvidenceRefs: ['completion report validation: red-green live smoke'],
+      runtimeValidationRefs: ['runner visual proof command completed after implementation'],
+    },
+  };
+}
 `;
 }
 
@@ -1567,6 +1727,12 @@ mkdirSync(proofDir, { recursive: true });
 const artifactPath = join(proofDir, 'live-smoke-proof.txt');
 const artifactRef = artifactDir.replace(/\/+$/, '') + '/issue-' + issueNumber + '/live-smoke-proof.txt';
 writeFileSync(artifactPath, 'live smoke acceptance proof for #' + issueNumber + ' mode=' + mode + '\n', 'utf8');
+const uiModes = new Set(['pass-ui', 'missing-ui-evidence', 'narrow-ui-viewport']);
+const uiArtifactPath = join(proofDir, 'live-smoke-ui-screenshot.png');
+const uiArtifactRef = artifactDir.replace(/\/+$/, '') + '/issue-' + issueNumber + '/live-smoke-ui-screenshot.png';
+if (uiModes.has(mode)) {
+  writeFileSync(uiArtifactPath, 'fake live smoke ui screenshot artifact for #' + issueNumber + '\n', 'utf8');
+}
 
 if (mode === 'product-diff') {
   const productPath = join('src', 'live-smoke', 'proof-side-effect-' + issueNumber + '.ts');
@@ -1575,30 +1741,43 @@ if (mode === 'product-diff') {
 }
 
 const proofReady = existsSync(join('src', 'live-smoke', 'issue-' + issueNumber + '-proof-ready.ts'));
-const shouldPass = mode === 'pass' || mode === 'low-confidence' || mode === 'product-diff' || (mode === 'rework' && proofReady);
+const shouldPass = mode === 'pass' || mode === 'pass-ui' || mode === 'missing-ui-evidence' || mode === 'narrow-ui-viewport' || mode === 'low-confidence' || mode === 'product-diff' || (mode === 'rework' && proofReady);
 const confidence = mode === 'low-confidence' ? 'medium' : 'high';
 const reportStatus = shouldPass ? 'passed' : 'needs-rework';
 const criterionStatus = shouldPass ? 'passed' : 'failed';
+const artifacts = [{
+  type: 'smoke-output',
+  path: artifactRef,
+  description: 'Live smoke acceptance proof output',
+}];
+if (uiModes.has(mode)) {
+  artifacts.push({
+    type: 'screenshot',
+    path: uiArtifactRef,
+    description: 'Live smoke UI Evidence screenshot',
+  });
+}
+const artifactRefs = uiModes.has(mode) ? [artifactRef, uiArtifactRef] : [artifactRef];
 
-writeFileSync(reportPath, JSON.stringify({
+const report = {
   status: reportStatus,
   criteria: [{
     id: 'ac-live-smoke',
-    description: 'Live smoke acceptance proof artifact exists and maps to the issue acceptance marker.',
+    description: uiModes.has(mode)
+      ? 'Live smoke UI Evidence artifact exists and maps to the issue acceptance marker.'
+      : 'Live smoke acceptance proof artifact exists and maps to the issue acceptance marker.',
     status: criterionStatus,
     confidence,
     reasoningSummary: shouldPass
-      ? 'The runner-owned proof command produced a durable smoke-output artifact for the acceptance criterion.'
+      ? uiModes.has(mode)
+        ? 'The runner-owned proof command produced a current screenshot artifact with UI Evidence Contract fields.'
+        : 'The runner-owned proof command produced a durable smoke-output artifact for the acceptance criterion.'
       : 'The implementation has not produced the proof-ready marker required by this scenario.',
-    artifactRefs: [artifactRef],
+    artifactRefs,
   }],
-  artifacts: [{
-    type: 'smoke-output',
-    path: artifactRef,
-    description: 'Live smoke acceptance proof output',
-  }],
+  artifacts,
   proofPhaseDiff: {
-    allowedProofPaths: [artifactRef],
+    allowedProofPaths: artifactRefs,
     forbiddenProductPaths: [],
   },
   residualRisks: [],
@@ -1607,9 +1786,62 @@ writeFileSync(reportPath, JSON.stringify({
     requiredChanges: ['Create src/live-smoke/issue-' + issueNumber + '-proof-ready.ts during implementation rework.'],
     evidenceRefs: [artifactRef],
   },
-}, null, 2), 'utf8');
+};
+
+if (mode === 'pass-ui') {
+  report.uiEvidence = buildUiEvidence(uiArtifactRef, 1440);
+}
+if (mode === 'narrow-ui-viewport') {
+  report.uiEvidence = buildUiEvidence(uiArtifactRef, 1024);
+}
+
+writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
 
 process.stdout.write('live smoke acceptance proof wrote ' + reportPath + '\n');
+
+function buildUiEvidence(artifactRef, width) {
+  return {
+    workflowScope: {
+      entrypoint: 'live smoke UI route',
+      path: ['daemon once', 'scoped implementation', 'acceptance proof UI inspection'],
+      screenState: 'final UI Evidence screen after implementation',
+      authPath: 'not-required',
+    },
+    viewportCoverage: [{
+      name: 'desktop wide',
+      width,
+      height: 900,
+      artifactRefs: [artifactRef],
+      requiredBy: 'desktop-web-layout',
+    }],
+    artifactFreshness: {
+      currentArtifactRefs: [artifactRef],
+      checkedAfterFinalRun: true,
+    },
+    layoutReview: {
+      checked: true,
+      findings: [{
+        summary: 'Spacing, alignment, clipping, and overlap were checked for the final live smoke UI state.',
+        artifactRefs: [artifactRef],
+      }],
+    },
+    copyReview: {
+      checked: true,
+      acceptedTerms: ['live smoke heading'],
+      rejectedTermsAbsent: ['implementation-only placeholder'],
+      findings: [{
+        summary: 'Visible copy matches the issue terms and omits rejected placeholder language.',
+        artifactRefs: [artifactRef],
+      }],
+    },
+    sourceInputs: {
+      acceptanceCriteriaRefs: ['issue body: Acceptance Criteria'],
+      implementationEvidenceRefs: ['completion report validation: red-green live smoke'],
+      manualQaPlanRefs: ['issue body: Manual QA Plan'],
+      runtimeValidationRefs: ['acceptance proof command completed after implementation'],
+    },
+  };
+}
 `;
 }
 
@@ -1680,8 +1912,11 @@ if (prompt.includes('# Fresh-Context Review')) {
     writeScopedReport(reportPath, ['components/live-smoke/issue-' + issueNumber + '.tsx', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
   case 'acceptance-proof':
+  case 'acceptance-proof-ui-evidence':
   case 'acceptance-proof-low-confidence':
   case 'acceptance-proof-product-diff':
+  case 'acceptance-proof-ui-evidence-missing':
+  case 'acceptance-proof-ui-evidence-narrow-viewport':
     writeAcceptanceChange(issueNumber, runId, scenario, false);
     writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;

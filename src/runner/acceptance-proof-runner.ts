@@ -13,6 +13,7 @@ import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
   evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
+  uiEvidenceFailureDimensions,
   type AcceptanceProofReport,
 } from './acceptance-proof.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
@@ -260,8 +261,17 @@ function buildAcceptanceProofPrompt(input: {
     `Proof-owned repair paths: ${input.config.reviewGates.acceptanceProof.proofOwnedPathGlobs.join(', ')}`,
     'You do not have GitHub write authority or publication authority. Do not edit GitHub labels, comments, issues, pull requests, branches, or releases.',
     'Do not change product code during proof. If behavior is missing, return needs-rework.',
+    'For UI proof, derive task-specific checks from issue acceptance criteria, implementation evidence, reproduction signals, validation sections, Manual QA Plan content when present, and runtime/media artifacts.',
+    'When you include screenshot or ui-dump artifacts, include uiEvidence with workflowScope, viewportCoverage, artifactFreshness, layoutReview, copyReview, and sourceInputs. The runner is the only pass/fail authority for UI Evidence.',
+    'workflowScope must record the exact entrypoint, user path, screenState, and authPath. Prefer real UI login when configured credentials are available; if you seed a session or cookie, set authPath to "seeded-session" and provide authShortcutReason.',
+    'viewportCoverage must record width, height, artifactRefs, and requiredBy. Use requiredBy "desktop-web-layout" with wide desktop coverage for web layout proof. Add mobile coverage only when the issue or acceptance criteria call for mobile or responsive behavior.',
+    'artifactFreshness must name current post-run artifact refs and checkedAfterFinalRun: true.',
+    'layoutReview findings must cover spacing, padding, clipping, overlap, alignment, and the specific visual complaint being verified, with each finding mapped to artifactRefs.',
+    'copyReview findings must cover user-facing copy and rejected implementation terms when copy is part of the acceptance path, with each finding mapped to artifactRefs.',
+    'sourceInputs must cite acceptanceCriteriaRefs and implementationEvidenceRefs; cite reproductionSignalRefs, manualQaPlanRefs, and runtimeValidationRefs when those inputs exist. Source inputs cannot replace workflow, viewport, freshness, layout, or copy evidence.',
+    `Stable UI Evidence failure dimensions are: ${uiEvidenceFailureDimensions.join(', ')}.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'Schema: { "status": "passed" | "needs-rework" | "blocked", "criteria": { "id": string, "description": string, "status": "passed" | "failed" | "unknown", "confidence": "high" | "medium" | "low", "reasoningSummary": string, "artifactRefs": string[] }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "proofScriptRepair"?: { "changedPaths": string[], "summary": string }, "proofPhaseDiff": { "allowedProofPaths": string[], "forbiddenProductPaths": string[] }, "reworkRequest"?: { "summary": string, "requiredChanges": string[], "evidenceRefs": string[] }, "residualRisks": string[] }.',
+    'Schema: { "status": "passed" | "needs-rework" | "blocked", "criteria": { "id": string, "description": string, "status": "passed" | "failed" | "unknown", "confidence": "high" | "medium" | "low", "reasoningSummary": string, "artifactRefs": string[] }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "uiEvidence"?: { "workflowScope": { "entrypoint": string, "path": string[], "screenState": string, "authPath"?: "real-login" | "seeded-session" | "not-required" | "blocked", "authShortcutReason"?: string }, "viewportCoverage": { "name": string, "width": number, "height": number, "artifactRefs": string[], "requiredBy": "desktop-web-layout" | "mobile-or-responsive" | "issue-specific" | "other" }[], "artifactFreshness": { "currentArtifactRefs": string[], "checkedAfterFinalRun": boolean }, "layoutReview": { "checked": boolean, "findings": { "summary": string, "artifactRefs": string[] }[] }, "copyReview": { "checked": boolean, "acceptedTerms"?: string[], "rejectedTermsAbsent"?: string[], "findings": { "summary": string, "artifactRefs": string[] }[] }, "sourceInputs": { "acceptanceCriteriaRefs": string[], "implementationEvidenceRefs": string[], "reproductionSignalRefs"?: string[], "manualQaPlanRefs"?: string[], "runtimeValidationRefs"?: string[] } }, "proofScriptRepair"?: { "changedPaths": string[], "summary": string }, "proofPhaseDiff": { "allowedProofPaths": string[], "forbiddenProductPaths": string[] }, "reworkRequest"?: { "summary": string, "requiredChanges": string[], "evidenceRefs": string[] }, "residualRisks": string[] }.',
   ].join('\n\n');
 }
 

@@ -1,6 +1,10 @@
 # codex-orchestrator
 
-`codex-orchestrator` turns GitHub Issues into controlled Codex work.
+## About
+
+`codex-orchestrator` turns GitHub Issues and project work into isolated,
+autonomous Codex implementation runs, allowing maintainers to manage work
+instead of supervising coding agents.
 
 Instead of starting a new Codex chat for every issue, you label the work you
 want automated. The runner creates an isolated workspace, gives Codex the issue
@@ -101,6 +105,10 @@ concrete rework request and the runner loops back through implementation within
 the configured iteration limit. If proof is malformed, low-confidence, lacks
 artifacts, or changes product code during verification, the runner blocks
 publication and preserves the evidence.
+
+For UI proof, screenshots and UI dumps must also satisfy the UI Evidence
+Contract: exact workflow, viewport coverage, current artifact freshness, layout
+review, copy review, and source inputs. Screenshot-only proof cannot pass.
 
 There are two main ways to run work.
 
@@ -288,8 +296,8 @@ Acceptance proof is runner-owned. Codex can change product behavior, but the
 runner runs proof afterwards and attaches screenshots, UI dumps, logs, smoke
 outputs, or other artifacts to the PR and issue report. The proof phase must
 produce a structured report that maps each required criterion to high-confidence
-evidence. Legacy visual proof config still works as a compatibility adapter for
-UI/mobile repositories.
+evidence. UI artifacts must include UI Evidence Contract mapping, and legacy
+visual proof config only supplies migration inputs for report-producing proof.
 
 ## Repository Policy
 

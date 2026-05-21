@@ -302,6 +302,17 @@ test('scoped auto command invokes adaptive proof phase and records durable evide
   assert.match(proofInput.promptText, /feature\.txt/);
   assert.match(proofInput.promptText, /\.codex-orchestrator\/proofs\/\*\*/);
   assert.match(proofInput.promptText, /do not have GitHub write authority/i);
+  assert.match(proofInput.promptText, /uiEvidence/);
+  assert.match(proofInput.promptText, /workflowScope/);
+  assert.match(proofInput.promptText, /viewportCoverage/);
+  assert.match(proofInput.promptText, /artifactFreshness/);
+  assert.match(proofInput.promptText, /layoutReview/);
+  assert.match(proofInput.promptText, /copyReview/);
+  assert.match(proofInput.promptText, /sourceInputs/);
+  assert.match(proofInput.promptText, /wide desktop/i);
+  assert.match(proofInput.promptText, /Manual QA Plan/);
+  assert.match(proofInput.promptText, /authPath/);
+  assert.match(proofInput.promptText, /authShortcutReason/);
   await assert.rejects(stat(proofInput.isolatedHomePath), /ENOENT/);
 
   const summary = JSON.parse(
@@ -316,6 +327,124 @@ test('scoped auto command invokes adaptive proof phase and records durable evide
   const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
   assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'started'), true);
   assert.equal(recentEvents.some((event) => event.phase === 'acceptance-proof' && event.status === 'completed'), true);
+});
+
+test('scoped auto command blocks draft PR handoff on UI Evidence Contract failures', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    codex: {
+      ...config.codex,
+      profiles: {
+        ...config.codex.profiles,
+        'acceptance-proof': {},
+      },
+    },
+    checks: {},
+    reviewGates: {
+      ...config.reviewGates,
+      quality: {
+        ...config.reviewGates.quality,
+        enabled: false,
+      },
+      acceptanceProof: {
+        ...config.reviewGates.acceptanceProof,
+        issueTextPatterns: ['ui evidence'],
+        changedPathGlobs: ['feature.txt'],
+        proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
+        runnerValidationCommand: '',
+      },
+      visualProof: {
+        ...config.reviewGates.visualProof,
+        enabled: false,
+        runnerValidationCommand: '',
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({
+      number: 155,
+      labels: [labels.auto.name],
+      title: 'Needs UI evidence',
+      body: 'Implement controlled UI change with ui evidence.',
+    }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.phase === 'acceptance-proof') {
+        await mkdir(join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155'), { recursive: true });
+        await writeFile(
+          join(input.worktreePath, '.codex-orchestrator', 'proofs', 'issue-155', 'screen.png'),
+          'png fixture\n',
+          'utf8',
+        );
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'passed',
+            criteria: [{
+              id: 'ac-ui',
+              description: 'UI screen proves the requested behavior.',
+              status: 'passed',
+              confidence: 'high',
+              reasoningSummary: 'A screenshot exists.',
+              artifactRefs: ['.codex-orchestrator/proofs/issue-155/screen.png'],
+            }],
+            artifacts: [{
+              type: 'screenshot',
+              path: '.codex-orchestrator/proofs/issue-155/screen.png',
+              description: 'UI screenshot without evidence contract',
+            }],
+            proofPhaseDiff: {
+              allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/screen.png'],
+              forbiddenProductPaths: [],
+            },
+            residualRisks: ['UI copy could not be reviewed from the shallow screenshot report.'],
+          }),
+          'utf8',
+        );
+        return { stdout: 'proof incomplete', stderr: '', exitCode: 0 };
+      }
+
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['feature.txt'],
+          validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.match(result.reportComment, /Acceptance Proof/);
+  assert.match(result.reportComment, /acceptance-proof-report\.json/);
+  assert.match(result.reportComment, /issue-155/);
+  assert.match(result.reportComment, /UI Evidence workflow:/);
+  assert.match(result.reportComment, /UI Evidence viewport:/);
+  assert.match(result.reportComment, /UI Evidence freshness:/);
+  assert.match(result.reportComment, /UI Evidence layout:/);
+  assert.match(result.reportComment, /UI Evidence copy:/);
+  assert.match(result.reportComment, /UI Evidence source-input:/);
+  assert.match(result.reportComment, /UI copy could not be reviewed/);
 });
 
 test('scoped auto command starts from the resolved remote base instead of stale local main', async () => {
@@ -1626,6 +1755,58 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.equal(profileDir.startsWith(proofDir), false);
     assert.equal(browsersDir.startsWith(proofDir), false);
     await writeFile(join(proofDir, '390.png'), 'png-fixture\n', 'utf8');
+    await writeFile(join(proofDir, 'acceptance-proof-report.json'), JSON.stringify({
+      status: 'passed',
+      criteria: [{
+        id: 'ac-ui',
+        description: 'Campaign layout is verified in the final screenshot.',
+        status: 'passed',
+        confidence: 'high',
+        reasoningSummary: 'The screenshot shows the responsive campaign layout after implementation.',
+        artifactRefs: ['.proofs/issue-155/390.png'],
+      }],
+      artifacts: [{
+        type: 'screenshot',
+        path: '.proofs/issue-155/390.png',
+        description: 'campaign layout screenshot',
+      }],
+      uiEvidence: {
+        workflowScope: {
+          entrypoint: 'Campaigns',
+          path: ['Open campaigns', 'Inspect responsive layout'],
+          screenState: 'Campaign list is visible after layout fix',
+          authPath: 'real-login',
+        },
+        viewportCoverage: [{
+          name: 'wide desktop',
+          width: 1440,
+          height: 900,
+          artifactRefs: ['.proofs/issue-155/390.png'],
+          requiredBy: 'desktop-web-layout',
+        }],
+        artifactFreshness: {
+          currentArtifactRefs: ['.proofs/issue-155/390.png'],
+          checkedAfterFinalRun: true,
+        },
+        layoutReview: {
+          checked: true,
+          findings: [{ summary: 'Spacing, clipping, overlap, and alignment reviewed.', artifactRefs: ['.proofs/issue-155/390.png'] }],
+        },
+        copyReview: {
+          checked: true,
+          findings: [{ summary: 'Visible copy remains user-facing.', artifactRefs: ['.proofs/issue-155/390.png'] }],
+        },
+        sourceInputs: {
+          acceptanceCriteriaRefs: ['issue-155-responsive-screenshots'],
+          implementationEvidenceRefs: ['TDD red-to-green'],
+        },
+      },
+      proofPhaseDiff: {
+        allowedProofPaths: ['.proofs/issue-155/390.png'],
+        forbiddenProductPaths: [],
+      },
+      residualRisks: [],
+    }), 'utf8');
     return { stdout: 'ok', stderr: '', exitCode: 0 };
   };
 

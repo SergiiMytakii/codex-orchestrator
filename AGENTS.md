@@ -71,12 +71,12 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.34` (2026-05-20):
-  - Adaptive Proof Agent runs as a runner-owned Codex phase.
-  - Proof attempts persist prompt, report, artifacts, blockers, and rework
-    evidence.
-  - Parent child-wave execution blocks publication on failed child proof.
-  - Setup installs the bundled Acceptance Proof workflow prompt.
+- `0.1.35` (2026-05-21):
+  - Acceptance Proof reports include runner-validated UI Evidence for workflow,
+    viewport, freshness, layout, copy, and source inputs.
+  - Screenshot and UI-dump proof now fail without the UI Evidence Contract.
+  - Visual proof no longer passes on screenshot-only output.
+  - Live smoke covers UI Evidence pass and blocking scenarios.
 
 ## Final Response
 

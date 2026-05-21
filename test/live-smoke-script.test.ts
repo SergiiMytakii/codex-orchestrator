@@ -46,8 +46,10 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
   assert.match(result.stdout, /loop-policy/);
   assert.match(result.stdout, /diagnostics/);
   assert.match(result.stdout, /acceptance-proof/);
+  assert.match(result.stdout, /acceptance-proof-ui-evidence/);
   assert.match(result.stdout, /acceptance-proof-rework/);
   assert.match(result.stdout, /acceptance-proof-blocking/);
+  assert.match(result.stdout, /acceptance-proof-ui-evidence-blocking/);
   assert.match(result.stdout, /plan-auto-blocking/);
   assert.match(result.stdout, /package-install/);
 });

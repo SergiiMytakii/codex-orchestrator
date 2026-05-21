@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-05-21
+
+### Added
+- Added a runner-validated UI Evidence Contract for Acceptance Proof reports,
+  covering workflow, viewport, freshness, layout, copy, and source-input
+  evidence for screenshot and UI-dump artifacts.
+- Added live smoke coverage for UI Evidence pass and blocking cases, including
+  missing UI Evidence and too-narrow desktop viewport proof.
+
+### Changed
+- Runner-owned visual proof no longer treats screenshot-only command success as
+  a pass path; proof commands must produce a valid machine-readable Acceptance
+  Proof report.
+- Updated the legacy `visual-proof` live smoke scenario to emit the same
+  machine-readable UI Evidence report required by the runner.
+
 ## [0.1.34] - 2026-05-20
 
 ### Added

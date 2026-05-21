@@ -18,7 +18,9 @@ npm run smoke:live -- --scenario package-install --cleanup
 npm run smoke:live -- --scenario discovery-matrix --cleanup
 npm run smoke:live -- --scenario quality-gates --cleanup
 npm run smoke:live -- --scenario acceptance-proof --cleanup
+npm run smoke:live -- --scenario acceptance-proof-ui-evidence --cleanup
 npm run smoke:live -- --scenario acceptance-proof-blocking --cleanup
+npm run smoke:live -- --scenario acceptance-proof-ui-evidence-blocking --cleanup
 npm run smoke:live -- --scenario diagnostics --cleanup
 npm run smoke:live -- --scenario plan-auto-blocking --cleanup
 ```
@@ -49,10 +51,15 @@ npm run smoke:live -- --cleanup
 - `visual-proof` - runner-owned screenshot proof is attached to the PR.
 - `acceptance-proof` - canonical machine-readable Acceptance Proof report is
   validated and attached to the PR.
+- `acceptance-proof-ui-evidence` - canonical screenshot proof includes the
+  runner-validated UI Evidence Contract for workflow, viewport, freshness,
+  layout, copy, and source inputs.
 - `acceptance-proof-rework` - failed Acceptance Proof requests implementation
   rework and then passes within the proof loop.
 - `acceptance-proof-blocking` - low-confidence proof and proof-phase product
   diffs block Draft PR Handoff.
+- `acceptance-proof-ui-evidence-blocking` - screenshot proof without UI
+  Evidence, or with invalid desktop viewport coverage, blocks Draft PR Handoff.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
 - `local-commit-blocked` - blocks agent local commits when policy disallows them.
@@ -299,12 +306,21 @@ non-runtime changes.
       a machine-readable proof report under the issue proof directory.
 - [ ] Rerun with canonical acceptance validation evidence.
 - [ ] Verify the PR and issue report include the smoke-output artifact link.
+- [ ] `acceptance-proof-ui-evidence` verifies screenshot proof includes
+      `uiEvidence.workflowScope`, `viewportCoverage`, `artifactFreshness`,
+      `layoutReview`, `copyReview`, and `sourceInputs`.
+- [ ] Verify UI Evidence screenshot artifacts are linked from the PR body and
+      exist under `.codex-orchestrator/proofs/issue-<number>/`.
 - [ ] Verify the proof artifact file exists under
       `.codex-orchestrator/proofs/issue-<number>/`.
 - [ ] Verify runner-owned visual proof environment variables are available to
       the command.
 - [ ] Verify failed browser, screenshot, or smoke proof blocks publication with
       preserved artifacts.
+- [ ] `acceptance-proof-ui-evidence-blocking` verifies screenshot proof without
+      `uiEvidence` blocks publication.
+- [ ] `acceptance-proof-ui-evidence-blocking` verifies desktop UI proof with a
+      too-narrow viewport blocks publication.
 - [ ] Verify low-confidence proof reports block publication instead of becoming
       Draft PR Handoff.
 - [ ] Verify product-code changes created during proof block publication even
