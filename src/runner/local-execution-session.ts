@@ -1,7 +1,3 @@
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { GitWorktreeManager, SessionCommitInfo } from '../git/worktree.js';
@@ -10,7 +6,7 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
-import { classifyAcceptanceProofDiff } from './acceptance-proof.js';
+import { classifyAcceptanceProofDiff, createAcceptanceProofDiffCapture } from './acceptance-proof.js';
 import { evaluateReviewGates } from './review-gates.js';
 import {
   validateChangedPaths,
@@ -300,7 +296,12 @@ export async function runImplementationPublishabilityCheck(
     }
   }
 
-  const beforeProofFileHashes = adaptiveProofConfigured ? undefined : await snapshotFileHashes(input.worktreePath, changedFiles);
+  const proofDiffCapture = adaptiveProofConfigured
+    ? undefined
+    : await createAcceptanceProofDiffCapture({
+      worktreePath: input.worktreePath,
+      changedFiles,
+    });
   const runnerVisualProof = adaptiveProofConfigured
     ? { validation: [], artifacts: [] }
     : await runRunnerVisualProof({
@@ -319,15 +320,11 @@ export async function runImplementationPublishabilityCheck(
     artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
   };
   if (!adaptiveProofConfigured && (runnerVisualProof.validation.length > 0 || runnerVisualProof.artifacts.length > 0)) {
-    const beforeProofChangedFiles = new Set(changedFiles);
     changeSet = await input.git.collectSessionChangeSet({
       worktreePath: input.worktreePath,
       baseHead: input.beforeHead,
     });
-    const proofPhaseChangedFiles = [
-      ...changeSet.changedPaths.filter((path) => !beforeProofChangedFiles.has(path)),
-      ...await changedFileHashes(input.worktreePath, beforeProofFileHashes ?? new Map()),
-    ];
+    const proofPhaseChangedFiles = await proofDiffCapture!.collectProofPhaseChangedFiles(changeSet.changedPaths);
     changedFiles = changeSet.changedPaths;
     const proofDiff = classifyAcceptanceProofDiff(input.config, proofPhaseChangedFiles);
     if (proofDiff.forbiddenProductPaths.length > 0) {
@@ -412,35 +409,6 @@ export async function runImplementationPublishabilityCheck(
     commits: changeSet.commits,
     acceptanceProofAttempt,
   };
-}
-
-async function snapshotFileHashes(worktreePath: string, paths: string[]): Promise<Map<string, string | undefined>> {
-  const hashes = new Map<string, string | undefined>();
-  await Promise.all(paths.map(async (path) => {
-    hashes.set(path, await fileHash(join(worktreePath, path)));
-  }));
-  return hashes;
-}
-
-async function changedFileHashes(worktreePath: string, before: Map<string, string | undefined>): Promise<string[]> {
-  const changed: string[] = [];
-  await Promise.all(Array.from(before.entries()).map(async ([path, hash]) => {
-    if (await fileHash(join(worktreePath, path)) !== hash) {
-      changed.push(path);
-    }
-  }));
-  return changed.sort((left, right) => left.localeCompare(right));
-}
-
-async function fileHash(path: string): Promise<string | undefined> {
-  try {
-    return createHash('sha256').update(await readFile(path)).digest('hex');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return undefined;
-    }
-    throw error;
-  }
 }
 
 async function defaultPassingLocalPhaseExecutor(input: { phaseId: string; worktreePath: string }) {

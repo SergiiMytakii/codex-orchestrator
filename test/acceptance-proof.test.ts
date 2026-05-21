@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
+  classifyAcceptanceProofDiff,
+  createAcceptanceProofDiffCapture,
   evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
   type AcceptanceProofUiEvidence,
@@ -262,6 +264,42 @@ test('acceptance proof rejects UI evidence missing source inputs', () => {
 
   assert.equal(result.ok, false);
   assert.match(result.reasons.join('\n'), /UI Evidence source-input:/);
+});
+
+test('acceptance proof captures proof-phase changed paths from existing, deleted, and newly added files', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-diff-'));
+  await mkdir(join(tempDir, 'src'), { recursive: true });
+  await mkdir(join(tempDir, '.codex-orchestrator/proofs/issue-611'), { recursive: true });
+  await writeFile(join(tempDir, 'src/feature.ts'), 'export const feature = "before";\n', 'utf8');
+  await writeFile(join(tempDir, 'src/deleted.ts'), 'export const deleted = true;\n', 'utf8');
+
+  const diffCapture = await createAcceptanceProofDiffCapture({
+    worktreePath: tempDir,
+    changedFiles: ['./src/deleted.ts', 'src/feature.ts'],
+  });
+
+  await writeFile(join(tempDir, 'src/feature.ts'), 'export const feature = "proof changed";\n', 'utf8');
+  await unlink(join(tempDir, 'src/deleted.ts'));
+  await writeFile(join(tempDir, 'src/new-runtime.ts'), 'export const leaked = true;\n', 'utf8');
+  await writeFile(join(tempDir, '.codex-orchestrator/proofs/issue-611/new-artifact.txt'), 'proof output\n', 'utf8');
+
+  const proofPhaseChangedFiles = await diffCapture.collectProofPhaseChangedFiles([
+    'src/new-runtime.ts',
+    '.codex-orchestrator/proofs/issue-611/new-artifact.txt',
+    './src/feature.ts',
+    'src/deleted.ts',
+  ]);
+
+  assert.deepEqual(proofPhaseChangedFiles, [
+    '.codex-orchestrator/proofs/issue-611/new-artifact.txt',
+    'src/deleted.ts',
+    'src/feature.ts',
+    'src/new-runtime.ts',
+  ]);
+  assert.deepEqual(classifyAcceptanceProofDiff(validConfig, proofPhaseChangedFiles), {
+    allowedProofPaths: ['.codex-orchestrator/proofs/issue-611/new-artifact.txt'],
+    forbiddenProductPaths: ['src/deleted.ts', 'src/feature.ts', 'src/new-runtime.ts'],
+  });
 });
 
 test('acceptance proof loads and classifies missing, invalid, and valid proof reports', async () => {

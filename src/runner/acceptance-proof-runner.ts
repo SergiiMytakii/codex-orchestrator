@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
@@ -11,6 +10,7 @@ import { globMatches, normalizePath } from '../path-policy.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
+  createAcceptanceProofDiffCapture,
   evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
   uiEvidenceFailureDimensions,
@@ -108,7 +108,10 @@ export async function runAcceptanceProofAttempt(
     worktreePath: input.worktreePath,
   });
   await writeFile(proofPromptPath, promptText, 'utf8');
-  const beforeProofFileHashes = await snapshotFileHashes(input.worktreePath, input.changedFiles);
+  const proofDiffCapture = await createAcceptanceProofDiffCapture({
+    worktreePath: input.worktreePath,
+    changedFiles: input.changedFiles,
+  });
   let proofResult: CodexCommandRunResult;
   try {
     proofResult = await input.codexAdapter.run({
@@ -140,11 +143,7 @@ export async function runAcceptanceProofAttempt(
     worktreePath: input.worktreePath,
     baseHead: input.beforeHead,
   });
-  const beforeProofChangedFiles = new Set(input.changedFiles);
-  const proofPhaseChangedFiles = [
-    ...changeSet.changedPaths.filter((path) => !beforeProofChangedFiles.has(path)),
-    ...await changedFileHashes(input.worktreePath, beforeProofFileHashes),
-  ].map(normalizePath).sort((left, right) => left.localeCompare(right));
+  const proofPhaseChangedFiles = await proofDiffCapture.collectProofPhaseChangedFiles(changeSet.changedPaths);
   const reportRead = await readAcceptanceProofReport(proofReportPath);
 
   if (reportRead.kind === 'missing') {
@@ -332,33 +331,4 @@ function artifactPathsFromReport(report: AcceptanceProofReport, changedFiles: st
     ...changedFiles,
     ...report.artifacts.flatMap((artifact) => artifact.path ? [normalizePath(artifact.path)] : []),
   ])).sort((left, right) => left.localeCompare(right));
-}
-
-async function snapshotFileHashes(worktreePath: string, paths: string[]): Promise<Map<string, string | undefined>> {
-  const hashes = new Map<string, string | undefined>();
-  await Promise.all(paths.map(async (path) => {
-    hashes.set(path, await fileHash(join(worktreePath, path)));
-  }));
-  return hashes;
-}
-
-async function changedFileHashes(worktreePath: string, before: Map<string, string | undefined>): Promise<string[]> {
-  const changed: string[] = [];
-  await Promise.all(Array.from(before.entries()).map(async ([path, hash]) => {
-    if (await fileHash(join(worktreePath, path)) !== hash) {
-      changed.push(path);
-    }
-  }));
-  return changed;
-}
-
-async function fileHash(path: string): Promise<string | undefined> {
-  try {
-    return createHash('sha256').update(await readFile(path)).digest('hex');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      return undefined;
-    }
-    throw error;
-  }
 }

@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import { globMatches, normalizePath } from '../path-policy.js';
+import { globMatches, normalizePath, uniqueSortedPaths } from '../path-policy.js';
 import { scopedArtifactTypes, type ScopedArtifactType } from './completion-report.js';
 
 export type AcceptanceProofStatus = 'passed' | 'needs-rework' | 'blocked';
@@ -114,6 +116,15 @@ export interface AcceptanceProofEvaluationResult {
   warnings: string[];
 }
 
+export interface AcceptanceProofDiffCaptureInput {
+  worktreePath: string;
+  changedFiles: string[];
+}
+
+export interface AcceptanceProofDiffCapture {
+  collectProofPhaseChangedFiles(changedFiles: string[]): Promise<string[]>;
+}
+
 export type AcceptanceProofReportReadResult =
   | { kind: 'missing' }
   | { kind: 'invalid'; message: string }
@@ -138,6 +149,24 @@ export async function readAcceptanceProofReport(path: string): Promise<Acceptanc
     const message = error instanceof Error ? error.message : 'Invalid acceptance proof report';
     return { kind: 'invalid', message };
   }
+}
+
+export async function createAcceptanceProofDiffCapture(
+  input: AcceptanceProofDiffCaptureInput,
+): Promise<AcceptanceProofDiffCapture> {
+  const beforeProofChangedFiles = uniqueSortedPaths(input.changedFiles);
+  const beforeProofChangedFileSet = new Set(beforeProofChangedFiles);
+  const beforeProofFileHashes = await snapshotFileHashes(input.worktreePath, beforeProofChangedFiles);
+
+  return {
+    async collectProofPhaseChangedFiles(changedFiles: string[]): Promise<string[]> {
+      const afterProofChangedFiles = uniqueSortedPaths(changedFiles);
+      return uniqueSortedPaths([
+        ...afterProofChangedFiles.filter((path) => !beforeProofChangedFileSet.has(path)),
+        ...await changedFileHashes(input.worktreePath, beforeProofFileHashes),
+      ]);
+    },
+  };
 }
 
 export function evaluateAcceptanceProofReport(input: AcceptanceProofEvaluationInput): AcceptanceProofEvaluationResult {
@@ -459,6 +488,35 @@ export function classifyAcceptanceProofDiff(
     allowedProofPaths: allowedProofPaths.sort(),
     forbiddenProductPaths: forbiddenProductPaths.sort(),
   };
+}
+
+async function snapshotFileHashes(worktreePath: string, paths: string[]): Promise<Map<string, string | undefined>> {
+  const hashes = new Map<string, string | undefined>();
+  await Promise.all(paths.map(async (path) => {
+    hashes.set(path, await fileHash(join(worktreePath, path)));
+  }));
+  return hashes;
+}
+
+async function changedFileHashes(worktreePath: string, before: Map<string, string | undefined>): Promise<string[]> {
+  const changed: string[] = [];
+  await Promise.all(Array.from(before.entries()).map(async ([path, hash]) => {
+    if (await fileHash(join(worktreePath, path)) !== hash) {
+      changed.push(path);
+    }
+  }));
+  return uniqueSortedPaths(changed);
+}
+
+async function fileHash(path: string): Promise<string | undefined> {
+  try {
+    return createHash('sha256').update(await readFile(path)).digest('hex');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 export function assertAcceptanceProofReport(value: unknown): asserts value is AcceptanceProofReport {
