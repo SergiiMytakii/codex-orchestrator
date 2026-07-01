@@ -7,7 +7,7 @@ import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import { classifyAcceptanceProofDiff, createAcceptanceProofDiffCapture } from './acceptance-proof.js';
-import { evaluateReviewGates } from './review-gates.js';
+import { evaluateReviewGates, shouldApplyVisualProofGate } from './review-gates.js';
 import {
   validateChangedPaths,
   validateCompletionReportSafety,
@@ -174,7 +174,7 @@ export async function runImplementationPublishabilityCheck(
       reasons: localSessionBlockReasons(localSession.phaseResults),
       changedFiles: changeSet.changedPaths,
       validation: [...report.validation, ...localSession.phaseResults.flatMap((phase) => phase.validation)],
-      skippedChecks: report.skippedChecks,
+      skippedChecks: applicableSkippedChecks(input, report, changeSet.changedPaths),
       residualRisks: [...report.residualRisks, ...localSession.phaseResults.flatMap((phase) => phase.residualRisks)],
       commits: changeSet.commits,
     };
@@ -192,6 +192,10 @@ export async function runImplementationPublishabilityCheck(
     baseHead: input.beforeHead,
   });
   let changedFiles = changeSet.changedPaths;
+  report = {
+    ...report,
+    skippedChecks: applicableSkippedChecks(input, report, changedFiles),
+  };
   if (changedFiles.length === 0) {
     return {
       status: 'blocked',
@@ -409,6 +413,22 @@ export async function runImplementationPublishabilityCheck(
     commits: changeSet.commits,
     acceptanceProofAttempt,
   };
+}
+
+function applicableSkippedChecks(
+  input: Pick<ImplementationPublishabilityInput, 'config' | 'issue'>,
+  report: ScopedCompletionReport,
+  changedFiles: string[],
+): string[] {
+  if (shouldApplyVisualProofGate({ config: input.config, issue: input.issue, changedFiles })) {
+    return report.skippedChecks;
+  }
+
+  return report.skippedChecks.filter((check) => !isRunnerOwnedVisualProofNonExecutionSkip(check));
+}
+
+function isRunnerOwnedVisualProofNonExecutionSkip(check: string): boolean {
+  return /\brunner-owned\b[\s\S]*\bvisual[- ]proof\b[\s\S]*\bnot executed\b/iu.test(check);
 }
 
 async function defaultPassingLocalPhaseExecutor(input: { phaseId: string; worktreePath: string }) {

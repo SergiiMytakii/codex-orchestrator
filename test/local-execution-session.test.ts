@@ -259,6 +259,58 @@ test('implementation publishability blocks product-code changes created during a
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /src\/proof-side-effect\.ts/);
 });
 
+test('implementation publishability drops non-applicable runner visual proof skips for internal proof-runner changes', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const skippedRunnerProof = 'Runner-owned codex-orchestrator visual-proof mobile --issue 773 was not executed by child Codex per the proof contract.';
+
+  await mkdir(join(repo, 'src', 'runner'), { recursive: true });
+  await mkdir(join(repo, 'test'), { recursive: true });
+  await writeFile(join(repo, 'src', 'runner', 'acceptance-proof.ts'), 'export const proof = true;\n', 'utf8');
+  await writeFile(join(repo, 'src', 'runner', 'visual-proof-runner.ts'), 'export const runner = true;\n', 'utf8');
+  await writeFile(join(repo, 'test', 'acceptance-proof.test.ts'), 'export const tested = true;\n', 'utf8');
+  await writeFile(join(repo, 'test', 'visual-proof-runner.test.ts'), 'export const runnerTested = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: [
+      'src/runner/acceptance-proof.ts',
+      'src/runner/visual-proof-runner.ts',
+      'test/acceptance-proof.test.ts',
+      'test/visual-proof-runner.test.ts',
+    ],
+    validation: [
+      {
+        command: 'TDD red/green: proof report loading',
+        status: 'passed',
+        summary: 'Focused acceptance-proof test failed before implementation and passed after implementation.',
+      },
+      { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+    ],
+    skippedChecks: [skippedRunnerProof, 'Optional benchmark not run.'],
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({
+      number: 773,
+      title: 'Self-improvement: Deepen Acceptance Proof report loading',
+      body: 'Acceptance Proof report loading lives in the internal visual proof runner.',
+    }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #773',
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.deepEqual(result.status === 'publish-ready' ? result.skippedChecks : [], ['Optional benchmark not run.']);
+});
+
 test('implementation publishability can allow repo-wide lint failures when touched-files lint passes (policy touched-only)', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -356,6 +408,7 @@ async function writeScopedReport(
   overrides: Partial<{
     changes: string[];
     validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>;
+    skippedChecks: string[];
   }> = {},
 ): Promise<void> {
   await mkdir(join(reportPath, '..'), { recursive: true });
@@ -366,7 +419,7 @@ async function writeScopedReport(
       changes: overrides.changes ?? ['README.md'],
       validation: overrides.validation ?? [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
       artifacts: [],
-      skippedChecks: [],
+      skippedChecks: overrides.skippedChecks ?? [],
       residualRisks: [],
       prohibitedActions: [],
     }),
