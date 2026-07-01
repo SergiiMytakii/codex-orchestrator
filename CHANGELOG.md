@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-07-01
+
+### Changed
+- Publishability checks now drop runner-owned visual proof skip notes when the
+  changed files do not require the visual proof gate.
+- Local self-improvement daily phase summaries now share one helper for failure
+  classification, exit-code impact, and summary rendering.
+
 ## [0.1.36] - 2026-05-21
 
 ### Added

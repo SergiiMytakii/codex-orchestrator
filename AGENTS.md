@@ -71,15 +71,11 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.36` (2026-05-21):
-  - Package-owned browser proof captures web UI screenshots, DOM snapshots,
-    console/network logs, and UI Evidence reports.
-  - `visual-proof auto` routes web changes to browser proof and mobile changes
-    to device-backed proof.
-  - Browser proof prefers explicit or installed Chrome/Chromium/Edge before a
-    Playwright Chromium download fallback.
-  - Live smoke covers the packaged browser-proof path and transient GitHub
-    retry behavior.
+- `0.1.37` (2026-07-01):
+  - Publishability checks ignore runner-owned visual proof skip notes when the
+    changed files do not require the visual proof gate.
+  - Local self-improvement daily phase summaries share one helper for failure
+    classification, exit-code impact, and summary rendering.
 
 ## Final Response
 
