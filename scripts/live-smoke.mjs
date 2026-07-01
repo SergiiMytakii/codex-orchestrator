@@ -29,6 +29,7 @@ const scenarioDefinitions = new Map([
   ['acceptance-proof-blocking', runAcceptanceProofBlockingScenario],
   ['acceptance-proof-ui-evidence-blocking', runAcceptanceProofUiEvidenceBlockingScenario],
   ['quality-gates', runQualityGatesScenario],
+  ['risk-routing', runRiskRoutingScenario],
   ['local-commit-blocked', runLocalCommitBlockedScenario],
   ['denied-secret', runDeniedSecretScenario],
   ['invalid-report', runInvalidReportScenario],
@@ -815,6 +816,27 @@ async function runQualityGatesScenario(context) {
     await assertNoPullRequestForBranch(context, `codex/issue-${issue.number}`);
     await assertNoRemoteBranch(context, `codex/issue-${issue.number}`);
   }
+}
+
+async function runRiskRoutingScenario(context) {
+  await configureTarget(context, { allowAgentLocalCommits: true });
+  const issue = await createIssue(
+    context,
+    'risk-routing-plan-warning',
+    ['agent:plan-auto'],
+    'Risk-routing live smoke. Parent planning intentionally omits sizeRisk and parentReviewHandoff in warn mode.',
+  );
+  await runDaemonOnce(context, issue.number, 'plan-parent');
+  await assertPlanAutoSuccess(context, issue.number);
+  const branchName = `codex/tree-${issue.number}`;
+  const pullRequest = await findPullRequestByBranch(context, branchName);
+  const body = await getPullRequestBody(context, pullRequest.number);
+  assertIncludes(body, 'Risk routing warnings', 'risk-routing PR body should include warning heading');
+  assertIncludes(body, 'parent sizeRisk is required', 'risk-routing PR body should include parent size warning');
+  assertIncludes(body, 'parentReviewHandoff is required', 'risk-routing PR body should include parent review warning');
+  const parent = await getIssue(context, issue.number);
+  assertIssueHasComment(parent, 'Risk routing warnings');
+  await appendReport(context, `Risk-routing warning PR: ${pullRequest.url}\n\n`);
 }
 
 async function runLocalCommitBlockedScenario(context) {
@@ -2140,6 +2162,9 @@ if (prompt.includes('# Fresh-Context Review')) {
   case 'plan-auto':
     writePlanReport(reportPath, runId);
     break;
+  case 'risk-routing-plan-warning':
+    writePlanRiskRoutingWarningReport(reportPath, runId);
+    break;
   case 'plan-malformed-graph':
     writeMalformedPlanReport(reportPath, runId);
     break;
@@ -2403,6 +2428,50 @@ function writePlanReport(path, run) {
       edges: [
         { from: 'live-smoke-a', to: 'live-smoke-c', reason: 'dependency smoke edge' },
         { from: 'live-smoke-b', to: 'live-smoke-c', reason: 'dependency smoke edge' },
+      ],
+      specGate: 'wave-level',
+    },
+    sizeRisk: {
+      small: ['live-smoke-a'],
+      medium: ['live-smoke-b'],
+      high: ['live-smoke-c'],
+    },
+    parentReviewHandoff: {
+      risks: ['Child c depends on child a and child b integration order.'],
+      proofStrategy: ['Run final configured checks after all child branches merge.'],
+      humanReviewFocus: ['Inspect child wave ordering and integration branch diff.'],
+    },
+    residualRisks: [],
+  }, null, 2), 'utf8');
+}
+
+function writePlanRiskRoutingWarningReport(path, run) {
+  const nodes = ['risk-a', 'risk-b', 'risk-c'].map((id) => ({
+    stableId: 'live-smoke-' + id,
+    title: '[live-smoke:' + run + '] plan child ' + id,
+    body: [
+      'Live smoke risk-routing child ' + id + '.',
+      '',
+      'LIVE_SMOKE_RUN_ID: ' + run,
+      'LIVE_SMOKE_SCENARIO: plan-child',
+      'LIVE_SMOKE_CHILD_ID: ' + id,
+    ].join('\n'),
+    afkHitl: 'afk',
+    ownershipScope: ['src/live-smoke/issue-owned-by-child-' + id + '.ts', 'test/live-smoke/issue-owned-by-child-' + id + '.test.ts'],
+    dependsOn: id === 'risk-c' ? ['live-smoke-risk-a', 'live-smoke-risk-b'] : [],
+    verification: ['live smoke fake child validation'],
+  }));
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    parent: {
+      title: '[live-smoke:' + run + '] risk-routing parent updated',
+      body: 'Live smoke parent updated with intentionally missing risk routing metadata.\n\nLIVE_SMOKE_RUN_ID: ' + run,
+    },
+    graph: {
+      nodes,
+      edges: [
+        { from: 'live-smoke-risk-a', to: 'live-smoke-risk-c', reason: 'dependency smoke edge' },
+        { from: 'live-smoke-risk-b', to: 'live-smoke-risk-c', reason: 'dependency smoke edge' },
       ],
       specGate: 'wave-level',
     },

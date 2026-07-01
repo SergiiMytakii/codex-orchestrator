@@ -138,6 +138,14 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
           skippedChecks: [],
           residualRisks: [],
           prohibitedActions: [],
+          reviewHandoff: {
+            flowUsed: 'scoped-implementation',
+            riskLevel: 'medium',
+            implementedContract: ['Feature file is created by the scoped run.'],
+            proofByAcceptanceCriteria: ['Runner commit and draft PR prove the file exists.'],
+            reviewFocus: ['Check runner-owned publication evidence.'],
+            humanReviewChecklist: ['Confirm the draft PR and review report were created.'],
+          },
         }),
         'utf8',
       );

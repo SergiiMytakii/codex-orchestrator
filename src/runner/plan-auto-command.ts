@@ -53,6 +53,7 @@ import {
   writeDurablePrompt,
 } from './prompt.js';
 import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
+import { evaluateParentRiskRoutingGate } from './review-gates.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -78,6 +79,7 @@ export interface PlanAutoCommandResult {
   pullRequest?: GitHubPullRequest;
   status: 'review-ready' | 'blocked';
   reportComment: string;
+  riskRoutingWarnings: string[];
 }
 
 interface PlanWorkflowPrompts {
@@ -307,6 +309,18 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       );
     }
     const report = reportRead.report;
+    const parentRiskRouting = evaluateParentRiskRoutingGate({ config, report });
+    const riskRoutingWarnings = parentRiskRouting.warnings;
+    if (!parentRiskRouting.ok) {
+      return finishPlanBlocked(
+        issueAdapter,
+        config,
+        events,
+        base,
+        parentRiskRouting.reasons,
+        [],
+      );
+    }
 
     await issueAdapter.updateIssue(options.issueNumber, {
       title: report.parent.title,
@@ -461,6 +475,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         finalValidation,
         sizeRisk: report.sizeRisk,
         parentReviewHandoff: report.parentReviewHandoff,
+        riskRoutingWarnings,
       }),
       headBranch: branchName,
       baseBranch: resolvedBase.prBaseBranch,
@@ -475,6 +490,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       finalValidation,
       sizeRisk: report.sizeRisk,
       parentReviewHandoff: report.parentReviewHandoff,
+      riskRoutingWarnings,
     });
     await markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults);
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
@@ -499,6 +515,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       status: 'review-ready',
       pullRequest,
       reportComment,
+      riskRoutingWarnings,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'plan-auto planning failed';
@@ -1056,7 +1073,7 @@ async function finishPlanBlocked(
     summary: `Issue-tree execution blocked: ${reasons[0] ?? 'blocked'}`,
     artifacts: sessionArtifacts(result.promptPath, result.reportPath, result.logPath, result.snapshotPath),
   });
-  return { ...result, status: 'blocked', reportComment };
+  return { ...result, status: 'blocked', reportComment, riskRoutingWarnings: [] };
 }
 
 function dependencyIssuesFor(child: AutonomousChildNode, allChildren: AutonomousChildNode[]): GitHubIssue[] {

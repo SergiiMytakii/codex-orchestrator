@@ -242,6 +242,36 @@ text or changed paths indicate UI, API, worker, CLI, or smoke-verifiable work.
 `reviewGates.acceptanceProof` is canonical; `reviewGates.visualProof` remains a
 configuration migration adapter for existing screenshot and mobile proof policy.
 
+The risk-routing gate checks declared review metadata instead of inferring risk
+with an LLM. `reviewGates.riskRouting` defaults to enabled `warn` mode so older
+repositories surface findings without unexpected publication blocks. In
+`block` mode, the same findings become publication blockers.
+
+For scoped runs, risk routing checks the completion report `reviewHandoff`:
+
+- required handoff fields must be present and non-empty;
+- low-risk claims must use an allowed low-risk flow;
+- configured `riskyChangedPathGlobs` can flag low-risk claims that changed
+  risky paths;
+- high-risk claims require passed code-review validation when
+  `highRiskRequiresCodeReview` is true.
+
+Low-risk routing never weakens existing quality, acceptance proof, visual proof,
+deny, or configured-check gates. It can only add warnings or blockers.
+Scoped risk-routing blockers are retryable only when
+`loopPolicy.rework.retryableBlockers` explicitly includes
+`risk-routing-policy`.
+
+For parent `agent:plan-auto` runs, risk routing checks the planning report after
+it is read and before parent content or child issues are mutated. Parent
+`sizeRisk` must partition every child stable id exactly once across
+`small`, `medium`, and `high`; `parentReviewHandoff` must include risks, proof
+strategy, and human review focus. In warn mode, findings render under
+`Risk routing warnings` in the parent PR body and review report while execution
+continues. In block mode, the parent stops at that point and does not create
+child issues, execute children, create a draft PR, or attempt parent planning
+rework.
+
 ## Acceptance Proof
 
 Acceptance proof is intentionally runner-owned. Codex can implement product
@@ -566,7 +596,7 @@ The top-level config areas are:
 - `project` for config and prompt directories;
 - `workflows` for prompt or skill routing;
 - `checks` and `checksPolicy` for validation commands;
-- `reviewGates` for quality and acceptance proof requirements;
+- `reviewGates` for quality, risk-routing, and acceptance proof requirements;
 - `loopPolicy` for issue selection, rework, review, summaries, and suggestions;
 - `deny` for secret and unsafe-action protection;
 - `branches` for branch templates;

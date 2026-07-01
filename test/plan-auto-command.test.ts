@@ -226,6 +226,89 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.match(pushed.stdout, /Codex: merge issue/);
 });
 
+test('plan-auto command renders parent risk-routing warnings without stopping warn-mode execution', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  delete report.sizeRisk;
+  delete report.parentReviewHandoff;
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: codexAdapterForReport(report),
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(result.childIssues.length, 1);
+  assert.equal(issueAdapter.createdIssues.length, 1);
+  assert.deepEqual(result.riskRoutingWarnings, [
+    'Risk routing warning: parent sizeRisk is required.',
+    'Risk routing warning: parentReviewHandoff is required.',
+  ]);
+  assert.match(result.reportComment, /Risk routing warnings/);
+  assert.match(result.reportComment, /parent sizeRisk is required/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Risk routing warnings/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /parentReviewHandoff is required/);
+});
+
+test('plan-auto command blocks parent risk-routing findings before parent or child mutations in block mode', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    reviewGates: {
+      ...config.reviewGates,
+      riskRouting: {
+        ...config.reviewGates.riskRouting,
+        mode: 'block',
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  delete report.sizeRisk;
+  delete report.parentReviewHandoff;
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(runCount, 1);
+  assert.deepEqual(result.riskRoutingWarnings, []);
+  assert.equal(issueAdapter.updatedIssues.some((entry) => entry.issueNumber === 156), false);
+  assert.equal(issueAdapter.createdIssues.length, 0);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
+  assert.equal(issueAdapter.addedLabels.some((entry) => entry.labels.includes(labels.review.name)), false);
+  assert.match(result.reportComment, /Risk routing gate requires: parent sizeRisk is required/);
+  assert.match(result.reportComment, /Risk routing gate requires: parentReviewHandoff is required/);
+});
+
 test('plan-auto command applies configured child rework loop before parent integration', async () => {
   const repo = await tempGitProject((config) => ({
     ...config,

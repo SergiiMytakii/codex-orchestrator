@@ -35,6 +35,16 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.reviewGates.quality.enabled, true);
     assert.equal(result.value.reviewGates.quality.tdd.requireTestChange, true);
     assert.equal(result.value.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
+    assert.deepEqual(result.value.reviewGates.riskRouting, {
+      enabled: true,
+      mode: 'warn',
+      requireScopedReviewHandoff: true,
+      requireParentSizeRisk: true,
+      requireParentReviewHandoff: true,
+      riskyChangedPathGlobs: [],
+      highRiskRequiresCodeReview: true,
+      allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
+    });
     assert.deepEqual(result.value.loopPolicy.issueSelection.priorityLabels, ['priority:critical', 'priority:high', 'priority:medium', 'priority:low']);
     assert.equal(result.value.loopPolicy.issueSelection.tieBreaker, 'issue-number-asc');
     assert.equal(result.value.loopPolicy.rework.maxAttempts, 1);
@@ -69,6 +79,18 @@ test('accepts the expanded valid config contract', () => {
     assert.deepEqual(result.value.branches.base, { mode: 'explicit', remote: 'origin', branch: 'main' });
     assert.equal(result.value.branches.scopedIssue, 'codex/issue-${issueNumber}');
   }
+});
+
+test('accepts stale config without risk routing gate for migration compatibility', () => {
+  const legacyReviewGates = { ...validConfig.reviewGates } as Record<string, unknown>;
+  delete legacyReviewGates.riskRouting;
+
+  const result = validateConfig({
+    ...validConfig,
+    reviewGates: legacyReviewGates,
+  });
+
+  assert.equal(result.ok, true);
 });
 
 test('accepts legacy string base branch config for migration compatibility', () => {
@@ -334,6 +356,56 @@ test('rejects invalid acceptance proof gate config', () => {
   ]);
 });
 
+test('rejects invalid risk routing gate config', () => {
+  const result = validateConfig({
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      riskRouting: {
+        ...validConfig.reviewGates.riskRouting,
+        enabled: 'yes',
+        mode: 'strict',
+        requireScopedReviewHandoff: 'yes',
+        requireParentSizeRisk: 'yes',
+        requireParentReviewHandoff: 'yes',
+        riskyChangedPathGlobs: ['src/**', ''],
+        highRiskRequiresCodeReview: 'yes',
+        allowedLowRiskFlows: ['small-task-implementer', 'invalid-flow'],
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'reviewGates.riskRouting.enabled must be a boolean',
+    'reviewGates.riskRouting.mode must be one of warn, block',
+    'reviewGates.riskRouting.requireScopedReviewHandoff must be a boolean',
+    'reviewGates.riskRouting.requireParentSizeRisk must be a boolean',
+    'reviewGates.riskRouting.requireParentReviewHandoff must be a boolean',
+    'reviewGates.riskRouting.riskyChangedPathGlobs must be an array of non-empty strings',
+    'reviewGates.riskRouting.highRiskRequiresCodeReview must be a boolean',
+    'reviewGates.riskRouting.allowedLowRiskFlows must contain only small-task-implementer, scoped-implementation, spec-implementer, issue-tree-child, other',
+  ]);
+});
+
+test('accepts risk routing policy as a retryable rework blocker', () => {
+  const result = validateConfig({
+    ...validConfig,
+    loopPolicy: {
+      ...validConfig.loopPolicy,
+      rework: {
+        ...validConfig.loopPolicy.rework,
+        retryableBlockers: [
+          ...validConfig.loopPolicy.rework.retryableBlockers,
+          'risk-routing-policy',
+        ],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+});
+
 test('rejects invalid quality gate config', () => {
   const result = validateConfig({
     ...validConfig,
@@ -396,7 +468,7 @@ test('rejects invalid loop policy config', () => {
     'loopPolicy.issueSelection.priorityLabels must be an array of non-empty strings',
     'loopPolicy.issueSelection.tieBreaker must be one of issue-number-asc',
     'loopPolicy.rework.maxAttempts must be a non-negative integer',
-    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof',
+      'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy',
     'loopPolicy.freshContextReview.enabled must be a boolean',
     'loopPolicy.freshContextReview.mode must be one of advisory',
     'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations must be a boolean',

@@ -77,6 +77,19 @@ export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewG
   };
 }
 
+export function defaultRiskRoutingConfig(): CodexOrchestratorConfig['reviewGates']['riskRouting'] {
+  return {
+    enabled: true,
+    mode: 'warn',
+    requireScopedReviewHandoff: true,
+    requireParentSizeRisk: true,
+    requireParentReviewHandoff: true,
+    riskyChangedPathGlobs: [],
+    highRiskRequiresCodeReview: true,
+    allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
+  };
+}
+
 export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchestratorConfig {
   return {
     version: 1,
@@ -228,6 +241,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           ],
         },
       },
+      riskRouting: defaultRiskRoutingConfig(),
     },
     loopPolicy: {
       issueSelection: {
@@ -309,6 +323,7 @@ export function mergeExistingProjectConfig(
   const existingAcceptanceProof = readObject(existingReviewGates?.acceptanceProof);
   const existingVisualProof = readObject(existingReviewGates?.visualProof);
   const existingQuality = readObject(existingReviewGates?.quality);
+  const existingRiskRouting = readObject(existingReviewGates?.riskRouting);
   const existingLoopPolicy = readObject(existing.loopPolicy);
   const existingIssueSelection = readObject(existingLoopPolicy?.issueSelection);
   const existingRework = readObject(existingLoopPolicy?.rework);
@@ -389,6 +404,14 @@ export function mergeExistingProjectConfig(
           ...defaults.reviewGates.quality.codeReview,
           ...readObject(existingQuality?.codeReview),
         },
+      },
+      riskRouting: {
+        ...defaults.reviewGates.riskRouting,
+        ...existingRiskRouting,
+        allowedLowRiskFlows: readStringArray(existingRiskRouting?.allowedLowRiskFlows)
+          ?? defaults.reviewGates.riskRouting.allowedLowRiskFlows,
+        riskyChangedPathGlobs: readStringArray(existingRiskRouting?.riskyChangedPathGlobs)
+          ?? defaults.reviewGates.riskRouting.riskyChangedPathGlobs,
       },
     },
     loopPolicy: {

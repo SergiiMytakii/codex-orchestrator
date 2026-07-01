@@ -1,16 +1,13 @@
 import { readFile } from 'node:fs/promises';
 
+import { reviewHandoffFlows, type ReviewHandoffFlow } from '../review-handoff.js';
 import type { PlanGraph } from './issue-tree.js';
 import { validatePlanGraph } from './issue-tree.js';
 
+export type { ReviewHandoffFlow } from '../review-handoff.js';
+
 export type CompletionStatus = 'completed' | 'needs-promotion';
 export type ValidationStatus = 'passed' | 'failed' | 'skipped';
-export type ReviewHandoffFlow =
-  | 'small-task-implementer'
-  | 'scoped-implementation'
-  | 'spec-implementer'
-  | 'issue-tree-child'
-  | 'other';
 export type ReviewHandoffRisk = 'low' | 'medium' | 'high';
 export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
 export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
@@ -143,7 +140,7 @@ function assertReviewHandoff(value: unknown): void {
     throw new Error('Invalid scoped completion report: reviewHandoff must be an object');
   }
   const record = value as Record<string, unknown>;
-  const flows = new Set(['small-task-implementer', 'scoped-implementation', 'spec-implementer', 'issue-tree-child', 'other']);
+  const flows = new Set<string>(reviewHandoffFlows);
   const risks = new Set(['low', 'medium', 'high']);
   if (typeof record.flowUsed !== 'string' || !flows.has(record.flowUsed)) {
     throw new Error('Invalid scoped completion report: reviewHandoff.flowUsed is malformed');

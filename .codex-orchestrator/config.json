@@ -263,6 +263,19 @@
           "code review"
         ]
       }
+    },
+    "riskRouting": {
+      "enabled": true,
+      "mode": "warn",
+      "requireScopedReviewHandoff": true,
+      "requireParentSizeRisk": true,
+      "requireParentReviewHandoff": true,
+      "riskyChangedPathGlobs": [],
+      "highRiskRequiresCodeReview": true,
+      "allowedLowRiskFlows": [
+        "small-task-implementer",
+        "scoped-implementation"
+      ]
     }
   },
   "loopPolicy": {

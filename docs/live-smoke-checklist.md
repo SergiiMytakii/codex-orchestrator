@@ -23,6 +23,7 @@ npm run smoke:live -- --scenario acceptance-proof-ui-evidence --cleanup
 npm run smoke:live -- --scenario acceptance-proof-blocking --cleanup
 npm run smoke:live -- --scenario acceptance-proof-ui-evidence-blocking --cleanup
 npm run smoke:live -- --scenario diagnostics --cleanup
+npm run smoke:live -- --scenario risk-routing --cleanup
 npm run smoke:live -- --scenario plan-auto-blocking --cleanup
 ```
 
@@ -68,6 +69,9 @@ npm run smoke:live -- --cleanup
   Evidence, or with invalid desktop viewport coverage, blocks Draft PR Handoff.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
+- `risk-routing` - parent `plan-auto` warn mode renders declared risk-routing
+  metadata findings in the parent PR body and review report while continuing
+  child execution.
 - `local-commit-blocked` - blocks agent local commits when policy disallows them.
 - `denied-secret` - blocks a configured denied path before PR creation.
 - `invalid-report` - blocks invalid scoped completion JSON before publication.
@@ -197,6 +201,21 @@ blocked states deterministically.
 
 Expected result: Loop Policy behavior is proven in a controlled self-repo live
 scenario without handing publication authority to Codex.
+
+## Risk Routing live proof
+
+- [ ] `risk-routing` creates a parent `agent:plan-auto` issue whose fake
+      planning report intentionally omits `sizeRisk` and `parentReviewHandoff`.
+- [ ] Verify warn mode does not stop child issue creation, child execution, the
+      integration branch, or the draft PR.
+- [ ] Verify the parent PR body and parent review report include the exact
+      `Risk routing warnings` heading.
+- [ ] Verify the warning text names missing parent `sizeRisk` and
+      `parentReviewHandoff` metadata.
+
+Expected result: declared parent risk-routing metadata findings are visible in
+handoff surfaces without weakening existing child execution or publication
+checks in warn mode.
 
 ## Scoped success flow
 

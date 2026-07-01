@@ -27,6 +27,7 @@ test('runner config reader backfills package-owned proof command and drops unsup
     workflows: fallbackWorkflows,
   });
   delete staleConfig.reviewGates.visualProof.runnerValidationCommand;
+  delete (staleConfig.reviewGates as Partial<typeof staleConfig.reviewGates>).riskRouting;
   staleConfig.loopPolicy.rework.retryableBlockers = staleConfig.loopPolicy.rework.retryableBlockers
     .filter((blocker) => blocker !== 'failed-acceptance-proof');
   await writeFile(
@@ -42,5 +43,15 @@ test('runner config reader backfills package-owned proof command and drops unsup
     config.reviewGates.visualProof.runnerValidationCommand,
     'codex-orchestrator visual-proof auto --issue ${issueNumber}',
   );
+  assert.deepEqual(config.reviewGates.riskRouting, {
+    enabled: true,
+    mode: 'warn',
+    requireScopedReviewHandoff: true,
+    requireParentSizeRisk: true,
+    requireParentReviewHandoff: true,
+    riskyChangedPathGlobs: [],
+    highRiskRequiresCodeReview: true,
+    allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
+  });
   assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
 });

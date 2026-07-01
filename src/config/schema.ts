@@ -5,6 +5,7 @@ import {
   workflowKeys,
   workflowSources,
 } from './constants.js';
+import { reviewHandoffFlows, type ReviewHandoffFlow } from '../review-handoff.js';
 
 export type LabelKey = (typeof labelKeys)[number];
 export type LabelPreparationPolicy = 'report-only' | 'create-missing';
@@ -18,8 +19,10 @@ export type RetryableReworkBlocker =
   | 'no-changed-files'
   | 'failed-configured-checks'
   | 'missing-quality-gate-evidence'
-  | 'failed-acceptance-proof';
+  | 'failed-acceptance-proof'
+  | 'risk-routing-policy';
 export type FreshContextReviewMode = 'advisory';
+export type RiskRoutingMode = 'warn' | 'block';
 export const codexPhaseKeys = [
   'plan-parent',
   'scoped-issue',
@@ -202,6 +205,16 @@ export interface CodexOrchestratorConfig {
         enabled: boolean;
         requiredValidationPatterns: string[];
       };
+    };
+    riskRouting: {
+      enabled: boolean;
+      mode: RiskRoutingMode;
+      requireScopedReviewHandoff: boolean;
+      requireParentSizeRisk: boolean;
+      requireParentReviewHandoff: boolean;
+      riskyChangedPathGlobs: string[];
+      highRiskRequiresCodeReview: boolean;
+      allowedLowRiskFlows: ReviewHandoffFlow[];
     };
   };
   loopPolicy: LoopPolicyConfig;
@@ -674,6 +687,23 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   }
 
   validateQualityGate(parent, errors);
+  validateRiskRoutingGate(parent, errors);
+}
+
+function validateRiskRoutingGate(parent: ObjectRecord, errors: string[]): void {
+  const riskRouting = expectOptionalObject(parent, 'reviewGates.riskRouting', errors);
+  if (!riskRouting) {
+    return;
+  }
+
+  expectBoolean(riskRouting, 'reviewGates.riskRouting.enabled', errors);
+  expectUnion(riskRouting, 'reviewGates.riskRouting.mode', ['warn', 'block'] as const, errors);
+  expectBoolean(riskRouting, 'reviewGates.riskRouting.requireScopedReviewHandoff', errors);
+  expectBoolean(riskRouting, 'reviewGates.riskRouting.requireParentSizeRisk', errors);
+  expectBoolean(riskRouting, 'reviewGates.riskRouting.requireParentReviewHandoff', errors);
+  expectStringArray(riskRouting, 'reviewGates.riskRouting.riskyChangedPathGlobs', errors);
+  expectBoolean(riskRouting, 'reviewGates.riskRouting.highRiskRequiresCodeReview', errors);
+  expectReviewHandoffFlows(riskRouting, errors);
 }
 
 function validateBrowserProofConfig(acceptanceProof: ObjectRecord, errors: string[]): void {
@@ -817,6 +847,7 @@ function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): Retrya
     'failed-configured-checks',
     'missing-quality-gate-evidence',
     'failed-acceptance-proof',
+    'risk-routing-policy',
   ] as const;
   const value = readPath(parent, 'loopPolicy.rework.retryableBlockers');
 
@@ -826,6 +857,17 @@ function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): Retrya
   }
 
   return value as RetryableReworkBlocker[];
+}
+
+function expectReviewHandoffFlows(parent: ObjectRecord, errors: string[]): ReviewHandoffFlow[] | undefined {
+  const value = readPath(parent, 'reviewGates.riskRouting.allowedLowRiskFlows');
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !reviewHandoffFlows.includes(item as ReviewHandoffFlow))) {
+    errors.push(`reviewGates.riskRouting.allowedLowRiskFlows must contain only ${reviewHandoffFlows.join(', ')}`);
+    return undefined;
+  }
+
+  return value as ReviewHandoffFlow[];
 }
 
 function expectOptionalPositiveInteger(parent: ObjectRecord, path: string, errors: string[]): number | undefined {

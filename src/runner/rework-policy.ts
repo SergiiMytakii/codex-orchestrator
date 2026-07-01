@@ -10,6 +10,7 @@ const retryableBlockerPatterns = [
   ['missing-quality-gate-evidence', /Quality gate requires/iu],
   ['failed-configured-checks', /One or more configured checks failed/iu],
   ['failed-acceptance-proof', /Acceptance proof/iu],
+  ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],
   ['missing-completion-report', /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/iu],
   ['no-changed-files', /Codex completed without file changes/iu],

@@ -306,6 +306,7 @@ export function buildIssueTreeReviewReport(input: {
   finalValidation: RunnerValidationLine[];
   sizeRisk?: PlanSizeRiskEvidence;
   parentReviewHandoff?: ParentReviewHandoffEvidence;
+  riskRoutingWarnings?: string[];
 }): string {
   return [
     `codex-orchestrator issue-tree review report for #${input.parentIssueNumber}`,
@@ -320,6 +321,7 @@ export function buildIssueTreeReviewReport(input: {
       `- #${result.child.issue.number}: ${result.durableRunSummary?.excerpt[0] ?? 'outcome: review-ready'}`
     )),
     ...renderPlanningRiskProof(input.sizeRisk, input.parentReviewHandoff),
+    ...renderRiskRoutingWarnings(input.riskRoutingWarnings),
     'Validation',
     ...input.childResults.flatMap((result) => renderValidationEvidence(result.validation, { prefix: `#${result.child.issue.number} ` })),
     ...renderValidationEvidence(input.finalValidation, { prefix: 'final ' }),
@@ -346,6 +348,7 @@ export function buildIssueTreePullRequestBody(input: {
   finalValidation: RunnerValidationLine[];
   sizeRisk?: PlanSizeRiskEvidence;
   parentReviewHandoff?: ParentReviewHandoffEvidence;
+  riskRoutingWarnings?: string[];
 }): string {
   return [
     `Parent issue: #${input.parentIssueNumber}`,
@@ -356,6 +359,8 @@ export function buildIssueTreePullRequestBody(input: {
     'Planning risk/proof:',
     ...renderPlanningRiskProofBullets(input.sizeRisk, input.parentReviewHandoff),
     '',
+    ...renderRiskRoutingWarnings(input.riskRoutingWarnings),
+    ...(input.riskRoutingWarnings?.length ? [''] : []),
     'Changed files:',
     ...input.childResults.flatMap((result) => [
       `- #${result.child.issue.number}:`,
@@ -531,6 +536,16 @@ function renderPlanningRiskProofBullets(
     lines.push(...handoff.humanReviewFocus.map((focus) => `- human review focus: ${focus}`));
   }
   return lines.length > 0 ? lines : ['- none'];
+}
+
+function renderRiskRoutingWarnings(warnings: string[] | undefined): string[] {
+  if (!warnings || warnings.length === 0) {
+    return [];
+  }
+  return [
+    'Risk routing warnings',
+    ...bulletList(warnings),
+  ];
 }
 
 function formatListInline(items: string[]): string {

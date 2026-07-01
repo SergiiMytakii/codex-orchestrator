@@ -4,10 +4,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { evaluateReviewGates, type ReviewGateInput } from '../src/runner/review-gates.js';
+import {
+  evaluateParentRiskRoutingGate,
+  evaluateReviewGates,
+  type ReviewGateInput,
+} from '../src/runner/review-gates.js';
+import type { PlanAutoCompletionReport } from '../src/runner/completion-report.js';
 import { classifyVisualProofDispatchTarget, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
+
+const defaultReviewHandoff: NonNullable<ReviewGateInput['report']['reviewHandoff']> = {
+  flowUsed: 'scoped-implementation',
+  riskLevel: 'medium',
+  implementedContract: ['Focused scoped change completed.'],
+  proofByAcceptanceCriteria: ['Focused validation covers the acceptance criteria.'],
+  reviewFocus: ['Review changed behavior and validation evidence.'],
+  humanReviewChecklist: ['Confirm the scoped contract is satisfied.'],
+};
 
 const baseRuntimeGateInput: Omit<ReviewGateInput, 'validation'> = {
   config: validConfig,
@@ -22,6 +36,7 @@ const baseRuntimeGateInput: Omit<ReviewGateInput, 'validation'> = {
     skippedChecks: [],
     residualRisks: [],
     prohibitedActions: [],
+    reviewHandoff: defaultReviewHandoff,
   },
 };
 
@@ -35,6 +50,52 @@ function evaluateTddGate(validation: Array<{ command: string; status: 'passed' |
   });
 }
 
+function riskRoutingConfig(overrides: Partial<typeof validConfig.reviewGates.riskRouting> = {}) {
+  return {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: {
+        ...validConfig.reviewGates.quality,
+        enabled: false,
+      },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        enabled: false,
+      },
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        enabled: false,
+      },
+      riskRouting: {
+        ...validConfig.reviewGates.riskRouting,
+        ...overrides,
+      },
+    },
+  };
+}
+
+function scopedRiskInput(overrides: Partial<ReviewGateInput> = {}): ReviewGateInput {
+  return {
+    config: riskRoutingConfig(),
+    issue: issueFixture({ number: 2148, title: 'Scoped policy change', body: 'Runner policy.' }),
+    changedFiles: ['src/runner/policy.ts'],
+    validation: [],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/runner/policy.ts'],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+      reviewHandoff: defaultReviewHandoff,
+    },
+    ...overrides,
+  };
+}
+
 test('quality gate accepts TDD red-to-green proof in one validation entry', () => {
   const result = evaluateTddGate([
     {
@@ -45,6 +106,161 @@ test('quality gate accepts TDD red-to-green proof in one validation entry', () =
   ]);
 
   assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
+});
+
+test('risk routing warns when scoped review handoff is missing in warn mode', () => {
+  const result = evaluateReviewGates(scopedRiskInput({
+    report: {
+      ...scopedRiskInput().report,
+      reviewHandoff: undefined,
+    },
+  }));
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.match(result.warnings.join('\n'), /Risk routing warning: scoped review handoff is required/);
+});
+
+test('risk routing warns when scoped review handoff evidence arrays are empty in warn mode', () => {
+  const input = scopedRiskInput();
+  const result = evaluateReviewGates({
+    ...input,
+    report: {
+      ...input.report,
+      reviewHandoff: {
+        flowUsed: 'scoped-implementation',
+        riskLevel: 'medium',
+        implementedContract: [],
+        proofByAcceptanceCriteria: [],
+        reviewFocus: [],
+        humanReviewChecklist: [],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.match(result.warnings.join('\n'), /implementedContract must describe the delivered contract/);
+  assert.match(result.warnings.join('\n'), /proofByAcceptanceCriteria must map proof to acceptance criteria/);
+  assert.match(result.warnings.join('\n'), /reviewFocus must identify review targets/);
+  assert.match(result.warnings.join('\n'), /humanReviewChecklist must identify human review checks/);
+});
+
+test('risk routing warns when low-risk scoped metadata uses a disallowed flow or configured risky path', () => {
+  const input = scopedRiskInput({
+    config: riskRoutingConfig({
+      riskyChangedPathGlobs: ['src/runner/**'],
+    }),
+  });
+  const result = evaluateReviewGates({
+    ...input,
+    report: {
+      ...input.report,
+      reviewHandoff: {
+        flowUsed: 'spec-implementer',
+        riskLevel: 'low',
+        implementedContract: ['Low-risk contract claim.'],
+        proofByAcceptanceCriteria: ['Proof.'],
+        reviewFocus: ['Focus.'],
+        humanReviewChecklist: ['Checklist.'],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.match(result.warnings.join('\n'), /low-risk scoped work used flow spec-implementer/);
+  assert.match(result.warnings.join('\n'), /low-risk scoped work changed configured risky path src\/runner\/policy\.ts/);
+});
+
+test('risk routing warns when high-risk scoped work lacks code-review proof in warn mode', () => {
+  const input = scopedRiskInput();
+  const result = evaluateReviewGates({
+    ...input,
+    report: {
+      ...input.report,
+      reviewHandoff: {
+        flowUsed: 'scoped-implementation',
+        riskLevel: 'high',
+        implementedContract: ['High-risk policy change.'],
+        proofByAcceptanceCriteria: ['Proof.'],
+        reviewFocus: ['Focus.'],
+        humanReviewChecklist: ['Checklist.'],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.match(result.warnings.join('\n'), /high-risk scoped work requires passed code-review validation/);
+});
+
+test('risk routing blocks scoped findings in block mode without warning-mode weakening', () => {
+  const result = evaluateReviewGates(scopedRiskInput({
+    config: riskRoutingConfig({ mode: 'block' }),
+    report: {
+      ...scopedRiskInput().report,
+      reviewHandoff: undefined,
+    },
+  }));
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.warnings, []);
+  assert.match(result.reasons.join('\n'), /Risk routing gate requires: scoped review handoff is required/);
+});
+
+test('parent risk routing warns about missing duplicate and unknown size-risk ids in warn mode', () => {
+  const report: PlanAutoCompletionReport = {
+    status: 'completed',
+    parent: { body: 'Updated parent body' },
+    graph: {
+      nodes: [
+        {
+          stableId: 'child-a',
+          title: 'Child A',
+          body: 'Child A body',
+          afkHitl: 'afk',
+          ownershipScope: ['src/a.ts'],
+          dependsOn: [],
+          verification: ['npm test'],
+        },
+        {
+          stableId: 'child-b',
+          title: 'Child B',
+          body: 'Child B body',
+          afkHitl: 'afk',
+          ownershipScope: ['src/b.ts'],
+          dependsOn: [],
+          verification: ['npm test'],
+        },
+      ],
+      edges: [],
+      specGate: 'wave-level',
+    },
+    sizeRisk: {
+      small: ['child-a', 'child-a', 'unknown-child'],
+      medium: [],
+      high: [],
+    },
+    parentReviewHandoff: {
+      risks: [],
+      proofStrategy: [],
+      humanReviewFocus: [],
+    },
+    residualRisks: [],
+  };
+
+  const result = evaluateParentRiskRoutingGate({
+    config: riskRoutingConfig(),
+    report,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.match(result.warnings.join('\n'), /sizeRisk is missing stable id child-b/);
+  assert.match(result.warnings.join('\n'), /sizeRisk lists stable id child-a more than once/);
+  assert.match(result.warnings.join('\n'), /sizeRisk lists unknown stable id unknown-child/);
+  assert.match(result.warnings.join('\n'), /parentReviewHandoff.risks must describe parent orchestration risks/);
 });
 
 test('quality gate accepts TDD red-to-green proof split across passed validation entries', () => {
@@ -346,6 +562,7 @@ test('review gates accept runner-owned visual proof as UI layout test evidence',
       skippedChecks: [],
       residualRisks: [],
       prohibitedActions: [],
+      reviewHandoff: defaultReviewHandoff,
     },
     worktreePath,
   });

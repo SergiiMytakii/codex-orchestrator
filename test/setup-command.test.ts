@@ -402,6 +402,16 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.reviewGates.quality.tdd.requireTestChange, false);
   assert.equal(result.config.reviewGates.quality.tdd.enabled, true);
   assert.equal(result.config.reviewGates.quality.cleanupReview.runtimeFileThreshold, 3);
+  assert.deepEqual(result.config.reviewGates.riskRouting, {
+    enabled: true,
+    mode: 'warn',
+    requireScopedReviewHandoff: true,
+    requireParentSizeRisk: true,
+    requireParentReviewHandoff: true,
+    riskyChangedPathGlobs: [],
+    highRiskRequiresCodeReview: true,
+    allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
+  });
   assert.deepEqual(result.config.loopPolicy.issueSelection.priorityLabels, [
     'priority:urgent',
     'priority:normal',
@@ -409,6 +419,43 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.loopPolicy.rework.maxAttempts, 2);
   assert.equal(result.config.loopPolicy.freshContextReview.enabled, false);
   assert.equal(result.config.loopPolicy.policySuggestions.maxSuggestions, 5);
+  assert.equal(validateConfig(result.config).ok, true);
+});
+
+test('setup preserves explicitly configured risk routing path globs', async () => {
+  const targetRoot = await tempRepo();
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify({
+      github: {
+        owner: 'SergiiMytakii',
+        repo: 'IntelleReach',
+      },
+      reviewGates: {
+        riskRouting: {
+          riskyChangedPathGlobs: ['src/payments/**'],
+        },
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await runSetupCommand({
+    targetRoot,
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+
+  assert.deepEqual(result.config.reviewGates.riskRouting, {
+    enabled: true,
+    mode: 'warn',
+    requireScopedReviewHandoff: true,
+    requireParentSizeRisk: true,
+    requireParentReviewHandoff: true,
+    riskyChangedPathGlobs: ['src/payments/**'],
+    highRiskRequiresCodeReview: true,
+    allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
+  });
   assert.equal(validateConfig(result.config).ok, true);
 });
 

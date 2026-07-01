@@ -2,7 +2,12 @@ import { readFile } from 'node:fs/promises';
 
 import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
 import type { ShellCommandExecutor } from '../process/command.js';
-import { applyTargetPackageConfigDefaults, defaultAcceptanceProofConfig, projectConfigPath } from '../setup/project-config.js';
+import {
+  applyTargetPackageConfigDefaults,
+  defaultAcceptanceProofConfig,
+  defaultRiskRoutingConfig,
+  projectConfigPath,
+} from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 
@@ -39,6 +44,9 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
   const acceptanceProof = typeof reviewGates?.acceptanceProof === 'object' && reviewGates.acceptanceProof !== null && !Array.isArray(reviewGates.acceptanceProof)
     ? reviewGates.acceptanceProof as Record<string, unknown>
     : undefined;
+  const riskRouting = typeof reviewGates?.riskRouting === 'object' && reviewGates.riskRouting !== null && !Array.isArray(reviewGates.riskRouting)
+    ? reviewGates.riskRouting as Record<string, unknown>
+    : undefined;
   const defaultAcceptanceProof = defaultAcceptanceProofConfig();
   const loopPolicy = typeof root.loopPolicy === 'object' && root.loopPolicy !== null && !Array.isArray(root.loopPolicy)
     ? root.loopPolicy as Record<string, unknown>
@@ -68,6 +76,10 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
               runnerValidationCommand: visualProof?.runnerValidationCommand,
               runnerTimeoutMs: visualProof?.runnerTimeoutMs,
               envPassthrough: visualProof?.envPassthrough ?? defaultAcceptanceProof.envPassthrough,
+            },
+            riskRouting: {
+              ...defaultRiskRoutingConfig(),
+              ...riskRouting,
             },
           },
         }
