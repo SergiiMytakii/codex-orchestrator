@@ -27,6 +27,39 @@ test('completion report validation rejects invalid JSON clearly', async () => {
   );
 });
 
+test('scoped completion report accepts structured review handoff for human review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['Updated sender disable recovery path.'],
+      validation: [{ command: 'npm test -- warmup', status: 'passed', summary: 'red -> green proof passed' }],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: ['No live provider smoke in local env.'],
+      prohibitedActions: [],
+      reviewHandoff: {
+        flowUsed: 'small-task-implementer',
+        riskLevel: 'low',
+        implementedContract: ['Disable event schedules warmup recovery once.'],
+        proofByAcceptanceCriteria: ['AC1: unit test covers disabled sender warmup outcome.'],
+        reviewFocus: ['Check notification signature and warmup state naming.'],
+        humanReviewChecklist: ['Read src/warmup/recovery.ts and test/warmup/recovery.test.ts.'],
+      },
+    }),
+    'utf8',
+  );
+
+  const result = await readScopedCompletionReport(reportPath);
+  assert.equal(result.kind, 'valid');
+  if (result.kind === 'valid') {
+    assert.equal(result.report.reviewHandoff?.flowUsed, 'small-task-implementer');
+    assert.deepEqual(result.report.reviewHandoff?.reviewFocus, ['Check notification signature and warmup state naming.']);
+  }
+});
+
 test('plan-auto completion report validation keeps graph errors explicit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
   const reportPath = join(root, 'plan-report.json');

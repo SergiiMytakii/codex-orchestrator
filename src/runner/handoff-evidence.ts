@@ -3,7 +3,7 @@ import type { GitHubIssue } from '../github/issues.js';
 import type { GitHubPullRequest } from '../github/pull-requests.js';
 import type { SessionCommitInfo } from '../git/worktree.js';
 import type { AutonomousChildNode } from './issue-tree.js';
-import type { ScopedCompletionReport } from './completion-report.js';
+import type { PlanAutoCompletionReport, ScopedCompletionReport } from './completion-report.js';
 import type { DurableRunSummaryEvidence } from './durable-run-summary.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 
@@ -14,6 +14,9 @@ export interface RunnerValidationLine {
 }
 
 type CommitEvidence = Pick<SessionCommitInfo, 'sha' | 'subject'>;
+type ReviewHandoffEvidence = ScopedCompletionReport['reviewHandoff'];
+type PlanSizeRiskEvidence = PlanAutoCompletionReport['sizeRisk'];
+type ParentReviewHandoffEvidence = PlanAutoCompletionReport['parentReviewHandoff'];
 
 export interface FreshContextReviewEvidence {
   status: 'passed' | 'blocked';
@@ -34,6 +37,7 @@ export interface ScopedHandoffEvidence {
   residualRisks: string[];
   logPath: string;
   commits: CommitEvidence[];
+  reviewHandoff?: ReviewHandoffEvidence;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
@@ -49,6 +53,7 @@ export interface ChildHandoffEvidence {
   skippedChecks: string[];
   residualRisks: string[];
   logPath: string;
+  reviewHandoff?: ReviewHandoffEvidence;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
@@ -68,6 +73,7 @@ export function buildScopedReviewReport(
     'Proof Artifacts',
     ...renderScopedProofArtifacts(input),
     ...renderAcceptanceProofEvidence(input.acceptanceProof),
+    ...renderReviewHandoff(input.reviewHandoff),
     'Log',
     ...bulletList([input.logPath]),
     'Local Commits',
@@ -101,6 +107,7 @@ export function buildScopedPullRequestBody(input: ScopedHandoffEvidence): string
     'Local commits:',
     ...renderCommitEvidence(input.commits),
     '',
+    ...renderReviewHandoffPullRequestSection(input.reviewHandoff),
     ...renderFreshContextReviewPullRequestSection(input.freshContextReview),
     ...renderDurableRunSummaryPullRequestSection(input.durableRunSummary),
     'Skipped checks:',
@@ -212,6 +219,39 @@ function renderFreshContextReviewPullRequestSection(evidence: FreshContextReview
   ];
 }
 
+function renderReviewHandoff(handoff: ReviewHandoffEvidence | undefined): string[] {
+  if (!handoff) {
+    return [];
+  }
+  return [
+    'Review Handoff',
+    `- flow: ${handoff.flowUsed}`,
+    `- risk: ${handoff.riskLevel}`,
+    'Implemented Contract',
+    ...bulletList(handoff.implementedContract),
+    'Proof By Acceptance Criteria',
+    ...bulletList(handoff.proofByAcceptanceCriteria),
+    'Review Focus',
+    ...bulletList(handoff.reviewFocus),
+    'Human Review Checklist',
+    ...bulletList(handoff.humanReviewChecklist),
+  ];
+}
+
+function renderReviewHandoffPullRequestSection(handoff: ReviewHandoffEvidence | undefined): string[] {
+  if (!handoff) {
+    return [];
+  }
+  return [
+    'Review handoff:',
+    `- flow: ${handoff.flowUsed}`,
+    `- risk: ${handoff.riskLevel}`,
+    ...handoff.reviewFocus.map((item) => `- review focus: ${item}`),
+    ...handoff.humanReviewChecklist.map((item) => `- human check: ${item}`),
+    '',
+  ];
+}
+
 export function buildPromotionRequestReport(input: {
   issueNumber: number;
   report: ScopedCompletionReport;
@@ -244,6 +284,7 @@ export function buildChildReviewReport(input: { parentIssueNumber: number; resul
     ...renderValidationEvidence(input.result.validation),
     'Proof Artifacts',
     ...renderLocalProofArtifacts({ artifacts: input.result.artifacts }),
+    ...renderReviewHandoff(input.result.reviewHandoff),
     'Local Commits',
     ...renderCommitEvidence(input.result.commits),
     'Log',
@@ -263,6 +304,8 @@ export function buildIssueTreeReviewReport(input: {
   batches: AutonomousChildNode[][];
   childResults: ChildHandoffEvidence[];
   finalValidation: RunnerValidationLine[];
+  sizeRisk?: PlanSizeRiskEvidence;
+  parentReviewHandoff?: ParentReviewHandoffEvidence;
 }): string {
   return [
     `codex-orchestrator issue-tree review report for #${input.parentIssueNumber}`,
@@ -276,6 +319,7 @@ export function buildIssueTreeReviewReport(input: {
     ...input.childResults.map((result) => (
       `- #${result.child.issue.number}: ${result.durableRunSummary?.excerpt[0] ?? 'outcome: review-ready'}`
     )),
+    ...renderPlanningRiskProof(input.sizeRisk, input.parentReviewHandoff),
     'Validation',
     ...input.childResults.flatMap((result) => renderValidationEvidence(result.validation, { prefix: `#${result.child.issue.number} ` })),
     ...renderValidationEvidence(input.finalValidation, { prefix: 'final ' }),
@@ -284,6 +328,8 @@ export function buildIssueTreeReviewReport(input: {
     'Proof Artifacts',
     ...input.childResults.flatMap((result) =>
       renderLocalProofArtifacts({ artifacts: result.artifacts, prefix: `#${result.child.issue.number} ` })),
+    'Parent Risk/Proof Mini-Report',
+    ...renderParentRiskProofMiniReport(input.childResults),
     'Logs',
     ...input.childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
     'Local Commits',
@@ -298,12 +344,17 @@ export function buildIssueTreePullRequestBody(input: {
   childIssues: GitHubIssue[];
   childResults: ChildHandoffEvidence[];
   finalValidation: RunnerValidationLine[];
+  sizeRisk?: PlanSizeRiskEvidence;
+  parentReviewHandoff?: ParentReviewHandoffEvidence;
 }): string {
   return [
     `Parent issue: #${input.parentIssueNumber}`,
     '',
     'Child issues:',
     ...input.childIssues.map((issue) => `- #${issue.number} ${issue.title}`),
+    '',
+    'Planning risk/proof:',
+    ...renderPlanningRiskProofBullets(input.sizeRisk, input.parentReviewHandoff),
     '',
     'Changed files:',
     ...input.childResults.flatMap((result) => [
@@ -321,6 +372,9 @@ export function buildIssueTreePullRequestBody(input: {
     'Proof artifacts:',
     ...input.childResults.flatMap((result) =>
       renderLocalProofArtifacts({ artifacts: result.artifacts, prefix: `#${result.child.issue.number} ` })),
+    '',
+    'Parent risk/proof mini-report:',
+    ...renderParentRiskProofMiniReport(input.childResults),
     '',
     'Logs:',
     ...input.childResults.map((result) => `- #${result.child.issue.number}: ${result.logPath}`),
@@ -433,6 +487,54 @@ export function renderLocalProofArtifacts(input: {
     const line = artifact.type === 'screenshot' ? `![${escapeMarkdownAlt(label)}](${target})` : `${label}: ${target}`;
     return `- ${input.prefix ?? ''}${line}`;
   });
+}
+
+function renderParentRiskProofMiniReport(results: ChildHandoffEvidence[]): string[] {
+  if (results.length === 0) {
+    return ['- none'];
+  }
+
+  return results.map((result) => {
+    const handoff = result.reviewHandoff;
+    if (!handoff) {
+      return `- #${result.child.issue.number}: no structured review handoff; inspect validation, proof artifacts, and residual risks.`;
+    }
+    const focus = handoff.reviewFocus.length > 0 ? handoff.reviewFocus.join('; ') : 'none';
+    return `- #${result.child.issue.number}: flow=${handoff.flowUsed}; risk=${handoff.riskLevel}; review focus=${focus}`;
+  });
+}
+
+function renderPlanningRiskProof(
+  sizeRisk: PlanSizeRiskEvidence,
+  handoff: ParentReviewHandoffEvidence,
+): string[] {
+  if (!sizeRisk && !handoff) {
+    return [];
+  }
+  return [
+    'Planning Risk/Proof',
+    ...renderPlanningRiskProofBullets(sizeRisk, handoff),
+  ];
+}
+
+function renderPlanningRiskProofBullets(
+  sizeRisk: PlanSizeRiskEvidence,
+  handoff: ParentReviewHandoffEvidence,
+): string[] {
+  const lines: string[] = [];
+  if (sizeRisk) {
+    lines.push(`- size/risk: small=${formatListInline(sizeRisk.small)}; medium=${formatListInline(sizeRisk.medium)}; high=${formatListInline(sizeRisk.high)}`);
+  }
+  if (handoff) {
+    lines.push(...handoff.risks.map((risk) => `- risk: ${risk}`));
+    lines.push(...handoff.proofStrategy.map((proof) => `- proof: ${proof}`));
+    lines.push(...handoff.humanReviewFocus.map((focus) => `- human review focus: ${focus}`));
+  }
+  return lines.length > 0 ? lines : ['- none'];
+}
+
+function formatListInline(items: string[]): string {
+  return items.length > 0 ? items.join(', ') : 'none';
 }
 
 function bulletList(items: string[]): string[] {

@@ -84,6 +84,14 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
     artifacts: [{ type: 'screenshot' as const, path: '.codex-orchestrator/proofs/issue-155/390.png', description: '390px layout' }],
     skippedChecks: ['BrowserUse unavailable; runner proof used.'],
     residualRisks: ['None beyond normal review.'],
+    reviewHandoff: {
+      flowUsed: 'small-task-implementer' as const,
+      riskLevel: 'low' as const,
+      implementedContract: ['Campaign rows no longer overlap at 390px.'],
+      proofByAcceptanceCriteria: ['AC1: Playwright screenshot covers 390px viewport.'],
+      reviewFocus: ['Inspect CampaignList row wrapping and copy.'],
+      humanReviewChecklist: ['Open the screenshot artifact before reading the diff.'],
+    },
     logPath: '/tmp/issue-155.log',
     commits: [{ sha: '1234567890abcdef', subject: 'Agent checkpoint' }],
   };
@@ -98,9 +106,15 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
   assert.match(report, /Pull Request\n- https:\/\/github\.com\/example\/repo\/pull\/155/);
   assert.match(report, /Playwright screenshots: passed - 390px viewport passed/);
   assert.match(report, /!\[screenshot: 390px layout\]\(https:\/\/raw\.githubusercontent\.com\/example\/repo\/codex%2Fissue-155\/\.codex-orchestrator\/proofs\/issue-155\/390\.png\)/);
+  assert.match(report, /Review Handoff/);
+  assert.match(report, /flow: small-task-implementer/);
+  assert.match(report, /risk: low/);
+  assert.match(report, /Inspect CampaignList row wrapping and copy/);
   assert.match(report, /1234567890ab Agent checkpoint/);
   assert.match(body, /Closes #155/);
   assert.match(body, /Proof artifacts:\n- !\[screenshot: 390px layout\]/);
+  assert.match(body, /Review handoff:/);
+  assert.match(body, /Open the screenshot artifact before reading the diff/);
 });
 
 test('scoped auto command creates worktree, runner commit, draft PR, review report, and cleans state', async () => {

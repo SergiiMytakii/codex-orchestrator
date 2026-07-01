@@ -64,6 +64,8 @@ export {
 } from './runner/completion-report.js';
 export type {
   PlanAutoCompletionReport,
+  ReviewHandoffFlow,
+  ReviewHandoffRisk,
   ScopedCompletionReport,
 } from './runner/completion-report.js';
 export {

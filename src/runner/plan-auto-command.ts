@@ -112,6 +112,7 @@ interface ChildExecutionResult {
   commits: SessionCommitInfo[];
   skippedChecks: string[];
   residualRisks: string[];
+  reviewHandoff?: ScopedCompletionReport['reviewHandoff'];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
@@ -458,6 +459,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         childIssues,
         childResults: executionResults,
         finalValidation,
+        sizeRisk: report.sizeRisk,
+        parentReviewHandoff: report.parentReviewHandoff,
       }),
       headBranch: branchName,
       baseBranch: resolvedBase.prBaseBranch,
@@ -470,6 +473,8 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       batches: batches.batches,
       childResults: executionResults,
       finalValidation,
+      sizeRisk: report.sizeRisk,
+      parentReviewHandoff: report.parentReviewHandoff,
     });
     await markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults);
     await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
@@ -874,6 +879,7 @@ async function executeChild(input: {
     commits: publishability.commits,
     skippedChecks: publishability.skippedChecks,
     residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
+    reviewHandoff: publishability.report.reviewHandoff,
     freshContextReview,
     durableRunSummary,
     acceptanceProof: publishability.acceptanceProofAttempt,

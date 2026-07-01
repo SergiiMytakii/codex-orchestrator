@@ -164,6 +164,10 @@
       "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}",
       "runnerTimeoutMs": 900000,
       "envPassthrough": [],
+      "browserProof": {
+        "strictConsoleErrors": false,
+        "strictNetworkFailures": false
+      },
       "maxIterations": 5
     },
     "visualProof": {
@@ -205,6 +209,7 @@
         "runner visual proof"
       ],
       "minScreenshotArtifacts": 1,
+      "requireWhenDesirable": false,
       "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}",
       "runnerTimeoutMs": 900000,
       "envPassthrough": []
@@ -304,7 +309,11 @@
     "additionalPathGlobs": []
   },
   "branches": {
-    "base": "main",
+    "base": {
+      "mode": "explicit",
+      "remote": "origin",
+      "branch": "main"
+    },
     "scopedIssue": "codex/issue-${issueNumber}",
     "issueTree": "codex/tree-${parentIssueNumber}"
   },

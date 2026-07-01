@@ -5,6 +5,13 @@ import { validatePlanGraph } from './issue-tree.js';
 
 export type CompletionStatus = 'completed' | 'needs-promotion';
 export type ValidationStatus = 'passed' | 'failed' | 'skipped';
+export type ReviewHandoffFlow =
+  | 'small-task-implementer'
+  | 'scoped-implementation'
+  | 'spec-implementer'
+  | 'issue-tree-child'
+  | 'other';
+export type ReviewHandoffRisk = 'low' | 'medium' | 'high';
 export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
 export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
 export type ProhibitedActionType =
@@ -21,6 +28,14 @@ export interface ScopedCompletionReport {
   skippedChecks: string[];
   residualRisks: string[];
   prohibitedActions: Array<{ type: ProhibitedActionType; description: string }>;
+  reviewHandoff?: {
+    flowUsed: ReviewHandoffFlow;
+    riskLevel: ReviewHandoffRisk;
+    implementedContract: string[];
+    proofByAcceptanceCriteria: string[];
+    reviewFocus: string[];
+    humanReviewChecklist: string[];
+  };
   promotion?: {
     reason: string;
     criteria: string[];
@@ -35,6 +50,16 @@ export interface PlanAutoCompletionReport {
     body: string;
   };
   graph: PlanGraph;
+  sizeRisk?: {
+    small: string[];
+    medium: string[];
+    high: string[];
+  };
+  parentReviewHandoff?: {
+    risks: string[];
+    proofStrategy: string[];
+    humanReviewFocus: string[];
+  };
   residualRisks: string[];
 }
 
@@ -105,9 +130,31 @@ function assertScopedCompletionReport(value: unknown): asserts value is ScopedCo
   assertStringArray(record.skippedChecks, 'skippedChecks');
   assertStringArray(record.residualRisks, 'residualRisks');
   assertProhibitedActions(record.prohibitedActions);
+  if ('reviewHandoff' in record) {
+    assertReviewHandoff(record.reviewHandoff);
+  }
   if (record.status === 'needs-promotion') {
     assertPromotion(record.promotion);
   }
+}
+
+function assertReviewHandoff(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid scoped completion report: reviewHandoff must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const flows = new Set(['small-task-implementer', 'scoped-implementation', 'spec-implementer', 'issue-tree-child', 'other']);
+  const risks = new Set(['low', 'medium', 'high']);
+  if (typeof record.flowUsed !== 'string' || !flows.has(record.flowUsed)) {
+    throw new Error('Invalid scoped completion report: reviewHandoff.flowUsed is malformed');
+  }
+  if (typeof record.riskLevel !== 'string' || !risks.has(record.riskLevel)) {
+    throw new Error('Invalid scoped completion report: reviewHandoff.riskLevel is malformed');
+  }
+  assertStringArray(record.implementedContract, 'reviewHandoff.implementedContract');
+  assertStringArray(record.proofByAcceptanceCriteria, 'reviewHandoff.proofByAcceptanceCriteria');
+  assertStringArray(record.reviewFocus, 'reviewHandoff.reviewFocus');
+  assertStringArray(record.humanReviewChecklist, 'reviewHandoff.humanReviewChecklist');
 }
 
 function assertPlanAutoCompletionReport(value: unknown): asserts value is PlanAutoCompletionReport {
@@ -120,11 +167,37 @@ function assertPlanAutoCompletionReport(value: unknown): asserts value is PlanAu
   }
   assertPlanParent(record.parent);
   assertPlanGraph(record.graph);
+  if ('sizeRisk' in record) {
+    assertPlanSizeRisk(record.sizeRisk);
+  }
+  if ('parentReviewHandoff' in record) {
+    assertParentReviewHandoff(record.parentReviewHandoff);
+  }
   assertStringArray(record.residualRisks, 'residualRisks', 'Invalid plan-auto completion report');
   const graphValidation = validatePlanGraph(record.graph);
   if (!graphValidation.ok) {
     throw new Error(`Invalid plan-auto completion report: ${graphValidation.errors.join('; ')}`);
   }
+}
+
+function assertPlanSizeRisk(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: sizeRisk must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  assertStringArray(record.small, 'sizeRisk.small', 'Invalid plan-auto completion report');
+  assertStringArray(record.medium, 'sizeRisk.medium', 'Invalid plan-auto completion report');
+  assertStringArray(record.high, 'sizeRisk.high', 'Invalid plan-auto completion report');
+}
+
+function assertParentReviewHandoff(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid plan-auto completion report: parentReviewHandoff must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  assertStringArray(record.risks, 'parentReviewHandoff.risks', 'Invalid plan-auto completion report');
+  assertStringArray(record.proofStrategy, 'parentReviewHandoff.proofStrategy', 'Invalid plan-auto completion report');
+  assertStringArray(record.humanReviewFocus, 'parentReviewHandoff.humanReviewFocus', 'Invalid plan-auto completion report');
 }
 
 function assertPlanParent(value: unknown): void {

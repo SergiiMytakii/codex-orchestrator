@@ -105,6 +105,16 @@ function completedReport(): PlanAutoCompletionReport {
       edges: [{ from: 'child-a', to: 'child-b', reason: 'B follows A' }],
       specGate: 'wave-level',
     },
+    sizeRisk: {
+      small: ['child-a'],
+      medium: ['child-b'],
+      high: [],
+    },
+    parentReviewHandoff: {
+      risks: ['Child B depends on Child A integration ordering.'],
+      proofStrategy: ['Run final configured checks after merging child branches.'],
+      humanReviewFocus: ['Inspect parent integration diff and child dependency order.'],
+    },
     residualRisks: [],
   };
 }
@@ -184,8 +194,13 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.match(result.childIssues[0]?.body ?? '', /Stable ID: child-a/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Parent issue: #156/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Planning risk\/proof:/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Child B depends on Child A integration ordering/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /size\/risk: small=child-a; medium=child-b; high=none/);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts:[\s\S]*#157 none/);
   assert.match(result.reportComment, /codex-orchestrator issue-tree review report for #156/);
+  assert.match(result.reportComment, /Planning Risk\/Proof/);
+  assert.match(result.reportComment, /Inspect parent integration diff and child dependency order/);
   assert.match(result.reportComment, /Proof Artifacts[\s\S]*#157 none/);
   assert.match(result.reportComment, /Child Loop Outcomes[\s\S]*#157: outcome: review-ready/);
   assert.match(
