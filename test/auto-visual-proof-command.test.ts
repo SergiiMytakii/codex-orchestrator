@@ -78,6 +78,26 @@ test('visual-proof auto honors explicit non-visual proof contract without runnin
   assert.equal(result.target, 'none');
 });
 
+test('visual-proof auto honors markdown bullet non-visual proof contract', async () => {
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '264', '--target', '/tmp/backend'],
+    config: validConfig,
+    env: {
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'docs/contracts/live-challenge-results-v1.fixture.json',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Contract fixture',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: '- Proof Strategy: non-visual-smoke\n- Automated: parse fixture JSON.',
+    },
+    browserRunner: async () => {
+      throw new Error('browser proof should not run for markdown bullet non-visual proof strategy');
+    },
+    mobileRunner: async () => {
+      throw new Error('mobile proof should not run for markdown bullet non-visual proof strategy');
+    },
+  });
+
+  assert.equal(result.target, 'none');
+});
+
 test('visual-proof auto accepts backend-only acceptance proof without browser or mobile dispatch', async () => {
   const result = await runAutoVisualProofCommand({
     args: ['--issue', '263', '--target', '/tmp/backend'],

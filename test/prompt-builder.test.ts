@@ -412,6 +412,7 @@ test('issue-tree child prompt includes parent, child, dependencies, workflow, sa
   assert.match(prompt, /must not commit, push, merge, open pull requests/);
   assert.match(prompt, /Safety Contract/);
   assert.match(prompt, /Completion Report Contract/);
+  assert.match(prompt, /Do not request promotion merely because a runner-owned proof command was not executed in-session/);
   assert.match(prompt, /\/report\.json/);
 });
 

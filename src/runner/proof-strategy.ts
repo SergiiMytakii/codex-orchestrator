@@ -21,7 +21,9 @@ export function resolveAcceptanceProofStrategy(input: {
 }
 
 export function parseIssueProofStrategy(text: string): AcceptanceProofStrategy | undefined {
-  const match = text.match(/(?:^|\n)\s*(?:proof\s*strategy|proofStrategy)\s*:\s*([a-z-]+)\s*(?:\n|$)/iu);
+  const match = text.match(
+    /(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?(?:proof\s*strategy|proofStrategy)(?:\*\*)?\s*:\s*([a-z-]+)\s*(?:\n|$)/iu,
+  );
   const value = match?.[1]?.toLowerCase();
   return acceptanceProofStrategies.includes(value as AcceptanceProofStrategy)
     ? value as AcceptanceProofStrategy
