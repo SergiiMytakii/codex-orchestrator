@@ -554,8 +554,13 @@ Recoverable runs are classified with explicit states:
 - `completed-pending-handoff` means the completed report, worktree, branch, and
   base evidence are sufficient to retry runner-owned publication.
 - `failed-pending-block` means the stale runner-owned run cannot satisfy
-  publication preconditions and should be moved to `agent:blocked` with
-  concrete evidence.
+  publication preconditions and should be moved to `agent:blocked` with concrete
+  evidence. Missing completion reports get one bounded recovery retry first when
+  `missing-completion-report` is configured as retryable, the stale attempt has
+  remaining rework budget, same-host stale ownership is proven, and the branch
+  has no committed, staged, unstaged, or untracked changes since the recovered
+  base SHA. If any of those checks fail, recovery blocks instead of resetting or
+  building on unreported work.
 - `unknown-or-foreign` means ownership or safety cannot be proven, so the runner
   does not mutate GitHub.
 

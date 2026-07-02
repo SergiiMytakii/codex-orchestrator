@@ -64,6 +64,15 @@ export interface ScopedAutoCommandOptions {
   now?: Date;
 }
 
+export interface ScopedRecoveryRetryOptions extends ScopedAutoCommandOptions {
+  issue: GitHubIssue;
+  startAttempt: number;
+  initialRework: {
+    attempt: number;
+    blockedReasons: string[];
+  };
+}
+
 export interface ScopedAutoCommandResult {
   issueNumber: number;
   branchName: string;
@@ -77,6 +86,28 @@ export interface ScopedAutoCommandResult {
 }
 
 export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): Promise<ScopedAutoCommandResult> {
+  return runScopedAutoCommandInternal(options);
+}
+
+export async function runScopedRecoveryRetry(options: ScopedRecoveryRetryOptions): Promise<ScopedAutoCommandResult> {
+  return runScopedAutoCommandInternal(options, {
+    issue: options.issue,
+    startAttempt: options.startAttempt,
+    initialRework: options.initialRework,
+  });
+}
+
+async function runScopedAutoCommandInternal(
+  options: ScopedAutoCommandOptions,
+  recovery?: {
+    issue: GitHubIssue;
+    startAttempt: number;
+    initialRework: {
+      attempt: number;
+      blockedReasons: string[];
+    };
+  },
+): Promise<ScopedAutoCommandResult> {
   const targetRoot = resolve(options.targetRoot);
   const now = options.now ?? new Date();
   const config = await readRunnerConfig(targetRoot);
@@ -86,16 +117,22 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
   const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(config);
   const resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
-  const issue = await issueAdapter.getIssue(options.issueNumber);
+  const issue = recovery?.issue ?? await issueAdapter.getIssue(options.issueNumber);
 
   if (!issue) {
     throw new Error(`Issue #${options.issueNumber} was not found`);
   }
 
-  const decision = discoverIssueWork([issue], config)[0];
-  if (!decision || decision.kind !== 'eligible' || decision.mode !== 'scoped-issue') {
-    const reason = decision?.kind === 'skipped' ? decision.reason : 'not scoped agent:auto';
-    throw new Error(`Issue #${options.issueNumber} is not eligible for scoped agent:auto execution: ${reason}`);
+  if (issue.number !== options.issueNumber) {
+    throw new Error(`Recovery issue #${issue.number} does not match scoped issue #${options.issueNumber}`);
+  }
+
+  if (!recovery) {
+    const decision = discoverIssueWork([issue], config)[0];
+    if (!decision || decision.kind !== 'eligible' || decision.mode !== 'scoped-issue') {
+      const reason = decision?.kind === 'skipped' ? decision.reason : 'not scoped agent:auto';
+      throw new Error(`Issue #${options.issueNumber} is not eligible for scoped agent:auto execution: ${reason}`);
+    }
   }
 
   const workflowPath = config.workflows.scopedImplementation.promptPath;
@@ -121,15 +158,17 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
   const store = new RunnerStateStore(targetRoot, config);
   const events = new RunnerLifecycleEventStore(targetRoot, config);
 
-  await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
-  await safeAppendEvent(events, {
-    timestamp: now,
-    issueNumber: options.issueNumber,
-    mode: 'scoped-issue',
-    phase: 'scoped-issue',
-    status: 'started',
-    summary: 'Issue claimed for scoped autonomous work.',
-  });
+  if (!recovery) {
+    await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
+    await safeAppendEvent(events, {
+      timestamp: now,
+      issueNumber: options.issueNumber,
+      mode: 'scoped-issue',
+      phase: 'scoped-issue',
+      status: 'started',
+      summary: 'Issue claimed for scoped autonomous work.',
+    });
+  }
 
   try {
     await git.ensureIssueWorktree({
@@ -144,10 +183,10 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       config.loopPolicy.rework.maxAttempts,
       config.reviewGates.acceptanceProof.maxIterations - 1,
     );
-    let rework: { attempt: number; blockedReasons: string[] } | undefined;
+    let rework: { attempt: number; blockedReasons: string[] } | undefined = recovery?.initialRework;
     let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
 
-    for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
+    for (let attempt = recovery?.startAttempt ?? 0; attempt <= maxReworkAttempts; attempt++) {
       const attemptNow = attempt === 0 ? now : new Date(now.getTime() + attempt);
       sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}`;
       promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });

@@ -27,8 +27,14 @@ import {
 import {
   finishScopedBlockedHandoff,
   finishScopedReviewReadyHandoff,
+  runScopedRecoveryRetry,
   type ScopedAutoCommandResult,
 } from './scoped-auto-command.js';
+import {
+  maxReworkAttemptsForReasons,
+  MISSING_COMPLETION_REPORT_REASON,
+  shouldRequestImplementationRework,
+} from './rework-policy.js';
 
 export const SCOPED_RECOVERY_LEASE_STALE_MS = 30 * 60 * 1000;
 export const SCOPED_RECOVERY_BLOCKED_MARKER_PREFIX = '<!-- codex-orchestrator:recovery-blocked';
@@ -206,6 +212,27 @@ export async function recoverScopedRun(input: RecoverScopedRunInput): Promise<Sc
     });
   }
   if (scoped.status === 'failed-pending-block') {
+    if (scoped.reportState === 'missing') {
+      const retryResult = await recoverMissingCompletionReport({
+        targetRoot,
+        config,
+        run,
+        issue,
+        classification: { ...scoped, beforeHead: scoped.beforeHead },
+        issueAdapter,
+        pullRequestAdapter,
+        git,
+        codexAdapter,
+        shellExecutor,
+        localPhases: input.localPhases,
+        localPhaseExecutor: input.localPhaseExecutor,
+        now,
+        localHost: (input.hostname ?? osHostname)(),
+      });
+      if (retryResult) {
+        return retryResult;
+      }
+    }
     return blockRecoveredRun({
       targetRoot,
       config,
@@ -223,6 +250,68 @@ export async function recoverScopedRun(input: RecoverScopedRunInput): Promise<Sc
   }
 
   return { status: 'not-recoverable', classification: scoped };
+}
+
+async function recoverMissingCompletionReport(input: {
+  targetRoot: string;
+  config: CodexOrchestratorConfig;
+  run: RunnerProcessMetadata;
+  issue: GitHubIssue;
+  classification: ScopedRecoveryClassification & { beforeHead: string };
+  issueAdapter: GitHubIssueAdapter;
+  pullRequestAdapter: GitHubPullRequestAdapter;
+  git: GitWorktreeManager;
+  codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
+  shellExecutor: ShellCommandExecutor;
+  localPhases?: string[];
+  localPhaseExecutor?: LocalExecutionPhaseExecutor;
+  now: Date;
+  localHost: string;
+}): Promise<ScopedRecoveryRunResult | undefined> {
+  const reasons = [MISSING_COMPLETION_REPORT_REASON];
+  const startAttempt = input.run.retryCount + 1;
+  if (
+    input.run.host !== input.localHost
+    || typeof input.run.ownerPid !== 'number'
+    || !Number.isInteger(input.run.ownerPid)
+    || startAttempt > maxReworkAttemptsForReasons(reasons, input.config)
+    || !shouldRequestImplementationRework(reasons, input.config)
+  ) {
+    return undefined;
+  }
+
+  let changeSet: Awaited<ReturnType<GitWorktreeManager['collectSessionChangeSet']>>;
+  try {
+    changeSet = await input.git.collectSessionChangeSet({
+      worktreePath: input.run.workspacePath,
+      baseHead: input.classification.beforeHead,
+    });
+  } catch {
+    return undefined;
+  }
+  if (changeSet.hasChanges) {
+    return undefined;
+  }
+
+  const result = await runScopedRecoveryRetry({
+    targetRoot: input.targetRoot,
+    issueNumber: input.run.issueNumber,
+    issueAdapter: input.issueAdapter,
+    pullRequestAdapter: input.pullRequestAdapter,
+    git: input.git,
+    codexAdapter: input.codexAdapter,
+    localPhases: input.localPhases,
+    localPhaseExecutor: input.localPhaseExecutor,
+    shellExecutor: input.shellExecutor,
+    now: input.now,
+    issue: input.issue,
+    startAttempt,
+    initialRework: {
+      attempt: startAttempt,
+      blockedReasons: reasons,
+    },
+  });
+  return { ...result, recovered: true, classification: input.classification };
 }
 
 export function defaultProcessProbe(pid: number): ProcessProbeResult {

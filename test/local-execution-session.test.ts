@@ -296,6 +296,11 @@ test('implementation publishability blocks product-code changes created during a
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /product-code changes during acceptance proof/i);
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /src\/feature\.ts/);
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /src\/proof-side-effect\.ts/);
+  assert.equal(result.status === 'blocked' ? result.acceptanceProofAttempt?.status : undefined, 'blocked');
+  assert.match(
+    result.status === 'blocked' ? result.acceptanceProofAttempt?.blockers.join('\n') ?? '' : '',
+    /product-code changes during acceptance proof/i,
+  );
 });
 
 test('implementation publishability drops non-applicable runner visual proof skips for internal proof-runner changes', async () => {

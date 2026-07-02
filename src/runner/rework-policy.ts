@@ -1,5 +1,10 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 
+export const MISSING_COMPLETION_REPORT_REASON =
+  'Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove safety contract.';
+
+const missingCompletionReportPattern = new RegExp(escapeRegex(MISSING_COMPLETION_REPORT_REASON), 'iu');
+
 const nonRetryableBlockerPatterns = [
   /matches denied pattern/iu,
   /runner-owned publication was violated/iu,
@@ -12,7 +17,7 @@ const retryableBlockerPatterns = [
   ['failed-acceptance-proof', /Acceptance proof/iu],
   ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],
-  ['missing-completion-report', /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/iu],
+  ['missing-completion-report', missingCompletionReportPattern],
   ['no-changed-files', /Codex completed without file changes/iu],
 ] as const;
 
@@ -32,4 +37,8 @@ export function maxReworkAttemptsForReasons(reasons: string[], config: CodexOrch
     return Math.max(0, config.reviewGates.acceptanceProof.maxIterations - 1);
   }
   return config.loopPolicy.rework.maxAttempts;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

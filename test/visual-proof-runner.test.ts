@@ -369,6 +369,84 @@ test('runner visual proof evaluates machine-readable acceptance proof reports', 
   }]);
 });
 
+test('runner visual proof exposes needs-rework acceptance proof evidence', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-'));
+
+  const shellExecutor: ShellCommandExecutor = async (_command, options) => {
+    const proofReportPath = options?.env?.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
+    const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
+    assert.ok(proofReportPath);
+    assert.ok(proofDir);
+    await writeFile(join(proofDir, 'smoke-output.txt'), 'missing expected behavior\n', 'utf8');
+    await writeFile(proofReportPath, JSON.stringify({
+      status: 'needs-rework',
+      criteria: [{
+        id: 'ac-1',
+        description: 'CLI smoke proves behavior.',
+        status: 'failed',
+        confidence: 'high',
+        reasoningSummary: 'Smoke output shows the behavior is still missing.',
+        artifactRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+      }],
+      artifacts: [{
+        type: 'smoke-output',
+        path: '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+        description: 'CLI smoke output',
+      }],
+      proofPhaseDiff: {
+        allowedProofPaths: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+        forbiddenProductPaths: [],
+      },
+      reworkRequest: {
+        summary: 'CLI behavior is still missing.',
+        requiredChanges: ['Make the command print the expected value.'],
+        evidenceRefs: ['.codex-orchestrator/proofs/issue-155/smoke-output.txt'],
+      },
+      residualRisks: ['proof is based on a local smoke fixture'],
+    }), 'utf8');
+    return { stdout: 'needs rework', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runRunnerVisualProof({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'node proof.mjs',
+          issueTextPatterns: ['acceptance proof'],
+        },
+      },
+    },
+    issue: issueFixture({ number: 155, title: 'Acceptance proof for CLI smoke', body: 'Needs acceptance proof.' }),
+    issueNumber: 155,
+    worktreePath,
+    changedFiles: ['src/cli.ts'],
+    report: {
+      status: 'completed',
+      changes: [],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+    shellExecutor,
+  });
+
+  assert.equal(result.validation[0]?.status, 'failed');
+  assert.equal(result.acceptanceProofAttempt?.status, 'needs-rework');
+  assert.deepEqual(result.acceptanceProofAttempt?.artifactPaths, [
+    '.codex-orchestrator/proofs/issue-155/smoke-output.txt',
+  ]);
+  assert.match(result.acceptanceProofAttempt?.blockers.join('\n') ?? '', /CLI behavior is still missing/);
+  assert.deepEqual(result.acceptanceProofAttempt?.reworkRequest?.requiredChanges, [
+    'Make the command print the expected value.',
+  ]);
+  assert.deepEqual(result.acceptanceProofAttempt?.residualRisks, ['proof is based on a local smoke fixture']);
+});
+
 test('runner visual proof accepts backend-only package-owned auto proof with an existing non-visual report', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-backend-proof-'));
   const proofDir = join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-263');

@@ -46,6 +46,7 @@ async function tempGitProject(): Promise<{ repo: string; baseSha: string; worktr
   await execFileAsync('git', ['-C', repo, 'push', '-u', 'origin', 'main']);
   await mkdir(join(repo, '.codex-orchestrator'), { recursive: true });
   await writeFile(join(repo, '.codex-orchestrator', 'config.json'), `${JSON.stringify(validConfig, null, 2)}\n`, 'utf8');
+  await writeWorkflowPrompts(repo);
   const baseSha = (await execFileAsync('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
   const worktreePath = join(repo, validConfig.runner.workspaceRoot, 'issue-155');
   await new GitWorktreeManager().createIssueWorktree({
@@ -55,6 +56,20 @@ async function tempGitProject(): Promise<{ repo: string; baseSha: string; worktr
     baseBranch: 'main',
   });
   return { repo, baseSha, worktreePath };
+}
+
+async function writeWorkflowPrompts(repo: string): Promise<void> {
+  const promptPaths = [
+    validConfig.workflows.scopedImplementation.promptPath,
+    validConfig.workflows.acceptanceProof.promptPath,
+  ];
+  for (const promptPath of promptPaths) {
+    if (!promptPath) {
+      throw new Error('workflow prompt path fixture is missing');
+    }
+    await mkdir(dirname(join(repo, promptPath)), { recursive: true });
+    await writeFile(join(repo, promptPath), 'workflow prompt\n', 'utf8');
+  }
 }
 
 function metadata(input: Partial<RunnerProcessMetadata> = {}): RunnerProcessMetadata {
@@ -481,6 +496,363 @@ test('recovery blocks when fresh-context review reports high-confidence policy v
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.blocked.name] });
   assert.match(result.reportComment, /Fresh-Context Review blocked publication/);
   assert.match(result.reportComment, /Recovered result violates handoff policy/);
+});
+
+test('retries stale missing completion report as next scoped attempt before blocking', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const phases: string[] = [];
+  const prompts: string[] = [];
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      phases.push(input.phase ?? '');
+      prompts.push(input.promptText);
+      await writeFile(join(input.worktreePath, 'feature.txt'), 'retried\n', 'utf8');
+      await writeCompletedReport(input.reportPath);
+      return { stdout: 'retry completed', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.deepEqual(phases, ['scoped-issue']);
+  assert.match(prompts[0] ?? '', /automatic rework attempt \(#1\)/);
+  assert.match(prompts[0] ?? '', /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/);
+  assert.equal(issueAdapter.postedComments.some((comment) => comment.body.includes('claimed #155')), false);
+  assert.equal(issueAdapter.postedComments.some((comment) => comment.body.includes('recovery-blocked')), false);
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+  assert.deepEqual((await new RunnerStateStore(repo, validConfig).load()).runs, []);
+  assert.equal(await readFile(join(worktreePath, 'feature.txt'), 'utf8'), 'retried\n');
+});
+
+test('recovery missing completion report blocks when retry budget is exhausted', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: validConfig.loopPolicy.rework.maxAttempts,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+  assert.equal(issueAdapter.postedComments.length, 1);
+  assert.match(issueAdapter.postedComments[0]?.body ?? '', /recovery-blocked/);
+  assert.equal((await new RunnerStateStore(repo, validConfig).load()).runs[0]?.lastRecoveredAt, now.toISOString());
+});
+
+test('recovery missing completion report blocks when policy disables retry', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  const config = {
+    ...validConfig,
+    loopPolicy: {
+      ...validConfig.loopPolicy,
+      rework: {
+        ...validConfig.loopPolicy.rework,
+        retryableBlockers: validConfig.loopPolicy.rework.retryableBlockers
+          .filter((blocker) => blocker !== 'missing-completion-report'),
+      },
+    },
+  };
+  await writeFile(join(repo, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  await new RunnerStateStore(repo, config).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+  assert.match(result.reportComment, /Recovered scoped run is stale, but the completion report is missing/);
+});
+
+test('recovery missing completion report blocks when stale attempt left uncommitted changes', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await writeFile(join(worktreePath, 'dirty.txt'), 'unreported\n', 'utf8');
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+  assert.match(result.reportComment, /Recovered scoped run is stale, but the completion report is missing/);
+});
+
+test('recovery missing completion report blocks when stale attempt left staged changes', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await writeFile(join(worktreePath, 'staged.txt'), 'unreported staged\n', 'utf8');
+  await execFileAsync('git', ['-C', worktreePath, 'add', 'staged.txt']);
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+});
+
+test('recovery missing completion report blocks when stale attempt left tracked unstaged changes', async () => {
+  const { repo, worktreePath } = await tempGitProject();
+  await writeFile(join(worktreePath, 'tracked.txt'), 'tracked\n', 'utf8');
+  await execFileAsync('git', ['-C', worktreePath, 'add', 'tracked.txt']);
+  await execFileAsync('git', ['-C', worktreePath, 'commit', '-m', 'Add tracked fixture']);
+  const trackedBaseSha = (await execFileAsync('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).stdout.trim();
+  await writeFile(join(worktreePath, 'tracked.txt'), 'tracked changed without report\n', 'utf8');
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha: trackedBaseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+});
+
+test('recovery missing completion report blocks when stale attempt left committed changes', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await writeFile(join(worktreePath, 'committed.txt'), 'unreported commit\n', 'utf8');
+  await execFileAsync('git', ['-C', worktreePath, 'add', 'committed.txt']);
+  await execFileAsync('git', ['-C', worktreePath, 'commit', '-m', 'Unreported stale work']);
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: hostname(),
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'daemon',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+  assert.match(result.reportComment, /Recovered scoped run is stale, but the completion report is missing/);
+});
+
+test('targeted recovery missing completion report does not retry cross-host stale runs', async () => {
+  const { repo, baseSha, worktreePath } = await tempGitProject();
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [metadata({
+      workspacePath: worktreePath,
+      reportPath: join(repo, 'missing-report.json'),
+      logPath: join(repo, 'missing-run.log'),
+      host: 'other-host',
+      ownerPid: 99999999,
+      baseSha,
+      retryCount: 0,
+    })],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] }),
+  ]);
+  let codexRuns = 0;
+
+  const result = await recoverScopedRun({
+    targetRoot: repo,
+    issueNumber: 155,
+    invocation: 'targeted',
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: {
+      async run(): Promise<CodexCommandRunResult> {
+        codexRuns += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      },
+    },
+    now,
+    hostname: () => 'local-host',
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(codexRuns, 0);
+  assert.match(result.reportComment, /Recovered scoped run is stale, but the completion report is missing/);
 });
 
 test('recovery blocked comment uses stable marker and is not duplicated', async () => {

@@ -20,6 +20,7 @@ import {
   shouldRunAcceptanceProofAttempt,
   type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof-runner.js';
+import { MISSING_COMPLETION_REPORT_REASON } from './rework-policy.js';
 
 export interface LocalExecutionPhaseInput {
   phaseId: string;
@@ -148,7 +149,7 @@ export async function runImplementationPublishabilityCheck(
   try {
     const reportResult = await readScopedCompletionReport(input.reportPath);
     if (reportResult.kind === 'missing') {
-      return blocked(['Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove safety contract.']);
+      return blocked([MISSING_COMPLETION_REPORT_REASON]);
     }
     report = reportResult.report;
   } catch (error) {
