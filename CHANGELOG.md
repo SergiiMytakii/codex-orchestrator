@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-07-02
+
+### Added
+- Added risk-routing review gates so runner handoffs can require plan review,
+  cleanup review, or code review evidence before publication.
+- Added risk and review-gate metadata to scoped, parent, and child orchestration
+  handoffs so downstream agents inherit the correct validation expectations.
+
+### Changed
+- Updated bundled workflow prompts to report risk classification and review-gate
+  completion consistently across PRD, issue breakdown, scoped implementation,
+  parent orchestration, and Acceptance Proof flows.
+
 ## [0.1.37] - 2026-07-01
 
 ### Changed

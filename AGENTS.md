@@ -71,11 +71,11 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.37` (2026-07-01):
-  - Publishability checks ignore runner-owned visual proof skip notes when the
-    changed files do not require the visual proof gate.
-  - Local self-improvement daily phase summaries share one helper for failure
-    classification, exit-code impact, and summary rendering.
+- `0.1.38` (2026-07-02):
+  - Risk-routing review gates require the right plan, cleanup, or code-review
+    evidence before runner publication.
+  - Scoped, parent, and child handoffs now carry risk and review-gate metadata
+    through bundled workflow prompts.
 
 ## Final Response
 
