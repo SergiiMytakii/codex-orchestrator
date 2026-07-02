@@ -9,6 +9,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 600_000;
+const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
+  ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
+const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
   ['baseline', runBaselineScenario],
@@ -72,11 +75,12 @@ async function main() {
     acceptanceProofPath: '',
     targetRoot: '',
     cliPath: '',
-    repo: options.repo ?? await inferRepo(),
+    repo: options.repo,
   };
 
   await appendReport(context, `# Live smoke ${runId}\n\nRepo: ${context.repo}\n\n`);
 
+  let runFailure;
   try {
     context.cliPath = await preparePackagedCli(context);
     context.fakeAgentPath = await writeFakeAgent(root);
@@ -99,11 +103,23 @@ async function main() {
 
     await appendReport(context, '## Result\n\nAll selected live smoke scenarios passed.\n');
     process.stdout.write(`\n[live-smoke] passed. Report: ${reportPath}\n`);
+  } catch (error) {
+    runFailure = error;
+    throw error;
   } finally {
     if (options.cleanup) {
-      await cleanupGitHubArtifacts(context);
+      try {
+        await cleanupGitHubArtifacts(context);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await appendReport(context, `\nCleanup failed: ${message}\n`);
+        if (!runFailure) {
+          throw error;
+        }
+        process.stderr.write(`[live-smoke] cleanup failed after run failure: ${message}\n`);
+      }
     } else {
-      await appendReport(context, '\n## Cleanup\n\nArtifacts kept for inspection. Run with --cleanup to close created issues and PRs.\n');
+      await appendReport(context, '\n## Cleanup\n\nArtifacts kept for inspection. Run without --keep-artifacts to clean created issues and PRs.\n');
     }
   }
 }
@@ -111,11 +127,12 @@ async function main() {
 function parseArgs(args) {
   const options = {
     scenarios: [],
-    cleanup: false,
+    cleanup: true,
+    cleanupMode: 'delete',
     skipLocalTests: false,
     keepPackageTarball: false,
     timeoutMs: defaultTimeoutMs,
-    repo: undefined,
+    repo: defaultLiveSmokeRepo,
     target: undefined,
     workDir: undefined,
     runId: undefined,
@@ -138,6 +155,14 @@ function parseArgs(args) {
       case '--repo':
         requireValue(arg, next);
         options.repo = next;
+        index += 1;
+        break;
+      case '--cleanup-mode':
+        requireValue(arg, next);
+        if (!cleanupModes.has(next)) {
+          throw new Error('--cleanup-mode must be one of: delete, close');
+        }
+        options.cleanupMode = next;
         index += 1;
         break;
       case '--target':
@@ -165,6 +190,10 @@ function parseArgs(args) {
         break;
       case '--cleanup':
         options.cleanup = true;
+        break;
+      case '--no-cleanup':
+      case '--keep-artifacts':
+        options.cleanup = false;
         break;
       case '--skip-local-tests':
         options.skipLocalTests = true;
@@ -195,12 +224,15 @@ function helpText() {
     '',
     'Options:',
     '  --scenario <name>          Run one scenario. Can be repeated.',
-    '  --repo <owner/name>        GitHub repository. Defaults to gh repo view.',
+    `  --repo <owner/name>        GitHub repository. Defaults to ${defaultLiveSmokeRepo}.`,
     '  --target <path>            Existing local target repo. Defaults to a temp clone.',
     '  --work-dir <path>          Directory for smoke temp files and report.',
     '  --run-id <id>              Stable id used in issue titles and local state paths.',
     '  --timeout-ms <number>      Per-command timeout. Default 600000.',
-    '  --cleanup                  Close created issues and PRs after the run.',
+    '  --cleanup                  Clean up created issues, PRs, and branches after the run by default.',
+    '  --cleanup-mode <mode>      Cleanup mode: delete or close. Default delete.',
+    '  --keep-artifacts           Keep created GitHub artifacts for inspection.',
+    '  --no-cleanup               Alias for --keep-artifacts.',
     '  --skip-local-tests         Skip npm test before npm pack.',
     '  --keep-package-tarball     Do not delete the npm pack tarball.',
     '',
@@ -1320,20 +1352,59 @@ async function getIssue(context, issueNumber) {
   return JSON.parse(result.stdout);
 }
 
-async function listIssuesByRunId(context) {
+async function getIssueIfExists(context, issueNumber) {
+  try {
+    return await getIssue(context, issueNumber);
+  } catch (error) {
+    if (isNotFoundCommandError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+async function getPullRequestIfExists(context, prNumber) {
+  try {
+    const result = await runCommand('gh', [
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      context.repo,
+      '--json',
+      'number,state',
+    ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    if (isNotFoundCommandError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isNotFoundCommandError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not found|Could not resolve|HTTP 404|GraphQL:.*not.*found/iu.test(message);
+}
+
+async function listIssuesByRunId(context, { state = 'open' } = {}) {
   const result = await runCommand('gh', [
     'issue',
     'list',
     '--repo',
     context.repo,
     '--state',
-    'open',
+    state,
     '--limit',
     '1000',
     '--json',
     'number,title,body,url,state,labels,comments',
   ], { timeoutMs: context.options.timeoutMs, retryTransient: true });
-  return JSON.parse(result.stdout).filter((issue) => issue.title.includes(`[live-smoke:${context.runId}]`));
+  return JSON.parse(result.stdout).filter((issue) =>
+    issue.title.includes(`[live-smoke:${context.runId}]`)
+      || issue.body?.includes(`LIVE_SMOKE_RUN_ID: ${context.runId}`),
+  );
 }
 
 async function findPullRequestByBranch(context, branchName) {
@@ -1386,30 +1457,56 @@ function assertIssueHasComment(issue, text) {
 async function cleanupGitHubArtifacts(context) {
   await appendReport(context, '\n## Cleanup\n\n');
   await discoverCreatedArtifacts(context);
+  const failures = [];
   for (const prNumber of [...new Set(context.createdPullRequests)].reverse()) {
-    await bestEffort(context, `close PR #${prNumber}`, async () => {
-      await runCommand('gh', ['pr', 'close', String(prNumber), '--repo', context.repo, '--comment', `[live-smoke:${context.runId}] cleanup`], {
+    const failure = await bestEffort(context, `close PR #${prNumber}`, async () => {
+      await runCommand('gh', [
+        'pr',
+        'close',
+        String(prNumber),
+        '--repo',
+        context.repo,
+        '--comment',
+        `[live-smoke:${context.runId}] cleanup`,
+        '--delete-branch',
+      ], {
         timeoutMs: context.options.timeoutMs,
       });
     });
+    if (failure) {
+      failures.push(failure);
+    }
   }
   for (const branchName of [...new Set(context.createdBranches)].reverse()) {
-    await bestEffort(context, `delete branch ${branchName}`, async () => {
-      await runCommand('git', ['-C', context.targetRoot, 'push', 'origin', '--delete', branchName], {
-        timeoutMs: context.options.timeoutMs,
-      });
+    const failure = await bestEffort(context, `delete branch ${branchName}`, async () => {
+      await deleteRemoteBranchIfExists(context, branchName);
     });
+    if (failure) {
+      failures.push(failure);
+    }
   }
   for (const issueNumber of [...new Set(context.createdIssues)].reverse()) {
-    await bestEffort(context, `close issue #${issueNumber}`, async () => {
-      await closeIssue(context, issueNumber, 'cleanup');
+    const action = context.options.cleanupMode === 'delete' ? 'delete' : 'close';
+    const failure = await bestEffort(context, `${action} issue #${issueNumber}`, async () => {
+      if (context.options.cleanupMode === 'delete') {
+        await deleteIssue(context, issueNumber);
+      } else {
+        await closeIssue(context, issueNumber, 'cleanup');
+      }
     });
+    if (failure) {
+      failures.push(failure);
+    }
+  }
+  failures.push(...await verifyCleanupArtifacts(context));
+  if (failures.length > 0) {
+    throw new Error(`Live smoke cleanup incomplete:\n${failures.join('\n')}`);
   }
 }
 
 async function discoverCreatedArtifacts(context) {
   try {
-    const issues = await listIssuesByRunId(context);
+    const issues = await listIssuesByRunId(context, { state: 'all' });
     for (const issue of issues) {
       context.createdIssues.push(issue.number);
     }
@@ -1429,7 +1526,7 @@ async function discoverCreatedArtifacts(context) {
       '--json',
       'number,headRefName',
       '--limit',
-      '100',
+      '1000',
     ], { timeoutMs: context.options.timeoutMs });
     for (const pullRequest of JSON.parse(result.stdout)) {
       context.createdPullRequests.push(pullRequest.number);
@@ -1446,22 +1543,72 @@ async function bestEffort(context, label, fn) {
   try {
     await fn();
     await appendReport(context, `- ${label}: done\n`);
+    return undefined;
   } catch (error) {
-    await appendReport(context, `- ${label}: failed - ${error instanceof Error ? error.message : String(error)}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    await appendReport(context, `- ${label}: failed - ${message}\n`);
+    return `${label}: ${message}`;
   }
 }
 
-async function inferRepo() {
-  const result = await runCommand('gh', ['repo', 'view', '--json', 'nameWithOwner'], {
-    cwd: sourceRoot,
-    timeoutMs: defaultTimeoutMs,
-    retryTransient: true,
-  });
-  const parsed = JSON.parse(result.stdout);
-  if (typeof parsed.nameWithOwner !== 'string') {
-    throw new Error('Could not infer GitHub repo from gh repo view');
+async function deleteIssue(context, issueNumber) {
+  await runCommand('gh', [
+    'issue',
+    'delete',
+    String(issueNumber),
+    '--repo',
+    context.repo,
+    '--yes',
+  ], { timeoutMs: context.options.timeoutMs });
+}
+
+async function deleteRemoteBranchIfExists(context, branchName) {
+  const output = await gitOutput(context.targetRoot, ['ls-remote', '--heads', 'origin', branchName]);
+  if (!output.includes(branchName)) {
+    return;
   }
-  return parsed.nameWithOwner;
+  await runCommand('git', ['-C', context.targetRoot, 'push', 'origin', '--delete', branchName], {
+    timeoutMs: context.options.timeoutMs,
+  });
+}
+
+async function verifyCleanupArtifacts(context) {
+  const failures = [];
+  const openIssues = await listIssuesByRunId(context, { state: 'open' });
+  if (openIssues.length > 0) {
+    failures.push(`open live-smoke issues remain: ${openIssues.map((issue) => `#${issue.number}`).join(', ')}`);
+  }
+
+  for (const issueNumber of [...new Set(context.createdIssues)]) {
+    const issue = await getIssueIfExists(context, issueNumber);
+    if (context.options.cleanupMode === 'delete' && issue) {
+      failures.push(`issue #${issueNumber} still exists after delete-mode cleanup`);
+    }
+    if (context.options.cleanupMode === 'close' && issue?.state === 'OPEN') {
+      failures.push(`issue #${issueNumber} is still open after close-mode cleanup`);
+    }
+  }
+
+  for (const prNumber of [...new Set(context.createdPullRequests)]) {
+    const pullRequest = await getPullRequestIfExists(context, prNumber);
+    if (pullRequest?.state === 'OPEN') {
+      failures.push(`PR #${prNumber} is still open after cleanup`);
+    }
+  }
+
+  for (const branchName of [...new Set(context.createdBranches)]) {
+    const output = await gitOutput(context.targetRoot, ['ls-remote', '--heads', 'origin', branchName]);
+    if (output.includes(branchName)) {
+      failures.push(`remote branch ${branchName} still exists after cleanup`);
+    }
+  }
+
+  if (failures.length === 0) {
+    await appendReport(context, '- cleanup verification: passed\n');
+  } else {
+    await appendReport(context, `- cleanup verification: failed - ${failures.join('; ')}\n`);
+  }
+  return failures;
 }
 
 async function defaultBranchFor(repo) {

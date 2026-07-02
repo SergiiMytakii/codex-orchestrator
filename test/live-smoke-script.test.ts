@@ -54,3 +54,13 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
   assert.match(result.stdout, /plan-auto-blocking/);
   assert.match(result.stdout, /package-install/);
 });
+
+test('live smoke help documents scratch repo and strict cleanup defaults', async () => {
+  const result = await runLiveSmokeHelp();
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Defaults to SergiiMytakii\/codex-orchestrator-live-smoke/);
+  assert.match(result.stdout, /Clean up created issues, PRs, and branches after the run by default/);
+  assert.match(result.stdout, /--cleanup-mode <mode>\s+Cleanup mode: delete or close\. Default delete/);
+  assert.match(result.stdout, /--keep-artifacts\s+Keep created GitHub artifacts for inspection/);
+});

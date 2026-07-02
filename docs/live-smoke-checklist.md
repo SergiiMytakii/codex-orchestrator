@@ -1,37 +1,46 @@
 # Live smoke checklist
 
-This checklist verifies `codex-orchestrator` against this repository as the
-target repository. It is intentionally broader than issue #11: the goal is to
-prove the full package flow through the packaged CLI, real GitHub Issues, real
-labels, real daemon polling, real branches, real draft PRs, local runner state,
-worktrees, logs, review gates, and cleanup behavior.
+This checklist verifies `codex-orchestrator` against a dedicated scratch GitHub
+repository by default: `SergiiMytakii/codex-orchestrator-live-smoke`. It is
+intentionally broader than issue #11: the goal is to prove the full package flow
+through the packaged CLI, real GitHub Issues, real labels, real daemon polling,
+real branches, real draft PRs, local runner state, worktrees, logs, review
+gates, and cleanup behavior without polluting the source repository.
 
 The default `npm run smoke:live` run is the publish-gate smoke. It packages the
 current code with `npm pack`, runs the packaged CLI, creates real GitHub Issues,
-and verifies the runner-owned GitHub handoff. This checklist tracks what is now
-automated and what remains a manual/deeper release check.
+and verifies the runner-owned GitHub handoff in the scratch repository. Cleanup
+is on by default and uses delete mode for smoke-created issues. PR records cannot
+be physically deleted by GitHub, so cleanup closes them and deletes their remote
+branches, then verifies no live smoke issues, open PRs, or remote branches remain
+for the run.
 
 Run focused subsets while developing:
 
 ```sh
-npm run smoke:live -- --scenario package-install --cleanup
-npm run smoke:live -- --scenario discovery-matrix --cleanup
-npm run smoke:live -- --scenario quality-gates --cleanup
-npm run smoke:live -- --scenario browser-proof --cleanup
-npm run smoke:live -- --scenario acceptance-proof --cleanup
-npm run smoke:live -- --scenario acceptance-proof-ui-evidence --cleanup
-npm run smoke:live -- --scenario acceptance-proof-blocking --cleanup
-npm run smoke:live -- --scenario acceptance-proof-ui-evidence-blocking --cleanup
-npm run smoke:live -- --scenario diagnostics --cleanup
-npm run smoke:live -- --scenario risk-routing --cleanup
-npm run smoke:live -- --scenario plan-auto-blocking --cleanup
+npm run smoke:live -- --scenario package-install
+npm run smoke:live -- --scenario discovery-matrix
+npm run smoke:live -- --scenario quality-gates
+npm run smoke:live -- --scenario browser-proof
+npm run smoke:live -- --scenario acceptance-proof
+npm run smoke:live -- --scenario acceptance-proof-ui-evidence
+npm run smoke:live -- --scenario acceptance-proof-blocking
+npm run smoke:live -- --scenario acceptance-proof-ui-evidence-blocking
+npm run smoke:live -- --scenario diagnostics
+npm run smoke:live -- --scenario risk-routing
+npm run smoke:live -- --scenario plan-auto-blocking
 ```
 
 Run the full publish gate before release:
 
 ```sh
-npm run smoke:live -- --cleanup
+npm run smoke:live
 ```
+
+Use `--keep-artifacts` only when a failed run needs manual GitHub inspection.
+Use `--cleanup-mode close` only when issue deletion would remove evidence needed
+for a temporary investigation. Use `--repo <owner/name>` only for an intentional
+alternate scratch repository; do not point routine smoke runs at the source repo.
 
 ## Automated scenario map
 
@@ -82,18 +91,20 @@ npm run smoke:live -- --cleanup
 
 ## Smoke contract
 
-- [ ] Run against `SergiiMytakii/codex-orchestrator`, not a synthetic repo.
+- [ ] Run against `SergiiMytakii/codex-orchestrator-live-smoke` by default, not
+      the source repository.
 - [ ] Run the packaged CLI from `npm pack`, not TypeScript source files.
 - [ ] Use real GitHub Issues and real labels through `gh`.
 - [ ] Use `codex-orchestrator daemon --once` for the primary pickup path.
 - [ ] Prove direct `codex-orchestrator run --issue` equivalence through
       `run-scoped` and `run-plan-auto`.
 - [ ] Keep all smoke-created issues and PRs clearly named with
-      `[live-smoke]`.
+      `[live-smoke:<runId>]`.
 - [ ] Do not merge smoke PRs unless the scenario explicitly checks cleanup after
       a merged PR.
 - [ ] Record every created issue number, branch, PR URL, log path, and worktree
-      path in the smoke notes.
+      path in the smoke notes, then verify cleanup removed or closed the GitHub
+      artifacts for the run.
 - [ ] Use real Codex as a required scenario in the default live smoke run.
 - [ ] Use a deterministic fake Codex command only for runner contract checks
       that would otherwise be flaky or destructive to force through an LLM.
@@ -102,8 +113,8 @@ npm run smoke:live -- --cleanup
 
 - [ ] Confirm working tree is clean enough for smoke changes:
       `git status --short`.
-- [ ] Confirm GitHub CLI is authenticated and points to the expected repo:
-      `gh repo view --json owner,name`.
+- [ ] Confirm GitHub CLI is authenticated and the scratch repo exists:
+      `gh repo view SergiiMytakii/codex-orchestrator-live-smoke --json owner,name`.
 - [ ] Build and package:
       `npm test`, `npm pack`.
 - [ ] Install or invoke the generated tarball so `codex-orchestrator --version`
