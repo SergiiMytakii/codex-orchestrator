@@ -103,6 +103,17 @@ export async function classifyScopedRecoveryRun(
   if (ownership.kind === 'same-host' && (ownership.process === 'alive' || ownership.process === 'unknown')) {
     return classification(input.run, 'active', `same-host process is ${ownership.process}`, false, beforeHead, reportState);
   }
+  if (ownership.kind === 'same-host' && ownership.process === 'missing' && reportState === 'completed') {
+    const canMutate = input.invocation !== 'status';
+    return classification(
+      input.run,
+      'completed-pending-handoff',
+      'same-host missing PID with completed report',
+      canMutate,
+      beforeHead,
+      reportState,
+    );
+  }
   if (ownership.kind === 'same-host' && !ownership.stale) {
     return classification(input.run, 'active', 'same-host lease is still fresh', false, beforeHead, reportState);
   }

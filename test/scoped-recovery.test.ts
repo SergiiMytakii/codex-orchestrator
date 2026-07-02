@@ -126,6 +126,43 @@ test('classifies stale completed scoped run as completed-pending-handoff', async
   assert.equal(result.beforeHead, 'base-sha');
 });
 
+test('classifies fresh same-host missing PID completed scoped run as completed-pending-handoff', async () => {
+  const targetRoot = await tempRepo();
+  const reportPath = join(targetRoot, 'report.json');
+  await writeCompletedReport(reportPath);
+  const run = metadata({
+    reportPath,
+    leaseUpdatedAt: new Date(now.getTime() - SCOPED_RECOVERY_LEASE_STALE_MS + 1).toISOString(),
+  });
+  const issue = issueFixture({ number: 155, labels: [labels.running.name, labels.auto.name] });
+
+  const daemon = await classifyScopedRecoveryRun({
+    targetRoot,
+    config: validConfig,
+    run,
+    issue,
+    invocation: 'daemon',
+    now,
+    hostname: () => 'local-host',
+    processProbe: probe('missing'),
+  });
+  const status = await classifyScopedRecoveryRun({
+    targetRoot,
+    config: validConfig,
+    run,
+    issue,
+    invocation: 'status',
+    now,
+    hostname: () => 'local-host',
+    processProbe: probe('missing'),
+  });
+
+  assert.equal(daemon.status, 'completed-pending-handoff');
+  assert.equal(daemon.canMutate, true);
+  assert.equal(status.status, 'completed-pending-handoff');
+  assert.equal(status.canMutate, false);
+});
+
 test('daemon leaves legacy and cross-host completed runs read-only', async () => {
   const targetRoot = await tempRepo();
   const reportPath = join(targetRoot, 'report.json');
@@ -241,7 +278,7 @@ test('lease policy distinguishes fresh alive missing unknown and cross-host case
     processProbe: probe('missing'),
   });
 
-  assert.equal(fresh.status, 'active');
+  assert.equal(fresh.status, 'completed-pending-handoff');
   assert.equal(alive.status, 'active');
   assert.equal(unknown.status, 'active');
   assert.equal(missing.status, 'completed-pending-handoff');

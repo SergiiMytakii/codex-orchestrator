@@ -82,7 +82,7 @@ test('status command returns structured result and ordered output without mutati
       '  - #2 manual-label: manual label is present',
       '  - #3 already-running: running label is present',
       'recovery:',
-      '  - #3 completed-pending-handoff: completed scoped run is pending runner-owned handoff',
+      '  - #3 completed-pending-handoff: same-host missing PID with completed report',
     ].join('\n'),
   );
   assert.deepEqual(adapter.addedLabels, []);
