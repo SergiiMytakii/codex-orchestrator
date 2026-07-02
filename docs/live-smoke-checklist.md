@@ -7,13 +7,37 @@ through the packaged CLI, real GitHub Issues, real labels, real daemon polling,
 real branches, real draft PRs, local runner state, worktrees, logs, review
 gates, and cleanup behavior without polluting the source repository.
 
-The default `npm run smoke:live` run is the publish-gate smoke. It packages the
-current code with `npm pack`, runs the packaged CLI, creates real GitHub Issues,
-and verifies the runner-owned GitHub handoff in the scratch repository. Cleanup
-is on by default and uses delete mode for smoke-created issues. PR records cannot
-be physically deleted by GitHub, so cleanup closes them and deletes their remote
-branches, then verifies no live smoke issues, open PRs, or remote branches remain
-for the run.
+The default `npm run smoke:live` run uses the `core-release` profile. It
+packages the current code with `npm pack`, runs the packaged CLI, creates real
+GitHub Issues, and verifies the runner-owned GitHub handoff in the scratch
+repository. Cleanup is on by default and uses delete mode for smoke-created
+issues. PR records cannot be physically deleted by GitHub, so cleanup closes
+them and deletes their remote branches, then verifies no live smoke issues, open
+PRs, or remote branches remain for the run.
+
+Run broader profile sets when release or policy work needs them:
+
+```sh
+npm run smoke:live -- --profile core-release
+npm run smoke:live -- --profile extended-policy
+npm run smoke:live -- --profile proof-matrix
+npm run smoke:live -- --profile full
+```
+
+Use this selection guide when an agent needs live smoke after implementing a
+change:
+
+| Change type | Command | Why |
+| --- | --- | --- |
+| Ordinary release gate, scoped runner behavior, diagnostics, quality gates, safety gates, browser proof, plan-auto happy path, or real-Codex handoff | `npm run smoke:live -- --profile core-release` | Covers the main publish path without running every edge matrix. |
+| Loop policy, priority selection, bounded rework, Fresh-Context Review, remote base branch resolution, Acceptance Proof rework/negative cases, or plan-auto blocking behavior | `npm run smoke:live -- --profile extended-policy` | Exercises policy and blocking edge cases that are intentionally outside the default profile. |
+| Browser proof, Acceptance Proof, UI Evidence, proof rework, proof product-diff blocking, low-confidence proof, or viewport/UI Evidence validation | `npm run smoke:live -- --profile proof-matrix` | Focuses on proof contracts without unrelated daemon and package scenarios. |
+| Scenario selection/profile behavior, release-signoff after policy/proof/publication changes, or uncertainty about which profile is sufficient | `npm run smoke:live -- --profile full` | Runs every top-level live smoke scenario. |
+| One known contract while developing or debugging a failure | `npm run smoke:live -- --scenario <name>` | Keeps feedback focused; `--scenario` overrides profile selection. |
+
+If multiple rows apply, use the broader matching profile. If no row applies, use
+`core-release`. Do not use `full` as the default after every implementation; it
+is the expensive release-signoff and broad-regression profile.
 
 Run focused subsets while developing:
 
@@ -22,19 +46,18 @@ npm run smoke:live -- --scenario package-install
 npm run smoke:live -- --scenario discovery-matrix
 npm run smoke:live -- --scenario quality-gates
 npm run smoke:live -- --scenario browser-proof
-npm run smoke:live -- --scenario acceptance-proof
-npm run smoke:live -- --scenario acceptance-proof-ui-evidence
-npm run smoke:live -- --scenario acceptance-proof-blocking
-npm run smoke:live -- --scenario acceptance-proof-ui-evidence-blocking
+npm run smoke:live -- --scenario acceptance-proof-positive
+npm run smoke:live -- --scenario acceptance-proof-negative
 npm run smoke:live -- --scenario diagnostics
 npm run smoke:live -- --scenario risk-routing
 npm run smoke:live -- --scenario plan-auto-blocking
 ```
 
-Run the full publish gate before release:
+Run the full live smoke matrix before a release when policy/proof coverage
+changed:
 
 ```sh
-npm run smoke:live
+npm run smoke:live -- --profile full
 ```
 
 Use `--keep-artifacts` only when a failed run needs manual GitHub inspection.
@@ -50,8 +73,11 @@ alternate scratch repository; do not point routine smoke runs at the source repo
 - `discovery-matrix` - verifies skipped issue states for manual, conflicting
   authorization, running, blocked, and review labels.
 - `real-codex` - runs one docs-only scoped issue through the real Codex command.
+- `remote-base-branch` - verifies scoped PRs target and build from an explicit
+  remote base branch.
 - `scoped-runner-commit` - daemon scoped success with runner-owned commit.
-- `scoped-local-commit` - daemon scoped success with accepted agent local commit.
+- `commit-policy` - daemon scoped success with accepted agent local commit and
+  blocked publication when local commits are disallowed.
 - `run-scoped` - direct `codex-orchestrator run --issue` scoped success.
 - `loop-policy` - priority-based daemon selection, bounded rework evidence,
   optional Fresh-Context Review evidence, Durable Run Summary excerpts, and
@@ -59,31 +85,25 @@ alternate scratch repository; do not point routine smoke runs at the source repo
 - `diagnostics` - packaged CLI proof for `doctor`, `status --json`,
   phase-specific profile selection, lifecycle event evidence, and context
   snapshot artifact references.
-- `visual-proof` - runner-owned screenshot proof is attached to the PR.
 - `browser-proof` - fake agent prepares a proof-owned browser scenario, then
   packaged `visual-proof auto` dispatches to browser proof and writes screenshot,
   DOM, console, network, run-summary, and UI Evidence artifacts. The package
   first reuses an existing local browser executable or Playwright browser cache;
   Chromium download is only a fallback when no installed browser can launch.
-- `acceptance-proof` - canonical machine-readable Acceptance Proof report is
-  validated and attached to the PR.
-- `acceptance-proof-ui-evidence` - canonical screenshot proof includes the
-  runner-validated UI Evidence Contract for workflow, viewport, freshness,
-  layout, copy, and source inputs.
+- `acceptance-proof-positive` - canonical machine-readable Acceptance Proof and
+  UI Evidence Contract reports are validated and attached to PRs.
 - `acceptance-proof-rework` - failed Acceptance Proof requests implementation
   rework and then passes within the proof loop.
-- `acceptance-proof-blocking` - low-confidence proof and proof-phase product
-  diffs block Draft PR Handoff.
-- `acceptance-proof-ui-evidence-blocking` - screenshot proof without UI
-  Evidence, or with invalid desktop viewport coverage, blocks Draft PR Handoff.
+- `acceptance-proof-negative` - low-confidence proof, proof-phase product diffs,
+  missing UI Evidence, and invalid desktop viewport coverage block Draft PR
+  Handoff.
 - `quality-gates` - blocks missing TDD, missing code-review, and missing
   cleanup-review evidence before publication.
 - `risk-routing` - parent `plan-auto` warn mode renders declared risk-routing
   metadata findings in the parent PR body and review report while continuing
   child execution.
-- `local-commit-blocked` - blocks agent local commits when policy disallows them.
-- `denied-secret` - blocks a configured denied path before PR creation.
-- `invalid-report` - blocks invalid scoped completion JSON before publication.
+- `safety-negative` - blocks a configured denied path and invalid scoped
+  completion JSON before publication.
 - `plan-auto` - daemon parent planning, child waves, integration branch, draft PR.
 - `run-plan-auto` - direct `codex-orchestrator run --issue` plan-auto success.
 - `plan-auto-blocking` - blocks malformed graph, planning file mutation, and
@@ -342,7 +362,7 @@ non-runtime changes.
       a machine-readable proof report under the issue proof directory.
 - [ ] Rerun with canonical acceptance validation evidence.
 - [ ] Verify the PR and issue report include the smoke-output artifact link.
-- [ ] `acceptance-proof-ui-evidence` verifies screenshot proof includes
+- [ ] `acceptance-proof-positive` verifies screenshot proof includes
       `uiEvidence.workflowScope`, `viewportCoverage`, `artifactFreshness`,
       `layoutReview`, `copyReview`, and `sourceInputs`.
 - [ ] Verify UI Evidence screenshot artifacts are linked from the PR body and
@@ -358,9 +378,9 @@ non-runtime changes.
       issue proof directory.
 - [ ] Verify failed browser, screenshot, or smoke proof blocks publication with
       preserved artifacts.
-- [ ] `acceptance-proof-ui-evidence-blocking` verifies screenshot proof without
+- [ ] `acceptance-proof-negative` verifies screenshot proof without
       `uiEvidence` blocks publication.
-- [ ] `acceptance-proof-ui-evidence-blocking` verifies desktop UI proof with a
+- [ ] `acceptance-proof-negative` verifies desktop UI proof with a
       too-narrow viewport blocks publication.
 - [ ] Verify low-confidence proof reports block publication instead of becoming
       Draft PR Handoff.
@@ -513,11 +533,15 @@ scenarios cover deterministic negative and edge cases.
 
 ## Exit criteria
 
-- [ ] All default `npm run smoke:live -- --cleanup` scenarios pass.
+- [ ] The default `npm run smoke:live -- --cleanup` `core-release` profile
+      passes.
+- [ ] The full `npm run smoke:live -- --profile full --cleanup` matrix passes
+      before releases that change policy, proof, or publication behavior.
 - [ ] Every blocked scenario blocks before push/PR publication.
 - [ ] Every success scenario creates exactly the expected branch, draft PR,
       issue labels, issue comments, logs, and local state.
-- [ ] The visual proof scenario embeds a screenshot artifact in the PR body.
+- [ ] Browser and Acceptance Proof scenarios attach screenshot, DOM, run-summary,
+      smoke-output, and UI Evidence artifacts where expected.
 - [ ] Daemon pickup is proven for both scoped and plan-auto work.
 - [ ] Direct `run` is proven equivalent for focused reruns.
 - [ ] Recovery and merged-worktree cleanup behavior is observed separately when

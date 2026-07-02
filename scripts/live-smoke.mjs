@@ -12,6 +12,7 @@ const defaultTimeoutMs = 600_000;
 const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
   ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
 const cleanupModes = new Set(['delete', 'close']);
+const defaultScenarioProfile = 'core-release';
 
 const scenarioDefinitions = new Map([
   ['baseline', runBaselineScenario],
@@ -20,25 +21,54 @@ const scenarioDefinitions = new Map([
   ['real-codex', runRealCodexScenario],
   ['remote-base-branch', runRemoteBaseBranchScenario],
   ['scoped-runner-commit', runScopedRunnerCommitScenario],
-  ['scoped-local-commit', runScopedLocalCommitScenario],
+  ['commit-policy', runCommitPolicyScenario],
   ['run-scoped', runDirectScopedScenario],
   ['loop-policy', runLoopPolicyScenario],
   ['diagnostics', runDiagnosticsScenario],
-  ['visual-proof', runVisualProofScenario],
   ['browser-proof', runBrowserProofScenario],
-  ['acceptance-proof', runAcceptanceProofScenario],
-  ['acceptance-proof-ui-evidence', runAcceptanceProofUiEvidenceScenario],
+  ['acceptance-proof-positive', runAcceptanceProofPositiveScenario],
   ['acceptance-proof-rework', runAcceptanceProofReworkScenario],
-  ['acceptance-proof-blocking', runAcceptanceProofBlockingScenario],
-  ['acceptance-proof-ui-evidence-blocking', runAcceptanceProofUiEvidenceBlockingScenario],
+  ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['quality-gates', runQualityGatesScenario],
   ['risk-routing', runRiskRoutingScenario],
-  ['local-commit-blocked', runLocalCommitBlockedScenario],
-  ['denied-secret', runDeniedSecretScenario],
-  ['invalid-report', runInvalidReportScenario],
+  ['safety-negative', runSafetyNegativeScenario],
   ['plan-auto', runPlanAutoScenario],
   ['run-plan-auto', runDirectPlanAutoScenario],
   ['plan-auto-blocking', runPlanAutoBlockingScenario],
+]);
+
+const scenarioProfiles = new Map([
+  ['core-release', [
+    'baseline',
+    'package-install',
+    'discovery-matrix',
+    'real-codex',
+    'scoped-runner-commit',
+    'commit-policy',
+    'run-scoped',
+    'diagnostics',
+    'browser-proof',
+    'acceptance-proof-positive',
+    'quality-gates',
+    'risk-routing',
+    'safety-negative',
+    'plan-auto',
+    'run-plan-auto',
+  ]],
+  ['extended-policy', [
+    'remote-base-branch',
+    'loop-policy',
+    'acceptance-proof-rework',
+    'acceptance-proof-negative',
+    'plan-auto-blocking',
+  ]],
+  ['proof-matrix', [
+    'browser-proof',
+    'acceptance-proof-positive',
+    'acceptance-proof-rework',
+    'acceptance-proof-negative',
+  ]],
+  ['full', Array.from(scenarioDefinitions.keys())],
 ]);
 
 async function main() {
@@ -48,7 +78,7 @@ async function main() {
     return;
   }
 
-  const selectedScenarios = options.scenarios.length > 0 ? options.scenarios : Array.from(scenarioDefinitions.keys());
+  const selectedScenarios = selectedScenariosForOptions(options);
   for (const scenario of selectedScenarios) {
     if (!scenarioDefinitions.has(scenario)) {
       throw new Error(`Unknown scenario "${scenario}". Known scenarios: ${Array.from(scenarioDefinitions.keys()).join(', ')}`);
@@ -70,7 +100,6 @@ async function main() {
     createdBranches: [],
     notes: [],
     fakeAgentPath: '',
-    visualProofPath: '',
     browserProofPath: '',
     acceptanceProofPath: '',
     targetRoot: '',
@@ -84,7 +113,6 @@ async function main() {
   try {
     context.cliPath = await preparePackagedCli(context);
     context.fakeAgentPath = await writeFakeAgent(root);
-    context.visualProofPath = await writeVisualProofScript(root);
     context.browserProofPath = await writeBrowserProofScript(root, context.cliPath, context.sourceRoot);
     context.acceptanceProofPath = await writeAcceptanceProofScript(root);
     context.targetRoot = await prepareTargetRepository(context);
@@ -133,6 +161,7 @@ function parseArgs(args) {
     keepPackageTarball: false,
     timeoutMs: defaultTimeoutMs,
     repo: defaultLiveSmokeRepo,
+    profile: defaultScenarioProfile,
     target: undefined,
     workDir: undefined,
     runId: undefined,
@@ -150,6 +179,11 @@ function parseArgs(args) {
       case '--scenario':
         requireValue(arg, next);
         options.scenarios.push(next);
+        index += 1;
+        break;
+      case '--profile':
+        requireValue(arg, next);
+        options.profile = next;
         index += 1;
         break;
       case '--repo':
@@ -209,6 +243,17 @@ function parseArgs(args) {
   return options;
 }
 
+function selectedScenariosForOptions(options) {
+  if (options.scenarios.length > 0) {
+    return options.scenarios;
+  }
+  const scenarios = scenarioProfiles.get(options.profile);
+  if (!scenarios) {
+    throw new Error(`Unknown profile "${options.profile}". Known profiles: ${Array.from(scenarioProfiles.keys()).join(', ')}`);
+  }
+  return scenarios;
+}
+
 function requireValue(arg, value) {
   if (!value || value.startsWith('--')) {
     throw new Error(`${arg} requires a value`);
@@ -224,6 +269,7 @@ function helpText() {
     '',
     'Options:',
     '  --scenario <name>          Run one scenario. Can be repeated.',
+    `  --profile <name>           Run a scenario profile. Default ${defaultScenarioProfile}.`,
     `  --repo <owner/name>        GitHub repository. Defaults to ${defaultLiveSmokeRepo}.`,
     '  --target <path>            Existing local target repo. Defaults to a temp clone.',
     '  --work-dir <path>          Directory for smoke temp files and report.',
@@ -236,6 +282,7 @@ function helpText() {
     '  --skip-local-tests         Skip npm test before npm pack.',
     '  --keep-package-tarball     Do not delete the npm pack tarball.',
     '',
+    `Profiles: ${Array.from(scenarioProfiles.keys()).join(', ')}`,
     `Scenarios: ${Array.from(scenarioDefinitions.keys()).join(', ')}`,
     '',
   ].join('\n');
@@ -529,11 +576,22 @@ async function runScopedRunnerCommitScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false });
 }
 
-async function runScopedLocalCommitScenario(context) {
+async function runCommitPolicyScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true });
-  const issue = await createIssue(context, 'scoped-local-commit', ['agent:auto']);
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertScopedSuccess(context, issue.number, { expectLocalCommit: true });
+  const accepted = await createIssue(context, 'scoped-local-commit', ['agent:auto']);
+  await runDaemonOnce(context, accepted.number, 'scoped-issue');
+  await assertScopedSuccess(context, accepted.number, { expectLocalCommit: true });
+
+  await configureTarget(context, { allowAgentLocalCommits: false });
+  const blocked = await createIssue(
+    context,
+    'scoped-local-commit',
+    ['agent:auto'],
+    'This scenario should block because local commits are disabled.',
+  );
+  await runDaemonOnce(context, blocked.number, 'scoped-issue');
+  await assertBlockedIssue(context, blocked.number, 'Codex changed git HEAD');
+  await assertNoPullRequestForBranch(context, `codex/issue-${blocked.number}`);
 }
 
 async function runDirectScopedScenario(context) {
@@ -656,21 +714,6 @@ async function runDiagnosticsScenario(context) {
   await appendReport(context, `Diagnostics snapshot: ${snapshotArtifact.path}\n\n`);
 }
 
-async function runVisualProofScenario(context) {
-  await configureTarget(context, {
-    allowAgentLocalCommits: true,
-    runnerValidationCommand: `${process.execPath} ${JSON.stringify(context.visualProofPath)}`,
-  });
-  const issue = await createIssue(
-    context,
-    'visual-proof',
-    ['agent:auto'],
-    'UI visual screenshot smoke. This should trigger the visual proof gate.',
-  );
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectScreenshotProof: true });
-}
-
 async function runBrowserProofScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -692,7 +735,7 @@ async function runBrowserProofScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectBrowserProof: true });
 }
 
-async function runAcceptanceProofScenario(context) {
+async function runAcceptanceProofPositiveScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
     acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} pass`,
@@ -705,14 +748,12 @@ async function runAcceptanceProofScenario(context) {
   );
   await runDaemonOnce(context, issue.number, 'scoped-issue');
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectAcceptanceProof: true });
-}
 
-async function runAcceptanceProofUiEvidenceScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
     acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} pass-ui`,
   });
-  const issue = await createIssue(
+  const uiEvidence = await createIssue(
     context,
     'acceptance-proof-ui-evidence',
     ['agent:auto'],
@@ -725,8 +766,8 @@ async function runAcceptanceProofUiEvidenceScenario(context) {
       '- Open the live smoke UI route after the implementation run and inspect the final screen.',
     ].join('\n'),
   );
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertScopedSuccess(context, issue.number, {
+  await runDaemonOnce(context, uiEvidence.number, 'scoped-issue');
+  await assertScopedSuccess(context, uiEvidence.number, {
     expectLocalCommit: false,
     expectAcceptanceProof: true,
     expectUiEvidenceProof: true,
@@ -748,7 +789,7 @@ async function runAcceptanceProofReworkScenario(context) {
   await assertScopedSuccess(context, issue.number, { expectLocalCommit: false, expectAcceptanceProof: true });
 }
 
-async function runAcceptanceProofBlockingScenario(context) {
+async function runAcceptanceProofNegativeScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
     acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} low-confidence`,
@@ -780,9 +821,7 @@ async function runAcceptanceProofBlockingScenario(context) {
   await assertBlockedIssue(context, productDiff.number, 'Acceptance proof produced product-code changes during acceptance proof');
   await assertNoPullRequestForBranch(context, `codex/issue-${productDiff.number}`);
   await assertNoRemoteBranch(context, `codex/issue-${productDiff.number}`);
-}
 
-async function runAcceptanceProofUiEvidenceBlockingScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
     acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} missing-ui-evidence`,
@@ -871,28 +910,18 @@ async function runRiskRoutingScenario(context) {
   await appendReport(context, `Risk-routing warning PR: ${pullRequest.url}\n\n`);
 }
 
-async function runLocalCommitBlockedScenario(context) {
-  await configureTarget(context, { allowAgentLocalCommits: false });
-  const issue = await createIssue(context, 'scoped-local-commit', ['agent:auto'], 'This scenario should block because local commits are disabled.');
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertBlockedIssue(context, issue.number, 'Codex changed git HEAD');
-  await assertNoPullRequestForBranch(context, `codex/issue-${issue.number}`);
-}
-
-async function runDeniedSecretScenario(context) {
+async function runSafetyNegativeScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true, additionalPathGlobs: ['live-smoke-denied/**'] });
-  const issue = await createIssue(context, 'denied-secret', ['agent:auto']);
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertBlockedIssue(context, issue.number, 'matches denied pattern live-smoke-denied/**');
-  await assertNoPullRequestForBranch(context, `codex/issue-${issue.number}`);
-}
+  const denied = await createIssue(context, 'denied-secret', ['agent:auto']);
+  await runDaemonOnce(context, denied.number, 'scoped-issue');
+  await assertBlockedIssue(context, denied.number, 'matches denied pattern live-smoke-denied/**');
+  await assertNoPullRequestForBranch(context, `codex/issue-${denied.number}`);
 
-async function runInvalidReportScenario(context) {
   await configureTarget(context, { allowAgentLocalCommits: true });
-  const issue = await createIssue(context, 'invalid-report', ['agent:auto']);
-  await runDaemonOnce(context, issue.number, 'scoped-issue');
-  await assertBlockedIssue(context, issue.number, 'report must be valid JSON');
-  await assertNoPullRequestForBranch(context, `codex/issue-${issue.number}`);
+  const invalidReport = await createIssue(context, 'invalid-report', ['agent:auto']);
+  await runDaemonOnce(context, invalidReport.number, 'scoped-issue');
+  await assertBlockedIssue(context, invalidReport.number, 'report must be valid JSON');
+  await assertNoPullRequestForBranch(context, `codex/issue-${invalidReport.number}`);
 }
 
 async function runPlanAutoScenario(context) {
@@ -1039,7 +1068,6 @@ async function assertScopedSuccess(
   issueNumber,
   {
     expectLocalCommit,
-    expectScreenshotProof = false,
     expectAcceptanceProof = false,
     expectLoopPolicyEvidence = false,
     expectedBaseBranch,
@@ -1086,23 +1114,6 @@ async function assertScopedSuccess(
     assertIncludes(body, 'Live smoke agent checkpoint', 'PR body should include fake agent commit');
     const log = await gitOutput(context.targetRoot, ['log', '--oneline', `origin/${branchName}`, '-5']);
     assertIncludes(log, 'Live smoke agent checkpoint', 'remote branch should include fake agent commit');
-  }
-  if (expectScreenshotProof) {
-    assertIncludes(body, '![screenshot: runner visual proof live-smoke-screenshot.png]', 'PR body should embed screenshot proof markdown');
-    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/live-smoke-screenshot.png`, 'PR body should link screenshot artifact path');
-    const screenshotPath = join(
-      context.targetRoot,
-      '.codex-orchestrator',
-      'workspaces',
-      `live-smoke-${context.runId}`,
-      `issue-${issueNumber}`,
-      '.codex-orchestrator',
-      'proofs',
-      `issue-${issueNumber}`,
-      'live-smoke-screenshot.png',
-    );
-    await assertPathExists(screenshotPath, 'runner visual proof screenshot was not written');
-    await appendReport(context, `Screenshot proof: ${screenshotPath}\n\n`);
   }
   if (expectAcceptanceProof) {
     assertIncludes(body, 'runner acceptance proof passed', 'PR body should include acceptance proof validation evidence');
@@ -1839,13 +1850,6 @@ async function writeFakeAgent(root) {
   return fakePath;
 }
 
-async function writeVisualProofScript(root) {
-  const scriptPath = join(root, 'live-smoke-visual-proof.mjs');
-  await writeFile(scriptPath, visualProofSource(), 'utf8');
-  await chmod(scriptPath, 0o755);
-  return scriptPath;
-}
-
 async function writeBrowserProofScript(root, cliPath, sourceRootPath) {
   const scriptPath = join(root, 'live-smoke-browser-proof.mjs');
   await writeFile(scriptPath, browserProofSource(cliPath, sourceRootPath), 'utf8');
@@ -1858,103 +1862,6 @@ async function writeAcceptanceProofScript(root) {
   await writeFile(scriptPath, acceptanceProofSource(), 'utf8');
   await chmod(scriptPath, 0o755);
   return scriptPath;
-}
-
-function visualProofSource() {
-  return String.raw`#!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-
-const proofDir = process.env.CODEX_ORCHESTRATOR_PROOF_DIR;
-const reportPath = process.env.CODEX_ORCHESTRATOR_PROOF_REPORT_PATH;
-const issueNumber = Number(process.env.CODEX_ORCHESTRATOR_ISSUE_NUMBER ?? 0);
-const artifactDir = process.env.CODEX_ORCHESTRATOR_ARTIFACT_DIR ?? '.codex-orchestrator/proofs';
-if (!proofDir) {
-  throw new Error('CODEX_ORCHESTRATOR_PROOF_DIR is required');
-}
-if (!reportPath || !Number.isInteger(issueNumber) || issueNumber < 1) {
-  throw new Error('CODEX_ORCHESTRATOR_PROOF_REPORT_PATH and CODEX_ORCHESTRATOR_ISSUE_NUMBER are required');
-}
-
-mkdirSync(proofDir, { recursive: true });
-const screenshotPath = join(proofDir, 'live-smoke-screenshot.png');
-const artifactRef = artifactDir.replace(/\/+$/, '') + '/issue-' + issueNumber + '/live-smoke-screenshot.png';
-
-try {
-  execFileSync('screencapture', ['-x', screenshotPath], { stdio: 'ignore' });
-} catch (error) {
-  throw new Error('screencapture failed; live smoke requires a real screenshot artifact: ' + error.message);
-}
-
-writeFileSync(reportPath, JSON.stringify({
-  status: 'passed',
-  criteria: [{
-    id: 'visual-live-smoke',
-    description: 'Runner-owned visual proof captured the final UI state.',
-    status: 'passed',
-    confidence: 'high',
-    reasoningSummary: 'The runner-owned screenshot artifact captures the live smoke UI after implementation.',
-    artifactRefs: [artifactRef],
-  }],
-  artifacts: [{
-    type: 'screenshot',
-    path: artifactRef,
-    description: 'Runner visual proof screenshot',
-  }],
-  uiEvidence: buildUiEvidence(artifactRef),
-  proofPhaseDiff: {
-    allowedProofPaths: [artifactRef],
-    forbiddenProductPaths: [],
-  },
-  residualRisks: [],
-}, null, 2), 'utf8');
-
-process.stdout.write('live smoke screenshot proof written to ' + screenshotPath + '\n');
-
-function buildUiEvidence(artifactRef) {
-  return {
-    workflowScope: {
-      entrypoint: 'live smoke visual proof command',
-      path: ['daemon once', 'scoped implementation', 'runner visual proof command'],
-      screenState: 'final implemented UI state after scoped run',
-      authPath: 'not-required',
-    },
-    viewportCoverage: [{
-      name: 'desktop wide',
-      width: 1440,
-      height: 900,
-      artifactRefs: [artifactRef],
-      requiredBy: 'desktop-web-layout',
-    }],
-    artifactFreshness: {
-      currentArtifactRefs: [artifactRef],
-      checkedAfterFinalRun: true,
-    },
-    layoutReview: {
-      checked: true,
-      findings: [{
-        summary: 'No overlap, clipping, or spacing regression is visible in the captured final UI state.',
-        artifactRefs: [artifactRef],
-      }],
-    },
-    copyReview: {
-      checked: true,
-      acceptedTerms: ['live smoke'],
-      rejectedTermsAbsent: ['placeholder'],
-      findings: [{
-        summary: 'Visible copy matches the live smoke visual proof expectation.',
-        artifactRefs: [artifactRef],
-      }],
-    },
-    sourceInputs: {
-      acceptanceCriteriaRefs: ['issue body: UI visual screenshot smoke'],
-      implementationEvidenceRefs: ['completion report validation: red-green live smoke'],
-      runtimeValidationRefs: ['runner visual proof command completed after implementation'],
-    },
-  };
-}
-`;
 }
 
 function browserProofSource(cliPath, sourceRootPath) {
@@ -2229,10 +2136,6 @@ if (prompt.includes('# Fresh-Context Review')) {
       ['policy suggestion smoke evidence after bounded rework'],
     );
     break;
-  case 'visual-proof':
-    writeVisualChange(issueNumber, runId);
-    writeScopedReport(reportPath, ['components/live-smoke/issue-' + issueNumber + '.tsx', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
-    break;
   case 'browser-proof':
     writeBrowserProofChange(issueNumber, runId);
     writeScopedReport(reportPath, [
@@ -2368,21 +2271,6 @@ function writeMediumRuntimeChange(issue, run) {
       'utf8',
     );
   }
-  writeFileSync(
-    join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
-    'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
-    'utf8',
-  );
-}
-
-function writeVisualChange(issue, run) {
-  mkdirSync('components/live-smoke', { recursive: true });
-  mkdirSync('test/live-smoke', { recursive: true });
-  writeFileSync(
-    join('components', 'live-smoke', 'issue-' + issue + '.tsx'),
-    'export const LiveSmokeVisualIssue' + issue + ' = ' + JSON.stringify({ issue, run, kind: 'visual-proof' }) + ';\n',
-    'utf8',
-  );
   writeFileSync(
     join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
     'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',

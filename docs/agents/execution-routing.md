@@ -50,7 +50,22 @@ configured and use the relevant source-of-truth docs plus `npm run typecheck`
 or `npm test` instead.
 
 Do not run `npm run smoke:live` unless the user explicitly asks for it. The live
-smoke suite creates or updates real GitHub issues, branches, and draft PRs.
+smoke suite creates or updates real GitHub issues, branches, and draft PRs. When
+live smoke is requested after implementation, choose the narrowest profile that
+matches the changed contract:
+
+- default / ordinary release gate: `npm run smoke:live -- --profile core-release`
+  (or just `npm run smoke:live`);
+- loop policy, remote base branch, blocking parent planning, or extra policy
+  edge cases: `npm run smoke:live -- --profile extended-policy`;
+- browser, Acceptance Proof, UI Evidence, or proof-loop changes:
+  `npm run smoke:live -- --profile proof-matrix`;
+- release-signoff after changing policy, proof, publication, or scenario
+  selection behavior itself: `npm run smoke:live -- --profile full`;
+- one known contract only: `npm run smoke:live -- --scenario <name>`.
+
+If multiple categories apply, run the broader matching profile. Always report
+when live smoke is skipped and give the concrete reason.
 
 ## Ownership Boundaries
 

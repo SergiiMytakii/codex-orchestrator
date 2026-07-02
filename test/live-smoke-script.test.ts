@@ -9,10 +9,10 @@ interface CommandResult {
   stderr: string;
 }
 
-function runLiveSmokeHelp(): Promise<CommandResult> {
+function runLiveSmoke(args: string[]): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const scriptPath = fileURLToPath(new URL('../../scripts/live-smoke.mjs', import.meta.url));
-    const child = spawn(process.execPath, [scriptPath, '--help'], {
+    const child = spawn(process.execPath, [scriptPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -33,26 +33,70 @@ function runLiveSmokeHelp(): Promise<CommandResult> {
   });
 }
 
+function runLiveSmokeHelp(): Promise<CommandResult> {
+  return runLiveSmoke(['--help']);
+}
+
+function listedValues(output: string, label: string): string[] {
+  const match = output.match(new RegExp(`^${label}: (.+)$`, 'm'));
+  assert.ok(match, `expected ${label} line in output:\n${output}`);
+  return match[1].split(',').map((value) => value.trim());
+}
+
 test('live smoke help lists publish-gate coverage scenarios', async () => {
   const result = await runLiveSmokeHelp();
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
-  assert.match(result.stdout, /run-scoped/);
-  assert.match(result.stdout, /run-plan-auto/);
-  assert.match(result.stdout, /remote-base-branch/);
-  assert.match(result.stdout, /discovery-matrix/);
-  assert.match(result.stdout, /quality-gates/);
-  assert.match(result.stdout, /loop-policy/);
-  assert.match(result.stdout, /diagnostics/);
-  assert.match(result.stdout, /browser-proof/);
-  assert.match(result.stdout, /acceptance-proof/);
-  assert.match(result.stdout, /acceptance-proof-ui-evidence/);
-  assert.match(result.stdout, /acceptance-proof-rework/);
-  assert.match(result.stdout, /acceptance-proof-blocking/);
-  assert.match(result.stdout, /acceptance-proof-ui-evidence-blocking/);
-  assert.match(result.stdout, /plan-auto-blocking/);
-  assert.match(result.stdout, /package-install/);
+  const scenarios = listedValues(result.stdout, 'Scenarios');
+  assert.deepEqual(scenarios, [
+    'baseline',
+    'package-install',
+    'discovery-matrix',
+    'real-codex',
+    'remote-base-branch',
+    'scoped-runner-commit',
+    'commit-policy',
+    'run-scoped',
+    'loop-policy',
+    'diagnostics',
+    'browser-proof',
+    'acceptance-proof-positive',
+    'acceptance-proof-rework',
+    'acceptance-proof-negative',
+    'quality-gates',
+    'risk-routing',
+    'safety-negative',
+    'plan-auto',
+    'run-plan-auto',
+    'plan-auto-blocking',
+  ]);
+  assert.equal(scenarios.includes('visual-proof'), false);
+  assert.equal(scenarios.includes('scoped-local-commit'), false);
+  assert.equal(scenarios.includes('local-commit-blocked'), false);
+  assert.equal(scenarios.includes('denied-secret'), false);
+  assert.equal(scenarios.includes('invalid-report'), false);
+});
+
+test('live smoke help documents run profiles and default core release profile', async () => {
+  const result = await runLiveSmokeHelp();
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /--profile <name>\s+Run a scenario profile\. Default core-release/);
+  assert.deepEqual(listedValues(result.stdout, 'Profiles'), [
+    'core-release',
+    'extended-policy',
+    'proof-matrix',
+    'full',
+  ]);
+});
+
+test('live smoke rejects unknown profiles before running smoke setup', async () => {
+  const result = await runLiveSmoke(['--profile', 'missing-profile']);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown profile "missing-profile"/);
+  assert.match(result.stderr, /Known profiles: core-release, extended-policy, proof-matrix, full/);
 });
 
 test('live smoke help documents scratch repo and strict cleanup defaults', async () => {

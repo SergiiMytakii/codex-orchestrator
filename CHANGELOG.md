@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Live smoke now defaults to a smaller `core-release` profile, exposes explicit
+  scenario profiles, and folds related commit, safety, and Acceptance Proof
+  checks into matrix scenarios.
+
 ## [0.1.38] - 2026-07-02
 
 ### Added
