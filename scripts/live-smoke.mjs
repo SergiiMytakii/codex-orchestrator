@@ -27,6 +27,7 @@ const scenarioDefinitions = new Map([
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runBrowserProofScenario],
   ['acceptance-proof-positive', runAcceptanceProofPositiveScenario],
+  ['proof-strategy-non-visual-smoke', runProofStrategyNonVisualSmokeScenario],
   ['acceptance-proof-rework', runAcceptanceProofReworkScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['quality-gates', runQualityGatesScenario],
@@ -65,6 +66,7 @@ const scenarioProfiles = new Map([
   ['proof-matrix', [
     'browser-proof',
     'acceptance-proof-positive',
+    'proof-strategy-non-visual-smoke',
     'acceptance-proof-rework',
     'acceptance-proof-negative',
   ]],
@@ -774,6 +776,31 @@ async function runAcceptanceProofPositiveScenario(context) {
   });
 }
 
+async function runProofStrategyNonVisualSmokeScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    acceptanceRunnerValidationCommand: `${process.execPath} ${JSON.stringify(context.acceptanceProofPath)} pass`,
+  });
+  const issue = await createIssue(
+    context,
+    'proof-strategy-non-visual-smoke',
+    ['agent:auto'],
+    [
+      'Proof Strategy: non-visual-smoke',
+      'ACCEPTANCE_PROOF_LIVE_SMOKE: pass. This marker would normally trigger runner-owned acceptance proof.',
+      'Acceptance Criteria:',
+      '- Non-visual smoke proof records event-dispatch behavior through tests and machine-readable output.',
+      '- Browser, screenshot, emulator, simulator, and device-backed proof are not required for this issue.',
+    ].join('\n'),
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, {
+    expectLocalCommit: false,
+    expectNonVisualSmokeProof: true,
+    forbidRunnerAcceptanceProof: true,
+  });
+}
+
 async function runAcceptanceProofReworkScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -1075,6 +1102,8 @@ async function assertScopedSuccess(
     expectedBaseMarkerPath,
     expectUiEvidenceProof = false,
     expectBrowserProof = false,
+    expectNonVisualSmokeProof = false,
+    forbidRunnerAcceptanceProof = false,
   },
 ) {
   const issue = await getIssue(context, issueNumber);
@@ -1131,6 +1160,32 @@ async function assertScopedSuccess(
     );
     await assertPathExists(proofPath, 'runner acceptance proof artifact was not written');
     await appendReport(context, `Acceptance proof artifact: ${proofPath}\n\n`);
+  }
+  if (forbidRunnerAcceptanceProof) {
+    assert(
+      !body.includes('runner acceptance proof passed'),
+      'PR body should not include runner acceptance proof validation when proof strategy is non-visual-smoke',
+    );
+    assert(
+      !body.includes(`.codex-orchestrator/proofs/issue-${issueNumber}/live-smoke-proof.txt`),
+      'PR body should not link runner-owned acceptance proof artifact when proof strategy is non-visual-smoke',
+    );
+  }
+  if (expectNonVisualSmokeProof) {
+    assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/non-visual-smoke-proof.txt`, 'PR body should link child non-visual smoke proof artifact path');
+    const proofPath = join(
+      context.targetRoot,
+      '.codex-orchestrator',
+      'workspaces',
+      `live-smoke-${context.runId}`,
+      `issue-${issueNumber}`,
+      '.codex-orchestrator',
+      'proofs',
+      `issue-${issueNumber}`,
+      'non-visual-smoke-proof.txt',
+    );
+    await assertPathExists(proofPath, 'child non-visual smoke proof artifact was not written');
+    await appendReport(context, `Non-visual smoke proof artifact: ${proofPath}\n\n`);
   }
   if (expectUiEvidenceProof) {
     assertIncludes(body, `.codex-orchestrator/proofs/issue-${issueNumber}/live-smoke-ui-screenshot.png`, 'PR body should link UI Evidence screenshot artifact path');
@@ -2153,6 +2208,16 @@ if (prompt.includes('# Fresh-Context Review')) {
     writeAcceptanceChange(issueNumber, runId, scenario, false);
     writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
+  case 'proof-strategy-non-visual-smoke':
+    if (!prompt.includes('Resolved proof strategy: non-visual-smoke (issue contract).')) {
+      throw new Error('Expected child prompt to resolve Proof Strategy: non-visual-smoke from the issue contract.');
+    }
+    if (!prompt.includes('Do not prepare browser, screenshot, emulator, simulator, or device-backed visual proof for this issue.')) {
+      throw new Error('Expected child prompt to prohibit visual/device proof for non-visual-smoke strategy.');
+    }
+    writeNonVisualSmokeChange(issueNumber, runId);
+    writeNonVisualSmokeReport(reportPath, issueNumber);
+    break;
   case 'acceptance-proof-rework': {
     const acceptanceProofReady = prompt.includes('automatic rework attempt (#1)');
     writeAcceptanceChange(issueNumber, runId, scenario, acceptanceProofReady);
@@ -2362,6 +2427,62 @@ function writeAcceptanceChange(issue, run, kind, proofReady) {
     'import assert from "node:assert/strict";\nassert.match(' + JSON.stringify(run) + ', /.+/);\n',
     'utf8',
   );
+}
+
+function writeNonVisualSmokeChange(issue, run) {
+  mkdirSync('src/live-smoke', { recursive: true });
+  mkdirSync('test/live-smoke', { recursive: true });
+  const proofDir = join('.codex-orchestrator', 'proofs', 'issue-' + issue);
+  mkdirSync(proofDir, { recursive: true });
+  writeFileSync(
+    join('src', 'live-smoke', 'issue-' + issue + '.ts'),
+    'export const nonVisualSmokeIssue' + issue + ' = ' + JSON.stringify({ issue, run, proofStrategy: 'non-visual-smoke' }) + ';\n',
+    'utf8',
+  );
+  writeFileSync(
+    join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
+    'import assert from "node:assert/strict";\nassert.equal(' + JSON.stringify('non-visual-smoke') + ', "non-visual-smoke");\n',
+    'utf8',
+  );
+  writeFileSync(
+    join(proofDir, 'non-visual-smoke-proof.txt'),
+    'non-visual smoke proof for issue #' + issue + ' via tests and machine-readable event output\n',
+    'utf8',
+  );
+}
+
+function writeNonVisualSmokeReport(path, issue) {
+  const artifactPath = '.codex-orchestrator/proofs/issue-' + issue + '/non-visual-smoke-proof.txt';
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    changes: [
+      'src/live-smoke/issue-' + issue + '.ts',
+      'test/live-smoke/issue-' + issue + '.test.ts',
+      artifactPath,
+    ],
+    validation: [
+      { command: 'TDD red-to-green', status: 'passed', summary: 'Focused non-visual smoke test failed before implementation and passed after implementation.' },
+      { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for non-visual proof strategy fixture' },
+    ],
+    artifacts: [{
+      type: 'smoke-output',
+      path: artifactPath,
+      description: 'Child-authored non-visual smoke proof artifact',
+    }],
+    skippedChecks: [
+      'Runner-owned visual/device proof skipped because issue declares Proof Strategy: non-visual-smoke.',
+    ],
+    residualRisks: [],
+    prohibitedActions: [],
+    reviewHandoff: {
+      flowUsed: 'scoped-implementation',
+      riskLevel: 'medium',
+      implementedContract: ['Explicit non-visual proof strategy is honored by the child prompt and runner handoff.'],
+      proofByAcceptanceCriteria: ['Non-visual smoke-output artifact maps the acceptance criterion without runner-owned screenshot or device proof.'],
+      reviewFocus: ['Confirm runner acceptance proof was not invoked for this issue.'],
+      humanReviewChecklist: ['Check that Proof Strategy: non-visual-smoke is present in the issue body.'],
+    },
+  }, null, 2), 'utf8');
 }
 
 function writeScopedReport(path, changes, validation = [

@@ -62,6 +62,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
     'diagnostics',
     'browser-proof',
     'acceptance-proof-positive',
+    'proof-strategy-non-visual-smoke',
     'acceptance-proof-rework',
     'acceptance-proof-negative',
     'quality-gates',
