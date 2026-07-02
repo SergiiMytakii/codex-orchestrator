@@ -10,6 +10,7 @@ import {
   dailyPhase,
   fingerprintCandidate,
   fingerprintFinding,
+  reportContracts,
   validateDiscoveryReport,
   validateReviewReport,
 } from './runner.mjs';
@@ -197,6 +198,29 @@ test('candidate and finding fingerprints are stable sha256 values', () => {
   assert.match(first, /^[a-f0-9]{64}$/);
   assert.equal(first, second);
   assert.match(fingerprintFinding(validFinding), /^[a-f0-9]{64}$/);
+});
+
+test('report contracts centralize item limits and residual risk normalization', () => {
+  const discovery = reportContracts.discovery.validate({
+    status: 'completed',
+    candidates: [validCandidate],
+    residualRisks: ['  keep this  ', '', 42, 'and this'],
+  });
+  assert.equal(discovery.ok, true);
+  assert.deepEqual(discovery.residualRisks, ['keep this', 'and this']);
+
+  const findings = Array.from({ length: 6 }, (_, index) => ({
+    ...validFinding,
+    findingFingerprint: `finding-${index}`,
+  }));
+  const review = reportContracts.review.validate({
+    status: 'completed',
+    findings,
+    residualRisks: 'not-an-array',
+  });
+  assert.equal(review.ok, true);
+  assert.equal(review.findings.length, 5);
+  assert.deepEqual(review.residualRisks, []);
 });
 
 test('codex JSON invocation uses exact command shape and rejects invalid JSON before mutation', async () => {
