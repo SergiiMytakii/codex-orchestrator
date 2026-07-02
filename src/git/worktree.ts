@@ -114,7 +114,6 @@ export class GitWorktreeManager {
     const workspaceWorktree = worktrees.find((worktree) => samePath(worktree.path, input.workspacePath));
     if (workspaceWorktree) {
       if (workspaceWorktree.branch === expectedBranchRef) {
-        await this.assertBranchContainsRequiredBase(input);
         return;
       }
       throw new Error(

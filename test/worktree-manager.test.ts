@@ -364,7 +364,7 @@ test('ensureIssueWorktree refuses unrelated dirty worktree at expected workspace
   );
 });
 
-test('ensureIssueWorktree refuses to resume a branch that does not contain the configured base sha', async () => {
+test('ensureIssueWorktree resumes the existing same-issue worktree even when configured base moved forward', async () => {
   const { root, repo } = await tempGitProject();
   const git = new GitWorktreeManager();
   const wrongBase = await git.getHead(repo);
@@ -380,10 +380,45 @@ test('ensureIssueWorktree refuses to resume a branch that does not contain the c
     baseBranch: wrongBase,
   });
 
+  await writeFile(join(worktreePath, 'dirty.txt'), 'continue in place\n', 'utf8');
+
+  await git.ensureIssueWorktree({
+    targetRoot: repo,
+    workspacePath: worktreePath,
+    branchName: 'codex/issue-1',
+    baseBranch: configuredBase,
+    requiredBaseSha: configuredBase,
+    allowResume: true,
+  });
+
+  const branch = await execFileAsync('git', ['-C', worktreePath, 'branch', '--show-current']);
+  const status = await execFileAsync('git', ['-C', worktreePath, 'status', '--porcelain']);
+  assert.equal(branch.stdout.trim(), 'codex/issue-1');
+  assert.match(status.stdout, /\?\? dirty\.txt/);
+});
+
+test('ensureIssueWorktree refuses to attach an existing branch that does not contain the configured base sha', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const wrongBase = await git.getHead(repo);
+  await writeFile(join(repo, 'new-base.txt'), 'new base\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'new-base.txt']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'New configured base']);
+  const configuredBase = await git.getHead(repo);
+  const temporaryWorktree = join(root, 'temporary-issue-1');
+  const resumedWorktree = join(root, 'issue-1');
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: temporaryWorktree,
+    branchName: 'codex/issue-1',
+    baseBranch: wrongBase,
+  });
+  await git.removeWorktree({ targetRoot: repo, worktreePath: temporaryWorktree });
+
   await assert.rejects(
     git.ensureIssueWorktree({
       targetRoot: repo,
-      workspacePath: worktreePath,
+      workspacePath: resumedWorktree,
       branchName: 'codex/issue-1',
       baseBranch: configuredBase,
       requiredBaseSha: configuredBase,
