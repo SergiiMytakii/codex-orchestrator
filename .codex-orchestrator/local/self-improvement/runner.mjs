@@ -63,44 +63,92 @@ function nonEmptyStringArray(value) {
   return Array.isArray(value) && value.length > 0 && value.every(nonEmptyString);
 }
 
-export function validateDiscoveryReport(report) {
-  if (!report || report.status !== 'completed' || !Array.isArray(report.candidates)) {
-    return { ok: false, reason: 'Discovery report must contain status completed and candidates array.' };
-  }
-  const valid = report.candidates.filter((candidate) => {
-    if (!candidate || typeof candidate !== 'object') return false;
-    if (!nonEmptyString(candidate.title)) return false;
-    if (!nonEmptyStringArray(candidate.files)) return false;
-    if (!nonEmptyString(candidate.problem)) return false;
-    if (!nonEmptyString(candidate.solution)) return false;
-    if (!nonEmptyStringArray(candidate.benefits)) return false;
-    if (!nonEmptyStringArray(candidate.verification)) return false;
-    if (!nonEmptyString(candidate.risk)) return false;
-    if (!nonEmptyString(candidate.adrConflict)) return false;
-    if (candidate.adrConflict.trim().toLowerCase() !== 'none') return false;
-    return true;
+function normalizeResidualRisks(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter(nonEmptyString).map((risk) => risk.trim());
+}
+
+function hasRequiredFields(item, fieldValidators) {
+  return Object.entries(fieldValidators).every(([field, validator]) => validator(item[field]));
+}
+
+function createReportContract({
+  itemKey,
+  shapeReason,
+  noValidReason,
+  allowEmptyValidItems = false,
+  itemLimit,
+  isValidItem,
+}) {
+  return Object.freeze({
+    validate(report) {
+      if (!report || report.status !== 'completed' || !Array.isArray(report[itemKey])) {
+        return { ok: false, reason: shapeReason };
+      }
+      const items = report[itemKey];
+      const valid = items.filter(isValidItem);
+      if (valid.length === 0 && (!allowEmptyValidItems || items.length > 0)) {
+        return { ok: false, reason: noValidReason };
+      }
+      const limited = Number.isInteger(itemLimit) ? valid.slice(0, itemLimit) : valid;
+      return { ok: true, [itemKey]: limited, residualRisks: normalizeResidualRisks(report.residualRisks) };
+    },
   });
-  if (valid.length === 0) return { ok: false, reason: 'Discovery report has no valid candidates.' };
-  return { ok: true, candidates: valid, residualRisks: report.residualRisks ?? [] };
+}
+
+const discoveryCandidateFields = Object.freeze({
+  title: nonEmptyString,
+  files: nonEmptyStringArray,
+  problem: nonEmptyString,
+  solution: nonEmptyString,
+  benefits: nonEmptyStringArray,
+  verification: nonEmptyStringArray,
+  risk: nonEmptyString,
+  adrConflict: nonEmptyString,
+});
+
+const reviewFindingFields = Object.freeze({
+  summary: nonEmptyString,
+  evidence: nonEmptyString,
+  proposedFix: nonEmptyString,
+  sourceIssue: (value) => Number.isInteger(Number(value)),
+  findingFingerprint: nonEmptyString,
+});
+
+function isValidDiscoveryCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'object') return false;
+  if (!hasRequiredFields(candidate, discoveryCandidateFields)) return false;
+  return candidate.adrConflict.trim().toLowerCase() === 'none';
+}
+
+function isValidReviewFinding(finding) {
+  if (!finding || typeof finding !== 'object') return false;
+  return hasRequiredFields(finding, reviewFindingFields);
+}
+
+export const reportContracts = Object.freeze({
+  discovery: createReportContract({
+    itemKey: 'candidates',
+    shapeReason: 'Discovery report must contain status completed and candidates array.',
+    noValidReason: 'Discovery report has no valid candidates.',
+    isValidItem: isValidDiscoveryCandidate,
+  }),
+  review: createReportContract({
+    itemKey: 'findings',
+    shapeReason: 'Review report must contain status completed and findings array.',
+    noValidReason: 'Review report has findings but none are valid.',
+    allowEmptyValidItems: true,
+    itemLimit: 5,
+    isValidItem: isValidReviewFinding,
+  }),
+});
+
+export function validateDiscoveryReport(report) {
+  return reportContracts.discovery.validate(report);
 }
 
 export function validateReviewReport(report) {
-  if (!report || report.status !== 'completed' || !Array.isArray(report.findings)) {
-    return { ok: false, reason: 'Review report must contain status completed and findings array.' };
-  }
-  const valid = report.findings.filter((finding) => {
-    if (!finding || typeof finding !== 'object') return false;
-    if (!nonEmptyString(finding.summary)) return false;
-    if (!nonEmptyString(finding.evidence)) return false;
-    if (!nonEmptyString(finding.proposedFix)) return false;
-    if (!Number.isInteger(Number(finding.sourceIssue))) return false;
-    if (!nonEmptyString(finding.findingFingerprint)) return false;
-    return true;
-  });
-  if (report.findings.length > 0 && valid.length === 0) {
-    return { ok: false, reason: 'Review report has findings but none are valid.' };
-  }
-  return { ok: true, findings: valid.slice(0, 5), residualRisks: report.residualRisks ?? [] };
+  return reportContracts.review.validate(report);
 }
 
 async function defaultExec(command, args = [], options = {}) {
