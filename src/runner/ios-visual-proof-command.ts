@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process';
 import { basename, join, relative, resolve, delimiter as hostPathDelimiter } from 'node:path';
 import { platform as hostPlatform } from 'node:os';
 
+import { discoverFlutterExecutable } from './flutter-sdk-discovery.js';
+
 type IosProofProjectType = 'auto' | 'flutter' | 'ios';
 
 export interface IosVisualProofCommandInput {
@@ -282,10 +284,7 @@ async function findFirstWithExtension(root: string, extension: string): Promise<
 }
 
 async function resolveFlutter(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): Promise<string> {
-  return env.CODEX_ORCHESTRATOR_FLUTTER_BIN
-    ?? (env.CODEX_ORCHESTRATOR_FLUTTER_ROOT ? join(env.CODEX_ORCHESTRATOR_FLUTTER_ROOT, 'bin', executableName('flutter', platform)) : undefined)
-    ?? (env.FLUTTER_ROOT ? join(env.FLUTTER_ROOT, 'bin', executableName('flutter', platform)) : undefined)
-    ?? await pathExecutable('flutter', env, platform)
+  return await discoverFlutterExecutable({ env, platform })
     ?? fail('Flutter was not found for Flutter iOS visual proof.');
 }
 

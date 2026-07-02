@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, win32, posix, delimiter as hostPathDelimiter } from 'node:path';
 import { homedir, platform as hostPlatform } from 'node:os';
 
+import { discoverFlutterExecutable } from './flutter-sdk-discovery.js';
 import { acquireMobileDeviceLease } from './mobile-device-lease.js';
 
 type AndroidProofProjectType = 'auto' | 'flutter' | 'android';
@@ -268,14 +269,7 @@ async function resolveAndroidProofTools(input: {
     ...sdkRoots.map((root) => sdkTool(root, platform, 'emulator', executableName('emulator', platform))),
     await pathExecutable('emulator', env, platform),
   ], platform);
-  const flutter = await firstExecutable([
-    env.CODEX_ORCHESTRATOR_FLUTTER_BIN,
-    env.CODEX_ORCHESTRATOR_FLUTTER_ROOT
-      ? sdkTool(env.CODEX_ORCHESTRATOR_FLUTTER_ROOT, platform, 'bin', executableName('flutter', platform))
-      : undefined,
-    env.FLUTTER_ROOT ? sdkTool(env.FLUTTER_ROOT, platform, 'bin', executableName('flutter', platform)) : undefined,
-    await pathExecutable('flutter', env, platform),
-  ], platform);
+  const flutter = await discoverFlutterExecutable({ env, platform });
 
   if (!adb) {
     throw new Error([

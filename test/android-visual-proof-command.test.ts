@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -70,6 +70,40 @@ test('package-owned Android visual proof captures Flutter launch screenshot usin
   assert.equal(screenshot, 'fake-png');
   assert.match(summary, /Android visual proof/);
   assert.match(summary, /serial: ZX1G22/);
+  assert.match(summary, /package: com\.example\.app/);
+});
+
+test('Android visual proof discovers FVM-managed Flutter SDK outside launchd PATH', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-android-fvm-proof-'));
+  const home = join(root, 'home');
+  const worktree = join(root, 'worktree');
+  const sdk = join(home, 'Library', 'Android', 'sdk');
+  const adbPath = join(sdk, 'platform-tools', 'adb');
+  const emulatorPath = join(sdk, 'emulator', 'emulator');
+  const flutterPath = join(home, 'fvm', 'versions', '3.44.3', 'bin', 'flutter');
+
+  await mkdir(join(sdk, 'platform-tools'), { recursive: true });
+  await mkdir(join(sdk, 'emulator'), { recursive: true });
+  await mkdir(dirname(flutterPath), { recursive: true });
+  await createFlutterAndroidFixture(worktree);
+  await writeExecutable(adbPath, fakeAdbScript());
+  await writeExecutable(emulatorPath, '#!/usr/bin/env bash\nprintf "Pixel_7\\n"\n');
+  await writeExecutable(flutterPath, fakeFlutterScript());
+
+  await runAndroidVisualProofCommand({
+    issueNumber: 160,
+    worktreePath: worktree,
+    artifactDir: '.proofs',
+    env: {
+      HOME: home,
+      PATH: '/bin:/usr/bin',
+    },
+    platform: 'darwin',
+    launchSettleMs: 0,
+  });
+
+  const summary = await readFile(join(worktree, '.proofs', 'issue-160', 'android-ui-summary.txt'), 'utf8');
+  assert.match(summary, /Android visual proof/);
   assert.match(summary, /package: com\.example\.app/);
 });
 

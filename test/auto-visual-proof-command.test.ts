@@ -42,6 +42,25 @@ test('visual-proof auto dispatches mobile changes to device-backed proof', async
   assert.equal(mobileIssue, 887);
 });
 
+test('visual-proof auto treats Flutter lib changes as mobile when issue asks for mobile proof', async () => {
+  let mobileIssue = 0;
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '160', '--target', '/tmp/flutter-app'],
+    config: validConfig,
+    env: {
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'lib/presentation/screens/prediction_markets/prediction_markets_discovery_screen.dart',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Add Live screen Firebase analytics in Flutter',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: 'Mobile app proof should validate the Flutter screen change.',
+    },
+    mobileRunner: async (input) => {
+      mobileIssue = input.issueNumber;
+    },
+  });
+
+  assert.equal(result.target, 'mobile');
+  assert.equal(mobileIssue, 160);
+});
+
 test('visual-proof auto reports no-match failures clearly', async () => {
   await assert.rejects(
     runAutoVisualProofCommand({

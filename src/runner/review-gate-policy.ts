@@ -273,7 +273,7 @@ function isMobileProofPath(path: string): boolean {
 }
 
 function isFlutterEntrypoint(path: string): boolean {
-  return path === 'lib/main.dart' || path === 'pubspec.yaml';
+  return path === 'pubspec.yaml' || /^lib\/.+\.dart$/u.test(path);
 }
 
 function isMobileIssueText(text: string): boolean {
