@@ -91,7 +91,7 @@ test('prompt builder uses review-gate policy contract lines', async () => {
   for (const line of buildQualityGatePromptLines(config)) {
     assert.match(prompt, new RegExp(escapeRegExp(line)));
   }
-  for (const line of buildVisualProofPromptLines(config, 155)) {
+  for (const line of buildVisualProofPromptLines(config, issueFixture({ number: 155, body: 'Fix UI overlap' }))) {
     assert.match(prompt, new RegExp(escapeRegExp(line)));
   }
 
@@ -103,6 +103,27 @@ test('prompt builder uses review-gate policy contract lines', async () => {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+test('prompt builder exposes explicit issue proof strategy to the child agent', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 160,
+      labels: ['agent:auto'],
+      title: 'Record Firebase events',
+      body: 'Proof Strategy: non-visual-smoke\nUse tests and smoke output for analytics proof.',
+    }),
+    config: validConfig,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-160',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /Resolved proof strategy: non-visual-smoke \(issue contract\)/);
+  assert.match(prompt, /Do not prepare browser, screenshot, emulator, simulator, or device-backed visual proof/);
+  assert.match(prompt, /Prepare non-visual smoke, test, log, or machine-readable artifact evidence/);
+});
 
 test('prompt builder keeps shell-like issue text inert and literal', () => {
   const maliciousText = '$(touch /tmp/owned) `touch /tmp/owned` ${reportPath}; gh pr create';

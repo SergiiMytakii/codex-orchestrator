@@ -3,6 +3,7 @@ import { classifyVisualProofDispatchTarget, type VisualProofDispatchTarget } fro
 import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand, type BrowserVisualProofCommandInput } from './browser-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand, type MobileVisualProofCommandInput } from './mobile-visual-proof-command.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
 export interface AutoVisualProofCommandInput {
   args: string[];
@@ -31,6 +32,10 @@ export async function runAutoVisualProofCommand(input: AutoVisualProofCommandInp
     const parsed = parseMobileVisualProofArgs(input.args, env);
     if (!parsed.ok) throw new Error(parsed.error);
     await (input.mobileRunner ?? runMobileVisualProofCommand)(parsed.value);
+    return { target };
+  }
+  const strategy = resolveAcceptanceProofStrategy({ config: input.config, issue }).strategy;
+  if (target === 'none' && (strategy === 'none' || strategy === 'non-visual-smoke')) {
     return { target };
   }
   throw new Error('visual-proof auto could not select browser or mobile proof from changed files. Provide web/mobile changed paths or use visual-proof browser/mobile explicitly.');

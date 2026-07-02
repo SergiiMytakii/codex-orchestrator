@@ -67,16 +67,18 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
       ? {
           reviewGates: {
             ...reviewGates,
-            acceptanceProof: acceptanceProof ?? {
-              ...defaultAcceptanceProof,
-              enabled: visualProof?.enabled ?? defaultAcceptanceProof.enabled,
-              artifactDir: visualProof?.artifactDir ?? defaultAcceptanceProof.artifactDir,
-              issueTextPatterns: visualProof?.issueTextPatterns ?? defaultAcceptanceProof.issueTextPatterns,
-              changedPathGlobs: visualProof?.changedPathGlobs ?? defaultAcceptanceProof.changedPathGlobs,
-              runnerValidationCommand: visualProof?.runnerValidationCommand,
-              runnerTimeoutMs: visualProof?.runnerTimeoutMs,
-              envPassthrough: visualProof?.envPassthrough ?? defaultAcceptanceProof.envPassthrough,
-            },
+            acceptanceProof: acceptanceProof
+              ? { ...defaultAcceptanceProof, ...acceptanceProof }
+              : {
+                  ...defaultAcceptanceProof,
+                  enabled: visualProof?.enabled ?? defaultAcceptanceProof.enabled,
+                  artifactDir: visualProof?.artifactDir ?? defaultAcceptanceProof.artifactDir,
+                  issueTextPatterns: visualProof?.issueTextPatterns ?? defaultAcceptanceProof.issueTextPatterns,
+                  changedPathGlobs: visualProof?.changedPathGlobs ?? defaultAcceptanceProof.changedPathGlobs,
+                  runnerValidationCommand: visualProof?.runnerValidationCommand,
+                  runnerTimeoutMs: visualProof?.runnerTimeoutMs,
+                  envPassthrough: visualProof?.envPassthrough ?? defaultAcceptanceProof.envPassthrough,
+                },
             riskRouting: {
               ...defaultRiskRoutingConfig(),
               ...riskRouting,

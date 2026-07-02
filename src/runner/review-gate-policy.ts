@@ -3,13 +3,18 @@ import type { GitHubIssue } from '../github/issues.js';
 import { globMatches } from '../path-policy.js';
 import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
-export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, issueNumber: number): string[] {
+export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, issue: GitHubIssue): string[] {
   const acceptanceProof = config.reviewGates.acceptanceProof;
   const policy = runnerVisualProofPolicy(config);
   const command = policy.commandTemplate;
+  const proofStrategy = resolveAcceptanceProofStrategy({ config, issue });
+  const issueNumber = issue.number;
+  const strategyLines = proofStrategyPromptLines(proofStrategy);
   if (!command) {
     return [
+      ...strategyLines,
       `For acceptance proof, save proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts.`,
       'For visual/UI work, screenshots and UI dumps require a Proof Report uiEvidence contract with workflowScope, viewportCoverage, artifactFreshness, layoutReview, copyReview, and sourceInputs; screenshot existence alone is not enough proof.',
       'For browser/web UI work, prefer a Playwright-based proof script when available; do not rely on in-session browser plugins for proof.',
@@ -26,6 +31,7 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     : 'If authentication is required, make the acceptance proof script read credentials from environment variables configured in reviewGates.acceptanceProof.envPassthrough; never hardcode credentials.';
 
   return [
+    ...strategyLines,
     `For acceptance proof, prepare proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts when you create them.`,
     `After your run, the runner will execute this visual proof command outside the child Codex sandbox as the configured acceptance proof command: ${command}.`,
     'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
@@ -48,6 +54,33 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     loginEnvLine,
     'If required login environment variables are missing, the visual proof script must fail with a short clear error.',
   ];
+}
+
+function proofStrategyPromptLines(proofStrategy: ReturnType<typeof resolveAcceptanceProofStrategy>): string[] {
+  const lines = [
+    `Resolved proof strategy: ${proofStrategy.strategy} (${proofStrategy.source}).`,
+    'Issue bodies may override the default with an explicit `Proof Strategy: auto|visual|browser-visual|mobile-visual|non-visual-smoke|none` line.',
+  ];
+  if (proofStrategy.strategy === 'non-visual-smoke') {
+    return [
+      ...lines,
+      'Do not prepare browser, screenshot, emulator, simulator, or device-backed visual proof for this issue.',
+      'Prepare non-visual smoke, test, log, or machine-readable artifact evidence that maps each acceptance criterion to observable behavior.',
+    ];
+  }
+  if (proofStrategy.strategy === 'none') {
+    return [
+      ...lines,
+      'Do not prepare runner-owned acceptance proof artifacts unless the implementation itself needs ordinary validation artifacts.',
+    ];
+  }
+  if (proofStrategy.strategy === 'browser-visual') {
+    return [...lines, 'Prepare browser visual proof artifacts; the runner-owned auto proof command must route to browser proof.'];
+  }
+  if (proofStrategy.strategy === 'mobile-visual') {
+    return [...lines, 'Prepare mobile visual proof expectations; the runner-owned auto proof command must route to device-backed mobile proof.'];
+  }
+  return lines;
 }
 
 function androidMobileProofPromptLines(): string[] {
@@ -105,8 +138,12 @@ export function shouldApplyVisualProofGate(input: {
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
   const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
-  if (isPackageOwnedAutoVisualProofCommand(acceptanceCommand) && isNonVisualTelemetryProofIssue(issueText)) {
+  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
     return false;
+  }
+  if (proofStrategy === 'browser-visual' || proofStrategy === 'mobile-visual' || proofStrategy === 'visual') {
+    return Boolean(acceptanceCommand);
   }
   const internalRunnerProofOnlyChange = input.changedFiles.length > 0
     && input.changedFiles.every(isInternalRunnerProofPath);
@@ -130,6 +167,16 @@ export function classifyVisualProofDispatchTarget(input: {
 }): VisualProofDispatchTarget {
   const normalizedFiles = input.changedFiles.map((path) => path.replaceAll('\\', '/').replace(/^\.\//u, ''));
   const issueText = `${input.issue.title}\n${input.issue.body}`;
+  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
+    return 'none';
+  }
+  if (proofStrategy === 'browser-visual') {
+    return 'browser';
+  }
+  if (proofStrategy === 'mobile-visual') {
+    return 'mobile';
+  }
   if (normalizedFiles.some(isMobileProofPath) || normalizedFiles.some((path) => isFlutterEntrypoint(path) && isMobileIssueText(issueText))) {
     return 'mobile';
   }
@@ -152,8 +199,12 @@ export function isVisualProofDesirable(input: {
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
   const command = runnerVisualProofPolicy(input.config).commandTemplate;
-  if (isPackageOwnedAutoVisualProofCommand(command) && isNonVisualTelemetryProofIssue(issueText)) {
+  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
     return false;
+  }
+  if (proofStrategy === 'browser-visual' || proofStrategy === 'mobile-visual' || proofStrategy === 'visual') {
+    return Boolean(command);
   }
   const internalRunnerProofOnlyChange = input.changedFiles.length > 0
     && input.changedFiles.every(isInternalRunnerProofPath);
@@ -271,17 +322,6 @@ function isLegacyVisualProofOverride(
 
 function isMobileVisualProofCommand(command: string | undefined): boolean {
   return /\bcodex-orchestrator\s+visual-proof\s+(?:mobile|android|ios)\b/iu.test(command ?? '');
-}
-
-function isPackageOwnedAutoVisualProofCommand(command: string | undefined): boolean {
-  return (command ?? '').trim() === 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
-}
-
-function isNonVisualTelemetryProofIssue(text: string): boolean {
-  if (!/\b(?:analytics?|firebase|telemetry|events?|logEvent|tracking)\b/iu.test(text)) {
-    return false;
-  }
-  return !/\b(?:visual|screenshot|layout|responsive|viewport|pixel)\b/iu.test(text);
 }
 
 function isMobileProofPath(path: string): boolean {

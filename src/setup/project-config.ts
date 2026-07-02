@@ -35,6 +35,7 @@ export const packageOwnedAutoVisualProofCommand = 'codex-orchestrator visual-pro
 export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
   return {
     enabled: true,
+    proofStrategy: 'auto',
     artifactDir: '.codex-orchestrator/proofs',
     issueTextPatterns: [
       '\\bUI\\b',
@@ -607,6 +608,7 @@ function migrateAcceptanceProofConfig(
     envPassthrough: visualProof?.envPassthrough ?? defaults.envPassthrough,
     ...existing,
   } as CodexOrchestratorConfig['reviewGates']['acceptanceProof'];
+  acceptanceProof.proofStrategy = acceptanceProof.proofStrategy ?? defaults.proofStrategy;
   const command = acceptanceProof.runnerValidationCommand?.trim();
   if (acceptanceProof.enabled && !command) {
     acceptanceProof.runnerValidationCommand = packageOwnedAutoVisualProofCommand;

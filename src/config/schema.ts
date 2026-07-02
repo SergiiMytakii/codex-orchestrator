@@ -23,6 +23,15 @@ export type RetryableReworkBlocker =
   | 'risk-routing-policy';
 export type FreshContextReviewMode = 'advisory';
 export type RiskRoutingMode = 'warn' | 'block';
+export const acceptanceProofStrategies = [
+  'auto',
+  'visual',
+  'browser-visual',
+  'mobile-visual',
+  'non-visual-smoke',
+  'none',
+] as const;
+export type AcceptanceProofStrategy = (typeof acceptanceProofStrategies)[number];
 export const codexPhaseKeys = [
   'plan-parent',
   'scoped-issue',
@@ -159,6 +168,7 @@ export interface CodexOrchestratorConfig {
   reviewGates: {
     acceptanceProof: {
       enabled: boolean;
+      proofStrategy: AcceptanceProofStrategy;
       artifactDir: string;
       issueTextPatterns: string[];
       changedPathGlobs: string[];
@@ -654,6 +664,7 @@ function validateReviewGates(parent: ObjectRecord, errors: string[]): void {
   const acceptanceProof = expectObject(parent, 'reviewGates.acceptanceProof', errors);
   if (acceptanceProof) {
     expectBoolean(acceptanceProof, 'reviewGates.acceptanceProof.enabled', errors);
+    expectUnion(acceptanceProof, 'reviewGates.acceptanceProof.proofStrategy', acceptanceProofStrategies, errors);
     expectString(acceptanceProof, 'reviewGates.acceptanceProof.artifactDir', errors);
     expectStringArray(acceptanceProof, 'reviewGates.acceptanceProof.issueTextPatterns', errors);
     expectStringArray(acceptanceProof, 'reviewGates.acceptanceProof.changedPathGlobs', errors);

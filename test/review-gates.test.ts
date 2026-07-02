@@ -464,13 +464,14 @@ test('visual proof policy still applies generic acceptance proof for configured 
   }), true);
 });
 
-test('visual proof policy does not require device screenshots for non-visual Firebase analytics proof', () => {
+test('visual proof policy does not require device screenshots for explicit non-visual Firebase analytics proof', () => {
   assert.equal(shouldApplyVisualProofGate({
     config: validConfig,
     issue: issueFixture({
       number: 160,
       title: 'Add Firebase-visible analytics for Live entry',
       body: [
+        'Proof Strategy: non-visual-smoke',
         'Send Firebase Analytics events from the mobile app when a user enters the Live screen.',
         'Route live_screen_viewed, sub_purchased, and points_purchased through AnalyticsService.logEvent.',
         'Tests or debug proof verify the event paths.',
@@ -481,6 +482,50 @@ test('visual proof policy does not require device screenshots for non-visual Fir
       'test/core/services/analytics_service_test.dart',
     ],
   }), false);
+});
+
+test('explicit non-visual proof contract disables visual proof without issue text heuristics', () => {
+  const issue = issueFixture({
+    number: 901,
+    title: 'Record Live entry event',
+    body: [
+      'Proof Strategy: non-visual-smoke',
+      'Emit the event when the Live tab opens.',
+      'The changed Flutter screen is not itself the proof surface.',
+    ].join('\n'),
+  });
+
+  assert.equal(shouldApplyVisualProofGate({
+    config: validConfig,
+    issue,
+    changedFiles: [
+      'lib/presentation/screens/live/live_screen.dart',
+      'test/presentation/screens/live/live_screen_test.dart',
+    ],
+  }), false);
+  assert.equal(classifyVisualProofDispatchTarget({
+    config: validConfig,
+    issue,
+    changedFiles: ['lib/presentation/screens/live/live_screen.dart'],
+  }), 'none');
+});
+
+test('explicit visual proof contracts route browser and mobile proof deterministically', () => {
+  const browserIssue = issueFixture({
+    number: 902,
+    title: 'Verify dashboard copy',
+    body: 'proofStrategy: browser-visual',
+  });
+  const mobileIssue = issueFixture({
+    number: 903,
+    title: 'Verify Flutter launch',
+    body: 'Proof Strategy: mobile-visual',
+  });
+
+  assert.equal(shouldApplyVisualProofGate({ config: validConfig, issue: browserIssue, changedFiles: ['src/server.ts'] }), true);
+  assert.equal(classifyVisualProofDispatchTarget({ config: validConfig, issue: browserIssue, changedFiles: ['src/server.ts'] }), 'browser');
+  assert.equal(shouldApplyVisualProofGate({ config: validConfig, issue: mobileIssue, changedFiles: ['src/server.ts'] }), true);
+  assert.equal(classifyVisualProofDispatchTarget({ config: validConfig, issue: mobileIssue, changedFiles: ['src/server.ts'] }), 'mobile');
 });
 
 test('visual proof policy does not treat internal Acceptance Proof module work as mobile UI proof', () => {

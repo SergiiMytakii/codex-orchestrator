@@ -27,6 +27,7 @@ test('runner config reader backfills package-owned proof command and drops unsup
     workflows: fallbackWorkflows,
   });
   delete staleConfig.reviewGates.visualProof.runnerValidationCommand;
+  delete (staleConfig.reviewGates.acceptanceProof as Partial<typeof staleConfig.reviewGates.acceptanceProof>).proofStrategy;
   delete (staleConfig.reviewGates as Partial<typeof staleConfig.reviewGates>).riskRouting;
   staleConfig.loopPolicy.rework.retryableBlockers = staleConfig.loopPolicy.rework.retryableBlockers
     .filter((blocker) => blocker !== 'failed-acceptance-proof');
@@ -43,6 +44,7 @@ test('runner config reader backfills package-owned proof command and drops unsup
     config.reviewGates.visualProof.runnerValidationCommand,
     'codex-orchestrator visual-proof auto --issue ${issueNumber}',
   );
+  assert.equal(config.reviewGates.acceptanceProof.proofStrategy, 'auto');
   assert.deepEqual(config.reviewGates.riskRouting, {
     enabled: true,
     mode: 'warn',

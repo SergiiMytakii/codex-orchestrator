@@ -24,6 +24,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.reviewGates.visualProof.runnerTimeoutMs, 900_000);
     assert.deepEqual(result.value.reviewGates.visualProof.envPassthrough, []);
     assert.equal(result.value.reviewGates.acceptanceProof.enabled, true);
+    assert.equal(result.value.reviewGates.acceptanceProof.proofStrategy, 'auto');
     assert.equal(result.value.reviewGates.acceptanceProof.artifactDir, '.codex-orchestrator/proofs');
     assert.equal(result.value.reviewGates.acceptanceProof.runnerValidationCommand, 'codex-orchestrator visual-proof auto --issue ${issueNumber}');
     assert.equal(result.value.reviewGates.acceptanceProof.maxIterations, 5);
@@ -328,6 +329,7 @@ test('rejects invalid acceptance proof gate config', () => {
       acceptanceProof: {
         ...validConfig.reviewGates.acceptanceProof,
         issueTextPatterns: ['['],
+        proofStrategy: 'analytics',
         proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**', ''],
         maxIterations: 0,
         runnerTimeoutMs: 0,
@@ -344,6 +346,7 @@ test('rejects invalid acceptance proof gate config', () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok ? [] : result.errors, [
+    'reviewGates.acceptanceProof.proofStrategy must be one of auto, visual, browser-visual, mobile-visual, non-visual-smoke, none',
     'reviewGates.acceptanceProof.proofOwnedPathGlobs must be an array of non-empty strings',
     'reviewGates.acceptanceProof.maxIterations must be a positive integer',
     'reviewGates.acceptanceProof.runnerTimeoutMs must be a positive integer when provided',

@@ -61,6 +61,23 @@ test('visual-proof auto treats Flutter lib changes as mobile when issue asks for
   assert.equal(mobileIssue, 160);
 });
 
+test('visual-proof auto honors explicit non-visual proof contract without running device proof', async () => {
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '160', '--target', '/tmp/flutter-app'],
+    config: validConfig,
+    env: {
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'lib/presentation/screens/prediction_markets/prediction_markets_discovery_screen.dart',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Add event dispatch',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: 'Proof Strategy: non-visual-smoke\nUse tests and smoke output as proof.',
+    },
+    mobileRunner: async () => {
+      throw new Error('mobile proof should not run for non-visual proof strategy');
+    },
+  });
+
+  assert.equal(result.target, 'none');
+});
+
 test('visual-proof auto reports no-match failures clearly', async () => {
   await assert.rejects(
     runAutoVisualProofCommand({
