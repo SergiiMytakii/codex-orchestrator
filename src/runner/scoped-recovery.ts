@@ -18,6 +18,12 @@ import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { runImplementationPublishabilityCheck, type LocalExecutionPhaseExecutor } from './local-execution-session.js';
 import { RunnerStateStore, type RunnerProcessMetadata } from './local-state.js';
 import { RunnerLifecycleEventStore } from './lifecycle-events.js';
+import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
+import {
+  buildBlockedHandoffEvidence,
+  buildPromotionAsBlockedHandoffEvidence,
+  buildReviewReadyHandoffEvidence,
+} from './runner-handoff-decision.js';
 import {
   finishScopedBlockedHandoff,
   finishScopedReviewReadyHandoff,
@@ -287,21 +293,32 @@ async function recoverCompletedHandoff(input: {
   };
 
   if (publishability.status !== 'publish-ready') {
+    const evidence = publishability.status === 'blocked'
+      ? buildBlockedHandoffEvidence({
+        publishability,
+        nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+      })
+      : buildPromotionAsBlockedHandoffEvidence({
+        publishability,
+        fallbackReason: 'Recovered report requested promotion',
+        nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+      });
     return blockRecoveredRun({
       targetRoot: input.targetRoot,
       config: input.config,
       run: input.run,
       classification: input.classification,
       issueAdapter: input.issueAdapter,
-      reasons: publishability.status === 'blocked'
-        ? publishability.reasons
-        : [publishability.report.promotion?.reason ?? 'Recovered report requested promotion'],
-      changedFiles: publishability.status === 'blocked' ? publishability.changedFiles : [],
-      validation: publishability.status === 'blocked' ? publishability.validation ?? [] : publishability.report.validation,
-      skippedChecks: publishability.status === 'blocked' ? publishability.skippedChecks : publishability.report.skippedChecks,
-      residualRisks: publishability.status === 'blocked' ? publishability.residualRisks : publishability.report.residualRisks,
+      reasons: evidence.blockers,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
       now: input.now,
       logPath,
+      nextAction: evidence.nextAction,
+      suggestionEvidence: evidence.suggestionEvidence,
+      acceptanceProof: evidence.acceptanceProof,
     });
   }
 
@@ -316,38 +333,52 @@ async function recoverCompletedHandoff(input: {
     publishability,
   });
   if (freshContextReview?.status === 'blocked') {
+    const evidence = buildBlockedHandoffEvidence({
+      publishability,
+      freshContextReview,
+      nextAction: 'Review the Fresh-Context Review blocker before draft PR handoff.',
+    });
     return blockRecoveredRun({
       targetRoot: input.targetRoot,
       config: input.config,
       run: input.run,
       classification: input.classification,
       issueAdapter: input.issueAdapter,
-      reasons: ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
-      changedFiles: publishability.changedFiles,
-      validation: publishability.validation,
-      skippedChecks: publishability.skippedChecks,
-      residualRisks: [...publishability.residualRisks, ...freshContextReview.residualRisks],
+      reasons: evidence.blockers,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
       now: input.now,
       logPath,
       freshContextReview,
+      nextAction: evidence.nextAction,
+      suggestionEvidence: evidence.suggestionEvidence,
+      acceptanceProof: evidence.acceptanceProof,
     });
   }
 
+  const evidence = buildReviewReadyHandoffEvidence({
+    publishability,
+    freshContextReview,
+    nextAction: 'Review the draft pull request before merge.',
+  });
   const durableRunSummary = await writeDurableRunSummary({
     targetRoot: input.targetRoot,
     config: input.config,
     issueNumber: input.run.issueNumber,
     sessionId: input.run.sessionId,
-    outcome: 'review-ready',
-    changedFiles: publishability.changedFiles,
-    validation: publishability.validation,
-    blockers: [],
-    skippedChecks: publishability.skippedChecks,
-    residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
-    suggestionEvidence: freshContextReview?.findings,
-    nextAction: 'Review the draft pull request before merge.',
+    outcome: evidence.outcome,
+    changedFiles: evidence.changedFiles,
+    validation: evidence.validation,
+    blockers: evidence.blockers,
+    skippedChecks: evidence.skippedChecks,
+    residualRisks: evidence.residualRisks,
+    suggestionEvidence: evidence.suggestionEvidence,
+    nextAction: evidence.nextAction,
     logPath,
     reportPath,
+    acceptanceProof: evidence.acceptanceProof,
   });
   const resolvedBase = await resolveBaseBranch({ targetRoot: input.targetRoot, base: input.config.branches.base });
   const handoff = await finishScopedReviewReadyHandoff({
@@ -363,6 +394,7 @@ async function recoverCompletedHandoff(input: {
     publishability,
     freshContextReview,
     durableRunSummary,
+    acceptanceProof: evidence.acceptanceProof,
   });
   await new RunnerStateStore(input.targetRoot, input.config).removeRun(input.run.issueNumber);
   await safeAppendRecoveryEvent(input.targetRoot, input.config, {
@@ -395,7 +427,10 @@ async function blockRecoveredRun(input: {
   residualRisks: string[];
   now: Date;
   logPath: string;
+  nextAction?: string;
+  suggestionEvidence?: string[];
   freshContextReview?: Parameters<typeof finishScopedBlockedHandoff>[0]['freshContextReview'];
+  acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): Promise<ScopedRecoveryRunResult> {
   const marker = recoveryBlockedMarker(input.run);
   const durableRunSummary = await writeDurableRunSummary({
@@ -409,10 +444,11 @@ async function blockRecoveredRun(input: {
     blockers: input.reasons,
     skippedChecks: input.skippedChecks,
     residualRisks: input.residualRisks,
-    suggestionEvidence: input.freshContextReview?.findings,
-    nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+    suggestionEvidence: input.suggestionEvidence,
+    nextAction: input.nextAction ?? 'Maintainer input or a corrected agent run is required before draft PR handoff.',
     logPath: input.logPath,
     reportPath: input.run.reportPath ?? '',
+    acceptanceProof: input.acceptanceProof,
   });
   const handoff = await finishScopedBlockedHandoff({
     issueNumber: input.run.issueNumber,
@@ -425,6 +461,7 @@ async function blockRecoveredRun(input: {
     residualRisks: input.residualRisks,
     freshContextReview: input.freshContextReview,
     durableRunSummary,
+    acceptanceProof: input.acceptanceProof,
     commentPrefix: marker,
     skipCommentIfIncludes: marker,
   });

@@ -43,6 +43,11 @@ import {
   writeDurablePrompt,
 } from './prompt.js';
 import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
+import {
+  buildBlockedHandoffEvidence,
+  buildPromotionRequestedHandoffEvidence,
+  buildReviewReadyHandoffEvidence,
+} from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -294,18 +299,22 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     }
 
     if (publishability.status === 'promotion-requested') {
+      const evidence = buildPromotionRequestedHandoffEvidence({
+        publishability,
+        nextAction: 'Maintainer should review promotion evidence and decide whether to use parent issue-tree orchestration.',
+      });
       const durableRunSummary = await writeDurableRunSummary({
         targetRoot,
         config,
         issueNumber: options.issueNumber,
         sessionId,
-        outcome: 'promotion-requested',
-        changedFiles: [],
-        validation: publishability.report.validation,
-        blockers: [publishability.report.promotion?.reason ?? 'Promotion requested'],
-        skippedChecks: publishability.report.skippedChecks,
-        residualRisks: publishability.report.residualRisks,
-        nextAction: 'Maintainer should review promotion evidence and decide whether to use parent issue-tree orchestration.',
+        outcome: evidence.outcome,
+        changedFiles: evidence.changedFiles,
+        validation: evidence.validation,
+        blockers: evidence.blockers,
+        skippedChecks: evidence.skippedChecks,
+        residualRisks: evidence.residualRisks,
+        nextAction: evidence.nextAction,
         logPath,
         reportPath,
       });
@@ -334,22 +343,26 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
     }
 
     if (publishability.status === 'blocked') {
+      const evidence = buildBlockedHandoffEvidence({
+        publishability,
+        nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+      });
       const durableRunSummary = await writeDurableRunSummary({
         targetRoot,
         config,
         issueNumber: options.issueNumber,
         sessionId,
-        outcome: 'blocked',
-        changedFiles: publishability.changedFiles,
-        validation: publishability.validation ?? [],
-        blockers: publishability.reasons,
-        skippedChecks: publishability.skippedChecks,
-        residualRisks: publishability.residualRisks,
-        suggestionEvidence: [],
-        nextAction: 'Maintainer input or a corrected agent run is required before draft PR handoff.',
+        outcome: evidence.outcome,
+        changedFiles: evidence.changedFiles,
+        validation: evidence.validation,
+        blockers: evidence.blockers,
+        skippedChecks: evidence.skippedChecks,
+        residualRisks: evidence.residualRisks,
+        suggestionEvidence: evidence.suggestionEvidence,
+        nextAction: evidence.nextAction,
         logPath,
         reportPath,
-        acceptanceProof: publishability.acceptanceProofAttempt,
+        acceptanceProof: evidence.acceptanceProof,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -364,13 +377,13 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
         config,
-        publishability.reasons,
-        publishability.changedFiles,
-        publishability.skippedChecks,
-        publishability.residualRisks,
+        evidence.blockers,
+        evidence.changedFiles,
+        evidence.skippedChecks,
+        evidence.residualRisks,
         undefined,
         durableRunSummary,
-        publishability.acceptanceProofAttempt,
+        evidence.acceptanceProof,
       );
     }
 
@@ -385,22 +398,27 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
       publishability,
     });
     if (freshContextReview?.status === 'blocked') {
+      const evidence = buildBlockedHandoffEvidence({
+        publishability,
+        freshContextReview,
+        nextAction: 'Review the Fresh-Context Review blocker before draft PR handoff.',
+      });
       const durableRunSummary = await writeDurableRunSummary({
         targetRoot,
         config,
         issueNumber: options.issueNumber,
         sessionId,
-        outcome: 'blocked',
-        changedFiles: publishability.changedFiles,
-        validation: publishability.validation,
-        blockers: ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
-        skippedChecks: publishability.skippedChecks,
-        residualRisks: [...publishability.residualRisks, ...freshContextReview.residualRisks],
-        suggestionEvidence: freshContextReview.findings,
-        nextAction: 'Review the Fresh-Context Review blocker before draft PR handoff.',
+        outcome: evidence.outcome,
+        changedFiles: evidence.changedFiles,
+        validation: evidence.validation,
+        blockers: evidence.blockers,
+        skippedChecks: evidence.skippedChecks,
+        residualRisks: evidence.residualRisks,
+        suggestionEvidence: evidence.suggestionEvidence,
+        nextAction: evidence.nextAction,
         logPath,
         reportPath,
-        acceptanceProof: publishability.acceptanceProofAttempt,
+        acceptanceProof: evidence.acceptanceProof,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -415,35 +433,37 @@ export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): P
         baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath),
         issueAdapter,
         config,
-        ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
-        publishability.changedFiles,
-        publishability.skippedChecks,
-        [...publishability.residualRisks, ...freshContextReview.residualRisks],
+        evidence.blockers,
+        evidence.changedFiles,
+        evidence.skippedChecks,
+        evidence.residualRisks,
         freshContextReview,
         durableRunSummary,
-        publishability.acceptanceProofAttempt,
+        evidence.acceptanceProof,
       );
     }
 
+    const evidence = buildReviewReadyHandoffEvidence({
+      publishability,
+      freshContextReview,
+      nextAction: 'Review the draft pull request before merge.',
+    });
     const durableRunSummary = await writeDurableRunSummary({
       targetRoot,
       config,
       issueNumber: options.issueNumber,
       sessionId,
-      outcome: 'review-ready',
-      changedFiles: publishability.changedFiles,
-      validation: publishability.validation,
-      blockers: [],
-      skippedChecks: publishability.skippedChecks,
-      residualRisks: [
-        ...publishability.residualRisks,
-        ...(freshContextReview?.residualRisks ?? []),
-      ],
-      suggestionEvidence: freshContextReview?.findings,
-      nextAction: 'Review the draft pull request before merge.',
+      outcome: evidence.outcome,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      blockers: evidence.blockers,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
+      suggestionEvidence: evidence.suggestionEvidence,
+      nextAction: evidence.nextAction,
       logPath,
       reportPath,
-      acceptanceProof: publishability.acceptanceProofAttempt,
+      acceptanceProof: evidence.acceptanceProof,
     });
     const handoff = await finishScopedReviewReadyHandoff({
       issueNumber: options.issueNumber,

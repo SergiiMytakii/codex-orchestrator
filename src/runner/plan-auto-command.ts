@@ -54,6 +54,11 @@ import {
 } from './prompt.js';
 import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
 import { evaluateParentRiskRoutingGate } from './review-gates.js';
+import {
+  buildBlockedHandoffEvidence,
+  buildPromotionAsBlockedHandoffEvidence,
+  buildReviewReadyHandoffEvidence,
+} from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -800,33 +805,57 @@ async function executeChild(input: {
 
   if (publishability.status === 'promotion-requested') {
     const promotion = publishability.report.promotion;
-    throw new Error(
-      [
-        'Child requested promotion instead of completing issue-tree work.',
-        promotion ? `Reason: ${promotion.reason}` : undefined,
-        promotion ? `Evidence: ${promotion.evidence.join(', ')}` : undefined,
-      ].filter(Boolean).join(' '),
-    );
-  }
-
-  if (publishability.status === 'blocked') {
+    const evidence = buildPromotionAsBlockedHandoffEvidence({
+      publishability,
+      fallbackReason: 'Child requested promotion instead of completing issue-tree work.',
+      nextAction: 'Parent issue-tree execution is blocked until this child is resolved.',
+    });
     const durableRunSummary = await writeDurableRunSummary({
       targetRoot: input.targetRoot,
       config: input.config,
       issueNumber: childIssueNumber,
       sessionId,
-      outcome: 'blocked',
-      changedFiles: publishability.changedFiles,
-      validation: publishability.validation ?? [],
-      blockers: publishability.reasons,
-      skippedChecks: publishability.skippedChecks,
-      residualRisks: publishability.residualRisks,
-      nextAction: 'Parent issue-tree execution is blocked until this child is resolved.',
+      outcome: evidence.outcome,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      blockers: evidence.blockers,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
+      nextAction: evidence.nextAction,
       logPath,
       reportPath,
-      acceptanceProof: publishability.acceptanceProofAttempt,
+      acceptanceProof: evidence.acceptanceProof,
     });
-    throw new ChildExecutionBlockedError(publishability.reasons.join('; '), durableRunSummary, undefined, publishability.acceptanceProofAttempt);
+    const message = [
+      'Child requested promotion instead of completing issue-tree work.',
+      promotion ? `Reason: ${promotion.reason}` : undefined,
+      promotion ? `Evidence: ${promotion.evidence.join(', ')}` : undefined,
+    ].filter(Boolean).join(' ');
+    throw new ChildExecutionBlockedError(message, durableRunSummary, undefined, evidence.acceptanceProof);
+  }
+
+  if (publishability.status === 'blocked') {
+    const evidence = buildBlockedHandoffEvidence({
+      publishability,
+      nextAction: 'Parent issue-tree execution is blocked until this child is resolved.',
+    });
+    const durableRunSummary = await writeDurableRunSummary({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+      outcome: evidence.outcome,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      blockers: evidence.blockers,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
+      nextAction: evidence.nextAction,
+      logPath,
+      reportPath,
+      acceptanceProof: evidence.acceptanceProof,
+    });
+    throw new ChildExecutionBlockedError(evidence.blockers.join('; '), durableRunSummary, undefined, evidence.acceptanceProof);
   }
 
   const freshContextReview = await runFreshContextReviewIfEnabled({
@@ -840,47 +869,57 @@ async function executeChild(input: {
     publishability,
   });
   if (freshContextReview?.status === 'blocked') {
+    const evidence = buildBlockedHandoffEvidence({
+      publishability,
+      freshContextReview,
+      nextAction: 'Parent issue-tree execution is blocked until this child review finding is resolved.',
+    });
     const durableRunSummary = await writeDurableRunSummary({
       targetRoot: input.targetRoot,
       config: input.config,
       issueNumber: childIssueNumber,
       sessionId,
-      outcome: 'blocked',
-      changedFiles: publishability.changedFiles,
-      validation: publishability.validation,
-      blockers: ['Fresh-Context Review blocked publication', ...freshContextReview.findings],
-      skippedChecks: publishability.skippedChecks,
-      residualRisks: [...publishability.residualRisks, ...freshContextReview.residualRisks],
-      suggestionEvidence: freshContextReview.findings,
-      nextAction: 'Parent issue-tree execution is blocked until this child review finding is resolved.',
+      outcome: evidence.outcome,
+      changedFiles: evidence.changedFiles,
+      validation: evidence.validation,
+      blockers: evidence.blockers,
+      skippedChecks: evidence.skippedChecks,
+      residualRisks: evidence.residualRisks,
+      suggestionEvidence: evidence.suggestionEvidence,
+      nextAction: evidence.nextAction,
       logPath,
       reportPath,
-      acceptanceProof: publishability.acceptanceProofAttempt,
+      acceptanceProof: evidence.acceptanceProof,
     });
     throw new ChildExecutionBlockedError(
-      ['Fresh-Context Review blocked publication', ...freshContextReview.findings].join('; '),
+      evidence.blockers.join('; '),
       durableRunSummary,
       freshContextReview,
-      publishability.acceptanceProofAttempt,
+      evidence.acceptanceProof,
     );
   }
 
+  const evidence = buildReviewReadyHandoffEvidence({
+    publishability,
+    freshContextReview,
+    nextAction: 'Parent issue-tree integration should merge this child branch.',
+  });
   const durableRunSummary = await writeDurableRunSummary({
     targetRoot: input.targetRoot,
     config: input.config,
     issueNumber: childIssueNumber,
     sessionId,
-    outcome: 'review-ready',
-    changedFiles: publishability.changedFiles,
-    validation: publishability.validation,
-    blockers: [],
-    skippedChecks: publishability.skippedChecks,
-    residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
-    suggestionEvidence: freshContextReview?.findings,
-    nextAction: 'Parent issue-tree integration should merge this child branch.',
+    outcome: evidence.outcome,
+    changedFiles: evidence.changedFiles,
+    validation: evidence.validation,
+    blockers: evidence.blockers,
+    skippedChecks: evidence.skippedChecks,
+    residualRisks: evidence.residualRisks,
+    suggestionEvidence: evidence.suggestionEvidence,
+    nextAction: evidence.nextAction,
     logPath,
     reportPath,
-    acceptanceProof: publishability.acceptanceProofAttempt,
+    acceptanceProof: evidence.acceptanceProof,
   });
 
   return {
@@ -895,7 +934,7 @@ async function executeChild(input: {
     artifacts: publishability.artifacts,
     commits: publishability.commits,
     skippedChecks: publishability.skippedChecks,
-    residualRisks: [...publishability.residualRisks, ...(freshContextReview?.residualRisks ?? [])],
+    residualRisks: evidence.residualRisks,
     reviewHandoff: publishability.report.reviewHandoff,
     freshContextReview,
     durableRunSummary,
