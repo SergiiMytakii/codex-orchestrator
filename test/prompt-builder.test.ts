@@ -123,6 +123,9 @@ test('prompt builder exposes explicit issue proof strategy to the child agent', 
   assert.match(prompt, /Resolved proof strategy: non-visual-smoke \(issue contract\)/);
   assert.match(prompt, /Do not prepare browser, screenshot, emulator, simulator, or device-backed visual proof/);
   assert.match(prompt, /Prepare non-visual smoke, test, log, or machine-readable artifact evidence/);
+  assert.match(prompt, /Do not create browser\/mobile routing markers/);
+  assert.doesNotMatch(prompt, /After your run, the runner will execute this visual proof command/);
+  assert.doesNotMatch(prompt, /codex-orchestrator visual-proof auto/);
 });
 
 test('prompt builder keeps shell-like issue text inert and literal', () => {

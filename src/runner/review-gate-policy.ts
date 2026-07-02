@@ -12,6 +12,21 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
   const proofStrategy = resolveAcceptanceProofStrategy({ config, issue });
   const issueNumber = issue.number;
   const strategyLines = proofStrategyPromptLines(proofStrategy);
+  if (proofStrategy.strategy === 'non-visual-smoke') {
+    return [
+      ...strategyLines,
+      `For acceptance proof, save non-visual smoke, test, log, or machine-readable artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as log, smoke-output, or other artifacts.`,
+      'Do not create browser/mobile routing markers, placeholder UI files, screenshot scenarios, emulator scripts, or other visual-proof shims just to satisfy the configured runner-owned visual proof command.',
+      'Do not change files outside the child ownership scope for proof routing. If non-visual evidence is insufficient, report the exact gap in skippedChecks or residualRisks.',
+    ];
+  }
+  if (proofStrategy.strategy === 'none') {
+    return [
+      ...strategyLines,
+      `If ordinary validation artifacts are useful, save them under ${policy.artifactDir}/issue-${issueNumber}/ and include them as log, smoke-output, or other artifacts.`,
+      'Do not create browser/mobile routing markers, placeholder UI files, screenshot scenarios, emulator scripts, or other visual-proof shims.',
+    ];
+  }
   if (!command) {
     return [
       ...strategyLines,
