@@ -177,7 +177,7 @@ function renderAcceptanceProofEvidence(evidence: AcceptanceProofAttemptEvidence 
   return [
     'Acceptance Proof',
     `- status: ${evidence.status}`,
-    `- prompt: ${evidence.promptPath}`,
+    ...(evidence.promptPath ? [`- prompt: ${evidence.promptPath}`] : []),
     `- report: ${evidence.reportPath}`,
     `- artifact dir: ${evidence.artifactDir}`,
     'Acceptance Proof Artifacts',

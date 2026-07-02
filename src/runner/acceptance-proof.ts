@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import { globMatches, normalizePath, uniqueSortedPaths } from '../path-policy.js';
 import { scopedArtifactTypes, type ScopedArtifactType } from './completion-report.js';
+import type { RunnerValidationLine } from './handoff-evidence.js';
 
 export type AcceptanceProofStatus = 'passed' | 'needs-rework' | 'blocked';
 export type AcceptanceCriterionStatus = 'passed' | 'failed' | 'unknown';
@@ -101,6 +102,32 @@ export interface AcceptanceProofReport {
     evidenceRefs: string[];
   };
   residualRisks: string[];
+}
+
+export interface AcceptanceProofAttemptEvidence {
+  status: AcceptanceProofStatus;
+  promptPath?: string;
+  reportPath: string;
+  artifactDir: string;
+  artifactPaths: string[];
+  validation: RunnerValidationLine[];
+  blockers: string[];
+  residualRisks: string[];
+  reworkRequest?: {
+    summary: string;
+    requiredChanges: string[];
+    evidenceRefs: string[];
+  };
+}
+
+export interface AcceptanceProofOutcome {
+  status: AcceptanceProofStatus;
+  validation: RunnerValidationLine[];
+  artifacts: AcceptanceProofArtifact[];
+  artifactPaths: string[];
+  blockers: string[];
+  residualRisks: string[];
+  evidence: AcceptanceProofAttemptEvidence;
 }
 
 export interface AcceptanceProofEvaluationInput {
@@ -232,6 +259,163 @@ export function evaluateAcceptanceProofReport(input: AcceptanceProofEvaluationIn
     reasons,
     warnings,
   };
+}
+
+export function buildAcceptanceProofReportOutcome(input: {
+  command: string;
+  config: CodexOrchestratorConfig;
+  report: AcceptanceProofReport;
+  proofPhaseChangedFiles: string[];
+  artifactExists?: (path: string) => boolean;
+  commandExitCode: number;
+  commandOutputSummary?: string;
+  promptPath?: string;
+  reportPath: string;
+  artifactDir: string;
+  passedSummary: (report: AcceptanceProofReport) => string;
+  failedSummaryPrefix: string;
+}): AcceptanceProofOutcome {
+  const evaluation = evaluateAcceptanceProofReport({
+    config: input.config,
+    report: input.report,
+    proofPhaseChangedFiles: input.proofPhaseChangedFiles,
+    artifactExists: input.artifactExists,
+  });
+  const status = acceptanceProofStatus(input.report, evaluation.ok, input.commandExitCode);
+  const artifactPaths = artifactPathsFromAcceptanceProofReport(input.report, input.proofPhaseChangedFiles);
+  const validation: RunnerValidationLine[] = [{
+    command: input.command,
+    status: status === 'passed' ? 'passed' : 'failed',
+    summary: status === 'passed'
+      ? input.passedSummary(input.report)
+      : `${input.failedSummaryPrefix} ${status}: ${[
+        input.commandExitCode === 0 ? undefined : input.commandOutputSummary,
+        ...evaluation.reasons,
+      ].filter(Boolean).join('; ')}`,
+  }];
+  const evidence: AcceptanceProofAttemptEvidence = {
+    status,
+    promptPath: input.promptPath,
+    reportPath: input.reportPath,
+    artifactDir: input.artifactDir,
+    artifactPaths,
+    validation,
+    blockers: status === 'passed' ? [] : validation.map((line) => line.summary),
+    residualRisks: uniqueStrings(evaluation.warnings),
+    reworkRequest: input.report.reworkRequest,
+  };
+  return {
+    status,
+    validation,
+    artifacts: input.report.artifacts,
+    artifactPaths,
+    blockers: evidence.blockers,
+    residualRisks: evidence.residualRisks,
+    evidence,
+  };
+}
+
+export function buildBlockedAcceptanceProofOutcome(input: {
+  command: string;
+  promptPath?: string;
+  reportPath: string;
+  artifactDir: string;
+  artifactPaths: string[];
+  validationSummary: string;
+  blockers: string[];
+  residualRisks: string[];
+  commandExitCode: number;
+  commandOutputSummary?: string;
+}): AcceptanceProofOutcome {
+  const validation: RunnerValidationLine[] = [{
+    command: input.command,
+    status: 'failed',
+    summary: input.commandExitCode === 0
+      ? input.validationSummary
+      : `${input.validationSummary} ${input.commandOutputSummary ?? `Command exited with code ${input.commandExitCode}`}`,
+  }];
+  const evidence: AcceptanceProofAttemptEvidence = {
+    status: 'blocked',
+    promptPath: input.promptPath,
+    reportPath: input.reportPath,
+    artifactDir: input.artifactDir,
+    artifactPaths: input.artifactPaths,
+    validation,
+    blockers: input.blockers,
+    residualRisks: input.residualRisks,
+  };
+  return {
+    status: 'blocked',
+    validation,
+    artifacts: input.artifactPaths.map((path) => ({
+      type: 'other',
+      path,
+      description: `acceptance proof artifact ${path}`,
+    })),
+    artifactPaths: input.artifactPaths,
+    blockers: input.blockers,
+    residualRisks: input.residualRisks,
+    evidence,
+  };
+}
+
+export function buildForbiddenAcceptanceProofDiffEvidence(input: {
+  command: string;
+  baseEvidence?: AcceptanceProofAttemptEvidence;
+  reportPath?: string;
+  artifactDir?: string;
+  artifactPaths: string[];
+  forbiddenProductPaths: string[];
+}): AcceptanceProofAttemptEvidence {
+  const normalizedForbiddenPaths = uniqueSortedPaths(input.forbiddenProductPaths);
+  const summary = `Acceptance proof produced product-code changes during acceptance proof: ${normalizedForbiddenPaths.join(', ')}.`;
+  const validation: RunnerValidationLine[] = [{
+    command: input.command,
+    status: 'failed',
+    summary,
+  }];
+  return {
+    status: 'blocked',
+    promptPath: input.baseEvidence?.promptPath,
+    reportPath: input.baseEvidence?.reportPath ?? input.reportPath ?? '',
+    artifactDir: input.baseEvidence?.artifactDir ?? input.artifactDir ?? '',
+    artifactPaths: uniqueSortedPaths([
+      ...(input.baseEvidence?.artifactPaths ?? []),
+      ...input.artifactPaths,
+    ]),
+    validation,
+    blockers: [summary],
+    residualRisks: input.baseEvidence?.residualRisks ?? [],
+    reworkRequest: input.baseEvidence?.reworkRequest,
+  };
+}
+
+export function artifactPathsFromAcceptanceProofReport(
+  report: AcceptanceProofReport,
+  changedFiles: string[],
+): string[] {
+  return Array.from(new Set([
+    ...changedFiles,
+    ...report.artifacts.flatMap((artifact) => artifact.path ? [normalizePath(artifact.path)] : []),
+  ])).sort((left, right) => left.localeCompare(right));
+}
+
+function acceptanceProofStatus(
+  report: AcceptanceProofReport,
+  evaluationOk: boolean,
+  exitCode: number,
+): AcceptanceProofStatus {
+  if (exitCode !== 0 || report.status === 'blocked') {
+    return 'blocked';
+  }
+  if (!evaluationOk || report.status === 'needs-rework') {
+    return 'needs-rework';
+  }
+  return 'passed';
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
 }
 
 function validateUiEvidence(input: {

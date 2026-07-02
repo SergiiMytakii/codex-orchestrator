@@ -6,7 +6,11 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
-import { classifyAcceptanceProofDiff, createAcceptanceProofDiffCapture } from './acceptance-proof.js';
+import {
+  buildForbiddenAcceptanceProofDiffEvidence,
+  classifyAcceptanceProofDiff,
+  createAcceptanceProofDiffCapture,
+} from './acceptance-proof.js';
 import { evaluateReviewGates, shouldApplyVisualProofGate } from './review-gates.js';
 import {
   validateChangedPaths,
@@ -355,6 +359,7 @@ export async function runImplementationPublishabilityCheck(
       shellExecutor: input.shellExecutor,
     });
   validation = [...validation, ...runnerVisualProof.validation];
+  acceptanceProofAttempt = runnerVisualProof.acceptanceProofAttempt ?? acceptanceProofAttempt;
   report = {
     ...report,
     artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
@@ -368,11 +373,18 @@ export async function runImplementationPublishabilityCheck(
     changedFiles = changeSet.changedPaths;
     const proofDiff = classifyAcceptanceProofDiff(input.config, proofPhaseChangedFiles);
     if (proofDiff.forbiddenProductPaths.length > 0) {
+      acceptanceProofAttempt = buildForbiddenAcceptanceProofDiffEvidence({
+        command: 'runner acceptance proof',
+        baseEvidence: acceptanceProofAttempt,
+        reportPath: runnerVisualProof.proofReportPath,
+        artifactDir: runnerVisualProof.proofArtifactDir,
+        artifactPaths: proofPhaseChangedFiles,
+        forbiddenProductPaths: proofDiff.forbiddenProductPaths,
+      });
+      validation = [...validation, ...acceptanceProofAttempt.validation];
       return {
         status: 'blocked',
-        reasons: [
-          `Acceptance proof produced product-code changes during acceptance proof: ${proofDiff.forbiddenProductPaths.join(', ')}.`,
-        ],
+        reasons: acceptanceProofAttempt.blockers,
         changedFiles,
         validation,
         skippedChecks: report.skippedChecks,

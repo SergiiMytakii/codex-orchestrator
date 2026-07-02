@@ -6,33 +6,20 @@ import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/comma
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitWorktreeManager } from '../git/worktree.js';
 import type { GitHubIssue } from '../github/issues.js';
-import { globMatches, normalizePath } from '../path-policy.js';
+import { globMatches } from '../path-policy.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
+  buildAcceptanceProofReportOutcome,
+  buildBlockedAcceptanceProofOutcome,
   createAcceptanceProofDiffCapture,
-  evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
   uiEvidenceFailureDimensions,
-  type AcceptanceProofReport,
+  type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
-export interface AcceptanceProofAttemptEvidence {
-  status: 'passed' | 'needs-rework' | 'blocked';
-  promptPath: string;
-  reportPath: string;
-  artifactDir: string;
-  artifactPaths: string[];
-  validation: RunnerValidationLine[];
-  blockers: string[];
-  residualRisks: string[];
-  reworkRequest?: {
-    summary: string;
-    requiredChanges: string[];
-    evidenceRefs: string[];
-  };
-}
+export type { AcceptanceProofAttemptEvidence } from './acceptance-proof.js';
 
 export interface RunAcceptanceProofAttemptInput {
   config: CodexOrchestratorConfig;
@@ -148,7 +135,8 @@ export async function runAcceptanceProofAttempt(
 
   if (reportRead.kind === 'missing') {
     return blocked({
-      proofResult,
+      commandExitCode: proofResult.exitCode,
+      commandOutputSummary: `Codex exited with code ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
       proofPromptPath,
       proofReportPath,
       proofDir,
@@ -161,7 +149,8 @@ export async function runAcceptanceProofAttempt(
   }
   if (reportRead.kind === 'invalid') {
     return blocked({
-      proofResult,
+      commandExitCode: proofResult.exitCode,
+      commandOutputSummary: `Codex exited with code ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
       proofPromptPath,
       proofReportPath,
       proofDir,
@@ -173,56 +162,41 @@ export async function runAcceptanceProofAttempt(
     });
   }
 
-  const evaluation = evaluateAcceptanceProofReport({
+  const outcome = buildAcceptanceProofReportOutcome({
+    command: 'adaptive acceptance proof',
     config: input.config,
     report: reportRead.report,
     proofPhaseChangedFiles,
     artifactExists: (path) => existsSync(join(input.worktreePath, path)),
-  });
-  const status = proofStatus(reportRead.report, evaluation.ok, proofResult.exitCode);
-  const artifactPaths = artifactPathsFromReport(reportRead.report, proofPhaseChangedFiles);
-  const validation: RunnerValidationLine[] = [{
-    command: 'adaptive acceptance proof',
-    status: status === 'passed' ? 'passed' : 'failed',
-    summary: status === 'passed'
-      ? `Acceptance proof passed: ${reportRead.report.criteria.length} criterion/criteria mapped to high-confidence artifacts.`
-      : `Acceptance proof ${status}: ${[
-        proofResult.exitCode === 0 ? undefined : `proof session exited ${proofResult.exitCode}`,
-        ...evaluation.reasons,
-      ].filter(Boolean).join('; ')}`,
-  }];
-  const evidence: AcceptanceProofAttemptEvidence = {
-    status,
+    commandExitCode: proofResult.exitCode,
+    commandOutputSummary: `proof session exited ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
     promptPath: proofPromptPath,
     reportPath: proofReportPath,
     artifactDir: proofDir,
-    artifactPaths,
-    validation,
-    blockers: status === 'passed' ? [] : validation.map((line) => line.summary),
-    residualRisks: [...reportRead.report.residualRisks, ...evaluation.warnings],
-    reworkRequest: reportRead.report.reworkRequest,
-  };
+    passedSummary: (report) => `Acceptance proof passed: ${report.criteria.length} criterion/criteria mapped to high-confidence artifacts.`,
+    failedSummaryPrefix: 'Acceptance proof',
+  });
 
-  if (status !== 'passed') {
+  if (outcome.status !== 'passed') {
     return {
       status: 'blocked',
       changedFiles: changeSet.changedPaths,
-      validation,
-      artifacts: reportRead.report.artifacts,
-      residualRisks: evidence.residualRisks,
-      blockers: evidence.blockers,
-      evidence,
+      validation: outcome.validation,
+      artifacts: outcome.artifacts,
+      residualRisks: outcome.residualRisks,
+      blockers: outcome.blockers,
+      evidence: outcome.evidence,
     };
   }
 
   return {
     status: 'passed',
     changedFiles: changeSet.changedPaths,
-    validation,
-    artifacts: reportRead.report.artifacts,
-    residualRisks: evidence.residualRisks,
+    validation: outcome.validation,
+    artifacts: outcome.artifacts,
+    residualRisks: outcome.residualRisks,
     blockers: [],
-    evidence,
+    evidence: outcome.evidence,
   };
 }
 
@@ -274,22 +248,9 @@ function buildAcceptanceProofPrompt(input: {
   ].join('\n\n');
 }
 
-function proofStatus(
-  report: AcceptanceProofReport,
-  evaluationOk: boolean,
-  exitCode: number,
-): AcceptanceProofAttemptEvidence['status'] {
-  if (exitCode !== 0 || report.status === 'blocked') {
-    return 'blocked';
-  }
-  if (!evaluationOk || report.status === 'needs-rework') {
-    return 'needs-rework';
-  }
-  return 'passed';
-}
-
 function blocked(input: {
-  proofResult: CodexCommandRunResult;
+  commandExitCode: number;
+  commandOutputSummary?: string;
   proofPromptPath: string;
   proofReportPath: string;
   proofDir: string;
@@ -299,36 +260,25 @@ function blocked(input: {
   blockers: string[];
   residualRisks: string[];
 }): AcceptanceProofAttemptResult {
-  const validation = [{
+  const outcome = buildBlockedAcceptanceProofOutcome({
     command: 'adaptive acceptance proof',
-    status: 'failed' as const,
-    summary: input.proofResult.exitCode === 0
-      ? input.validationSummary
-      : `${input.validationSummary} Codex exited with code ${input.proofResult.exitCode}: ${input.proofResult.stderr || input.proofResult.stdout}`,
-  }];
+    promptPath: input.proofPromptPath,
+    reportPath: input.proofReportPath,
+    artifactDir: input.proofDir,
+    artifactPaths: input.artifactPaths,
+    validationSummary: input.validationSummary,
+    blockers: input.blockers,
+    residualRisks: input.residualRisks,
+    commandExitCode: input.commandExitCode,
+    commandOutputSummary: input.commandOutputSummary,
+  });
   return {
     status: 'blocked',
     changedFiles: input.changedFiles,
-    validation,
-    artifacts: input.artifactPaths.map((path) => ({ type: 'other' as const, path, description: `acceptance proof artifact ${path}` })),
-    residualRisks: input.residualRisks,
-    blockers: input.blockers,
-    evidence: {
-      status: 'blocked',
-      promptPath: input.proofPromptPath,
-      reportPath: input.proofReportPath,
-      artifactDir: input.proofDir,
-      artifactPaths: input.artifactPaths,
-      validation,
-      blockers: input.blockers,
-      residualRisks: input.residualRisks,
-    },
+    validation: outcome.validation,
+    artifacts: outcome.artifacts,
+    residualRisks: outcome.residualRisks,
+    blockers: outcome.blockers,
+    evidence: outcome.evidence,
   };
-}
-
-function artifactPathsFromReport(report: AcceptanceProofReport, changedFiles: string[]): string[] {
-  return Array.from(new Set([
-    ...changedFiles,
-    ...report.artifacts.flatMap((artifact) => artifact.path ? [normalizePath(artifact.path)] : []),
-  ])).sort((left, right) => left.localeCompare(right));
 }

@@ -301,6 +301,8 @@ test('implementation publishability blocks product-code changes created during a
     result.status === 'blocked' ? result.acceptanceProofAttempt?.blockers.join('\n') ?? '' : '',
     /product-code changes during acceptance proof/i,
   );
+  assert.match(result.status === 'blocked' ? result.acceptanceProofAttempt?.reportPath ?? '' : '', /acceptance-proof-report\.json$/);
+  assert.match(result.status === 'blocked' ? result.acceptanceProofAttempt?.artifactDir ?? '' : '', /\.codex-orchestrator\/proofs\/issue-155$/);
 });
 
 test('implementation publishability drops non-applicable runner visual proof skips for internal proof-runner changes', async () => {

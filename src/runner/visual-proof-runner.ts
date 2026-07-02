@@ -12,8 +12,10 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
-  evaluateAcceptanceProofReport,
+  buildAcceptanceProofReportOutcome,
+  buildBlockedAcceptanceProofOutcome,
   readAcceptanceProofReport,
+  type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof.js';
 import { browserProofRuntimeEnv } from './browser-proof-contract.js';
 import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
@@ -39,6 +41,9 @@ export interface RunnerVisualProofInput {
 export interface RunnerVisualProofResult {
   validation: RunnerValidationLine[];
   artifacts: ScopedCompletionReport['artifacts'];
+  acceptanceProofAttempt?: AcceptanceProofAttemptEvidence;
+  proofReportPath?: string;
+  proofArtifactDir?: string;
 }
 
 export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promise<RunnerVisualProofResult> {
@@ -110,74 +115,120 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
   }));
   const proofReport = await readAcceptanceProofReport(proofReportPath);
   if (proofReport.kind === 'invalid') {
+    const outcome = buildBlockedAcceptanceProofOutcome({
+      command,
+      reportPath: proofReportPath,
+      artifactDir: proofDir,
+      artifactPaths: artifacts.flatMap((artifact) => artifact.path ? [artifact.path] : []),
+      validationSummary: proofReport.message,
+      blockers: [`Acceptance proof blocked: ${proofReport.message}`],
+      residualRisks: [],
+      commandExitCode: result.exitCode,
+      commandOutputSummary: `command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+    });
     return {
-      validation: [{
-        command,
-        status: 'failed',
-        summary: proofReport.message,
-      }],
-      artifacts,
+      validation: outcome.validation,
+      artifacts: mergeProofArtifacts(artifacts, outcome.artifacts),
+      acceptanceProofAttempt: outcome.evidence,
+      proofReportPath,
+      proofArtifactDir: proofDir,
     };
   }
   if (proofReport.kind === 'valid') {
-    const evaluation = evaluateAcceptanceProofReport({
+    const outcome = buildAcceptanceProofReportOutcome({
+      command,
       config: input.config,
       report: proofReport.report,
       proofPhaseChangedFiles: [],
       artifactExists: (path) => existsSync(join(input.worktreePath, path)),
+      commandExitCode: result.exitCode,
+      commandOutputSummary: result.stderr || result.stdout || 'no output',
+      reportPath: proofReportPath,
+      artifactDir: proofDir,
+      passedSummary: (report) => `runner acceptance proof passed: ${report.criteria.length} criterion/criteria mapped to artifacts.`,
+      failedSummaryPrefix: 'runner acceptance proof',
     });
-    if (result.exitCode !== 0) {
-      return {
-        validation: [{
-          command,
-          status: 'failed',
-          summary: `runner acceptance proof failed: command exited ${result.exitCode}; ${result.stderr || result.stdout || 'no output'}`,
-        }],
-        artifacts: mergeProofArtifacts(artifacts, proofReport.report.artifacts),
-      };
-    }
     return {
-      validation: [{
-        command,
-        status: evaluation.ok ? 'passed' : 'failed',
-        summary: evaluation.ok
-          ? `runner acceptance proof passed: ${proofReport.report.criteria.length} criterion/criteria mapped to artifacts.`
-          : `runner acceptance proof failed: ${evaluation.reasons.join('; ')}`,
-      }],
-      artifacts: mergeProofArtifacts(artifacts, proofReport.report.artifacts),
+      validation: outcome.validation,
+      artifacts: mergeProofArtifacts(artifacts, outcome.artifacts),
+      acceptanceProofAttempt: outcome.evidence,
+      proofReportPath,
+      proofArtifactDir: proofDir,
     };
   }
 
   if (result.exitCode !== 0) {
-    return {
-      validation: [{
+    const summary = `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`;
+    const outcome = policy.blockOnMissingProof
+      ? buildBlockedAcceptanceProofOutcome({
         command,
-        status: policy.blockOnMissingProof ? 'failed' : 'skipped',
-        summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`,
+        reportPath: proofReportPath,
+        artifactDir: proofDir,
+        artifactPaths: artifacts.flatMap((artifact) => artifact.path ? [artifact.path] : []),
+        validationSummary: summary,
+        blockers: [summary],
+        residualRisks: [],
+        commandExitCode: 0,
+      })
+      : undefined;
+    return {
+      validation: outcome?.validation ?? [{
+        command,
+        status: 'skipped',
+        summary,
       }],
-      artifacts,
+      artifacts: outcome ? mergeProofArtifacts(artifacts, outcome.artifacts) : artifacts,
+      acceptanceProofAttempt: outcome?.evidence,
+      proofReportPath,
+      proofArtifactDir: proofDir,
     };
   }
 
   if (artifacts.length > 0) {
+    const summary = `runner acceptance proof failed: command completed and produced ${artifacts.length} screenshot artifact(s), but did not write a valid machine-readable acceptance proof report at ${proofReportPath}.`;
+    const outcome = buildBlockedAcceptanceProofOutcome({
+      command,
+      reportPath: proofReportPath,
+      artifactDir: proofDir,
+      artifactPaths: artifacts.flatMap((artifact) => artifact.path ? [artifact.path] : []),
+      validationSummary: summary,
+      blockers: [summary],
+      residualRisks: [],
+      commandExitCode: 0,
+    });
     return {
-      validation: [{
-        command,
-        status: 'failed',
-        summary: `runner acceptance proof failed: command completed and produced ${artifacts.length} screenshot artifact(s), but did not write a valid machine-readable acceptance proof report at ${proofReportPath}.`,
-      }],
-      artifacts,
+      validation: outcome.validation,
+      artifacts: mergeProofArtifacts(artifacts, outcome.artifacts),
+      acceptanceProofAttempt: outcome.evidence,
+      proofReportPath,
+      proofArtifactDir: proofDir,
     };
   }
 
   const requiredArtifactCount = policy.minScreenshotArtifacts;
-  return {
-    validation: [{
+  const summary = `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`;
+  const outcome = policy.blockOnMissingProof
+    ? buildBlockedAcceptanceProofOutcome({
       command,
-      status: policy.blockOnMissingProof ? 'failed' : 'skipped',
-      summary: `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: command completed but did not produce a screenshot artifact under ${policy.artifactDir}/issue-${input.issueNumber}; ${requiredArtifactCount} required.`,
+      reportPath: proofReportPath,
+      artifactDir: proofDir,
+      artifactPaths: [],
+      validationSummary: summary,
+      blockers: [summary],
+      residualRisks: [],
+      commandExitCode: 0,
+    })
+    : undefined;
+  return {
+    validation: outcome?.validation ?? [{
+      command,
+      status: 'skipped',
+      summary,
     }],
     artifacts,
+    acceptanceProofAttempt: outcome?.evidence,
+    proofReportPath,
+    proofArtifactDir: proofDir,
   };
 }
 
