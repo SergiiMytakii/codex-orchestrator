@@ -61,9 +61,10 @@ export function ensureAutonomousChildBody(body: string, parentIssueNumber: numbe
 }
 
 export function renderAutonomousChildBody(node: PlanChildNode, parentIssueNumber: number): string {
+  const body = stripGeneratedAutonomousChildSections(node.body);
   return ensureAutonomousChildBody(
     [
-      node.body,
+      body,
       '',
       '## codex-orchestrator metadata',
       `Stable ID: ${node.stableId}`,
@@ -506,7 +507,13 @@ function scheduleExecutableBatches(nodes: AutonomousChildNode[], limit: number):
 
 function readMetadataSection(body: string): string[] {
   const lines = body.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trim() === '## codex-orchestrator metadata');
+  let start = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (lines[index]?.trim() === '## codex-orchestrator metadata') {
+      start = index;
+      break;
+    }
+  }
   if (start < 0) {
     return [];
   }
@@ -518,6 +525,28 @@ function readMetadataSection(body: string): string[] {
     section.push(line);
   }
   return section;
+}
+
+function stripGeneratedAutonomousChildSections(body: string): string {
+  const removedHeadings = new Set(['## Blocked by', '## codex-orchestrator metadata']);
+  const lines = body.split(/\r?\n/);
+  const kept: string[] = [];
+  let skipping = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('## ')) {
+      skipping = removedHeadings.has(trimmed);
+      if (skipping) {
+        continue;
+      }
+    }
+    if (!skipping) {
+      kept.push(line);
+    }
+  }
+
+  return kept.join('\n').trimEnd();
 }
 
 function readSingleValue(lines: string[], key: string): string {

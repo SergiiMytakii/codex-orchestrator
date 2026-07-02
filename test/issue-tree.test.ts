@@ -65,6 +65,34 @@ test('autonomous child marker is exact and body normalization keeps it first', (
   );
 });
 
+test('autonomous child renderer strips generated metadata sections from model body', () => {
+  const rendered = renderAutonomousChildBody(
+    {
+      ...validGraph().nodes[0]!,
+      body: [
+        'Child body',
+        '',
+        '## codex-orchestrator metadata',
+        'Ownership:',
+        '- docs/generated.md',
+        '',
+        '## Blocked by',
+        'None - can start immediately.',
+        '',
+        '## Notes',
+        'Keep this section.',
+      ].join('\n'),
+    },
+    151,
+  );
+
+  assert.equal(rendered.match(/## codex-orchestrator metadata/g)?.length, 1);
+  assert.doesNotMatch(rendered, /docs\/generated\.md/);
+  assert.doesNotMatch(rendered, /## Blocked by/);
+  assert.match(rendered, /## Notes\nKeep this section\./);
+  assert.match(rendered, /Stable ID: a/);
+});
+
 test('autonomous child lifecycle creates marked children and reads metadata', async () => {
   const adapter = new InMemoryGitHubIssueAdapter();
   const node = validGraph().nodes[0]!;
@@ -261,6 +289,32 @@ test('autonomous child metadata parses only marked children with required fields
   assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Ownership/);
   assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Verification/);
   assert.match(malformed.ok ? '' : malformed.errors.join('\n'), /Spec gate/);
+});
+
+test('autonomous child metadata parser prefers the canonical last metadata section', () => {
+  const issue = issueFixture({
+    number: 23,
+    labels: [labels.child.name],
+    body: [
+      renderAutonomousChildMarker(151),
+      'Child body',
+      '',
+      '## codex-orchestrator metadata',
+      'Ownership:',
+      '- docs/generated.md',
+      '',
+      childBody({ stableId: 'canonical-child', ownershipScope: ['src/canonical.ts'] }).replace(
+        `${renderAutonomousChildMarker(151)}\nChild body\n\n`,
+        '',
+      ),
+    ].join('\n'),
+  });
+
+  const parsed = parseAutonomousChildMetadata(issue, validConfig, 151);
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.ok ? parsed.node.metadata.stableId : '', 'canonical-child');
+  assert.deepEqual(parsed.ok ? parsed.node.metadata.ownershipScope : [], ['src/canonical.ts']);
 });
 
 test('structural plan validation allows serializable ownership overlap while strict validation rejects same-wave overlap', () => {
