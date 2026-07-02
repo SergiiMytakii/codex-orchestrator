@@ -11,6 +11,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   scenario profiles, and folds related commit, safety, and Acceptance Proof
   checks into matrix scenarios.
 
+## [0.1.39] - 2026-07-02
+
+### Fixed
+- Fixed full live smoke plan-child fixtures so issue-tree children write only
+  to their declared ownership paths.
+- Fixed browser-proof live smoke execution so packaged visual proof reads target
+  config while validating proof artifacts from the issue worktree.
+
 ## [0.1.38] - 2026-07-02
 
 ### Added

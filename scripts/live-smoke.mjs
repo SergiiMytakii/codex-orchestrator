@@ -1931,8 +1931,12 @@ const cliPath = ${JSON.stringify(cliPath)};
 const packageDir = ${JSON.stringify(packageDir)};
 const sourceRoot = ${JSON.stringify(sourceRootPath)};
 const issueNumber = Number(process.env.CODEX_ORCHESTRATOR_ISSUE_NUMBER ?? 0);
+const targetRoot = process.env.CODEX_ORCHESTRATOR_TARGET_ROOT;
 if (!Number.isInteger(issueNumber) || issueNumber < 1) {
   throw new Error('CODEX_ORCHESTRATOR_ISSUE_NUMBER is required for browser proof live smoke');
+}
+if (!targetRoot) {
+  throw new Error('CODEX_ORCHESTRATOR_TARGET_ROOT is required for browser proof live smoke');
 }
 
 ensurePlaywrightCoreDependency();
@@ -1951,7 +1955,7 @@ const baseUrl = 'http://127.0.0.1:' + address.port;
 
 try {
   await run(process.execPath, [cliPath, 'visual-proof', 'auto', '--issue', String(issueNumber)], {
-    cwd: process.cwd(),
+    cwd: targetRoot,
     env: {
       ...process.env,
       CODEX_ORCHESTRATOR_BROWSER_BASE_URL: baseUrl,
@@ -2291,8 +2295,8 @@ if (prompt.includes('# Fresh-Context Review')) {
     writePlanReportForExistingIssue(reportPath, runId, Number(readMarker(prompt, 'LIVE_SMOKE_ARBITRARY_ISSUE')));
     break;
   case 'plan-child':
-    writeCodeChange(issueNumber, runId, 'plan-child');
-    writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
+    writePlanChildChange(readMarker(prompt, 'LIVE_SMOKE_CHILD_ID'), runId);
+    writeScopedReport(reportPath, planChildChangePaths(readMarker(prompt, 'LIVE_SMOKE_CHILD_ID')));
     break;
   default:
     throw new Error('Unknown LIVE_SMOKE_SCENARIO: ' + scenario);
@@ -2321,6 +2325,33 @@ function writeCodeChange(issue, run, kind) {
   );
   writeFileSync(
     join('test', 'live-smoke', 'issue-' + issue + '.test.ts'),
+    'import assert from "node:assert/strict";\nassert.equal(' + JSON.stringify(run) + ', ' + JSON.stringify(run) + ');\n',
+    'utf8',
+  );
+}
+
+function planChildChangePaths(childId) {
+  if (!childId) {
+    throw new Error('Missing LIVE_SMOKE_CHILD_ID for plan-child scenario');
+  }
+  return [
+    'src/live-smoke/issue-owned-by-child-' + childId + '.ts',
+    'test/live-smoke/issue-owned-by-child-' + childId + '.test.ts',
+  ];
+}
+
+function writePlanChildChange(childId, run) {
+  const [sourcePath, testPath] = planChildChangePaths(childId);
+  mkdirSync(dirname(sourcePath), { recursive: true });
+  mkdirSync(dirname(testPath), { recursive: true });
+  const identifier = childId.replace(/[^a-zA-Z0-9_$]/g, '_');
+  writeFileSync(
+    sourcePath,
+    'export const liveSmokePlanChild' + identifier + ' = ' + JSON.stringify({ childId, run, kind: 'plan-child' }) + ';\n',
+    'utf8',
+  );
+  writeFileSync(
+    testPath,
     'import assert from "node:assert/strict";\nassert.equal(' + JSON.stringify(run) + ', ' + JSON.stringify(run) + ');\n',
     'utf8',
   );

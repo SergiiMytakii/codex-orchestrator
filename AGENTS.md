@@ -71,11 +71,11 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.38` (2026-07-02):
-  - Risk-routing review gates require the right plan, cleanup, or code-review
-    evidence before runner publication.
-  - Scoped, parent, and child handoffs now carry risk and review-gate metadata
-    through bundled workflow prompts.
+- `0.1.39` (2026-07-02):
+  - Full live smoke issue-tree child fixtures now stay inside declared ownership
+    paths.
+  - Browser-proof live smoke now runs packaged visual proof with target config
+    and issue-worktree proof artifacts aligned.
 
 ## Final Response
 

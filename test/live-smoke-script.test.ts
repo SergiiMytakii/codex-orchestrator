@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -35,6 +38,44 @@ function runLiveSmoke(args: string[]): Promise<CommandResult> {
 
 function runLiveSmokeHelp(): Promise<CommandResult> {
   return runLiveSmoke(['--help']);
+}
+
+async function extractFakeAgentSource(): Promise<string> {
+  const scriptPath = fileURLToPath(new URL('../../scripts/live-smoke.mjs', import.meta.url));
+  const script = await readFile(scriptPath, 'utf8');
+  const match = script.match(/function fakeAgentSource\(\) {\n\s+return String\.raw`([\s\S]*?)`;\n}/);
+  assert.ok(match, 'expected live smoke script to contain fakeAgentSource raw template');
+  return match[1];
+}
+
+async function liveSmokeScriptSource(): Promise<string> {
+  const scriptPath = fileURLToPath(new URL('../../scripts/live-smoke.mjs', import.meta.url));
+  return readFile(scriptPath, 'utf8');
+}
+
+function runNodeScript(scriptPath: string, env: Record<string, string>, cwd: string): Promise<CommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (status) => {
+      resolve({ status, stdout, stderr });
+    });
+  });
 }
 
 function listedValues(output: string, label: string): string[] {
@@ -108,4 +149,41 @@ test('live smoke help documents scratch repo and strict cleanup defaults', async
   assert.match(result.stdout, /Clean up created issues, PRs, and branches after the run by default/);
   assert.match(result.stdout, /--cleanup-mode <mode>\s+Cleanup mode: delete or close\. Default delete/);
   assert.match(result.stdout, /--keep-artifacts\s+Keep created GitHub artifacts for inspection/);
+});
+
+test('live smoke fake plan child writes only graph-owned paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-plan-child-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-123-tree-24-issue-123.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Live smoke child a.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260702141645',
+    'LIVE_SMOKE_SCENARIO: plan-child',
+    'LIVE_SMOKE_CHILD_ID: a',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.deepEqual(report.changes, [
+    'src/live-smoke/issue-owned-by-child-a.ts',
+    'test/live-smoke/issue-owned-by-child-a.test.ts',
+  ]);
+  assert.match(await readFile(join(root, 'src/live-smoke/issue-owned-by-child-a.ts'), 'utf8'), /plan-child/);
+  assert.match(await readFile(join(root, 'test/live-smoke/issue-owned-by-child-a.test.ts'), 'utf8'), /20260702141645/);
+});
+
+test('browser proof live smoke helper runs visual proof against target root', async () => {
+  const source = await liveSmokeScriptSource();
+
+  assert.match(source, /CODEX_ORCHESTRATOR_TARGET_ROOT/);
+  assert.match(source, /'visual-proof', 'auto', '--issue', String\(issueNumber\)/);
+  assert.match(source, /cwd: targetRoot/);
 });
