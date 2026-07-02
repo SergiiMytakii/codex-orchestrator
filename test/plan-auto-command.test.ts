@@ -88,7 +88,7 @@ function completedReport(): PlanAutoCompletionReport {
           title: 'Child A',
           body: 'Child A body',
           afkHitl: 'afk',
-          ownershipScope: ['src/a.ts'],
+          ownershipScope: ['child-a.txt'],
           dependsOn: [],
           verification: ['npm test'],
         },
@@ -97,7 +97,7 @@ function completedReport(): PlanAutoCompletionReport {
           title: 'Child B',
           body: 'Child B body',
           afkHitl: 'afk',
-          ownershipScope: ['src/b.ts'],
+          ownershipScope: ['child-b.txt'],
           dependsOn: ['child-a'],
           verification: ['npm test'],
         },
@@ -129,12 +129,12 @@ function codexAdapterForReport(
       if (input.sessionId.startsWith('plan-')) {
         await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
       } else {
-        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        const changedPath = await writeChildOwnedChange(input);
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: [`child-${input.issueNumber}.txt`],
+            changes: [changedPath],
             validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
             skippedChecks: [],
             residualRisks: [],
@@ -146,6 +146,28 @@ function codexAdapterForReport(
       return { stdout: 'ok', stderr: '', exitCode: 0 };
     },
   };
+}
+
+async function writeChildOwnedChange(input: CodexCommandRunInput, content = 'done\n'): Promise<string> {
+  const changedPath = childOwnedPath(input);
+  await mkdir(dirname(join(input.worktreePath, changedPath)), { recursive: true });
+  await writeFile(join(input.worktreePath, changedPath), content, 'utf8');
+  return changedPath;
+}
+
+function childOwnedPath(input: CodexCommandRunInput): string {
+  const ownership = /^Ownership Scope:\s*(.+)$/mu.exec(input.promptText)?.[1]?.split(',')[0]?.trim();
+  if (!ownership) {
+    return `child-${input.issueNumber}.txt`;
+  }
+  const normalized = ownership.replaceAll('\\', '/').replace(/^\.\//u, '').replace(/\/+$/u, '');
+  if (normalized.endsWith('/**')) {
+    return `${normalized.slice(0, -3)}/child-${input.issueNumber}.txt`;
+  }
+  if (normalized.includes('*')) {
+    return normalized.replace(/\*+/gu, String(input.issueNumber));
+  }
+  return normalized;
 }
 
 test('plan-auto command plans parent, executes marked children, and opens one integration draft PR', async () => {
@@ -336,14 +358,12 @@ test('plan-auto command applies configured child rework loop before parent integ
       } else {
         childRuns += 1;
         reworkPrompt = input.promptText;
-        if (childRuns === 2) {
-          await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
-        }
+        const changedPath = childRuns === 2 ? await writeChildOwnedChange(input) : undefined;
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: childRuns === 2 ? [`child-${input.issueNumber}.txt`] : [],
+            changes: changedPath ? [changedPath] : [],
             validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
             artifacts: [],
             skippedChecks: [],
@@ -414,12 +434,12 @@ test('plan-auto command blocks child publication on configured fresh-context rev
           'utf8',
         );
       } else {
-        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        const changedPath = await writeChildOwnedChange(input);
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: [`child-${input.issueNumber}.txt`],
+            changes: [changedPath],
             validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
             artifacts: [],
             skippedChecks: [],
@@ -471,14 +491,14 @@ test('plan-auto command integrates validated child local commits when policy all
       if (input.sessionId.startsWith('plan-')) {
         await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
       } else {
-        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
-        await execFileAsync('git', ['-C', input.worktreePath, 'add', `child-${input.issueNumber}.txt`]);
+        const changedPath = await writeChildOwnedChange(input);
+        await execFileAsync('git', ['-C', input.worktreePath, 'add', changedPath]);
         await execFileAsync('git', ['-C', input.worktreePath, 'commit', '-m', 'Agent child checkpoint']);
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: [`child-${input.issueNumber}.txt`],
+            changes: [changedPath],
             validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
             artifacts: [],
             skippedChecks: [],
@@ -617,12 +637,12 @@ test('plan-auto command blocks parent publication when child acceptance proof fa
           'utf8',
         );
       } else {
-        await writeFile(join(input.worktreePath, `child-${input.issueNumber}.txt`), 'done\n', 'utf8');
+        const changedPath = await writeChildOwnedChange(input);
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: [`child-${input.issueNumber}.txt`],
+            changes: [changedPath],
             validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
             artifacts: [],
             skippedChecks: [],
@@ -895,17 +915,19 @@ test('plan-auto command blocks on child merge conflict without pushing or openin
     { ...report.graph.nodes[1]!, stableId: 'right', ownershipScope: ['src/right.ts'], dependsOn: [] },
   ];
   report.graph.edges = [];
+  const conflictPath = '.codex-orchestrator/proofs/conflict.txt';
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       if (input.sessionId.startsWith('plan-')) {
         await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
       } else {
-        await writeFile(join(input.worktreePath, 'conflict.txt'), `${input.issueNumber}\n`, 'utf8');
+        await mkdir(dirname(join(input.worktreePath, conflictPath)), { recursive: true });
+        await writeFile(join(input.worktreePath, conflictPath), `${input.issueNumber}\n`, 'utf8');
         await writeFile(
           input.reportPath,
           JSON.stringify({
             status: 'completed',
-            changes: ['conflict.txt'],
+            changes: [conflictPath],
             validation: [],
             skippedChecks: [],
             residualRisks: [],

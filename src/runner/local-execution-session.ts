@@ -13,6 +13,7 @@ import {
   validateCompletionReportSafety,
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
+import { evaluateScopeIsolation } from './scope-isolation-policy.js';
 import { runRunnerVisualProof } from './visual-proof-runner.js';
 import {
   runAcceptanceProofAttempt,
@@ -208,6 +209,23 @@ export async function runImplementationPublishabilityCheck(
     };
   }
 
+  const scopeIsolation = evaluateScopeIsolation({
+    config: input.config,
+    issue: input.issue,
+    changedFiles,
+  });
+  if (scopeIsolation.blockers.length > 0) {
+    return {
+      status: 'blocked',
+      reasons: scopeIsolation.blockers,
+      changedFiles,
+      validation: report.validation,
+      skippedChecks: report.skippedChecks,
+      residualRisks: report.residualRisks,
+      commits: changeSet.commits,
+    };
+  }
+
   const violations = [
     ...validateChangedPaths(changedFiles, input.config),
     ...validateCompletionReportSafety(report),
@@ -285,6 +303,23 @@ export async function runImplementationPublishabilityCheck(
     };
     residualRisks.push(...proofResult.residualRisks);
     changedFiles = proofResult.changedFiles;
+    const postProofScopeIsolation = evaluateScopeIsolation({
+      config: input.config,
+      issue: input.issue,
+      changedFiles,
+    });
+    if (postProofScopeIsolation.blockers.length > 0) {
+      return {
+        status: 'blocked',
+        reasons: postProofScopeIsolation.blockers,
+        changedFiles,
+        validation,
+        skippedChecks: report.skippedChecks,
+        residualRisks,
+        commits: changeSet.commits,
+        acceptanceProofAttempt,
+      };
+    }
 
     if (proofResult.status === 'blocked') {
       return {
@@ -341,6 +376,23 @@ export async function runImplementationPublishabilityCheck(
         validation,
         skippedChecks: report.skippedChecks,
         residualRisks: report.residualRisks,
+        commits: changeSet.commits,
+        acceptanceProofAttempt,
+      };
+    }
+    const postRunnerProofScopeIsolation = evaluateScopeIsolation({
+      config: input.config,
+      issue: input.issue,
+      changedFiles,
+    });
+    if (postRunnerProofScopeIsolation.blockers.length > 0) {
+      return {
+        status: 'blocked',
+        reasons: postRunnerProofScopeIsolation.blockers,
+        changedFiles,
+        validation,
+        skippedChecks: report.skippedChecks,
+        residualRisks,
         commits: changeSet.commits,
         acceptanceProofAttempt,
       };

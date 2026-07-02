@@ -125,6 +125,45 @@ test('implementation publishability blocks failed configured checks before publi
   assert.equal(await git.isWorktreeClean(repo), false);
 });
 
+test('implementation publishability blocks changed files outside issue ownership scope', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await mkdir(join(repo, 'docs', 'other'), { recursive: true });
+  await writeFile(join(repo, 'docs', 'other', 'feature.md'), 'out of scope\n', 'utf8');
+  await writeScopedReport(reportPath);
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: { tests: 'npm test' } }),
+    issue: issueFixture({
+      number: 155,
+      title: 'Update owned feature',
+      body: [
+        'Implement scoped work.',
+        '',
+        '## codex-orchestrator metadata',
+        'Ownership:',
+        '- docs/owned/**',
+      ].join('\n'),
+    }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /outside issue ownership scope/);
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /docs\/other\/feature\.md/);
+  assert.equal(await git.isWorktreeClean(repo), false);
+});
+
 test('implementation publishability keeps validation evidence when quality gate blocks publication', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();

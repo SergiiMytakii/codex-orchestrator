@@ -6,13 +6,13 @@ import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager } from '../git/worktree.js';
-import { globMatches, normalizePath } from '../path-policy.js';
 import { readRunnerConfig } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { runPlanAutoCommand } from './plan-auto-command.js';
 import { RunnerStateStore } from './local-state.js';
 import { recoverScopedRun } from './scoped-recovery.js';
 import { runScopedAutoCommand } from './scoped-auto-command.js';
+import { issueOwnershipScopes, scopesOverlap } from './scope-isolation-policy.js';
 import { cleanupMergedWorktrees, type WorktreeCleanupResult } from './worktree-cleanup.js';
 
 export interface DaemonCommandOptions {
@@ -243,48 +243,8 @@ function ownershipScopesForIssue(issueNumber: number, issues: GitHubIssue[]): st
     return undefined;
   }
 
-  const scopes = readMetadataBulletBlock(issue.body, 'Ownership').map((scope) => normalizePath(scope.trim())).filter(Boolean);
+  const scopes = issueOwnershipScopes(issue);
   return scopes.length > 0 ? Array.from(new Set(scopes)).sort((left, right) => left.localeCompare(right)) : undefined;
-}
-
-function scopesOverlap(left: string[], right: string[]): boolean {
-  return left.some((leftScope) =>
-    right.some((rightScope) =>
-      leftScope === rightScope || globMatches(leftScope, rightScope) || globMatches(rightScope, leftScope),
-    ),
-  );
-}
-
-function readMetadataBulletBlock(body: string, heading: string): string[] {
-  const lines = body.split(/\r?\n/);
-  const metadataStart = lines.findIndex((line) => line.trim() === '## codex-orchestrator metadata');
-  if (metadataStart < 0) {
-    return [];
-  }
-
-  const block: string[] = [];
-  let inBlock = false;
-  for (const line of lines.slice(metadataStart + 1)) {
-    if (line.startsWith('## ')) {
-      break;
-    }
-    if (line.trim() === `${heading}:`) {
-      inBlock = true;
-      continue;
-    }
-    if (!inBlock) {
-      continue;
-    }
-    const item = /^[-*]\s+(.+)$/u.exec(line.trim());
-    if (item) {
-      block.push(item[1]?.trim() ?? '');
-      continue;
-    }
-    if (line.trim().length > 0) {
-      break;
-    }
-  }
-  return block.filter((item) => item.length > 0);
 }
 
 function compareEligibleIssueSelection(
