@@ -347,6 +347,7 @@ test('plan-auto prompt includes parent context and all planning workflows', () =
   assert.match(prompt, /Runner-Owned GitHub Contract/);
   assert.match(prompt, /Autonomous Child Contract/);
   assert.match(prompt, /Planning Risk\/Proof Contract/);
+  assert.match(prompt, /A "hitl" child intentionally blocks automatic issue-tree execution/);
   assert.match(prompt, /sizeRisk/);
   assert.match(prompt, /parentReviewHandoff/);
   assert.match(prompt, /Arbitrary links, milestones, projects, and comments do not grant membership/);

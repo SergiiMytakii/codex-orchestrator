@@ -147,6 +147,7 @@ export function buildPlanAutoPrompt(input: PlanAutoPromptInput): string {
     '## Planning Risk/Proof Contract',
     'Classify each proposed child by size and risk. Small low-risk children should state that they are intended for the `$small-task-implementer` path; medium/high-risk children should carry issue-level or wave-level spec/review expectations.',
     'The parent planning report must include a concise parentReviewHandoff with the main risks, proof strategy, and what a maintainer should inspect after the issue tree finishes.',
+    'Plan-auto is an autonomous workflow: set every child afkHitl to "afk" unless that child cannot start without a specific external human decision, credential, approval, or artifact. Do not use "hitl" merely because maintainers should review the result after completion; put post-completion review expectations in parentReviewHandoff.humanReviewFocus instead. A "hitl" child intentionally blocks automatic issue-tree execution.',
     '## Runner-Owned GitHub Contract',
     'Return structured output only. Do not create/edit GitHub issues, labels, comments, milestones, projects, branches, commits, pushes, pull requests, merges, publishes, deploys, or execute child waves. The runner owns all GitHub mutations.',
     '## Autonomous Child Contract',
