@@ -78,6 +78,33 @@ test('visual-proof auto honors explicit non-visual proof contract without runnin
   assert.equal(result.target, 'none');
 });
 
+test('visual-proof auto accepts backend-only acceptance proof without browser or mobile dispatch', async () => {
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '263', '--target', '/tmp/backend'],
+    config: validConfig,
+    env: {
+      CODEX_ORCHESTRATOR_CHANGED_FILES: [
+        'src/live-challenges/live-challenges.service.ts',
+        'src/live-challenges/live-challenges.service.spec.ts',
+        'docs/agents/contract-test-ledger.md',
+      ].join('\n'),
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Live match challenges: round 60 min - closing too fast',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: [
+        'Final proof includes deterministic test evidence or a live/manual timing fixture.',
+        'The backend API timing behavior is proven by smoke-output artifacts.',
+      ].join('\n'),
+    },
+    browserRunner: async () => {
+      throw new Error('browser proof should not run for backend-only acceptance proof');
+    },
+    mobileRunner: async () => {
+      throw new Error('mobile proof should not run for backend-only acceptance proof');
+    },
+  });
+
+  assert.equal(result.target, 'none');
+});
+
 test('visual-proof auto reports no-match failures clearly', async () => {
   await assert.rejects(
     runAutoVisualProofCommand({
@@ -85,6 +112,21 @@ test('visual-proof auto reports no-match failures clearly', async () => {
       config: validConfig,
       env: {
         CODEX_ORCHESTRATOR_CHANGED_FILES: 'src/server.ts',
+      },
+    }),
+    /could not select browser or mobile proof/,
+  );
+});
+
+test('visual-proof auto still rejects visual proof requests without a browser or mobile dispatch path', async () => {
+  await assert.rejects(
+    runAutoVisualProofCommand({
+      args: ['--issue', '887'],
+      config: validConfig,
+      env: {
+        CODEX_ORCHESTRATOR_CHANGED_FILES: 'src/server.ts',
+        CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Needs visual proof',
+        CODEX_ORCHESTRATOR_ISSUE_BODY: 'The layout proof must include a screenshot.',
       },
     }),
     /could not select browser or mobile proof/,

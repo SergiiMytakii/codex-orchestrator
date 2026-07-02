@@ -1,5 +1,10 @@
 import type { GitHubIssue } from '../github/issues.js';
-import { classifyVisualProofDispatchTarget, type VisualProofDispatchTarget } from './review-gate-policy.js';
+import {
+  classifyVisualProofDispatchTarget,
+  isVisualProofDesirable,
+  shouldApplyVisualProofGate,
+  type VisualProofDispatchTarget,
+} from './review-gate-policy.js';
 import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand, type BrowserVisualProofCommandInput } from './browser-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand, type MobileVisualProofCommandInput } from './mobile-visual-proof-command.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
@@ -36,6 +41,11 @@ export async function runAutoVisualProofCommand(input: AutoVisualProofCommandInp
   }
   const strategy = resolveAcceptanceProofStrategy({ config: input.config, issue }).strategy;
   if (target === 'none' && (strategy === 'none' || strategy === 'non-visual-smoke')) {
+    return { target };
+  }
+  if (target === 'none'
+    && shouldApplyVisualProofGate({ config: input.config, issue, changedFiles })
+    && !isVisualProofDesirable({ config: input.config, issue, changedFiles })) {
     return { target };
   }
   throw new Error('visual-proof auto could not select browser or mobile proof from changed files. Provide web/mobile changed paths or use visual-proof browser/mobile explicitly.');

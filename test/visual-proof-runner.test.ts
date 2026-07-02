@@ -5,6 +5,7 @@ import { delimiter, isAbsolute, join, relative } from 'node:path';
 import { test } from 'node:test';
 
 import type { ShellCommandExecutor } from '../src/process/command.js';
+import { runAutoVisualProofCommand } from '../src/runner/auto-visual-proof-command.js';
 import { runRunnerVisualProof, type RunnerVisualProofResult } from '../src/runner/visual-proof-runner.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -368,6 +369,72 @@ test('runner visual proof evaluates machine-readable acceptance proof reports', 
   }]);
 });
 
+test('runner visual proof accepts backend-only package-owned auto proof with an existing non-visual report', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-backend-proof-'));
+  const proofDir = join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-263');
+  const proofReportPath = join(proofDir, 'acceptance-proof-report.json');
+  await mkdir(proofDir, { recursive: true });
+  await writeFile(join(proofDir, 'timing-smoke.txt'), 'scheduledCloseAt - openedAt = 3 minutes\n', 'utf8');
+  await writeNonVisualProofReport(
+    proofReportPath,
+    '.codex-orchestrator/proofs/issue-263/timing-smoke.txt',
+  );
+
+  const shellExecutor: ShellCommandExecutor = async (command, options) => {
+    assert.equal(command, 'codex-orchestrator visual-proof auto --issue 263');
+    const result = await runAutoVisualProofCommand({
+      args: ['--issue', '263'],
+      config: validConfig,
+      env: options?.env,
+      browserRunner: async () => {
+        throw new Error('browser proof should not run for backend-only acceptance proof');
+      },
+      mobileRunner: async () => {
+        throw new Error('mobile proof should not run for backend-only acceptance proof');
+      },
+    });
+    assert.equal(result.target, 'none');
+    return { stdout: 'non-visual acceptance proof selected', stderr: '', exitCode: 0 };
+  };
+
+  const result = await runRunnerVisualProof({
+    config: validConfig,
+    issue: issueFixture({
+      number: 263,
+      title: 'Live match challenges: round 60 min - closing too fast',
+      body: [
+        'Final proof includes deterministic test evidence or a live/manual timing fixture.',
+        'The backend API timing behavior is proven by smoke-output artifacts.',
+      ].join('\n'),
+    }),
+    issueNumber: 263,
+    worktreePath,
+    changedFiles: [
+      'src/live-challenges/live-challenges.service.ts',
+      'src/live-challenges/live-challenges.service.spec.ts',
+      'docs/agents/contract-test-ledger.md',
+    ],
+    report: {
+      status: 'completed',
+      changes: [],
+      validation: [],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+    shellExecutor,
+  });
+
+  assert.equal(result.validation[0]?.status, 'passed');
+  assert.match(result.validation[0]?.summary ?? '', /runner acceptance proof passed/);
+  assert.deepEqual(result.artifacts, [{
+    type: 'smoke-output',
+    path: '.codex-orchestrator/proofs/issue-263/timing-smoke.txt',
+    description: 'backend timing smoke output',
+  }]);
+});
+
 test('runner visual proof fails when the command exits nonzero despite a passing report', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-'));
 
@@ -680,6 +747,30 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
 function isPathInside(parent: string, child: string): boolean {
   const path = relative(parent, child);
   return path.length === 0 || (!path.startsWith('..') && !isAbsolute(path));
+}
+
+async function writeNonVisualProofReport(reportPath: string, artifactRef: string): Promise<void> {
+  await writeFile(reportPath, JSON.stringify({
+    status: 'passed',
+    criteria: [{
+      id: 'ac-backend',
+      description: 'Backend smoke proves the requested behavior.',
+      status: 'passed',
+      confidence: 'high',
+      reasoningSummary: 'The deterministic smoke artifact records the observable backend result.',
+      artifactRefs: [artifactRef],
+    }],
+    artifacts: [{
+      type: 'smoke-output',
+      path: artifactRef,
+      description: 'backend timing smoke output',
+    }],
+    proofPhaseDiff: {
+      allowedProofPaths: [artifactRef],
+      forbiddenProductPaths: [],
+    },
+    residualRisks: [],
+  }), 'utf8');
 }
 
 async function writeUiProofReport(reportPath: string, screenshotRef: string): Promise<void> {

@@ -403,7 +403,11 @@ Setup now uses the package-owned
 `codex-orchestrator visual-proof auto --issue ${issueNumber}` command. Auto
 dispatch uses one shared policy owner: web/frontend paths route to browser
 proof, while Android, iOS, Flutter, and mobile app paths remain device-backed.
-Explicit legacy proof command overrides are preserved.
+When acceptance proof is required but the changed paths are backend/API/CLI-only
+and visual proof is not desirable, auto proof does not force a browser or mobile
+target; the runner evaluates the prepared machine-readable
+`acceptance-proof-report.json` and its non-visual artifacts instead. Explicit
+legacy proof command overrides are preserved.
 
 For web UI work, `codex-orchestrator visual-proof browser` reads a proof-owned
 browser scenario, drives Playwright Core against an explicit base URL, and
