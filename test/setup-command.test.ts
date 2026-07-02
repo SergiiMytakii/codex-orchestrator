@@ -392,9 +392,11 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.runner.maxParallelChildren, 2);
   assert.deepEqual(result.config.checks, { architecture: 'npm run test:architecture' });
   assert.deepEqual(result.config.branches.base, { mode: 'explicit', remote: 'origin', branch: 'dev' });
-  assert.equal(result.config.codex.args.includes('--ignore-user-config'), false);
+  assert.equal(result.config.codex.args.includes('--ignore-user-config'), true);
   assert.equal(result.config.codex.args.includes('sandbox_workspace_write.network_access=true'), true);
   assert.equal(result.config.codex.timeoutMs, 1_800_000);
+  assert.equal(result.config.codex.ignoreUserConfig, true);
+  assert.equal(result.config.codex.figmaMcp?.enabled, true);
   assert.equal(result.config.reviewGates.visualProof.enabled, true);
   assert.equal(result.config.reviewGates.visualProof.runnerTimeoutMs, 900_000);
   assert.deepEqual(result.config.reviewGates.visualProof.envPassthrough, []);

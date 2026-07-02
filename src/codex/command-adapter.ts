@@ -41,7 +41,7 @@ export class CodexCommandAdapter {
     const phase = input.phase ?? 'scoped-issue';
     const effectiveProfile = resolveCodexProfile(this.config, phase);
     const profileTimeoutMs = this.config.codex.profiles?.[phase]?.timeoutMs;
-    const args = effectiveProfile.args.map((arg) => renderCodexArg(arg, input));
+    const args = buildCodexArgs(effectiveProfile.args, input);
     const logWriter = input.logPath ? new RunLogWriter(input.logPath) : undefined;
     const mobileDeviceGuardBin = await ensureMobileDeviceGuardBin({ targetRoot: input.targetRoot, config: input.config });
     await logWriter?.appendLifecycle(`starting ${effectiveProfile.command} ${args.join(' ')}`);
@@ -97,6 +97,31 @@ export function buildCodexProcessEnv(
   return env;
 }
 
+export function buildCodexArgs(args: string[], input: CodexCommandRunInput): string[] {
+  const rendered = args.map((arg) => renderCodexArg(arg, input));
+  const withUserConfigPolicy = input.config.codex.ignoreUserConfig === false
+    ? rendered
+    : ensureCodexFlag(rendered, '--ignore-user-config');
+
+  if (!promptRequiresFigmaMcp(input.promptText, input.config)) {
+    return withUserConfigPolicy;
+  }
+
+  const figmaMcp = input.config.codex.figmaMcp;
+  if (!figmaMcp?.enabled) {
+    return withUserConfigPolicy;
+  }
+
+  return insertCodexOptionsBeforePrompt(withUserConfigPolicy, [
+    '-c',
+    `mcp_servers.figma.url=${tomlString(figmaMcp.url)}`,
+    ...Object.entries(figmaMcp.httpHeaders).flatMap(([key, value]) => [
+      '-c',
+      `mcp_servers.figma.http_headers.${tomlPathSegment(key)}=${tomlString(value)}`,
+    ]),
+  ]);
+}
+
 export interface EffectiveCodexProfile {
   phase: CodexPhase;
   command: string;
@@ -130,4 +155,48 @@ function renderCodexArg(arg: string, input: CodexCommandRunInput): string {
     .replaceAll('${issueNumber}', String(input.issueNumber))
     .replaceAll('${sessionId}', input.sessionId)
     .replaceAll('${branchName}', input.branchName);
+}
+
+function ensureCodexFlag(args: string[], flag: string): string[] {
+  if (args.includes(flag)) {
+    return args;
+  }
+  if (args[0] !== 'exec') {
+    return args;
+  }
+  const insertAt = args[0] === 'exec' ? 1 : 0;
+  return [...args.slice(0, insertAt), flag, ...args.slice(insertAt)];
+}
+
+function insertCodexOptionsBeforePrompt(args: string[], options: string[]): string[] {
+  const promptIndex = args.lastIndexOf('-');
+  if (promptIndex < 0) {
+    return [...args, ...options];
+  }
+  return [...args.slice(0, promptIndex), ...options, ...args.slice(promptIndex)];
+}
+
+function promptRequiresFigmaMcp(promptText: string, config: CodexOrchestratorConfig): boolean {
+  const figmaMcp = config.codex.figmaMcp;
+  if (!figmaMcp?.enabled) {
+    return false;
+  }
+
+  return figmaMcp.issueTextPatterns.some((pattern) => {
+    try {
+      return new RegExp(pattern, 'iu').test(promptText);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function tomlPathSegment(segment: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/u.test(segment)
+    ? segment
+    : `"${segment.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`;
+}
+
+function tomlString(value: string): string {
+  return `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`;
 }

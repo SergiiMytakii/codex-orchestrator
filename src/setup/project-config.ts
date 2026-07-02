@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { forbiddenRuntimeKeys } from '../config/constants.js';
-import type { BaseBranchConfig, CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy } from '../config/schema.js';
+import type { BaseBranchConfig, CodexFigmaMcpConfig, CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy } from '../config/schema.js';
 import { validateConfig } from '../config/schema.js';
 import type { WorkflowConfigMap } from './workflows.js';
 
@@ -31,6 +31,21 @@ export const packageOwnedDefaultChecks: CodexOrchestratorConfig['checks'] = {
 
 export const packageOwnedMobileVisualProofCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
 export const packageOwnedAutoVisualProofCommand = 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
+
+export function defaultFigmaMcpConfig(): CodexFigmaMcpConfig {
+  return {
+    enabled: true,
+    url: 'https://mcp.figma.com/mcp',
+    httpHeaders: {
+      'X-Figma-Region': 'us-east-1',
+    },
+    issueTextPatterns: [
+      'https?://(?:www\\.)?figma\\.com/\\S+',
+      '\\bFigma\\b.{0,80}\\b(design|file|node|mockup|prototype|дизайн|макет)\\b',
+      '\\b(design|file|node|mockup|prototype|дизайн|макет)\\b.{0,80}\\bFigma\\b',
+    ],
+  };
+}
 
 export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
   return {
@@ -121,6 +136,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         'workspace-write',
         '--add-dir',
         '${stateDir}',
+        '--ignore-user-config',
         '-c',
         'sandbox_workspace_write.network_access=true',
         '--output-last-message',
@@ -130,6 +146,8 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       timeoutMs: 1_800_000,
       mobileTimeoutMs: 3_600_000,
       idleTimeoutMs: 300_000,
+      ignoreUserConfig: true,
+      figmaMcp: defaultFigmaMcpConfig(),
       profiles: {},
       promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE',
       reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE',
@@ -361,6 +379,8 @@ export function mergeExistingProjectConfig(
       timeoutMs: migrateCodexTimeout(readPositiveInteger(existingCodex?.timeoutMs), defaults.codex.timeoutMs ?? 1_800_000),
       mobileTimeoutMs: readPositiveInteger(existingCodex?.mobileTimeoutMs) ?? defaults.codex.mobileTimeoutMs,
       idleTimeoutMs: readPositiveInteger(existingCodex?.idleTimeoutMs) ?? defaults.codex.idleTimeoutMs,
+      ignoreUserConfig: readBoolean(existingCodex?.ignoreUserConfig) ?? defaults.codex.ignoreUserConfig,
+      figmaMcp: migrateFigmaMcpConfig(defaults.codex.figmaMcp, readObject(existingCodex?.figmaMcp)),
       profiles: (readObject(existingCodex?.profiles) as CodexOrchestratorConfig['codex']['profiles'] | undefined)
         ?? defaults.codex.profiles,
       promptFileEnv: defaults.codex.promptFileEnv,
@@ -623,6 +643,24 @@ function migrateRetryableBlockers(
   return Array.from(new Set([...(existing ?? defaults), ...defaults])) as CodexOrchestratorConfig['loopPolicy']['rework']['retryableBlockers'];
 }
 
+function migrateFigmaMcpConfig(
+  defaults: CodexFigmaMcpConfig | undefined,
+  existing: Record<string, unknown> | undefined,
+): CodexFigmaMcpConfig | undefined {
+  if (!defaults) {
+    return undefined;
+  }
+  if (!existing) {
+    return defaults;
+  }
+  return {
+    enabled: readBoolean(existing.enabled) ?? defaults.enabled,
+    url: readString(existing.url) ?? defaults.url,
+    httpHeaders: readStringRecord(existing.httpHeaders) ?? defaults.httpHeaders,
+    issueTextPatterns: readStringArray(existing.issueTextPatterns) ?? defaults.issueTextPatterns,
+  };
+}
+
 function label(name: string, color: string, description: string): LabelDefinition {
   return { name, color, description };
 }
@@ -648,25 +686,24 @@ function migrateWorkflowConfigs(
 }
 
 function migrateCodexArgs(existingArgs: string[] | undefined, defaultArgs: string[]): string[] {
-  if (!existingArgs) {
-    return defaultArgs;
+  const args = existingArgs ?? defaultArgs;
+  const migrated = [...args];
+
+  if (migrated[0] !== 'exec') {
+    return migrated;
   }
 
-  if (!existingArgs.includes('--ignore-user-config')) {
-    return existingArgs;
+  if (!migrated.includes('--ignore-user-config')) {
+    const insertAt = migrated[0] === 'exec' ? 1 : 0;
+    migrated.splice(insertAt, 0, '--ignore-user-config');
   }
 
-  const migrated: string[] = [];
-  for (let index = 0; index < existingArgs.length; index += 1) {
-    const arg = existingArgs[index];
-    if (arg === '--ignore-user-config') {
-      if (!migrated.includes('-c') && !existingArgs.includes('sandbox_workspace_write.network_access=true')) {
-        migrated.push('-c', 'sandbox_workspace_write.network_access=true');
-      }
-      continue;
-    }
-    migrated.push(arg);
+  if (!migrated.includes('sandbox_workspace_write.network_access=true')) {
+    const outputIndex = migrated.indexOf('--output-last-message');
+    const insertAt = outputIndex >= 0 ? outputIndex : migrated.length;
+    migrated.splice(insertAt, 0, '-c', 'sandbox_workspace_write.network_access=true');
   }
+
   return migrated;
 }
 
@@ -701,6 +738,10 @@ function readStringArray(value: unknown): string[] | undefined {
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function readStringRecord(value: unknown): Record<string, string> | undefined {

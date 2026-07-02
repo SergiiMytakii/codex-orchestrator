@@ -17,6 +17,10 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.codex.timeoutMs, 1_800_000);
     assert.equal(result.value.codex.mobileTimeoutMs, 3_600_000);
     assert.equal(result.value.codex.idleTimeoutMs, 300_000);
+    assert.equal(result.value.codex.ignoreUserConfig, true);
+    assert.equal(result.value.codex.figmaMcp?.enabled, true);
+    assert.equal(result.value.codex.figmaMcp?.url, 'https://mcp.figma.com/mcp');
+    assert.deepEqual(result.value.codex.figmaMcp?.httpHeaders, { 'X-Figma-Region': 'us-east-1' });
     assert.deepEqual(result.value.codex.profiles, {});
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
@@ -71,6 +75,7 @@ test('accepts the expanded valid config contract', () => {
       'workspace-write',
       '--add-dir',
       '${stateDir}',
+      '--ignore-user-config',
       '-c',
       'sandbox_workspace_write.network_access=true',
       '--output-last-message',

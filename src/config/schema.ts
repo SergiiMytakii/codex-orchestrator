@@ -51,6 +51,13 @@ export interface CodexProfileConfig {
   env?: Record<string, string>;
 }
 
+export interface CodexFigmaMcpConfig {
+  enabled: boolean;
+  url: string;
+  httpHeaders: Record<string, string>;
+  issueTextPatterns: string[];
+}
+
 export const forbiddenCodexProfileEnvKeys = new Set([
   'GH_TOKEN',
   'GITHUB_TOKEN',
@@ -140,6 +147,8 @@ export interface CodexOrchestratorConfig {
     timeoutMs?: number;
     mobileTimeoutMs?: number;
     idleTimeoutMs?: number;
+    ignoreUserConfig?: boolean;
+    figmaMcp?: CodexFigmaMcpConfig;
     profiles?: Partial<Record<CodexPhase, CodexProfileConfig>>;
     promptFileEnv: 'CODEX_ORCHESTRATOR_PROMPT_FILE';
     reportFileEnv: 'CODEX_ORCHESTRATOR_REPORT_FILE';
@@ -313,6 +322,8 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectOptionalPositiveInteger(codex, 'codex.timeoutMs', errors);
     expectOptionalPositiveInteger(codex, 'codex.mobileTimeoutMs', errors);
     expectOptionalPositiveInteger(codex, 'codex.idleTimeoutMs', errors);
+    expectOptionalBoolean(codex, 'codex.ignoreUserConfig', errors);
+    validateCodexFigmaMcp(codex, errors);
     validateCodexProfiles(codex, errors);
     expectLiteral(codex, 'codex.promptFileEnv', 'CODEX_ORCHESTRATOR_PROMPT_FILE', errors);
     expectLiteral(codex, 'codex.reportFileEnv', 'CODEX_ORCHESTRATOR_REPORT_FILE', errors);
@@ -636,6 +647,28 @@ function validateCodexProfileEnv(profile: ObjectRecord, phase: string, errors: s
   for (const [key, value] of Object.entries(env)) {
     if (typeof value !== 'string') {
       errors.push(`codex.profiles.${phase}.env.${key} must be a string`);
+    }
+  }
+}
+
+function validateCodexFigmaMcp(codex: ObjectRecord, errors: string[]): void {
+  const figmaMcp = expectOptionalObject(codex, 'codex.figmaMcp', errors);
+  if (!figmaMcp) {
+    return;
+  }
+
+  expectBoolean(figmaMcp, 'codex.figmaMcp.enabled', errors);
+  expectString(figmaMcp, 'codex.figmaMcp.url', errors);
+  expectStringArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
+  validateRegexArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
+
+  const httpHeaders = expectObject(figmaMcp, 'codex.figmaMcp.httpHeaders', errors);
+  if (!httpHeaders) {
+    return;
+  }
+  for (const [key, value] of Object.entries(httpHeaders)) {
+    if (key.length === 0 || typeof value !== 'string' || value.length === 0) {
+      errors.push('codex.figmaMcp.httpHeaders must map non-empty names to non-empty string values');
     }
   }
 }

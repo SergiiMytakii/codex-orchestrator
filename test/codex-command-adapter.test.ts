@@ -45,6 +45,7 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
     'workspace-write',
     '--add-dir',
     join(input.targetRoot, validConfig.runner.stateDir),
+    '--ignore-user-config',
     '-c',
     'sandbox_workspace_write.network_access=true',
     '--output-last-message',
@@ -57,6 +58,56 @@ test('codex command adapter renders args, stdin, cwd, and scrubbed env', async (
   assert.equal(options?.idleTimeoutMs, 300_000);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROMPT_FILE, input.promptPath);
   assert.equal(options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE, input.reportPath);
+});
+
+test('codex command adapter ignores user config even when legacy args omit the flag', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const config = {
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      args: validConfig.codex.args.filter((arg) => arg !== '--ignore-user-config'),
+    },
+  };
+  const adapter = new CodexCommandAdapter(config, executor);
+
+  await adapter.run({ ...input, config });
+
+  const [, args] = calls[0] ?? [];
+  assert.ok(args);
+  assert.equal(args.includes('--ignore-user-config'), true);
+});
+
+test('codex command adapter enables figma mcp only when prompt requires figma', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  await adapter.run({
+    ...input,
+    promptText: 'Implement this backend issue without design assets.',
+  });
+  await adapter.run({
+    ...input,
+    promptText: 'Use the design at https://www.figma.com/design/abc123/File?node-id=1-2 before coding.',
+  });
+
+  const [, plainArgs] = calls[0] ?? [];
+  const [, figmaArgs] = calls[1] ?? [];
+  assert.ok(plainArgs);
+  assert.ok(figmaArgs);
+  assert.equal(plainArgs.some((arg) => arg.includes('mcp_servers.figma')), false);
+  assert.equal(figmaArgs.includes('--ignore-user-config'), true);
+  assert.ok(figmaArgs.some((arg) => arg === 'mcp_servers.figma.url="https://mcp.figma.com/mcp"'));
+  assert.ok(figmaArgs.some((arg) => arg === 'mcp_servers.figma.http_headers."X-Figma-Region"="us-east-1"'));
+  assert.ok(figmaArgs.indexOf('mcp_servers.figma.url="https://mcp.figma.com/mcp"') < figmaArgs.lastIndexOf('-'));
 });
 
 test('codex command adapter blocks child mobile device control through a guard PATH', async () => {
@@ -221,7 +272,7 @@ test('codex profile fallback keeps global command values for missing phases', ()
   assert.equal(profile.idleTimeoutMs, validConfig.codex.idleTimeoutMs);
 });
 
-test('codex env defaults CODEX_HOME to the user codex home for authentication', () => {
+test('codex env keeps CODEX_HOME on the user codex home for authentication', () => {
   const env = buildCodexProcessEnv(input, {});
 
   assert.match(env.CODEX_HOME, /\/\.codex$/);
