@@ -464,6 +464,25 @@ test('visual proof policy still applies generic acceptance proof for configured 
   }), true);
 });
 
+test('visual proof policy does not require device screenshots for non-visual Firebase analytics proof', () => {
+  assert.equal(shouldApplyVisualProofGate({
+    config: validConfig,
+    issue: issueFixture({
+      number: 160,
+      title: 'Add Firebase-visible analytics for Live entry',
+      body: [
+        'Send Firebase Analytics events from the mobile app when a user enters the Live screen.',
+        'Route live_screen_viewed, sub_purchased, and points_purchased through AnalyticsService.logEvent.',
+        'Tests or debug proof verify the event paths.',
+      ].join('\n'),
+    }),
+    changedFiles: [
+      'lib/presentation/screens/prediction_markets/prediction_markets_discovery_screen.dart',
+      'test/core/services/analytics_service_test.dart',
+    ],
+  }), false);
+});
+
 test('visual proof policy does not treat internal Acceptance Proof module work as mobile UI proof', () => {
   assert.equal(shouldApplyVisualProofGate({
     config: validConfig,

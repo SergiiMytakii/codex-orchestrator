@@ -104,9 +104,12 @@ export function shouldApplyVisualProofGate(input: {
   }
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
+  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
+  if (isPackageOwnedAutoVisualProofCommand(acceptanceCommand) && isNonVisualTelemetryProofIssue(issueText)) {
+    return false;
+  }
   const internalRunnerProofOnlyChange = input.changedFiles.length > 0
     && input.changedFiles.every(isInternalRunnerProofPath);
-  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
   const canRunGenericAcceptanceProof = Boolean(acceptanceCommand) && !isMobileVisualProofCommand(acceptanceCommand);
   const issueNeedsAcceptanceProof = canRunGenericAcceptanceProof
     && !internalRunnerProofOnlyChange
@@ -148,6 +151,10 @@ export function isVisualProofDesirable(input: {
   }
 
   const issueText = `${input.issue.title}\n${input.issue.body}`;
+  const command = runnerVisualProofPolicy(input.config).commandTemplate;
+  if (isPackageOwnedAutoVisualProofCommand(command) && isNonVisualTelemetryProofIssue(issueText)) {
+    return false;
+  }
   const internalRunnerProofOnlyChange = input.changedFiles.length > 0
     && input.changedFiles.every(isInternalRunnerProofPath);
   const issueNeedsVisualProof = visualProof.enabled
@@ -264,6 +271,17 @@ function isLegacyVisualProofOverride(
 
 function isMobileVisualProofCommand(command: string | undefined): boolean {
   return /\bcodex-orchestrator\s+visual-proof\s+(?:mobile|android|ios)\b/iu.test(command ?? '');
+}
+
+function isPackageOwnedAutoVisualProofCommand(command: string | undefined): boolean {
+  return (command ?? '').trim() === 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
+}
+
+function isNonVisualTelemetryProofIssue(text: string): boolean {
+  if (!/\b(?:analytics?|firebase|telemetry|events?|logEvent|tracking)\b/iu.test(text)) {
+    return false;
+  }
+  return !/\b(?:visual|screenshot|layout|responsive|viewport|pixel)\b/iu.test(text);
 }
 
 function isMobileProofPath(path: string): boolean {
