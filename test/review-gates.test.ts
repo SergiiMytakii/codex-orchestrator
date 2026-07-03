@@ -10,7 +10,7 @@ import {
   type ReviewGateInput,
 } from '../src/runner/review-gates.js';
 import type { PlanAutoCompletionReport } from '../src/runner/completion-report.js';
-import { classifyVisualProofDispatchTarget, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
+import { classifyVisualProofDispatchTarget, decideProofRouting, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 
@@ -513,6 +513,63 @@ test('visual proof policy still applies generic acceptance proof for configured 
     issue: issueFixture({ number: 782, title: 'Backend cleanup', body: 'No visual proof.' }),
     changedFiles: ['src/api/routes.ts'],
   }), true);
+});
+
+test('proof routing decision centralizes visual, non-visual, and no-target outcomes', () => {
+  const genericAcceptanceConfig = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        runnerValidationCommand: 'npm run acceptance-proof',
+        changedPathGlobs: ['src/api/**'],
+      },
+    },
+  };
+
+  assert.deepEqual(decideProofRouting({
+    config: validConfig,
+    issue: issueFixture({
+      number: 901,
+      title: 'Record analytics event',
+      body: 'Proof Strategy: non-visual-smoke\nUse deterministic event smoke output.',
+    }),
+    changedFiles: ['lib/presentation/screens/live/live_screen.dart'],
+  }), {
+    applies: false,
+    desirable: false,
+    dispatchTarget: 'none',
+    proofStrategy: 'non-visual-smoke',
+    action: 'skip',
+    reason: 'proof strategy disables browser/mobile visual proof',
+  });
+
+  assert.deepEqual(decideProofRouting({
+    config: genericAcceptanceConfig,
+    issue: issueFixture({ number: 902, title: 'Backend API smoke proof', body: 'Acceptance proof by API smoke output.' }),
+    changedFiles: ['src/api/routes.ts'],
+  }), {
+    applies: true,
+    desirable: false,
+    dispatchTarget: 'none',
+    proofStrategy: 'auto',
+    action: 'allow-non-visual',
+    reason: 'acceptance proof applies without browser or mobile dispatch',
+  });
+
+  assert.deepEqual(decideProofRouting({
+    config: validConfig,
+    issue: issueFixture({ number: 903, title: 'Needs visual proof', body: 'The layout proof must include a screenshot.' }),
+    changedFiles: ['src/server.ts'],
+  }), {
+    applies: true,
+    desirable: true,
+    dispatchTarget: 'none',
+    proofStrategy: 'auto',
+    action: 'error',
+    reason: 'visual proof is desirable but no browser or mobile dispatch target matched',
+  });
 });
 
 test('visual proof policy does not require device screenshots for explicit non-visual Firebase analytics proof', () => {

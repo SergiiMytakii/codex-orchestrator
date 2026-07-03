@@ -1,14 +1,11 @@
 import type { GitHubIssue } from '../github/issues.js';
 import {
-  classifyVisualProofDispatchTarget,
-  isVisualProofDesirable,
-  shouldApplyVisualProofGate,
+  decideProofRouting,
   type VisualProofDispatchTarget,
 } from './review-gate-policy.js';
 import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand, type BrowserVisualProofCommandInput } from './browser-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand, type MobileVisualProofCommandInput } from './mobile-visual-proof-command.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
 export interface AutoVisualProofCommandInput {
   args: string[];
@@ -25,29 +22,26 @@ export async function runAutoVisualProofCommand(input: AutoVisualProofCommandInp
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
-  const target = classifyVisualProofDispatchTarget({ config: input.config, issue, changedFiles });
+  const routing = decideProofRouting({ config: input.config, issue, changedFiles });
+  const target = routing.dispatchTarget;
 
-  if (target === 'browser') {
+  if (routing.action === 'dispatch' && target === 'browser') {
     const parsed = parseBrowserVisualProofArgs(input.args, env);
     if (!parsed.ok) throw new Error(parsed.error);
     await (input.browserRunner ?? runBrowserVisualProofCommand)(parsed.value);
     return { target };
   }
-  if (target === 'mobile') {
+  if (routing.action === 'dispatch' && target === 'mobile') {
     const parsed = parseMobileVisualProofArgs(input.args, env);
     if (!parsed.ok) throw new Error(parsed.error);
     await (input.mobileRunner ?? runMobileVisualProofCommand)(parsed.value);
     return { target };
   }
-  const strategy = resolveAcceptanceProofStrategy({ config: input.config, issue }).strategy;
-  if (target === 'none' && (strategy === 'none' || strategy === 'non-visual-smoke')) {
+
+  if (routing.action === 'skip' || routing.action === 'allow-non-visual') {
     return { target };
   }
-  if (target === 'none'
-    && shouldApplyVisualProofGate({ config: input.config, issue, changedFiles })
-    && !isVisualProofDesirable({ config: input.config, issue, changedFiles })) {
-    return { target };
-  }
+
   throw new Error('visual-proof auto could not select browser or mobile proof from changed files. Provide web/mobile changed paths or use visual-proof browser/mobile explicitly.');
 }
 

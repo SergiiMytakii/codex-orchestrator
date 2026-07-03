@@ -125,6 +125,35 @@ test('visual-proof auto accepts backend-only acceptance proof without browser or
   assert.equal(result.target, 'none');
 });
 
+test('visual-proof auto accepts configured non-visual acceptance paths without browser dispatch', async () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      acceptanceProof: {
+        ...validConfig.reviewGates.acceptanceProof,
+        runnerValidationCommand: 'npm run acceptance-proof',
+        changedPathGlobs: ['src/api/**'],
+      },
+    },
+  };
+
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '263', '--target', '/tmp/backend'],
+    config,
+    env: {
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'src/api/routes.ts',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Backend API smoke proof',
+      CODEX_ORCHESTRATOR_ISSUE_BODY: 'Acceptance proof by API smoke output.',
+    },
+    browserRunner: async () => {
+      throw new Error('browser proof should not run for configured non-visual acceptance paths');
+    },
+  });
+
+  assert.equal(result.target, 'none');
+});
+
 test('visual-proof auto reports no-match failures clearly', async () => {
   await assert.rejects(
     runAutoVisualProofCommand({
