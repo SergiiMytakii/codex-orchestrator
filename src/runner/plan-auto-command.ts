@@ -25,7 +25,7 @@ import {
   type FreshContextReviewEvidence,
   type RunnerValidationLine,
 } from './handoff-evidence.js';
-import { writeDurableRunSummary, type DurableRunSummaryEvidence } from './durable-run-summary.js';
+import { writeDurableRunSummary, type DurableRunSummaryEvidence, type ReworkAttemptEvidence } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { writeContextSnapshot } from './context-snapshot.js';
 import {
@@ -52,7 +52,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
+import { decideImplementationRework } from './rework-policy.js';
 import { evaluateParentRiskRoutingGate } from './review-gates.js';
 import {
   buildBlockedHandoffEvidence,
@@ -131,6 +131,7 @@ class ChildExecutionBlockedError extends Error {
     public readonly durableRunSummary?: DurableRunSummaryEvidence,
     public readonly freshContextReview?: FreshContextReviewEvidence,
     public readonly acceptanceProof?: AcceptanceProofAttemptEvidence,
+    public readonly reworkAttempts?: ReworkAttemptEvidence[],
   ) {
     super(message);
   }
@@ -620,27 +621,12 @@ async function executeChild(input: {
   const childIssueNumber = input.child.issue.number;
   const branchName = `codex/tree-${input.parentIssue.number}-issue-${childIssueNumber}`;
   const worktreePath = join(input.targetRoot, input.config.runner.workspaceRoot, `tree-${input.parentIssue.number}-issue-${childIssueNumber}`);
-  const sessionId = `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(input.now)}`;
-  const promptPath = sessionPromptPath({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    issueNumber: childIssueNumber,
-    sessionId,
-  });
-  const reportPath = sessionReportPath({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    issueNumber: childIssueNumber,
-    sessionId,
-  });
-  const logPath = sessionLogPath({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    issueNumber: childIssueNumber,
-    sessionId,
-  });
-  const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
   const store = new RunnerStateStore(input.targetRoot, input.config);
+  let sessionId = '';
+  let promptPath = '';
+  let reportPath = '';
+  let logPath = '';
+  let snapshotPath = '';
 
   await input.git.createIssueWorktree({
     targetRoot: input.targetRoot,
@@ -653,52 +639,52 @@ async function executeChild(input: {
     childIssueNumber,
     `codex-orchestrator: claimed #${childIssueNumber} for tree-child autonomous work under #${input.parentIssue.number} at ${input.now.toISOString()}.`,
   );
-  await mkdir(dirname(reportPath), { recursive: true });
-  await mkdir(isolatedHomePath, { recursive: true });
-  const promptText = buildIssueTreeChildPrompt({
-    parentIssue: input.parentIssue,
-    childIssue: input.child.issue,
-    config: input.config,
-    workflowPromptText: input.issueTreeWorkflowPrompt,
-    childMetadata: input.child.metadata,
-    dependencyIssues: input.dependencyIssues,
-    promptPath,
-    reportPath,
-    branchName,
-    worktreePath,
-  });
-  await writeDurablePrompt({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    issueNumber: childIssueNumber,
-    sessionId,
-    promptText,
-  });
-  await store.upsertRun({
-    issueNumber: childIssueNumber,
-    parentIssueNumber: input.parentIssue.number,
-    mode: 'tree-child',
-    workspacePath: worktreePath,
-    sessionId,
-    branchName,
-    promptPath,
-    reportPath,
-    logPath,
-    retryCount: 0,
-    createdAt: input.now.toISOString(),
-    updatedAt: input.now.toISOString(),
-  });
 
   let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
-  let rework: { attempt: number; blockedReasons: string[] } | undefined;
+  let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined;
+  const reworkAttempts: ReworkAttemptEvidence[] = [];
   const maxReworkAttempts = Math.max(
     input.config.loopPolicy.rework.maxAttempts,
     input.config.reviewGates.acceptanceProof.maxIterations - 1,
   );
   for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
     const attemptNow = new Date(input.now.getTime() + attempt);
+    sessionId = `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`;
+    promptPath = sessionPromptPath({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+    });
+    reportPath = sessionReportPath({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+    });
+    logPath = sessionLogPath({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: childIssueNumber,
+      sessionId,
+    });
+    const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
+    await mkdir(dirname(reportPath), { recursive: true });
+    await mkdir(isolatedHomePath, { recursive: true });
+    const promptText = buildIssueTreeChildPrompt({
+      parentIssue: input.parentIssue,
+      childIssue: input.child.issue,
+      config: input.config,
+      workflowPromptText: input.issueTreeWorkflowPrompt,
+      childMetadata: input.child.metadata,
+      dependencyIssues: input.dependencyIssues,
+      promptPath,
+      reportPath,
+      branchName,
+      worktreePath,
+    });
     const attemptPromptText = rework
-      ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\nAddress the blockers, then produce a fresh completion report JSON for the runner.`
+      ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\n${rework.disableOptionalFigmaMcp ? 'Optional Figma MCP failed in the previous attempt. Continue without optional Figma MCP access unless the issue explicitly requires Figma.\n' : ''}Address the blockers, then produce a fresh completion report JSON for the runner.`
       : promptText;
     await writeDurablePrompt({
       targetRoot: input.targetRoot,
@@ -727,6 +713,23 @@ async function executeChild(input: {
       blockedBy: [],
       createdAt: attemptNow,
     });
+    snapshotPath = snapshot.path;
+    await store.upsertRun({
+      issueNumber: childIssueNumber,
+      parentIssueNumber: input.parentIssue.number,
+      mode: 'tree-child',
+      workspacePath: worktreePath,
+      sessionId,
+      branchName,
+      promptPath,
+      reportPath,
+      logPath,
+      retryCount: attempt,
+      createdAt: input.now.toISOString(),
+      updatedAt: attemptNow.toISOString(),
+      attemptStartedAt: attemptNow.toISOString(),
+      snapshotPath,
+    });
     await safeAppendEvent(input.events, {
       timestamp: attemptNow,
       issueNumber: childIssueNumber,
@@ -736,7 +739,7 @@ async function executeChild(input: {
       phase: 'tree-child',
       status: 'started',
       summary: rework ? `Starting tree-child rework attempt #${rework.attempt}.` : 'Starting tree-child Codex session.',
-      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshot.path),
+      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
     });
     const beforeHead = await input.git.getHead(worktreePath);
     let codexResult: CodexCommandRunResult;
@@ -754,6 +757,7 @@ async function executeChild(input: {
         branchName,
         phase: 'tree-child',
         logPath,
+        disableOptionalFigmaMcp: rework?.disableOptionalFigmaMcp,
       });
     } finally {
       await cleanupSessionCodexHome(isolatedHomePath);
@@ -787,14 +791,49 @@ async function executeChild(input: {
       },
     });
 
-    if (
-      publishability.status === 'blocked'
-      && attempt < maxReworkAttemptsForReasons(publishability.reasons, input.config)
-      && shouldRequestImplementationRework(publishability.reasons, input.config)
-    ) {
-      rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };
-      await mkdir(isolatedHomePath, { recursive: true });
-      continue;
+    if (publishability.status === 'blocked') {
+      const reworkDecision = decideImplementationRework({
+        reasons: publishability.reasons,
+        config: input.config,
+        attempt,
+      });
+      reworkAttempts.push({
+        attempt,
+        maxAttempts: 'maxAttempts' in reworkDecision ? reworkDecision.maxAttempts : undefined,
+        decisionKind: reworkDecision.kind,
+        reasons: publishability.reasons,
+        promptPath,
+        reportPath,
+        logPath,
+        snapshotPath,
+      });
+      if (reworkDecision.kind === 'retry') {
+        rework = reworkDecision.rework;
+        await safeAppendEvent(input.events, {
+          timestamp: attemptNow,
+          issueNumber: childIssueNumber,
+          parentIssueNumber: input.parentIssue.number,
+          mode: 'tree-child',
+          sessionId,
+          phase: 'tree-child',
+          status: 'needs-rework',
+          summary: `Runner scheduled tree-child rework attempt #${reworkDecision.nextAttempt}.`,
+          artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+        });
+        await mkdir(isolatedHomePath, { recursive: true });
+        continue;
+      }
+      await safeAppendEvent(input.events, {
+        timestamp: attemptNow,
+        issueNumber: childIssueNumber,
+        parentIssueNumber: input.parentIssue.number,
+        mode: 'tree-child',
+        sessionId,
+        phase: 'tree-child',
+        status: 'blocked',
+        summary: `Runner rework decision: ${reworkDecision.kind}.`,
+        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+      });
     }
     break;
   }
@@ -825,13 +864,14 @@ async function executeChild(input: {
       logPath,
       reportPath,
       acceptanceProof: evidence.acceptanceProof,
+      reworkAttempts,
     });
     const message = [
       'Child requested promotion instead of completing issue-tree work.',
       promotion ? `Reason: ${promotion.reason}` : undefined,
       promotion ? `Evidence: ${promotion.evidence.join(', ')}` : undefined,
     ].filter(Boolean).join(' ');
-    throw new ChildExecutionBlockedError(message, durableRunSummary, undefined, evidence.acceptanceProof);
+    throw new ChildExecutionBlockedError(message, durableRunSummary, undefined, evidence.acceptanceProof, reworkAttempts);
   }
 
   if (publishability.status === 'blocked') {
@@ -854,8 +894,9 @@ async function executeChild(input: {
       logPath,
       reportPath,
       acceptanceProof: evidence.acceptanceProof,
+      reworkAttempts,
     });
-    throw new ChildExecutionBlockedError(evidence.blockers.join('; '), durableRunSummary, undefined, evidence.acceptanceProof);
+    throw new ChildExecutionBlockedError(evidence.blockers.join('; '), durableRunSummary, undefined, evidence.acceptanceProof, reworkAttempts);
   }
 
   const freshContextReview = await runFreshContextReviewIfEnabled({
@@ -890,12 +931,14 @@ async function executeChild(input: {
       logPath,
       reportPath,
       acceptanceProof: evidence.acceptanceProof,
+      reworkAttempts,
     });
     throw new ChildExecutionBlockedError(
       evidence.blockers.join('; '),
       durableRunSummary,
       freshContextReview,
       evidence.acceptanceProof,
+      reworkAttempts,
     );
   }
 
@@ -920,6 +963,7 @@ async function executeChild(input: {
     logPath,
     reportPath,
     acceptanceProof: evidence.acceptanceProof,
+    reworkAttempts,
   });
 
   return {
@@ -952,6 +996,7 @@ async function blockFailedBatch(
     durableRunSummary?: DurableRunSummaryEvidence;
     freshContextReview?: FreshContextReviewEvidence;
     acceptanceProof?: AcceptanceProofAttemptEvidence;
+    reworkAttempts?: ReworkAttemptEvidence[];
   }>,
   successfulUnmerged: ChildExecutionResult[],
 ): Promise<void> {
@@ -970,6 +1015,7 @@ async function blockFailedBatch(
         details: ['Worktree preserved for maintainer inspection.'],
         freshContextReview: failure.freshContextReview,
         durableRunSummary: failure.durableRunSummary,
+        reworkAttempts: failure.reworkAttempts,
         acceptanceProof: failure.acceptanceProof,
       }),
     );

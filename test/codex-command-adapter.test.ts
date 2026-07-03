@@ -90,11 +90,11 @@ test('codex command adapter enables figma mcp only when prompt requires figma', 
   };
   const adapter = new CodexCommandAdapter(validConfig, executor);
 
-  await adapter.run({
+  const plain = await adapter.run({
     ...input,
     promptText: 'Implement this backend issue without design assets.',
   });
-  await adapter.run({
+  const figma = await adapter.run({
     ...input,
     promptText: 'Use the design at https://www.figma.com/design/abc123/File?node-id=1-2 before coding.',
   });
@@ -104,10 +104,41 @@ test('codex command adapter enables figma mcp only when prompt requires figma', 
   assert.ok(plainArgs);
   assert.ok(figmaArgs);
   assert.equal(plainArgs.some((arg) => arg.includes('mcp_servers.figma')), false);
+  assert.deepEqual(plain.figmaMcp, { requirement: 'none', enabled: false });
+  assert.deepEqual(figma.figmaMcp, { requirement: 'optional', enabled: true });
   assert.equal(figmaArgs.includes('--ignore-user-config'), true);
   assert.ok(figmaArgs.some((arg) => arg === 'mcp_servers.figma.url="https://mcp.figma.com/mcp"'));
   assert.ok(figmaArgs.some((arg) => arg === 'mcp_servers.figma.http_headers."X-Figma-Region"="us-east-1"'));
   assert.ok(figmaArgs.indexOf('mcp_servers.figma.url="https://mcp.figma.com/mcp"') < figmaArgs.lastIndexOf('-'));
+});
+
+test('codex command adapter disables optional figma mcp on rework but keeps required figma enabled', async () => {
+  const calls: Parameters<ProcessExecutor>[] = [];
+  const executor: ProcessExecutor = async (...args) => {
+    calls.push(args);
+    return { stdout: 'ok', stderr: '', exitCode: 0 };
+  };
+  const adapter = new CodexCommandAdapter(validConfig, executor);
+
+  const optional = await adapter.run({
+    ...input,
+    promptText: 'Use https://www.figma.com/design/abc123/File?node-id=1-2 as helpful context.',
+    disableOptionalFigmaMcp: true,
+  });
+  const required = await adapter.run({
+    ...input,
+    promptText: 'This issue requires Figma source of truth before implementation.',
+    disableOptionalFigmaMcp: true,
+  });
+
+  const [, optionalArgs] = calls[0] ?? [];
+  const [, requiredArgs] = calls[1] ?? [];
+  assert.ok(optionalArgs);
+  assert.ok(requiredArgs);
+  assert.equal(optionalArgs.some((arg) => arg.includes('mcp_servers.figma')), false);
+  assert.equal(requiredArgs.some((arg) => arg.includes('mcp_servers.figma')), true);
+  assert.deepEqual(optional.figmaMcp, { requirement: 'optional', enabled: false });
+  assert.deepEqual(required.figmaMcp, { requirement: 'required', enabled: true });
 });
 
 test('codex command adapter blocks child mobile device control through a guard PATH', async () => {

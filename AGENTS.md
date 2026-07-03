@@ -71,11 +71,14 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.39` (2026-07-02):
-  - Full live smoke issue-tree child fixtures now stay inside declared ownership
-    paths.
-  - Browser-proof live smoke now runs packaged visual proof with target config
-    and issue-worktree proof artifacts aligned.
+- `0.1.40` (2026-07-03):
+  - Live smoke now uses smaller default and explicit scenario profiles.
+  - Runner rework now uses one `ReworkDecision` contract for retry, exhausted,
+    and hard-block outcomes.
+  - Structured TDD proof is supported inside completion-report `validation[]`.
+  - Optional Figma MCP failures retry without MCP while required Figma access
+    hard-blocks.
+  - Focused live smoke now covers tree-child quality-gate rework.
 
 ## Final Response
 

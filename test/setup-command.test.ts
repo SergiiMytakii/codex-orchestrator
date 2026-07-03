@@ -397,6 +397,11 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.codex.timeoutMs, 1_800_000);
   assert.equal(result.config.codex.ignoreUserConfig, true);
   assert.equal(result.config.codex.figmaMcp?.enabled, true);
+  assert.equal('issueTextPatterns' in (result.config.codex.figmaMcp ?? {}), false);
+  assert.deepEqual(result.config.codex.figmaMcp?.optionalFailure, 'retry-without-mcp');
+  assert.deepEqual(result.config.codex.figmaMcp?.requiredFailure, 'block');
+  assert.ok(result.config.codex.figmaMcp?.optionalIssueTextPatterns.some((pattern) => pattern.includes('figma')));
+  assert.ok(result.config.codex.figmaMcp?.requiredIssueTextPatterns.some((pattern) => pattern.includes('Figma')));
   assert.equal(result.config.reviewGates.visualProof.enabled, true);
   assert.equal(result.config.reviewGates.visualProof.runnerTimeoutMs, 900_000);
   assert.deepEqual(result.config.reviewGates.visualProof.envPassthrough, []);

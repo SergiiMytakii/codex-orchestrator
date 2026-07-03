@@ -31,9 +31,8 @@ import {
   type ScopedAutoCommandResult,
 } from './scoped-auto-command.js';
 import {
-  maxReworkAttemptsForReasons,
+  decideImplementationRework,
   MISSING_COMPLETION_REPORT_REASON,
-  shouldRequestImplementationRework,
 } from './rework-policy.js';
 
 export const SCOPED_RECOVERY_LEASE_STALE_MS = 30 * 60 * 1000;
@@ -270,12 +269,17 @@ async function recoverMissingCompletionReport(input: {
 }): Promise<ScopedRecoveryRunResult | undefined> {
   const reasons = [MISSING_COMPLETION_REPORT_REASON];
   const startAttempt = input.run.retryCount + 1;
+  const reworkDecision = decideImplementationRework({
+    reasons,
+    config: input.config,
+    attempt: startAttempt - 1,
+  });
   if (
     input.run.host !== input.localHost
     || typeof input.run.ownerPid !== 'number'
     || !Number.isInteger(input.run.ownerPid)
-    || startAttempt > maxReworkAttemptsForReasons(reasons, input.config)
-    || !shouldRequestImplementationRework(reasons, input.config)
+    || reworkDecision.kind !== 'retry'
+    || reworkDecision.nextAttempt !== startAttempt
   ) {
     return undefined;
   }
@@ -306,10 +310,7 @@ async function recoverMissingCompletionReport(input: {
     now: input.now,
     issue: input.issue,
     startAttempt,
-    initialRework: {
-      attempt: startAttempt,
-      blockedReasons: reasons,
-    },
+    initialRework: reworkDecision.rework,
   });
   return { ...result, recovered: true, classification: input.classification };
 }

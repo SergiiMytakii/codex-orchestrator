@@ -21,12 +21,24 @@ export interface DurableRunSummary {
     logPath: string;
     reportPath: string;
   };
+  reworkAttempts?: ReworkAttemptEvidence[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
 export interface DurableRunSummaryEvidence {
   path: string;
   excerpt: string[];
+}
+
+export interface ReworkAttemptEvidence {
+  attempt: number;
+  maxAttempts?: number;
+  decisionKind: 'retry' | 'exhausted' | 'hard-block';
+  reasons: string[];
+  promptPath: string;
+  reportPath: string;
+  logPath: string;
+  snapshotPath?: string;
 }
 
 export async function writeDurableRunSummary(input: {
@@ -45,6 +57,7 @@ export async function writeDurableRunSummary(input: {
   nextAction: string;
   logPath: string;
   reportPath: string;
+  reworkAttempts?: ReworkAttemptEvidence[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): Promise<DurableRunSummaryEvidence | undefined> {
   if (!input.config.loopPolicy.durableRunSummaries.enabled) {
@@ -67,6 +80,7 @@ export async function writeDurableRunSummary(input: {
       logPath: input.logPath,
       reportPath: input.reportPath,
     },
+    reworkAttempts: input.reworkAttempts && input.reworkAttempts.length > 0 ? input.reworkAttempts : undefined,
     acceptanceProof: input.acceptanceProof,
   };
   const path = join(
@@ -85,6 +99,7 @@ export async function writeDurableRunSummary(input: {
       `next action: ${summary.nextAction}`,
       `confirmed facts: ${summary.confirmedFacts.length === 0 ? 'none' : summary.confirmedFacts.join('; ')}`,
       `residual risks: ${summary.residualRisks.length === 0 ? 'none' : summary.residualRisks.join('; ')}`,
+      `rework attempts: ${summary.reworkAttempts?.length ?? 0}`,
       `acceptance proof: ${summary.acceptanceProof?.status ?? 'not-run'}`,
       `policy suggestions: ${summary.policySuggestions.length === 0 ? 'none' : summary.policySuggestions.join('; ')}`,
     ],

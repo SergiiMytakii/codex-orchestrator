@@ -36,6 +36,7 @@ const scenarioDefinitions = new Map([
   ['plan-auto', runPlanAutoScenario],
   ['run-plan-auto', runDirectPlanAutoScenario],
   ['plan-auto-blocking', runPlanAutoBlockingScenario],
+  ['tree-child-quality-rework', runTreeChildQualityReworkScenario],
 ]);
 
 const scenarioProfiles = new Map([
@@ -62,6 +63,7 @@ const scenarioProfiles = new Map([
     'acceptance-proof-rework',
     'acceptance-proof-negative',
     'plan-auto-blocking',
+    'tree-child-quality-rework',
   ]],
   ['proof-matrix', [
     'browser-proof',
@@ -990,6 +992,49 @@ async function runPlanAutoBlockingScenario(context) {
   await assertPlanBlockedIssue(context, parent.number, 'refusing to update arbitrary issue');
   await assertNoPullRequestForBranch(context, `codex/tree-${parent.number}`);
   await assertNoRemoteBranch(context, `codex/tree-${parent.number}`);
+}
+
+async function runTreeChildQualityReworkScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    loopPolicy: {
+      rework: {
+        maxAttempts: 1,
+      },
+    },
+  });
+  const issue = await createIssue(
+    context,
+    'plan-quality-rework',
+    ['agent:plan-auto'],
+    'Tree-child quality rework live smoke. Child attempt 0 intentionally misses structured TDD evidence; attempt 1 fixes it.',
+  );
+  await runDaemonOnce(context, issue.number, 'plan-parent');
+
+  const parent = await getIssue(context, issue.number);
+  assertHasLabel(parent, 'agent:review');
+  assertMissingLabel(parent, 'agent:blocked');
+  assertIssueHasComment(parent, `codex-orchestrator issue-tree review report for #${issue.number}`);
+
+  const branchName = `codex/tree-${issue.number}`;
+  context.createdBranches.push(branchName);
+  await assertRemoteBranchExists(context, branchName);
+  const pullRequest = await findPullRequestByBranch(context, branchName);
+  assert(pullRequest, `expected draft PR for ${branchName}`);
+  context.createdPullRequests.push(pullRequest.number);
+  const body = await getPullRequestBody(context, pullRequest.number);
+  assertIncludes(body, 'Child loop outcomes:', 'tree-child quality rework PR should include child loop outcomes');
+
+  const childIssues = await listIssuesByRunId(context);
+  const child = childIssues.find((entry) => entry.title.includes('quality rework child'));
+  assert(child, 'expected quality rework child issue to be created');
+  context.createdIssues.push(child.number);
+  assertHasLabel(child, 'agent:child');
+  assertHasLabel(child, 'agent:review');
+  assertMissingLabel(child, 'agent:blocked');
+  assertIssueHasComment(child, 'codex-orchestrator child review report');
+  assertIssueHasComment(child, 'rework attempts: 1');
+  assertIssueHasComment(parent, 'codex-orchestrator issue-tree review report');
 }
 
 async function assertPlanAutoSuccess(context, issueNumber, { expectLoopPolicyEvidence = false } = {}) {
@@ -2149,7 +2194,7 @@ const prompt = readFileSync(promptPath, 'utf8');
 const issueNumber = Number(basename(reportPath).match(/^issue-(\d+)-/)?.[1] ?? 0);
 const inferredScenario = inferScenarioFromReportPath(reportPath);
 const scenario = inferredScenario === 'plan-child'
-  ? inferredScenario
+  ? readLastMarker(prompt, 'LIVE_SMOKE_SCENARIO') ?? inferredScenario
   : readMarker(prompt, 'LIVE_SMOKE_SCENARIO') ?? inferredScenario;
 const runId = readMarker(prompt, 'LIVE_SMOKE_RUN_ID') ?? 'unknown';
 
@@ -2281,6 +2326,9 @@ if (prompt.includes('# Fresh-Context Review')) {
   case 'plan-auto':
     writePlanReport(reportPath, runId);
     break;
+  case 'plan-quality-rework':
+    writePlanQualityReworkReport(reportPath, runId);
+    break;
   case 'risk-routing-plan-warning':
     writePlanRiskRoutingWarningReport(reportPath, runId);
     break;
@@ -2298,6 +2346,31 @@ if (prompt.includes('# Fresh-Context Review')) {
     writePlanChildChange(readMarker(prompt, 'LIVE_SMOKE_CHILD_ID'), runId);
     writeScopedReport(reportPath, planChildChangePaths(readMarker(prompt, 'LIVE_SMOKE_CHILD_ID')));
     break;
+  case 'plan-child-quality-rework': {
+    const childId = readMarker(prompt, 'LIVE_SMOKE_CHILD_ID');
+    writePlanChildChange(childId, runId);
+    const reworkReady = prompt.includes('automatic rework attempt (#1)');
+    writeScopedReport(
+      reportPath,
+      planChildChangePaths(childId),
+      reworkReady
+        ? [
+          {
+            command: 'tree-child quality rework structured TDD',
+            status: 'passed',
+            summary: 'machine-readable proof attached',
+            evidence: {
+              kind: 'tdd-red-green',
+              red: { command: 'node --test', status: 'failed', summary: 'failed before implementation' },
+              green: { command: 'node --test', status: 'passed', summary: 'passed after implementation' },
+            },
+          },
+          { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+        ]
+        : [{ command: 'npm test', status: 'passed', summary: 'all tests passed without red-green proof' }],
+    );
+    break;
+  }
   default:
     throw new Error('Unknown LIVE_SMOKE_SCENARIO: ' + scenario);
 }
@@ -2306,6 +2379,11 @@ console.log(JSON.stringify({ type: 'live-smoke', message: 'completed ' + scenari
 
 function readMarker(text, key) {
   return text.match(new RegExp('^' + key + ':\\s*(.+)$', 'm'))?.[1]?.trim();
+}
+
+function readLastMarker(text, key) {
+  const matches = Array.from(text.matchAll(new RegExp('^' + key + ':\\s*(.+)$', 'gm')));
+  return matches.at(-1)?.[1]?.trim();
 }
 
 function inferScenarioFromReportPath(path) {
@@ -2627,6 +2705,49 @@ function writePlanReport(path, run) {
       risks: ['Child c depends on child a and child b integration order.'],
       proofStrategy: ['Run final configured checks after all child branches merge.'],
       humanReviewFocus: ['Inspect child wave ordering and integration branch diff.'],
+    },
+    residualRisks: [],
+  }, null, 2), 'utf8');
+}
+
+function writePlanQualityReworkReport(path, run) {
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    parent: {
+      title: '[live-smoke:' + run + '] tree child quality rework parent updated',
+      body: 'Live smoke parent updated for tree-child quality rework.\n\nLIVE_SMOKE_RUN_ID: ' + run,
+    },
+    graph: {
+      nodes: [{
+        stableId: 'live-smoke-quality-rework',
+        title: '[live-smoke:' + run + '] quality rework child',
+        body: [
+          'Live smoke quality rework child.',
+          '',
+          'LIVE_SMOKE_RUN_ID: ' + run,
+          'LIVE_SMOKE_SCENARIO: plan-child-quality-rework',
+          'LIVE_SMOKE_CHILD_ID: quality-rework',
+        ].join('\n'),
+        afkHitl: 'afk',
+        ownershipScope: [
+          'src/live-smoke/issue-owned-by-child-quality-rework.ts',
+          'test/live-smoke/issue-owned-by-child-quality-rework.test.ts',
+        ],
+        dependsOn: [],
+        verification: ['live smoke tree-child quality rework validation'],
+      }],
+      edges: [],
+      specGate: 'wave-level',
+    },
+    sizeRisk: {
+      small: ['live-smoke-quality-rework'],
+      medium: [],
+      high: [],
+    },
+    parentReviewHandoff: {
+      risks: ['Child attempt 0 intentionally misses structured TDD evidence.'],
+      proofStrategy: ['Runner must rework the child once and keep the parent unblocked.'],
+      humanReviewFocus: ['Inspect child loop outcome evidence.'],
     },
     residualRisks: [],
   }, null, 2), 'utf8');

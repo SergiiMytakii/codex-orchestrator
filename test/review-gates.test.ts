@@ -40,7 +40,7 @@ const baseRuntimeGateInput: Omit<ReviewGateInput, 'validation'> = {
   },
 };
 
-function evaluateTddGate(validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>) {
+function evaluateTddGate(validation: ReviewGateInput['validation']) {
   return evaluateReviewGates({
     ...baseRuntimeGateInput,
     validation: [
@@ -106,6 +106,57 @@ test('quality gate accepts TDD red-to-green proof in one validation entry', () =
   ]);
 
   assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
+});
+
+test('quality gate accepts structured TDD evidence without regex-friendly summary text', () => {
+  const result = evaluateTddGate([
+    {
+      command: 'focused behavior proof',
+      status: 'passed',
+      summary: 'machine-readable proof attached',
+      evidence: {
+        kind: 'tdd-red-green',
+        red: {
+          command: 'node --test dist/test/filters.test.js',
+          status: 'failed',
+          summary: 'pre-change behavior failed',
+        },
+        green: {
+          command: 'node --test dist/test/filters.test.js',
+          status: 'passed',
+          summary: 'post-change behavior passed',
+        },
+      },
+    },
+  ]);
+
+  assert.deepEqual(result, { ok: true, reasons: [], warnings: [] });
+});
+
+test('quality gate rejects malformed structured TDD evidence', () => {
+  const result = evaluateTddGate([
+    {
+      command: 'focused behavior proof',
+      status: 'passed',
+      summary: 'machine-readable proof attached',
+      evidence: {
+        kind: 'tdd-red-green',
+        red: {
+          command: 'node --test dist/test/filters.test.js',
+          status: 'passed',
+          summary: 'red did not fail',
+        },
+        green: {
+          command: 'node --test dist/test/filters.test.js',
+          status: 'passed',
+          summary: 'green passed',
+        },
+      },
+    } as unknown as ReviewGateInput['validation'][number],
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
 });
 
 test('risk routing warns when scoped review handoff is missing in warn mode', () => {

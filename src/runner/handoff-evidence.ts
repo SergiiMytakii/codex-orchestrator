@@ -3,15 +3,11 @@ import type { GitHubIssue } from '../github/issues.js';
 import type { GitHubPullRequest } from '../github/pull-requests.js';
 import type { SessionCommitInfo } from '../git/worktree.js';
 import type { AutonomousChildNode } from './issue-tree.js';
-import type { PlanAutoCompletionReport, ScopedCompletionReport } from './completion-report.js';
-import type { DurableRunSummaryEvidence } from './durable-run-summary.js';
+import type { PlanAutoCompletionReport, ScopedCompletionReport, ValidationItem } from './completion-report.js';
+import type { DurableRunSummaryEvidence, ReworkAttemptEvidence } from './durable-run-summary.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 
-export interface RunnerValidationLine {
-  command: string;
-  status: 'passed' | 'failed' | 'skipped';
-  summary: string;
-}
+export type RunnerValidationLine = ValidationItem;
 
 type CommitEvidence = Pick<SessionCommitInfo, 'sha' | 'subject'>;
 type ReviewHandoffEvidence = ScopedCompletionReport['reviewHandoff'];
@@ -127,6 +123,7 @@ export function buildScopedBlockedReport(input: {
   residualRisks: string[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  reworkAttempts?: ReworkAttemptEvidence[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): string {
   return [
@@ -138,6 +135,7 @@ export function buildScopedBlockedReport(input: {
     'Log',
     ...bulletList([input.logPath]),
     ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderReworkAttemptEvidence(input.reworkAttempts),
     ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     ...renderAcceptanceProofEvidence(input.acceptanceProof),
     'Skipped Checks',
@@ -155,6 +153,26 @@ function renderDurableRunSummaryEvidence(evidence: DurableRunSummaryEvidence | u
     'Durable Run Summary',
     `- ${evidence.path}`,
     ...evidence.excerpt.map((line) => `- ${line}`),
+  ];
+}
+
+function renderReworkAttemptEvidence(attempts: ReworkAttemptEvidence[] | undefined): string[] {
+  if (!attempts || attempts.length === 0) {
+    return [];
+  }
+  if (!attempts.some((attempt) => attempt.attempt > 0 || attempt.decisionKind !== 'hard-block')) {
+    return [];
+  }
+  return [
+    'Rework Attempts',
+    ...attempts.map((attempt) => [
+      `- attempt ${attempt.attempt}: ${attempt.decisionKind}${typeof attempt.maxAttempts === 'number' ? `/${attempt.maxAttempts}` : ''}`,
+      `  prompt: ${attempt.promptPath}`,
+      `  report: ${attempt.reportPath}`,
+      `  log: ${attempt.logPath}`,
+      ...(attempt.snapshotPath ? [`  snapshot: ${attempt.snapshotPath}`] : []),
+      ...attempt.reasons.map((reason) => `  reason: ${reason}`),
+    ].join('\n')),
   ];
 }
 
@@ -413,6 +431,7 @@ export function buildChildBlockedReport(input: {
   gitOutput?: string;
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
+  reworkAttempts?: ReworkAttemptEvidence[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): string {
   return [
@@ -423,6 +442,7 @@ export function buildChildBlockedReport(input: {
     ...(input.branchName ? [`- Branch preserved: ${input.branchName}`] : []),
     ...(input.worktreePath ? [`- Worktree preserved: ${input.worktreePath}`] : []),
     ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderReworkAttemptEvidence(input.reworkAttempts),
     ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     ...renderAcceptanceProofEvidence(input.acceptanceProof),
     ...(input.batchChildren ? ['Batch Children', ...bulletList(input.batchChildren.map((child) => `#${child.issueNumber} ${child.branchName}`))] : []),

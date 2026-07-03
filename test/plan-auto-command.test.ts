@@ -351,12 +351,14 @@ test('plan-auto command applies configured child rework loop before parent integ
   report.graph.edges = [];
   let childRuns = 0;
   let reworkPrompt = '';
+  const childInputs: CodexCommandRunInput[] = [];
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       if (input.sessionId.startsWith('plan-')) {
         await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
       } else {
         childRuns += 1;
+        childInputs.push(input);
         reworkPrompt = input.promptText;
         const changedPath = childRuns === 2 ? await writeChildOwnedChange(input) : undefined;
         await writeFile(
@@ -389,8 +391,19 @@ test('plan-auto command applies configured child rework loop before parent integ
 
   assert.equal(result.status, 'review-ready');
   assert.equal(childRuns, 2);
+  assert.equal(new Set(childInputs.map((input) => input.promptPath)).size, 2);
+  assert.equal(new Set(childInputs.map((input) => input.reportPath)).size, 2);
+  assert.equal(new Set(childInputs.map((input) => input.logPath)).size, 2);
   assert.match(reworkPrompt, /This is an automatic rework attempt \(#1\)/);
   assert.match(reworkPrompt, /Codex completed without file changes/);
+  const childReviewComment = [...issueAdapter.postedComments].reverse()
+    .find((entry) => entry.issueNumber === 157 && entry.body.includes('codex-orchestrator child review report'))?.body ?? '';
+  assert.match(childReviewComment, /rework attempts: 1/);
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) =>
+      entry.issueNumber === 156 && entry.labels.includes(labels.blocked.name)),
+    false,
+  );
   const recentEvents = await new RunnerLifecycleEventStore(repo, validConfig).readRecent();
   assert.equal(recentEvents.filter((event) => event.mode === 'tree-child' && event.status === 'started').length, 2);
 });

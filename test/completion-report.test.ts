@@ -60,6 +60,104 @@ test('scoped completion report accepts structured review handoff for human revie
   }
 });
 
+test('scoped completion report accepts structured TDD red-green validation evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['src/filters.ts'],
+      validation: [{
+        command: 'focused behavior proof',
+        status: 'passed',
+        summary: 'machine-readable proof attached',
+        evidence: {
+          kind: 'tdd-red-green',
+          red: {
+            command: 'node --test dist/test/filters.test.js',
+            status: 'failed',
+            summary: 'new filter behavior failed before implementation',
+          },
+          green: {
+            command: 'node --test dist/test/filters.test.js',
+            status: 'passed',
+            summary: 'new filter behavior passed after implementation',
+          },
+        },
+      }],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    }),
+    'utf8',
+  );
+
+  const result = await readScopedCompletionReport(reportPath);
+  assert.equal(result.kind, 'valid');
+  if (result.kind === 'valid') {
+    assert.equal(result.report.validation[0]?.evidence?.kind, 'tdd-red-green');
+  }
+});
+
+test('scoped completion report rejects malformed structured TDD evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  const baseReport = {
+    status: 'completed',
+    changes: ['src/filters.ts'],
+    artifacts: [],
+    skippedChecks: [],
+    residualRisks: [],
+    prohibitedActions: [],
+  };
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      ...baseReport,
+      validation: [{
+        command: 'focused behavior proof',
+        status: 'passed',
+        summary: 'malformed proof',
+        evidence: {
+          kind: 'tdd-red-green',
+          red: { command: 'node --test', status: 'passed', summary: 'red did not fail' },
+          green: { command: 'node --test', status: 'passed', summary: 'green passed' },
+        },
+      }],
+    }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: validation evidence red status must be failed/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      ...baseReport,
+      validation: [{
+        command: 'focused behavior proof',
+        status: 'passed',
+        summary: 'malformed proof',
+        evidence: {
+          kind: 'tdd-red-green',
+          red: { command: 'node --test', status: 'failed', summary: 'red failed' },
+          green: { command: 'node --test', status: 'failed', summary: 'green did not pass' },
+        },
+      }],
+    }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: validation evidence green status must be passed/,
+  );
+});
+
 test('plan-auto completion report validation keeps graph errors explicit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
   const reportPath = join(root, 'plan-report.json');

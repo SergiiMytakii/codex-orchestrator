@@ -39,11 +39,17 @@ export function defaultFigmaMcpConfig(): CodexFigmaMcpConfig {
     httpHeaders: {
       'X-Figma-Region': 'us-east-1',
     },
-    issueTextPatterns: [
+    optionalIssueTextPatterns: [
       'https?://(?:www\\.)?figma\\.com/\\S+',
       '\\bFigma\\b.{0,80}\\b(design|file|node|mockup|prototype|дизайн|макет)\\b',
       '\\b(design|file|node|mockup|prototype|дизайн|макет)\\b.{0,80}\\bFigma\\b',
     ],
+    requiredIssueTextPatterns: [
+      '\\b(?:must|requires?|required)\\b.{0,80}\\bFigma\\b',
+      '\\bFigma\\b.{0,80}\\b(?:must|required|source of truth)\\b',
+    ],
+    optionalFailure: 'retry-without-mcp',
+    requiredFailure: 'block',
   };
 }
 
@@ -276,6 +282,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
           'failed-configured-checks',
           'missing-quality-gate-evidence',
           'failed-acceptance-proof',
+          'optional-figma-mcp-failure',
         ],
       },
       freshContextReview: {
@@ -657,7 +664,12 @@ function migrateFigmaMcpConfig(
     enabled: readBoolean(existing.enabled) ?? defaults.enabled,
     url: readString(existing.url) ?? defaults.url,
     httpHeaders: readStringRecord(existing.httpHeaders) ?? defaults.httpHeaders,
-    issueTextPatterns: readStringArray(existing.issueTextPatterns) ?? defaults.issueTextPatterns,
+    optionalIssueTextPatterns: readStringArray(existing.optionalIssueTextPatterns)
+      ?? readStringArray(existing.issueTextPatterns)
+      ?? defaults.optionalIssueTextPatterns,
+    requiredIssueTextPatterns: readStringArray(existing.requiredIssueTextPatterns) ?? defaults.requiredIssueTextPatterns,
+    optionalFailure: 'retry-without-mcp',
+    requiredFailure: 'block',
   };
 }
 

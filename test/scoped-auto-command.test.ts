@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../src/codex/command-adapter.js';
@@ -784,13 +784,16 @@ test('scoped auto command blocks when completion report is missing before PR pub
   assert.equal(pullRequestAdapter.createdPullRequests.length, 0);
   assert.match(result.reportComment, /runner cannot prove safety contract/);
   assert.match(result.reportComment, /Durable Run Summary/);
+  const terminalReportName = basename(result.reportPath, '.json');
+  const terminalSessionId = terminalReportName.replace(/^issue-155-/u, '');
   const summary = JSON.parse(
     await readFile(
-      join(repo, validConfig.runner.stateDir, 'summaries', 'issue-155-issue-155-20260508120000.json'),
+      join(repo, validConfig.runner.stateDir, 'summaries', `issue-155-${terminalSessionId}.json`),
       'utf8',
     ),
   ) as Record<string, unknown>;
   assert.equal(summary.outcome, 'blocked');
+  assert.equal((summary.reworkAttempts as unknown[]).length, 2);
   assert.match(String((summary.blockers as string[])[0]), /CODEX_ORCHESTRATOR_REPORT_FILE/);
   assert.match(String((summary.policySuggestions as string[])[0]), /Non-mutating recommendation/);
   assert.match(result.reportComment, /policy suggestions: Non-mutating recommendation/);
@@ -1196,6 +1199,110 @@ test('scoped auto command retries once on retryable blockers and can recover to 
   assert.equal(result.status, 'review-ready');
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
+});
+
+test('scoped auto command retries optional figma mcp failure with optional figma disabled', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Use Figma design', body: 'Use https://www.figma.com/design/abc123/File.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const disableFlags: Array<boolean | undefined> = [];
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      disableFlags.push(input.disableOptionalFigmaMcp);
+      if (runCount === 1) {
+        return {
+          stdout: '',
+          stderr: 'figma mcp server connection timed out',
+          exitCode: 1,
+          figmaMcp: { requirement: 'optional', enabled: true },
+        };
+      }
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const fixed = true;\n', 'utf8');
+      await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(1, 1);\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/feature.ts', 'test/feature.test.ts'],
+          validation: [
+            {
+              command: 'focused behavior proof',
+              status: 'passed',
+              summary: 'machine-readable proof attached',
+              evidence: {
+                kind: 'tdd-red-green',
+                red: { command: 'node --test', status: 'failed', summary: 'failed before implementation' },
+                green: { command: 'node --test', status: 'passed', summary: 'passed after implementation' },
+              },
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return {
+        stdout: 'ok',
+        stderr: '',
+        exitCode: 0,
+        figmaMcp: { requirement: 'optional', enabled: false },
+      };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.deepEqual(disableFlags, [undefined, true]);
+});
+
+test('scoped auto command hard-blocks required figma mcp failure', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Requires Figma', body: 'This implementation requires Figma source access.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let runCount = 0;
+  const codexAdapter = {
+    async run(): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      return {
+        stdout: '',
+        stderr: 'figma mcp auth failed with 403',
+        exitCode: 1,
+        figmaMcp: { requirement: 'required', enabled: true },
+      };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(runCount, 1);
+  assert.match(result.reportComment, /Required Figma MCP failed; required design access is unavailable/);
 });
 
 test('scoped auto command uses configured rework limit and includes exact blockers in rework prompts', async () => {

@@ -8,6 +8,19 @@ export type { ReviewHandoffFlow } from '../review-handoff.js';
 
 export type CompletionStatus = 'completed' | 'needs-promotion';
 export type ValidationStatus = 'passed' | 'failed' | 'skipped';
+export interface TddRedGreenValidationEvidence {
+  kind: 'tdd-red-green';
+  red: { command: string; status: 'failed'; summary: string };
+  green: { command: string; status: 'passed'; summary: string };
+}
+
+export type ValidationEvidence = TddRedGreenValidationEvidence;
+export interface ValidationItem {
+  command: string;
+  status: ValidationStatus;
+  summary: string;
+  evidence?: ValidationEvidence;
+}
 export type ReviewHandoffRisk = 'low' | 'medium' | 'high';
 export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
 export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
@@ -20,7 +33,7 @@ export type ProhibitedActionType =
 export interface ScopedCompletionReport {
   status: CompletionStatus;
   changes: string[];
-  validation: Array<{ command: string; status: ValidationStatus; summary: string }>;
+  validation: ValidationItem[];
   artifacts: Array<{ type: ScopedArtifactType; path?: string; url?: string; description: string }>;
   skippedChecks: string[];
   residualRisks: string[];
@@ -283,6 +296,37 @@ function assertValidation(value: unknown): void {
     if (typeof record.command !== 'string' || !['passed', 'failed', 'skipped'].includes(String(record.status)) || typeof record.summary !== 'string') {
       throw new Error('Invalid scoped completion report: validation item is malformed');
     }
+    if ('evidence' in record) {
+      assertValidationEvidence(record.evidence);
+    }
+  }
+}
+
+function assertValidationEvidence(value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid scoped completion report: validation evidence must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind !== 'tdd-red-green') {
+    throw new Error('Invalid scoped completion report: validation evidence kind is unsupported');
+  }
+  assertTddEvidenceEndpoint(record.red, 'red', 'failed');
+  assertTddEvidenceEndpoint(record.green, 'green', 'passed');
+}
+
+function assertTddEvidenceEndpoint(value: unknown, key: 'red' | 'green', expectedStatus: 'failed' | 'passed'): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`Invalid scoped completion report: validation evidence ${key} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.command !== 'string' || record.command.trim().length === 0) {
+    throw new Error(`Invalid scoped completion report: validation evidence ${key} command must be non-empty`);
+  }
+  if (record.status !== expectedStatus) {
+    throw new Error(`Invalid scoped completion report: validation evidence ${key} status must be ${expectedStatus}`);
+  }
+  if (typeof record.summary !== 'string' || record.summary.trim().length === 0) {
+    throw new Error(`Invalid scoped completion report: validation evidence ${key} summary must be non-empty`);
   }
 }
 

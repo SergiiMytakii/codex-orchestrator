@@ -106,6 +106,13 @@ the configured iteration limit. If proof is malformed, low-confidence, lacks
 artifacts, or changes product code during verification, the runner blocks
 publication and preserves the evidence.
 
+Implementation rework is decided by one runner policy: each blocked attempt is
+classified as `retry`, `exhausted`, or `hard-block`. Fixable machine-checkable
+blockers, including missing quality-gate proof and optional Figma MCP failures,
+can retry within the configured budget. Denied paths, runner-owned publication
+violations, destructive or production actions, unknown Codex exits, and required
+Figma MCP failures hard-block publication.
+
 For UI proof, screenshots and UI dumps must also satisfy the UI Evidence
 Contract: exact workflow, viewport coverage, current artifact freshness, layout
 review, copy review, and source inputs. Screenshot-only proof cannot pass.
@@ -158,6 +165,16 @@ Codex. See [docs/deep-dive.md](docs/deep-dive.md) for the recovery rules.
 7. Review the draft PR created by the runner.
 
 The runner never auto-merges.
+
+For behavior-changing work, completion reports can include structured TDD proof
+inside each `validation[]` item with `evidence.kind: "tdd-red-green"`. The
+runner still accepts legacy validation summaries, but structured red failed /
+green passed evidence is the preferred proof. The focused live smoke for the
+tree-child quality rework path is:
+
+```sh
+npm run smoke:live -- --scenario tree-child-quality-rework --cleanup
+```
 
 ## Agent Memory
 

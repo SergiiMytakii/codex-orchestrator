@@ -245,6 +245,10 @@ export function hasPassedValidation(validation: RunnerValidationLine[], patterns
 }
 
 export function hasPassedTddValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
+  if (validation.some((line) => line.status === 'passed' && hasStructuredTddEvidence(line))) {
+    return true;
+  }
+
   if (validation.some((line) =>
     line.status === 'passed'
       && !hasMissingTddProofText(validationText(line))
@@ -260,6 +264,17 @@ export function hasPassedTddValidation(validation: RunnerValidationLine[], patte
   const hasRedEvidence = passedTexts.some(hasTddRedEvidence);
   const hasGreenEvidence = passedTexts.some(hasTddGreenEvidence);
   return hasRedEvidence && hasGreenEvidence;
+}
+
+function hasStructuredTddEvidence(line: RunnerValidationLine): boolean {
+  const evidence = line.evidence;
+  return evidence?.kind === 'tdd-red-green'
+    && evidence.red.status === 'failed'
+    && evidence.red.command.trim().length > 0
+    && evidence.red.summary.trim().length > 0
+    && evidence.green.status === 'passed'
+    && evidence.green.command.trim().length > 0
+    && evidence.green.summary.trim().length > 0;
 }
 
 export function validationText(line: RunnerValidationLine): string {

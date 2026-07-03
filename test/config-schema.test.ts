@@ -21,6 +21,17 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.codex.figmaMcp?.enabled, true);
     assert.equal(result.value.codex.figmaMcp?.url, 'https://mcp.figma.com/mcp');
     assert.deepEqual(result.value.codex.figmaMcp?.httpHeaders, { 'X-Figma-Region': 'us-east-1' });
+    assert.deepEqual(result.value.codex.figmaMcp?.optionalIssueTextPatterns, [
+      'https?://(?:www\\.)?figma\\.com/\\S+',
+      '\\bFigma\\b.{0,80}\\b(design|file|node|mockup|prototype|дизайн|макет)\\b',
+      '\\b(design|file|node|mockup|prototype|дизайн|макет)\\b.{0,80}\\bFigma\\b',
+    ]);
+    assert.deepEqual(result.value.codex.figmaMcp?.requiredIssueTextPatterns, [
+      '\\b(?:must|requires?|required)\\b.{0,80}\\bFigma\\b',
+      '\\bFigma\\b.{0,80}\\b(?:must|required|source of truth)\\b',
+    ]);
+    assert.equal(result.value.codex.figmaMcp?.optionalFailure, 'retry-without-mcp');
+    assert.equal(result.value.codex.figmaMcp?.requiredFailure, 'block');
     assert.deepEqual(result.value.codex.profiles, {});
     assert.equal(result.value.reviewGates.visualProof.enabled, true);
     assert.equal(result.value.reviewGates.visualProof.minScreenshotArtifacts, 1);
@@ -60,6 +71,7 @@ test('accepts the expanded valid config contract', () => {
       'failed-configured-checks',
       'missing-quality-gate-evidence',
       'failed-acceptance-proof',
+      'optional-figma-mcp-failure',
     ]);
     assert.equal(result.value.loopPolicy.freshContextReview.enabled, false);
     assert.equal(result.value.loopPolicy.freshContextReview.mode, 'advisory');
@@ -97,6 +109,29 @@ test('accepts stale config without risk routing gate for migration compatibility
   });
 
   assert.equal(result.ok, true);
+});
+
+test('normalizes legacy figma issue text patterns to optional figma policy', () => {
+  const result = validateConfig({
+    ...validConfig,
+    codex: {
+      ...validConfig.codex,
+      figmaMcp: {
+        enabled: true,
+        url: 'https://mcp.figma.com/mcp',
+        httpHeaders: {},
+        issueTextPatterns: ['legacy figma link'],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.value.codex.figmaMcp?.optionalIssueTextPatterns, ['legacy figma link']);
+    assert.deepEqual(result.value.codex.figmaMcp?.requiredIssueTextPatterns, []);
+    assert.equal(result.value.codex.figmaMcp?.optionalFailure, 'retry-without-mcp');
+    assert.equal(result.value.codex.figmaMcp?.requiredFailure, 'block');
+  }
 });
 
 test('accepts legacy string base branch config for migration compatibility', () => {
@@ -476,7 +511,7 @@ test('rejects invalid loop policy config', () => {
     'loopPolicy.issueSelection.priorityLabels must be an array of non-empty strings',
     'loopPolicy.issueSelection.tieBreaker must be one of issue-number-asc',
     'loopPolicy.rework.maxAttempts must be a non-negative integer',
-      'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy',
+      'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy, optional-figma-mcp-failure',
     'loopPolicy.freshContextReview.enabled must be a boolean',
     'loopPolicy.freshContextReview.mode must be one of advisory',
     'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations must be a boolean',

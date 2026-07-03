@@ -24,7 +24,11 @@ import {
   shouldRunAcceptanceProofAttempt,
   type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof-runner.js';
-import { MISSING_COMPLETION_REPORT_REASON } from './rework-policy.js';
+import {
+  MISSING_COMPLETION_REPORT_REASON,
+  OPTIONAL_FIGMA_MCP_FAILURE_REASON,
+  REQUIRED_FIGMA_MCP_FAILURE_REASON,
+} from './rework-policy.js';
 
 export interface LocalExecutionPhaseInput {
   phaseId: string;
@@ -62,7 +66,7 @@ export interface ImplementationPublishabilityInput {
   reportPath: string;
   beforeHead: string;
   afterHead: string;
-  codexResult: { stdout: string; stderr: string; exitCode: number };
+  codexResult: CodexCommandRunResult;
   git: Pick<GitWorktreeManager, 'collectSessionChangeSet' | 'isWorktreeClean' | 'commitAll'>;
   shellExecutor: ShellCommandExecutor;
   commitMessage: string;
@@ -530,7 +534,11 @@ function blocked(reasons: string[]): ImplementationPublishabilityResult {
   };
 }
 
-function formatCodexExitReason(result: { stdout: string; stderr: string; exitCode: number }): string {
+function formatCodexExitReason(result: CodexCommandRunResult): string {
+  const figmaReason = formatFigmaMcpFailureReason(result);
+  if (figmaReason) {
+    return figmaReason;
+  }
   const output = [result.stderr, result.stdout]
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
@@ -544,6 +552,21 @@ function formatCodexExitReason(result: { stdout: string; stderr: string; exitCod
   return detail
     ? `Codex exited with code ${result.exitCode}: ${truncate(detail, 600)}`
     : `Codex exited with code ${result.exitCode}`;
+}
+
+function formatFigmaMcpFailureReason(result: CodexCommandRunResult): string | undefined {
+  if (result.exitCode === 0 || result.figmaMcp?.enabled !== true) {
+    return undefined;
+  }
+  const output = `${result.stderr}\n${result.stdout}`;
+  const looksLikeFigmaMcpFailure = /\bfigma\b[\s\S]{0,120}\b(?:mcp|server|tool|connection|connect|timeout|timed out|401|403|auth|unauthorized|forbidden|unavailable|failed)\b/iu.test(output)
+    || /mcp_servers\.figma/iu.test(output);
+  if (!looksLikeFigmaMcpFailure) {
+    return undefined;
+  }
+  return result.figmaMcp.requirement === 'required'
+    ? REQUIRED_FIGMA_MCP_FAILURE_REASON
+    : OPTIONAL_FIGMA_MCP_FAILURE_REASON;
 }
 
 function truncate(value: string, maxLength: number): string {

@@ -33,6 +33,7 @@ export interface ScopedPromptInput {
   rework?: {
     attempt: number;
     blockedReasons: string[];
+    disableOptionalFigmaMcp?: boolean;
   };
 }
 
@@ -77,6 +78,9 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
       `This is an automatic rework attempt (#${input.rework.attempt}). Continue from the current worktree state; do not start over.`,
       'The previous attempt was blocked for these reasons:',
       ...input.rework.blockedReasons.map((reason) => `- ${reason}`),
+      ...(input.rework.disableOptionalFigmaMcp
+        ? ['Optional Figma MCP failed in the previous attempt. Continue without optional Figma MCP access unless the issue explicitly requires Figma.']
+        : []),
       'Address the blockers, then produce a fresh completion report JSON for the runner.',
     ].join('\n')
     : '';
@@ -113,7 +117,7 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     '## Review Handoff Contract',
     'Include reviewHandoff for completed work so a maintainer can review quickly without reverse-engineering the diff.',
     'reviewHandoff must name the flow used, risk level, implemented contract, proof by acceptance criterion, review focus, and human review checklist.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
@@ -218,7 +222,7 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     ...buildVisualProofPromptLines(input.config, input.childIssue),
     '## Review Handoff Contract',
     'Include reviewHandoff for completed child work so the parent report can show risk, proof, and human review focus per child.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,

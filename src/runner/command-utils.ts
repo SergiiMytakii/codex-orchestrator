@@ -92,7 +92,11 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
             ...loopPolicy,
             rework: {
               ...rework,
-              retryableBlockers: Array.from(new Set([...retryableBlockers, 'failed-acceptance-proof'])),
+              retryableBlockers: Array.from(new Set([
+                ...retryableBlockers,
+                'failed-acceptance-proof',
+                'optional-figma-mcp-failure',
+              ])),
             },
           },
         }

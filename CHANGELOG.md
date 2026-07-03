@@ -6,10 +6,21 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-07-03
+
 ### Changed
 - Live smoke now defaults to a smaller `core-release` profile, exposes explicit
   scenario profiles, and folds related commit, safety, and Acceptance Proof
   checks into matrix scenarios.
+- Runner rework now uses a first-class `ReworkDecision` contract with explicit
+  retry, exhausted, and hard-block outcomes across scoped, recovery, and
+  issue-tree child paths.
+- Quality gates now prefer structured TDD evidence in `validation[]`, while
+  keeping legacy validation summaries as a fallback.
+- Figma MCP policy now distinguishes optional design context from required
+  design access: optional failures retry without MCP, required failures block.
+- Added focused live-smoke coverage for tree-child quality-gate rework:
+  `npm run smoke:live -- --scenario tree-child-quality-rework --cleanup`.
 
 ## [0.1.39] - 2026-07-02
 

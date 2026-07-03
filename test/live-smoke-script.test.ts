@@ -112,6 +112,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
     'plan-auto',
     'run-plan-auto',
     'plan-auto-blocking',
+    'tree-child-quality-rework',
   ]);
   assert.equal(scenarios.includes('visual-proof'), false);
   assert.equal(scenarios.includes('scoped-local-commit'), false);
@@ -139,6 +140,13 @@ test('live smoke rejects unknown profiles before running smoke setup', async () 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Unknown profile "missing-profile"/);
   assert.match(result.stderr, /Known profiles: core-release, extended-policy, proof-matrix, full/);
+});
+
+test('live smoke extended policy profile includes tree-child quality rework scenario', async () => {
+  const source = await liveSmokeScriptSource();
+
+  assert.match(source, /'extended-policy'[\s\S]*'tree-child-quality-rework'/);
+  assert.match(source, /runTreeChildQualityReworkScenario/);
 });
 
 test('live smoke help documents scratch repo and strict cleanup defaults', async () => {
@@ -178,6 +186,46 @@ test('live smoke fake plan child writes only graph-owned paths', async () => {
   ]);
   assert.match(await readFile(join(root, 'src/live-smoke/issue-owned-by-child-a.ts'), 'utf8'), /plan-child/);
   assert.match(await readFile(join(root, 'test/live-smoke/issue-owned-by-child-a.test.ts'), 'utf8'), /20260702141645/);
+});
+
+test('live smoke fake agent supports tree-child quality rework markers', async () => {
+  const source = await extractFakeAgentSource();
+
+  assert.match(source, /plan-quality-rework/);
+  assert.match(source, /plan-child-quality-rework/);
+  assert.match(source, /automatic rework attempt \(#1\)/);
+  assert.match(source, /tree-child quality rework structured TDD/);
+});
+
+test('live smoke fake agent uses the child scenario marker for tree-child prompts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-quality-rework-child-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-134-tree-133-issue-134.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Parent issue context.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260703082546',
+    'LIVE_SMOKE_SCENARIO: plan-quality-rework',
+    '',
+    'Child issue context.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260703082546',
+    'LIVE_SMOKE_SCENARIO: plan-child-quality-rework',
+    'LIVE_SMOKE_CHILD_ID: quality-rework',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.deepEqual(report.validation, [
+    { command: 'npm test', status: 'passed', summary: 'all tests passed without red-green proof' },
+  ]);
 });
 
 test('browser proof live smoke helper runs visual proof against target root', async () => {

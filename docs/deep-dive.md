@@ -232,6 +232,12 @@ The quality gate can require:
 - code review evidence;
 - cleanup review evidence for larger runtime changes.
 
+TDD proof can be reported as structured validation evidence inside the existing
+completion-report `validation[]` array:
+`evidence.kind: "tdd-red-green"` with a failed red command and a passed green
+command. Legacy summary text is still accepted as a fallback, but structured
+evidence is the primary path.
+
 Runtime and test paths are configurable through:
 
 - `reviewGates.quality.runtimeChangedPathGlobs`;
@@ -456,7 +462,22 @@ It includes:
 
 Bounded rework is limited to machine-checkable blockers such as missing or
 invalid completion reports, no changed files, failed configured checks, or
-missing quality-gate evidence. It stops at the configured attempt limit.
+missing quality-gate evidence. `ReworkDecision` classifies each blocked attempt
+as `retry`, `exhausted`, or `hard-block` from one source of truth in the runner
+policy. Retry uses zero-based attempts: attempt `0` is the original run, and
+retry continues only while `attempt < maxAttempts`.
+
+Hard blockers always stop publication. These include denied paths,
+runner-owned publication violations, destructive database/cache actions,
+production deploy/release actions, unknown Codex exits, and required Figma MCP
+failures. Optional Figma MCP failures are retryable when configured; the next
+attempt disables optional Figma MCP while required Figma access remains a hard
+dependency.
+
+Figma MCP routing is configured with optional and required issue-text patterns.
+Optional matches add Figma MCP as helpful context; required matches treat design
+access as part of the issue contract. Legacy `issueTextPatterns` are migrated to
+optional patterns by setup/config compatibility handling.
 
 Fresh-Context Review runs a separate Codex session with the issue, diff, and
 validation evidence. It does not reuse the implementation transcript. In the

@@ -20,7 +20,8 @@ export type RetryableReworkBlocker =
   | 'failed-configured-checks'
   | 'missing-quality-gate-evidence'
   | 'failed-acceptance-proof'
-  | 'risk-routing-policy';
+  | 'risk-routing-policy'
+  | 'optional-figma-mcp-failure';
 export type FreshContextReviewMode = 'advisory';
 export type RiskRoutingMode = 'warn' | 'block';
 export const acceptanceProofStrategies = [
@@ -55,7 +56,11 @@ export interface CodexFigmaMcpConfig {
   enabled: boolean;
   url: string;
   httpHeaders: Record<string, string>;
-  issueTextPatterns: string[];
+  optionalIssueTextPatterns: string[];
+  requiredIssueTextPatterns: string[];
+  optionalFailure: 'retry-without-mcp';
+  requiredFailure: 'block';
+  issueTextPatterns?: string[];
 }
 
 export const forbiddenCodexProfileEnvKeys = new Set([
@@ -383,7 +388,35 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     return { ok: false, errors };
   }
 
-  return { ok: true, value: input as CodexOrchestratorConfig };
+  return { ok: true, value: normalizeConfig(root as unknown as CodexOrchestratorConfig) };
+}
+
+function normalizeConfig(config: CodexOrchestratorConfig): CodexOrchestratorConfig {
+  const figmaMcp = config.codex.figmaMcp;
+  if (!figmaMcp) {
+    return config;
+  }
+  const {
+    issueTextPatterns,
+    optionalIssueTextPatterns,
+    requiredIssueTextPatterns,
+    optionalFailure,
+    requiredFailure,
+    ...rest
+  } = figmaMcp;
+  return {
+    ...config,
+    codex: {
+      ...config.codex,
+      figmaMcp: {
+        ...rest,
+        optionalIssueTextPatterns: optionalIssueTextPatterns ?? issueTextPatterns ?? [],
+        requiredIssueTextPatterns: requiredIssueTextPatterns ?? [],
+        optionalFailure: optionalFailure ?? 'retry-without-mcp',
+        requiredFailure: requiredFailure ?? 'block',
+      },
+    },
+  };
 }
 
 function asObject(value: unknown): ObjectRecord | undefined {
@@ -659,8 +692,22 @@ function validateCodexFigmaMcp(codex: ObjectRecord, errors: string[]): void {
 
   expectBoolean(figmaMcp, 'codex.figmaMcp.enabled', errors);
   expectString(figmaMcp, 'codex.figmaMcp.url', errors);
-  expectStringArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
-  validateRegexArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
+  const hasLegacyPatterns = Array.isArray(figmaMcp.issueTextPatterns);
+  if (hasLegacyPatterns) {
+    expectStringArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
+    validateRegexArray(figmaMcp, 'codex.figmaMcp.issueTextPatterns', errors);
+  } else {
+    expectStringArray(figmaMcp, 'codex.figmaMcp.optionalIssueTextPatterns', errors);
+    validateRegexArray(figmaMcp, 'codex.figmaMcp.optionalIssueTextPatterns', errors);
+    expectStringArray(figmaMcp, 'codex.figmaMcp.requiredIssueTextPatterns', errors);
+    validateRegexArray(figmaMcp, 'codex.figmaMcp.requiredIssueTextPatterns', errors);
+  }
+  if ('optionalFailure' in figmaMcp) {
+    expectLiteral(figmaMcp, 'codex.figmaMcp.optionalFailure', 'retry-without-mcp', errors);
+  }
+  if ('requiredFailure' in figmaMcp) {
+    expectLiteral(figmaMcp, 'codex.figmaMcp.requiredFailure', 'block', errors);
+  }
 
   const httpHeaders = expectObject(figmaMcp, 'codex.figmaMcp.httpHeaders', errors);
   if (!httpHeaders) {
@@ -892,6 +939,7 @@ function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): Retrya
     'missing-quality-gate-evidence',
     'failed-acceptance-proof',
     'risk-routing-policy',
+    'optional-figma-mcp-failure',
   ] as const;
   const value = readPath(parent, 'loopPolicy.rework.retryableBlockers');
 

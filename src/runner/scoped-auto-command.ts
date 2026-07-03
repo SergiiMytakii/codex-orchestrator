@@ -23,7 +23,7 @@ import {
   buildScopedReviewReport,
   type FreshContextReviewEvidence,
 } from './handoff-evidence.js';
-import { writeDurableRunSummary } from './durable-run-summary.js';
+import { writeDurableRunSummary, type ReworkAttemptEvidence } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
 import { writeContextSnapshot } from './context-snapshot.js';
@@ -42,7 +42,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { maxReworkAttemptsForReasons, shouldRequestImplementationRework } from './rework-policy.js';
+import { decideImplementationRework } from './rework-policy.js';
 import {
   buildBlockedHandoffEvidence,
   buildPromotionRequestedHandoffEvidence,
@@ -70,6 +70,7 @@ export interface ScopedRecoveryRetryOptions extends ScopedAutoCommandOptions {
   initialRework: {
     attempt: number;
     blockedReasons: string[];
+    disableOptionalFigmaMcp?: boolean;
   };
 }
 
@@ -105,6 +106,7 @@ async function runScopedAutoCommandInternal(
     initialRework: {
       attempt: number;
       blockedReasons: string[];
+      disableOptionalFigmaMcp?: boolean;
     };
   },
 ): Promise<ScopedAutoCommandResult> {
@@ -183,12 +185,13 @@ async function runScopedAutoCommandInternal(
       config.loopPolicy.rework.maxAttempts,
       config.reviewGates.acceptanceProof.maxIterations - 1,
     );
-    let rework: { attempt: number; blockedReasons: string[] } | undefined = recovery?.initialRework;
+    let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined = recovery?.initialRework;
     let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
+    const reworkAttempts: ReworkAttemptEvidence[] = [];
 
     for (let attempt = recovery?.startAttempt ?? 0; attempt <= maxReworkAttempts; attempt++) {
       const attemptNow = attempt === 0 ? now : new Date(now.getTime() + attempt);
-      sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}`;
+      sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`;
       promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
       reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
       logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
@@ -277,6 +280,7 @@ async function runScopedAutoCommandInternal(
           phase: 'scoped-issue',
           timeoutMs: codexTimeoutMs,
           logPath,
+          disableOptionalFigmaMcp: rework?.disableOptionalFigmaMcp,
         });
       } finally {
         await cleanupSessionCodexHome(isolatedHomePath);
@@ -321,13 +325,46 @@ async function runScopedAutoCommandInternal(
         artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
       });
 
-      if (
-        publishability.status === 'blocked'
-        && attempt < maxReworkAttemptsForReasons(publishability.reasons, config)
-        && shouldRequestImplementationRework(publishability.reasons, config)
-      ) {
-        rework = { attempt: attempt + 1, blockedReasons: publishability.reasons };
-        continue;
+      if (publishability.status === 'blocked') {
+        const reworkDecision = decideImplementationRework({
+          reasons: publishability.reasons,
+          config,
+          attempt,
+        });
+        reworkAttempts.push({
+          attempt,
+          maxAttempts: 'maxAttempts' in reworkDecision ? reworkDecision.maxAttempts : undefined,
+          decisionKind: reworkDecision.kind,
+          reasons: publishability.reasons,
+          promptPath,
+          reportPath,
+          logPath,
+          snapshotPath,
+        });
+        if (reworkDecision.kind === 'retry') {
+          rework = reworkDecision.rework;
+          await safeAppendEvent(events, {
+            timestamp: attemptNow,
+            issueNumber: options.issueNumber,
+            mode: 'scoped-issue',
+            sessionId,
+            phase: 'quality-review',
+            status: 'needs-rework',
+            summary: `Runner scheduled scoped rework attempt #${reworkDecision.nextAttempt}.`,
+            artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+          });
+          continue;
+        }
+        await safeAppendEvent(events, {
+          timestamp: attemptNow,
+          issueNumber: options.issueNumber,
+          mode: 'scoped-issue',
+          sessionId,
+          phase: 'quality-review',
+          status: 'blocked',
+          summary: `Runner rework decision: ${reworkDecision.kind}.`,
+          artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
+        });
       }
 
       break;
@@ -402,6 +439,7 @@ async function runScopedAutoCommandInternal(
         logPath,
         reportPath,
         acceptanceProof: evidence.acceptanceProof,
+        reworkAttempts,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -422,6 +460,7 @@ async function runScopedAutoCommandInternal(
         evidence.residualRisks,
         undefined,
         durableRunSummary,
+        reworkAttempts,
         evidence.acceptanceProof,
       );
     }
@@ -458,6 +497,7 @@ async function runScopedAutoCommandInternal(
         logPath,
         reportPath,
         acceptanceProof: evidence.acceptanceProof,
+        reworkAttempts,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -478,6 +518,7 @@ async function runScopedAutoCommandInternal(
         evidence.residualRisks,
         freshContextReview,
         durableRunSummary,
+        reworkAttempts,
         evidence.acceptanceProof,
       );
     }
@@ -503,6 +544,7 @@ async function runScopedAutoCommandInternal(
       logPath,
       reportPath,
       acceptanceProof: evidence.acceptanceProof,
+      reworkAttempts,
     });
     const handoff = await finishScopedReviewReadyHandoff({
       issueNumber: options.issueNumber,
@@ -658,6 +700,7 @@ async function finishBlocked(
   residualRisks: string[],
   freshContextReview?: FreshContextReviewEvidence,
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
+  reworkAttempts?: ReworkAttemptEvidence[],
   acceptanceProof?: AcceptanceProofAttemptEvidence,
 ): Promise<ScopedAutoCommandResult> {
   const handoff = await finishScopedBlockedHandoff({
@@ -671,6 +714,7 @@ async function finishBlocked(
     residualRisks,
     freshContextReview,
     durableRunSummary,
+    reworkAttempts,
     acceptanceProof,
   });
   return { ...result, status: 'blocked', reportComment: handoff.reportComment };
@@ -757,6 +801,7 @@ export interface FinishScopedBlockedHandoffInput {
   residualRisks: string[];
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
+  reworkAttempts?: ReworkAttemptEvidence[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
   commentPrefix?: string;
   skipCommentIfIncludes?: string;
@@ -776,6 +821,7 @@ export async function finishScopedBlockedHandoff(
       residualRisks: input.residualRisks,
       freshContextReview: input.freshContextReview,
       durableRunSummary: input.durableRunSummary,
+      reworkAttempts: input.reworkAttempts,
       acceptanceProof: input.acceptanceProof,
     }),
   ].filter(Boolean).join('\n');

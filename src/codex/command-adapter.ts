@@ -22,6 +22,7 @@ export interface CodexCommandRunInput {
   timeoutMs?: number;
   logPath?: string;
   env?: Record<string, string>;
+  disableOptionalFigmaMcp?: boolean;
 }
 
 export interface CodexCommandRunResult {
@@ -29,6 +30,10 @@ export interface CodexCommandRunResult {
   stdout: string;
   stderr: string;
   logPath?: string;
+  figmaMcp?: {
+    requirement: 'none' | 'optional' | 'required';
+    enabled: boolean;
+  };
 }
 
 export class CodexCommandAdapter {
@@ -41,6 +46,7 @@ export class CodexCommandAdapter {
     const phase = input.phase ?? 'scoped-issue';
     const effectiveProfile = resolveCodexProfile(this.config, phase);
     const profileTimeoutMs = this.config.codex.profiles?.[phase]?.timeoutMs;
+    const figmaMcp = resolveFigmaMcpForRun(input);
     const args = buildCodexArgs(effectiveProfile.args, input);
     const logWriter = input.logPath ? new RunLogWriter(input.logPath) : undefined;
     const mobileDeviceGuardBin = await ensureMobileDeviceGuardBin({ targetRoot: input.targetRoot, config: input.config });
@@ -55,7 +61,7 @@ export class CodexCommandAdapter {
         onStdoutChunk: logWriter ? (chunk) => logWriter.appendStdout(chunk) : undefined,
         onStderrChunk: logWriter ? (chunk) => logWriter.appendStderr(chunk) : undefined,
       });
-      return { ...result, logPath: input.logPath };
+      return { ...result, logPath: input.logPath, figmaMcp };
     } finally {
       await logWriter?.close();
     }
@@ -103,7 +109,8 @@ export function buildCodexArgs(args: string[], input: CodexCommandRunInput): str
     ? rendered
     : ensureCodexFlag(rendered, '--ignore-user-config');
 
-  if (!promptRequiresFigmaMcp(input.promptText, input.config)) {
+  const runFigmaMcp = resolveFigmaMcpForRun(input);
+  if (!runFigmaMcp.enabled) {
     return withUserConfigPolicy;
   }
 
@@ -176,15 +183,32 @@ function insertCodexOptionsBeforePrompt(args: string[], options: string[]): stri
   return [...args.slice(0, promptIndex), ...options, ...args.slice(promptIndex)];
 }
 
-function promptRequiresFigmaMcp(promptText: string, config: CodexOrchestratorConfig): boolean {
+function resolveFigmaMcpForRun(input: CodexCommandRunInput): NonNullable<CodexCommandRunResult['figmaMcp']> {
+  const requirement = classifyFigmaMcpRequirement(input.promptText, input.config);
+  const enabled = Boolean(input.config.codex.figmaMcp?.enabled)
+    && (requirement === 'required' || (requirement === 'optional' && !input.disableOptionalFigmaMcp));
+  return { requirement, enabled };
+}
+
+function classifyFigmaMcpRequirement(promptText: string, config: CodexOrchestratorConfig): 'none' | 'optional' | 'required' {
   const figmaMcp = config.codex.figmaMcp;
   if (!figmaMcp?.enabled) {
-    return false;
+    return 'none';
   }
 
-  return figmaMcp.issueTextPatterns.some((pattern) => {
+  if (patternsMatch(figmaMcp.requiredIssueTextPatterns, promptText)) {
+    return 'required';
+  }
+  if (patternsMatch(figmaMcp.optionalIssueTextPatterns ?? figmaMcp.issueTextPatterns ?? [], promptText)) {
+    return 'optional';
+  }
+  return 'none';
+}
+
+function patternsMatch(patterns: string[], text: string): boolean {
+  return patterns.some((pattern) => {
     try {
-      return new RegExp(pattern, 'iu').test(promptText);
+      return new RegExp(pattern, 'iu').test(text);
     } catch {
       return false;
     }
