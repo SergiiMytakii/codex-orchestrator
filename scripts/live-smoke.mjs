@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -37,7 +37,7 @@ const scenarioDefinitions = new Map([
   ['run-plan-auto', runDirectPlanAutoScenario],
   ['plan-auto-blocking', runPlanAutoBlockingScenario],
   ['tree-child-quality-rework', runTreeChildQualityReworkScenario],
-  ['plan-auto-tree-recovery', runTreeChildQualityReworkScenario],
+  ['plan-auto-tree-recovery', runPlanAutoTreeRecoveryScenario],
 ]);
 
 const scenarioProfiles = new Map([
@@ -1039,6 +1039,127 @@ async function runTreeChildQualityReworkScenario(context) {
   assertIssueHasComment(parent, 'codex-orchestrator issue-tree review report');
 }
 
+async function runPlanAutoTreeRecoveryScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    loopPolicy: {
+      rework: {
+        maxAttempts: 1,
+      },
+      durableRunSummaries: {
+        enabled: true,
+      },
+    },
+  });
+
+  const parent = await createIssue(
+    context,
+    'plan-tree-recovery',
+    ['agent:plan-auto'],
+    'Plan-auto tree recovery live smoke. The harness prepares stale runner-owned parent state, one closed recovered child, and one retryable blocked child.',
+  );
+  const recoveredChild = await createIssue(
+    context,
+    'plan-tree-recovery-recovered-child',
+    ['agent:child'],
+    autonomousChildBody({
+      parentIssueNumber: parent.number,
+      stableId: 'live-smoke-recovered',
+      body: 'Recovered child already merged before parent resume.',
+      ownership: ['src/live-smoke/recovered-child.ts'],
+      verification: ['live smoke recovered child validation'],
+    }),
+    { skipNoEligibleCheck: true },
+  );
+  const blockedChild = await createIssue(
+    context,
+    'plan-tree-recovery-blocked-child',
+    ['agent:child'],
+    autonomousChildBody({
+      parentIssueNumber: parent.number,
+      stableId: 'live-smoke-blocked-rework',
+      body: [
+        'Blocked child should resume through automatic rework.',
+        '',
+        `LIVE_SMOKE_RUN_ID: ${context.runId}`,
+        'LIVE_SMOKE_SCENARIO: plan-child-quality-rework',
+        'LIVE_SMOKE_CHILD_ID: tree-recovery-rework',
+      ].join('\n'),
+      dependsOn: ['live-smoke-recovered'],
+      ownership: [
+        'src/live-smoke/issue-owned-by-child-tree-recovery-rework.ts',
+        'test/live-smoke/issue-owned-by-child-tree-recovery-rework.test.ts',
+      ],
+      verification: ['live smoke retryable blocked child recovery validation'],
+    }),
+    { skipNoEligibleCheck: true },
+  );
+
+  await closeIssue(context, recoveredChild.number, 'completed child recovery fixture');
+  await runCommand('gh', [
+    'issue',
+    'edit',
+    String(blockedChild.number),
+    '--repo',
+    context.repo,
+    '--add-label',
+    'agent:blocked',
+  ], { timeoutMs: context.options.timeoutMs });
+  await runCommand('gh', [
+    'issue',
+    'edit',
+    String(parent.number),
+    '--repo',
+    context.repo,
+    '--add-label',
+    'agent:running',
+  ], { timeoutMs: context.options.timeoutMs });
+
+  const recoveryFixture = await preparePlanAutoTreeRecoveryFixture(context, {
+    parentIssueNumber: parent.number,
+    recoveredChildIssueNumber: recoveredChild.number,
+    blockedChildIssueNumber: blockedChild.number,
+  });
+  await appendReport(context, `Prepared plan-auto tree recovery fixture at ${recoveryFixture.parentWorktreePath}\n\n`);
+
+  const result = await runPackagedCli(context, ['run', '--target', context.targetRoot, '--issue', String(parent.number)]);
+  assertIncludes(result.stdout, `codex-orchestrator issue-tree review report for #${parent.number}`, 'direct recovery run should print parent review report');
+
+  const updatedParent = await getIssue(context, parent.number);
+  assertHasLabel(updatedParent, 'agent:review');
+  assertMissingLabel(updatedParent, 'agent:running');
+  assertMissingLabel(updatedParent, 'agent:blocked');
+  assertIssueHasComment(updatedParent, `codex-orchestrator issue-tree review report for #${parent.number}`);
+
+  const branchName = `codex/tree-${parent.number}`;
+  context.createdBranches.push(branchName);
+  await assertRemoteBranchExists(context, branchName);
+  const pullRequest = await findPullRequestByBranch(context, branchName);
+  assert(pullRequest, `expected draft PR for ${branchName}`);
+  context.createdPullRequests.push(pullRequest.number);
+  const body = await getPullRequestBody(context, pullRequest.number);
+  assertIncludes(body, 'recovered from durable summary', 'tree recovery PR should show recovered child evidence');
+  assertIncludes(body, `#${recoveredChild.number}`, 'tree recovery PR should identify the recovered child');
+  assertIncludes(body, `#${blockedChild.number}`, 'tree recovery PR should identify the resumed child');
+  assertIncludes(body, 'tree-child quality rework structured TDD', 'tree recovery PR should show blocked child rework validation evidence');
+  assertIncludes(body, 'attempt-1', 'tree recovery PR should link the resumed child attempt-1 log');
+
+  const recovered = await getIssue(context, recoveredChild.number);
+  assert(recovered.state === 'CLOSED', `expected recovered child #${recoveredChild.number} to remain closed`);
+  assertHasLabel(recovered, 'agent:child');
+  assertMissingLabel(recovered, 'agent:running');
+  assertMissingLabel(recovered, 'agent:blocked');
+
+  const resumed = await getIssue(context, blockedChild.number);
+  assertHasLabel(resumed, 'agent:child');
+  assertHasLabel(resumed, 'agent:review');
+  assertMissingLabel(resumed, 'agent:blocked');
+  assertMissingLabel(resumed, 'agent:running');
+  assertIssueHasComment(resumed, 'codex-orchestrator child review report');
+  assertIssueHasComment(resumed, 'tree-child quality rework structured TDD');
+  assertIssueHasComment(resumed, 'attempt-1');
+}
+
 async function assertPlanAutoSuccess(context, issueNumber, { expectLoopPolicyEvidence = false } = {}) {
   const parent = await getIssue(context, issueNumber);
   assertHasLabel(parent, 'agent:review');
@@ -1135,6 +1256,30 @@ async function createIssue(context, scenario, labels, extraBody = '', options = 
   context.createdIssues.push(issueNumber);
   await appendReport(context, `Created issue #${issueNumber}: ${title}\n\n`);
   return getIssue(context, issueNumber);
+}
+
+function autonomousChildBody({
+  parentIssueNumber,
+  stableId,
+  body,
+  dependsOn = [],
+  ownership,
+  verification,
+}) {
+  return [
+    `<!-- codex-orchestrator:autonomous-child parent=#${parentIssueNumber} -->`,
+    body,
+    '',
+    '## codex-orchestrator metadata',
+    `Stable ID: ${stableId}`,
+    'AFK/HITL: afk',
+    `Depends on: ${dependsOn.length > 0 ? dependsOn.join(', ') : 'none'}`,
+    'Ownership:',
+    ...ownership.map((entry) => `- ${entry}`),
+    'Spec gate: wave-level',
+    'Verification:',
+    ...verification.map((entry) => `- ${entry}`),
+  ].join('\n');
 }
 
 async function assertScopedSuccess(
@@ -1788,6 +1933,161 @@ async function createRemoteBaseBranch(context) {
   return { branchName, markerPath, sha };
 }
 
+async function preparePlanAutoTreeRecoveryFixture(context, input) {
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const defaultBranch = await defaultBranchFor(context.repo);
+  await gitOutput(context.targetRoot, ['fetch', 'origin', '--prune']);
+  const baseSha = (await gitOutput(context.targetRoot, ['rev-parse', `refs/remotes/origin/${defaultBranch}`])).trim();
+  const now = new Date();
+  const staleLease = new Date(now.getTime() - 31 * 60 * 1000).toISOString();
+  const parentBranchName = `codex/tree-${input.parentIssueNumber}`;
+  const parentWorktreePath = join(context.targetRoot, config.runner.workspaceRoot, `tree-${input.parentIssueNumber}`);
+  const recoveredSessionId = `tree-${input.parentIssueNumber}-issue-${input.recoveredChildIssueNumber}-recovered-live-smoke`;
+  const blockedSessionId = `tree-${input.parentIssueNumber}-issue-${input.blockedChildIssueNumber}-blocked-live-smoke`;
+  const recoveredBranchName = `codex/tree-${input.parentIssueNumber}-issue-${input.recoveredChildIssueNumber}`;
+  const blockedBranchName = `codex/tree-${input.parentIssueNumber}-issue-${input.blockedChildIssueNumber}`;
+  const recoveredWorktreePath = join(
+    context.targetRoot,
+    config.runner.workspaceRoot,
+    `tree-${input.parentIssueNumber}-issue-${input.recoveredChildIssueNumber}`,
+  );
+  const blockedWorktreePath = join(
+    context.targetRoot,
+    config.runner.workspaceRoot,
+    `tree-${input.parentIssueNumber}-issue-${input.blockedChildIssueNumber}`,
+  );
+
+  await mkdir(dirname(parentWorktreePath), { recursive: true });
+  await runCommand('git', [
+    '-C',
+    context.targetRoot,
+    'worktree',
+    'add',
+    '--no-track',
+    '-b',
+    parentBranchName,
+    parentWorktreePath,
+    `refs/remotes/origin/${defaultBranch}`,
+  ], { timeoutMs: context.options.timeoutMs });
+  await runCommand('git', ['-C', context.targetRoot, 'branch', recoveredBranchName, parentBranchName], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  await runCommand('git', [
+    '-C',
+    context.targetRoot,
+    'worktree',
+    'add',
+    '--no-track',
+    '-b',
+    blockedBranchName,
+    blockedWorktreePath,
+    parentBranchName,
+  ], { timeoutMs: context.options.timeoutMs });
+
+  await writeLiveSmokeDurableSummary(context, config, {
+    issueNumber: input.recoveredChildIssueNumber,
+    sessionId: recoveredSessionId,
+    outcome: 'review-ready',
+    changedFiles: ['src/live-smoke/recovered-child.ts'],
+    validation: [
+      { command: 'live smoke recovered child validation', status: 'passed', summary: 'child branch already merged into parent branch' },
+    ],
+    blockers: [],
+    skippedChecks: [],
+    residualRisks: [],
+    nextAction: 'Recovered completed child should be included in parent handoff without re-running Codex.',
+  });
+  await writeLiveSmokeDurableSummary(context, config, {
+    issueNumber: input.blockedChildIssueNumber,
+    sessionId: blockedSessionId,
+    outcome: 'blocked',
+    changedFiles: [],
+    validation: [],
+    blockers: ['Quality gate requires TDD red-to-green proof'],
+    skippedChecks: [],
+    residualRisks: [],
+    nextAction: 'Retry blocked child through automatic rework.',
+  });
+
+  await writeFile(join(context.targetRoot, config.runner.stateDir, 'runner-state.json'), `${JSON.stringify({
+    version: 1,
+    runs: [
+      {
+        issueNumber: input.parentIssueNumber,
+        mode: 'plan-parent',
+        workspacePath: parentWorktreePath,
+        sessionId: `plan-${input.parentIssueNumber}-stale-live-smoke`,
+        retryCount: 0,
+        createdAt: staleLease,
+        updatedAt: staleLease,
+        branchName: parentBranchName,
+        ownerPid: 2_147_483_647,
+        host: hostname(),
+        leaseUpdatedAt: staleLease,
+        baseSha,
+      },
+      {
+        issueNumber: input.recoveredChildIssueNumber,
+        parentIssueNumber: input.parentIssueNumber,
+        mode: 'tree-child',
+        workspacePath: recoveredWorktreePath,
+        sessionId: recoveredSessionId,
+        retryCount: 0,
+        createdAt: staleLease,
+        updatedAt: staleLease,
+        branchName: recoveredBranchName,
+        promptPath: join(context.targetRoot, config.runner.stateDir, 'prompts', `${recoveredSessionId}.md`),
+        reportPath: join(context.targetRoot, config.runner.stateDir, 'reports', `issue-${input.recoveredChildIssueNumber}-${recoveredSessionId}.json`),
+        logPath: join(context.targetRoot, config.runner.stateDir, 'logs', `issue-${input.recoveredChildIssueNumber}-${recoveredSessionId}.log`),
+      },
+      {
+        issueNumber: input.blockedChildIssueNumber,
+        parentIssueNumber: input.parentIssueNumber,
+        mode: 'tree-child',
+        workspacePath: blockedWorktreePath,
+        sessionId: blockedSessionId,
+        retryCount: 0,
+        createdAt: staleLease,
+        updatedAt: staleLease,
+        branchName: blockedBranchName,
+        promptPath: join(context.targetRoot, config.runner.stateDir, 'prompts', `${blockedSessionId}.md`),
+        reportPath: join(context.targetRoot, config.runner.stateDir, 'reports', `issue-${input.blockedChildIssueNumber}-${blockedSessionId}.json`),
+        logPath: join(context.targetRoot, config.runner.stateDir, 'logs', `issue-${input.blockedChildIssueNumber}-${blockedSessionId}.log`),
+      },
+    ],
+  }, null, 2)}\n`, 'utf8');
+
+  return { parentWorktreePath };
+}
+
+async function writeLiveSmokeDurableSummary(context, config, input) {
+  const reportPath = join(context.targetRoot, config.runner.stateDir, 'reports', `issue-${input.issueNumber}-${input.sessionId}.json`);
+  const logPath = join(context.targetRoot, config.runner.stateDir, 'logs', `issue-${input.issueNumber}-${input.sessionId}.log`);
+  const summaryPath = join(context.targetRoot, config.runner.stateDir, 'summaries', `issue-${input.issueNumber}-${input.sessionId}.json`);
+  await mkdir(dirname(reportPath), { recursive: true });
+  await mkdir(dirname(logPath), { recursive: true });
+  await mkdir(dirname(summaryPath), { recursive: true });
+  await writeFile(reportPath, JSON.stringify({ status: input.outcome === 'review-ready' ? 'completed' : 'blocked' }, null, 2) + '\n', 'utf8');
+  await writeFile(logPath, `[lifecycle] live smoke recovery fixture for #${input.issueNumber}\n`, 'utf8');
+  await writeFile(summaryPath, `${JSON.stringify({
+    issueNumber: input.issueNumber,
+    sessionId: input.sessionId,
+    outcome: input.outcome,
+    changedFiles: input.changedFiles,
+    confirmedFacts: input.changedFiles.length > 0 ? [`${input.changedFiles.length} changed file(s) detected`] : [],
+    validation: input.validation,
+    blockers: input.blockers,
+    skippedChecks: input.skippedChecks,
+    residualRisks: input.residualRisks,
+    policySuggestions: [],
+    nextAction: input.nextAction,
+    evidence: {
+      logPath,
+      reportPath,
+    },
+  }, null, 2)}\n`, 'utf8');
+}
+
 function ownerOf(repo) {
   return repo.split('/')[0];
 }
@@ -2331,6 +2631,17 @@ if (prompt.includes('# Fresh-Context Review')) {
   case 'plan-quality-rework':
     writePlanQualityReworkReport(reportPath, runId);
     break;
+  case 'plan-tree-recovery':
+    {
+      const children = readTreeRecoveryChildNumbers(prompt, reportPath, issueNumber);
+      writePlanTreeRecoveryReport(
+        reportPath,
+        runId,
+        children.recoveredChildIssueNumber,
+        children.blockedChildIssueNumber,
+      );
+    }
+    break;
   case 'risk-routing-plan-warning':
     writePlanRiskRoutingWarningReport(reportPath, runId);
     break;
@@ -2386,6 +2697,34 @@ function readMarker(text, key) {
 function readLastMarker(text, key) {
   const matches = Array.from(text.matchAll(new RegExp('^' + key + ':\\s*(.+)$', 'gm')));
   return matches.at(-1)?.[1]?.trim();
+}
+
+function readTreeRecoveryChildNumbers(text, reportPath, parentIssueNumber) {
+  const markedRecovered = Number(readMarker(text, 'LIVE_SMOKE_RECOVERED_CHILD'));
+  const markedBlocked = Number(readMarker(text, 'LIVE_SMOKE_BLOCKED_CHILD'));
+  if (Number.isInteger(markedRecovered) && markedRecovered > 0 && Number.isInteger(markedBlocked) && markedBlocked > 0) {
+    return {
+      recoveredChildIssueNumber: markedRecovered,
+      blockedChildIssueNumber: markedBlocked,
+    };
+  }
+  const statePath = join(dirname(dirname(reportPath)), 'runner-state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  const children = Array.isArray(state.runs)
+    ? state.runs.filter((run) => run.mode === 'tree-child' && run.parentIssueNumber === parentIssueNumber)
+    : [];
+  const recovered = children.find((run) => String(run.sessionId).includes('recovered'))?.issueNumber;
+  const blocked = children.find((run) => String(run.sessionId).includes('blocked'))?.issueNumber;
+  if (!Number.isInteger(recovered) || recovered < 1) {
+    throw new Error('LIVE_SMOKE_RECOVERED_CHILD must be a positive integer');
+  }
+  if (!Number.isInteger(blocked) || blocked < 1) {
+    throw new Error('LIVE_SMOKE_BLOCKED_CHILD must be a positive integer');
+  }
+  return {
+    recoveredChildIssueNumber: recovered,
+    blockedChildIssueNumber: blocked,
+  };
 }
 
 function inferScenarioFromReportPath(path) {
@@ -2750,6 +3089,70 @@ function writePlanQualityReworkReport(path, run) {
       risks: ['Child attempt 0 intentionally misses structured TDD evidence.'],
       proofStrategy: ['Runner must rework the child once and keep the parent unblocked.'],
       humanReviewFocus: ['Inspect child loop outcome evidence.'],
+    },
+    residualRisks: [],
+  }, null, 2), 'utf8');
+}
+
+function writePlanTreeRecoveryReport(path, run, recoveredChildIssueNumber, blockedChildIssueNumber) {
+  if (!Number.isInteger(recoveredChildIssueNumber) || recoveredChildIssueNumber < 1) {
+    throw new Error('LIVE_SMOKE_RECOVERED_CHILD must be a positive integer');
+  }
+  if (!Number.isInteger(blockedChildIssueNumber) || blockedChildIssueNumber < 1) {
+    throw new Error('LIVE_SMOKE_BLOCKED_CHILD must be a positive integer');
+  }
+  writeFileSync(path, JSON.stringify({
+    status: 'completed',
+    parent: {
+      title: '[live-smoke:' + run + '] tree recovery parent resumed',
+      body: 'Live smoke parent resumed from stale runner-owned tree state.\n\nLIVE_SMOKE_RUN_ID: ' + run,
+    },
+    graph: {
+      nodes: [
+        {
+          stableId: 'live-smoke-recovered',
+          issueNumber: recoveredChildIssueNumber,
+          title: '[live-smoke:' + run + '] recovered child',
+          body: 'Recovered child already completed before parent resume.',
+          afkHitl: 'afk',
+          ownershipScope: ['src/live-smoke/recovered-child.ts'],
+          dependsOn: [],
+          verification: ['live smoke recovered child validation'],
+        },
+        {
+          stableId: 'live-smoke-blocked-rework',
+          issueNumber: blockedChildIssueNumber,
+          title: '[live-smoke:' + run + '] blocked child rework resumed',
+          body: [
+            'Blocked child should resume through automatic rework.',
+            '',
+            'LIVE_SMOKE_RUN_ID: ' + run,
+            'LIVE_SMOKE_SCENARIO: plan-child-quality-rework',
+            'LIVE_SMOKE_CHILD_ID: tree-recovery-rework',
+          ].join('\n'),
+          afkHitl: 'afk',
+          ownershipScope: [
+            'src/live-smoke/issue-owned-by-child-tree-recovery-rework.ts',
+            'test/live-smoke/issue-owned-by-child-tree-recovery-rework.test.ts',
+          ],
+          dependsOn: ['live-smoke-recovered'],
+          verification: ['live smoke retryable blocked child recovery validation'],
+        },
+      ],
+      edges: [
+        { from: 'live-smoke-recovered', to: 'live-smoke-blocked-rework', reason: 'recovered child must unblock resumed rework child' },
+      ],
+      specGate: 'wave-level',
+    },
+    sizeRisk: {
+      small: ['live-smoke-recovered'],
+      medium: ['live-smoke-blocked-rework'],
+      high: [],
+    },
+    parentReviewHandoff: {
+      risks: ['Parent starts from stale runner-owned state with one recovered child and one retryable blocked child.'],
+      proofStrategy: ['Verify recovered durable summary evidence and automatic rework attempt evidence in the parent PR.'],
+      humanReviewFocus: ['Confirm recovered child was not re-run and blocked child resumed from existing worktree.'],
     },
     residualRisks: [],
   }, null, 2), 'utf8');

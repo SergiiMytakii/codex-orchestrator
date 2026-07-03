@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -143,12 +143,14 @@ test('live smoke rejects unknown profiles before running smoke setup', async () 
   assert.match(result.stderr, /Known profiles: core-release, extended-policy, proof-matrix, full/);
 });
 
-test('live smoke extended policy profile includes tree-child quality rework scenario', async () => {
+test('live smoke extended policy profile includes tree-child recovery scenario', async () => {
   const source = await liveSmokeScriptSource();
 
   assert.match(source, /'extended-policy'[\s\S]*'tree-child-quality-rework'/);
   assert.match(source, /'extended-policy'[\s\S]*'plan-auto-tree-recovery'/);
   assert.match(source, /runTreeChildQualityReworkScenario/);
+  assert.match(source, /runPlanAutoTreeRecoveryScenario/);
+  assert.doesNotMatch(source, /\['plan-auto-tree-recovery', runTreeChildQualityReworkScenario\]/);
 });
 
 test('live smoke help documents scratch repo and strict cleanup defaults', async () => {
@@ -228,6 +230,72 @@ test('live smoke fake agent uses the child scenario marker for tree-child prompt
   assert.deepEqual(report.validation, [
     { command: 'npm test', status: 'passed', summary: 'all tests passed without red-green proof' },
   ]);
+});
+
+test('live smoke fake agent writes tree recovery plan for existing recovered and blocked children', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-tree-recovery-parent-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-151-plan.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Live smoke tree recovery parent.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260703121500',
+    'LIVE_SMOKE_SCENARIO: plan-tree-recovery',
+    'LIVE_SMOKE_RECOVERED_CHILD: 152',
+    'LIVE_SMOKE_BLOCKED_CHILD: 153',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.equal(report.graph.nodes.length, 2);
+  assert.deepEqual(report.graph.nodes.map((node: { issueNumber: number }) => node.issueNumber), [152, 153]);
+  assert.deepEqual(report.graph.nodes.map((node: { stableId: string }) => node.stableId), [
+    'live-smoke-recovered',
+    'live-smoke-blocked-rework',
+  ]);
+  assert.match(report.graph.nodes[1].body, /LIVE_SMOKE_SCENARIO: plan-child-quality-rework/);
+  assert.deepEqual(report.graph.nodes[1].dependsOn, ['live-smoke-recovered']);
+});
+
+test('live smoke fake agent can derive tree recovery children from runner state', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-tree-recovery-state-'));
+  const stateDir = join(root, '.codex-orchestrator/state/live-smoke');
+  const promptPath = join(stateDir, 'prompts/issue-151-plan.md');
+  const reportPath = join(stateDir, 'reports/issue-151-plan.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await mkdir(join(stateDir, 'prompts'), { recursive: true });
+  await mkdir(join(stateDir, 'reports'), { recursive: true });
+  await writeFile(promptPath, [
+    'Live smoke tree recovery parent.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260703121600',
+    'LIVE_SMOKE_SCENARIO: plan-tree-recovery',
+  ].join('\n'), 'utf8');
+  await writeFile(join(stateDir, 'runner-state.json'), JSON.stringify({
+    version: 1,
+    runs: [
+      { issueNumber: 151, mode: 'plan-parent', workspacePath: root, sessionId: 'plan-151', retryCount: 0, createdAt: '2026-07-03T10:00:00.000Z', updatedAt: '2026-07-03T10:00:00.000Z' },
+      { issueNumber: 152, parentIssueNumber: 151, mode: 'tree-child', workspacePath: root, sessionId: 'tree-151-issue-152-recovered-live-smoke', retryCount: 0, createdAt: '2026-07-03T10:00:00.000Z', updatedAt: '2026-07-03T10:00:00.000Z' },
+      { issueNumber: 153, parentIssueNumber: 151, mode: 'tree-child', workspacePath: root, sessionId: 'tree-151-issue-153-blocked-live-smoke', retryCount: 0, createdAt: '2026-07-03T10:00:00.000Z', updatedAt: '2026-07-03T10:00:00.000Z' },
+    ],
+  }), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.deepEqual(report.graph.nodes.map((node: { issueNumber: number }) => node.issueNumber), [152, 153]);
 });
 
 test('browser proof live smoke helper runs visual proof against target root', async () => {

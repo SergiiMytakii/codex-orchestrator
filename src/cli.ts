@@ -315,6 +315,15 @@ async function runIssueCommand(targetRootInput: string, issueNumber: number): Pr
     if (recovered.status !== 'not-recoverable') {
       return { reportComment: recovered.reportComment };
     }
+    const labels = new Set(issue.labels.map((label) => label.name));
+    const alreadyRunningPlanParent = decision?.kind === 'skipped'
+      && decision.reasonCode === 'already-running'
+      && issue.state === 'OPEN'
+      && labels.has(config.github.labels.planAuto.name)
+      && !labels.has(config.github.labels.child.name);
+    if (alreadyRunningPlanParent) {
+      return runPlanAutoCommand({ targetRoot, issueNumber });
+    }
     const reason = decision?.kind === 'skipped' ? decision.reason : 'not eligible';
     throw new Error(`Issue #${issueNumber} is not eligible for autonomous work: ${reason}`);
   }

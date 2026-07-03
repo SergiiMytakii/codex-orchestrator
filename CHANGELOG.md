@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-07-03
+
+### Added
+- Added a focused `plan-auto-tree-recovery` live-smoke scenario that prepares
+  stale runner-owned parent state, recovered closed child evidence, and
+  retryable blocked child rework in the scratch repository.
+
+### Fixed
+- `codex-orchestrator run --issue` can now enter plan-auto parent recovery for
+  open `agent:plan-auto` issues that still carry `agent:running`, while keeping
+  child-labeled and unsafe cases behind the existing recovery safety checks.
+
 ## [0.1.40] - 2026-07-03
 
 ### Changed

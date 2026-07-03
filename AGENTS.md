@@ -71,14 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.40` (2026-07-03):
-  - Live smoke now uses smaller default and explicit scenario profiles.
-  - Runner rework now uses one `ReworkDecision` contract for retry, exhausted,
-    and hard-block outcomes.
-  - Structured TDD proof is supported inside completion-report `validation[]`.
-  - Optional Figma MCP failures retry without MCP while required Figma access
-    hard-blocks.
-  - Focused live smoke now covers tree-child quality-gate rework.
+- `0.1.41` (2026-07-03):
+  - Focused live smoke now covers plan-auto tree recovery with a stale parent,
+    recovered closed child evidence, and retryable blocked child rework.
+  - Direct `run --issue` can enter safe plan-auto parent recovery for
+    runner-owned `agent:running` parent issues.
+  - The recovery smoke fixture verifies parent PR evidence, child labels, and
+    resumed attempt logs in the scratch repository.
 
 ## Final Response
 
