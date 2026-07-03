@@ -218,6 +218,7 @@ test('setup adds runtime work folders to gitignore without ignoring committed po
       'node_modules/',
       '',
       '# codex-orchestrator runtime files',
+      '.codex-orchestrator/proofs/',
       '.codex-orchestrator/workspaces/',
       '.codex-orchestrator/state/',
       '',
@@ -276,6 +277,7 @@ test('setup does not duplicate existing runtime gitignore entries', async () => 
       './.codex-orchestrator/state',
       '',
       '# codex-orchestrator runtime files',
+      '.codex-orchestrator/proofs/',
       '.codex-orchestrator/workspaces/',
       '',
     ].join('\n'),
@@ -579,7 +581,7 @@ test('dry-run reports intended automation without writing files or creating labe
   assert.equal(result.labelPlan.wouldCreate.length, 7);
   assert.match(result.output, /.codex-orchestrator\/config.json/);
   assert.match(result.output, /labels: create-missing/);
-  assert.match(result.output, /gitignore runtime entries: \.codex-orchestrator\/workspaces\/, \.codex-orchestrator\/state\//);
+  assert.match(result.output, /gitignore runtime entries: \.codex-orchestrator\/proofs\/, \.codex-orchestrator\/workspaces\/, \.codex-orchestrator\/state\//);
   assert.match(result.output, /prd: package-bundled-prompt/);
   assert.match(result.output, /Codex will not be launched/);
   await assert.rejects(readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'), /ENOENT/);

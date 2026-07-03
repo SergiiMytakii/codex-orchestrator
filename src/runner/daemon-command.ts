@@ -10,6 +10,7 @@ import { readRunnerConfig } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { runPlanAutoCommand } from './plan-auto-command.js';
 import { RunnerStateStore } from './local-state.js';
+import { runHygieneCleanup, type HygieneCleanupResult } from './hygiene-cleanup.js';
 import { recoverScopedRun } from './scoped-recovery.js';
 import { runScopedAutoCommand } from './scoped-auto-command.js';
 import { issueOwnershipScopes, scopesOverlap } from './scope-isolation-policy.js';
@@ -26,6 +27,7 @@ export interface DaemonCommandOptions {
   concurrency?: number;
   sleep?: (milliseconds: number) => Promise<void>;
   executeIssue?: (issueNumber: number) => Promise<{ reportComment: string }>;
+  cleanupHygiene?: () => Promise<HygieneCleanupResult>;
   cleanupWorktrees?: () => Promise<WorktreeCleanupResult>;
   onEvent?: (line: string) => void;
   now?: () => Date;
@@ -128,6 +130,21 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
           emit(`[${now().toISOString()}] failed #${decision.issueNumber}: ${message}`);
         }
       }
+    }
+
+    try {
+      const hygiene =
+        options.cleanupHygiene ??
+        (() => runHygieneCleanup({ targetRoot, config, git }));
+      const hygieneResult = await hygiene();
+      if (hygieneResult.staleRunsRemoved.length > 0) {
+        emit(
+          `[${now().toISOString()}] hygiene pruned ${hygieneResult.staleRunsRemoved.length} stale runner-state run(s)`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'hygiene cleanup failed';
+      emit(`[${now().toISOString()}] hygiene cleanup failed: ${message}`);
     }
 
     try {

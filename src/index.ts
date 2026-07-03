@@ -81,6 +81,8 @@ export type {
 } from './runner/prompt.js';
 export { runDaemonCommand } from './runner/daemon-command.js';
 export type { DaemonCommandOptions, DaemonCommandResult } from './runner/daemon-command.js';
+export { runHygieneCleanup } from './runner/hygiene-cleanup.js';
+export type { HygieneCleanupResult, RunHygieneCleanupInput } from './runner/hygiene-cleanup.js';
 export { cleanupMergedWorktrees } from './runner/worktree-cleanup.js';
 export type {
   CleanupMergedWorktreesInput,

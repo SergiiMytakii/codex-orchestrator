@@ -206,6 +206,7 @@ function gitignoreDirectory(path: string): string {
 
 function runtimeGitignoreEntries(config: CodexOrchestratorConfig): string[] {
   return Array.from(new Set([
+    gitignoreDirectory(config.reviewGates.acceptanceProof.artifactDir),
     gitignoreDirectory(config.runner.workspaceRoot),
     gitignoreDirectory(config.runner.stateDir),
   ]));

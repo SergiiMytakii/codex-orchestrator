@@ -374,6 +374,58 @@ test('daemon preserves active and dirty merged worktrees', async () => {
   assert.match(result.output, /skipped dirty worktree .*issue-156/);
 });
 
+test('daemon automatically prunes stale runner state for missing workspaces', async () => {
+  const targetRoot = await tempGitRepo();
+  const existingWorktreePath = join(targetRoot, validConfig.runner.workspaceRoot, 'issue-156');
+  const missingWorktreePath = join(targetRoot, validConfig.runner.workspaceRoot, 'issue-155');
+  const git = new GitWorktreeManager();
+  await git.createIssueWorktree({
+    targetRoot,
+    workspacePath: existingWorktreePath,
+    branchName: 'codex/issue-156',
+    baseBranch: 'main',
+  });
+  await new RunnerStateStore(targetRoot, validConfig).save({
+    version: 1,
+    runs: [
+      {
+        issueNumber: 155,
+        mode: 'scoped-issue',
+        workspacePath: missingWorktreePath,
+        sessionId: 'session-155',
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/issue-155',
+      },
+      {
+        issueNumber: 156,
+        mode: 'scoped-issue',
+        workspacePath: existingWorktreePath,
+        sessionId: 'session-156',
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/issue-156',
+      },
+    ],
+  });
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: new InMemoryGitHubIssueAdapter([]),
+    once: true,
+    now: () => new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.deepEqual(
+    (await new RunnerStateStore(targetRoot, validConfig).load()).runs.map((run) => run.issueNumber),
+    [156],
+  );
+  assert.match(result.output, /hygiene pruned 1 stale runner-state run/);
+  assert.equal((await stat(existingWorktreePath)).isDirectory(), true);
+});
+
 function scopedIssueBody(ownershipScope: string[]): string {
   return [
     'Implement scoped work.',
