@@ -53,6 +53,7 @@ export interface ChildHandoffEvidence {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
+  recovered?: boolean;
 }
 
 export function buildScopedReviewReport(
@@ -333,7 +334,7 @@ export function buildIssueTreeReviewReport(input: {
     'Execution Batches',
     ...input.batches.map((batch, index) => `- Batch ${index + 1}: ${batch.map((child) => `#${child.issue.number}`).join(', ')}`),
     'Child Issues',
-    ...input.childResults.map((result) => `- #${result.child.issue.number} ${result.child.issue.title}: ${result.branchName}`),
+    ...input.childResults.map((result) => `- #${result.child.issue.number} ${result.recovered ? 'recovered ' : ''}${result.child.issue.title}: ${result.branchName}`),
     'Child Loop Outcomes',
     ...input.childResults.map((result) => (
       `- #${result.child.issue.number}: ${result.durableRunSummary?.excerpt[0] ?? 'outcome: review-ready'}`
@@ -414,7 +415,7 @@ export function buildIssueTreePullRequestBody(input: {
     )),
     '',
     'Merge summary:',
-    ...input.childResults.map((result) => `- ${result.branchName} merged for #${result.child.issue.number}`),
+    ...input.childResults.map((result) => `- ${result.branchName} ${result.recovered ? 'recovered from durable summary' : 'merged'} for #${result.child.issue.number}`),
     '',
     'Auto-merge is disabled.',
   ].join('\n');

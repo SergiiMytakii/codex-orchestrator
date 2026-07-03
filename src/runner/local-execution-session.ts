@@ -257,7 +257,7 @@ export async function runImplementationPublishabilityCheck(
     input.worktreePath,
     input.shellExecutor,
     report.validation,
-    changedFiles,
+    { phase: 'child', changedFiles },
   );
   const checkWarnings = validation
     .slice(validationBeforeChecks)

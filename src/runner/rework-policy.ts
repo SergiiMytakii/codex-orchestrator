@@ -69,7 +69,7 @@ const blockerPatterns: Array<[ReworkBlockerKey, RegExp]> = [
   ['required-figma-mcp-failure', requiredFigmaPattern],
   ['optional-figma-mcp-failure', optionalFigmaPattern],
   ['missing-quality-gate-evidence', /Quality gate requires/iu],
-  ['failed-configured-checks', /One or more configured checks failed/iu],
+  ['failed-configured-checks', /One or more configured checks failed|^(?!Codex exited\b)[^\n:]+:\s*failed\b/iu],
   ['failed-acceptance-proof', /Acceptance proof/iu],
   ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],

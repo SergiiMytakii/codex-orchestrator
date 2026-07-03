@@ -234,6 +234,60 @@ export class GitWorktreeManager {
     return parseWorktreeList((await this.git(['-C', targetRoot, 'worktree', 'list', '--porcelain'])).stdout);
   }
 
+  public async branchExists(targetRoot: string, branchName: string): Promise<boolean> {
+    const result = await this.executor('git', [
+      '-C',
+      targetRoot,
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${branchName}`,
+    ]);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw new Error(`git command failed: git -C ${targetRoot} show-ref --verify --quiet refs/heads/${branchName}\n${result.stderr}`);
+  }
+
+  public async branchContainsCommit(targetRoot: string, branchName: string, commitSha: string): Promise<boolean> {
+    const result = await this.executor('git', [
+      '-C',
+      targetRoot,
+      'merge-base',
+      '--is-ancestor',
+      commitSha,
+      branchName,
+    ]);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw new Error(`git command failed: git -C ${targetRoot} merge-base --is-ancestor ${commitSha} ${branchName}\n${result.stderr}`);
+  }
+
+  public async isBranchAncestorOf(targetRoot: string, ancestorBranch: string, descendantBranch: string): Promise<boolean> {
+    const result = await this.executor('git', [
+      '-C',
+      targetRoot,
+      'merge-base',
+      '--is-ancestor',
+      ancestorBranch,
+      descendantBranch,
+    ]);
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw new Error(`git command failed: git -C ${targetRoot} merge-base --is-ancestor ${ancestorBranch} ${descendantBranch}\n${result.stderr}`);
+  }
+
   public async isWorktreeClean(worktreePath: string): Promise<boolean> {
     const status = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all']);
     return status.stdout.trim().length === 0;
@@ -259,24 +313,6 @@ export class GitWorktreeManager {
       input.workspacePath,
       input.baseBranch,
     ];
-  }
-
-  private async branchExists(targetRoot: string, branchName: string): Promise<boolean> {
-    const result = await this.executor('git', [
-      '-C',
-      targetRoot,
-      'show-ref',
-      '--verify',
-      '--quiet',
-      `refs/heads/${branchName}`,
-    ]);
-    if (result.exitCode === 0) {
-      return true;
-    }
-    if (result.exitCode === 1) {
-      return false;
-    }
-    throw new Error(`git command failed: git -C ${targetRoot} show-ref --verify --quiet refs/heads/${branchName}\n${result.stderr}`);
   }
 
   private async removeMergedStaleBranchWorktree(input: CreateIssueWorktreeInput): Promise<void> {

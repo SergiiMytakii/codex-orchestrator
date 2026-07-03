@@ -86,10 +86,12 @@ export type ScopedRecoveryRunResult =
   | { status: 'not-recoverable'; classification: ScopedRecoveryClassification }
   | (ScopedAutoCommandResult & { recovered: true; classification: ScopedRecoveryClassification });
 
-interface OwnershipState {
+export interface RecoveryOwnershipState {
   kind: 'same-host' | 'cross-host' | 'legacy' | 'unknown';
   stale: boolean;
   process: ProcessProbeResult;
+  localHost?: string;
+  remoteHost?: string;
 }
 
 export async function classifyScopedRecoveryRun(
@@ -106,7 +108,7 @@ export async function classifyScopedRecoveryRun(
     return classification(input.run, 'unknown-or-foreign', 'deterministic base evidence is missing', false, undefined, reportState);
   }
 
-  const ownership = await classifyOwnership(input);
+  const ownership = await classifyRecoveryOwnership(input);
   if (ownership.kind === 'unknown') {
     return classification(input.run, 'unknown-or-foreign', 'lease ownership evidence is invalid or from the future', false, beforeHead, reportState);
   }
@@ -583,7 +585,7 @@ async function readOnlyStatusClassification(
   run: RunnerProcessMetadata,
   beforeHead: string,
   reportState: ScopedRecoveryClassification['reportState'],
-  ownership: OwnershipState,
+  ownership: RecoveryOwnershipState,
 ): Promise<ScopedRecoveryClassification> {
   if (reportState === 'completed' && (ownership.kind === 'legacy' || ownership.stale)) {
     return classification(run, 'completed-pending-handoff', 'completed scoped run is pending runner-owned handoff', false, beforeHead, reportState);
@@ -629,7 +631,12 @@ function basicInvalidReason(
   return undefined;
 }
 
-async function classifyOwnership(input: ClassifyScopedRecoveryRunInput): Promise<OwnershipState> {
+export async function classifyRecoveryOwnership(input: {
+  run: RunnerProcessMetadata;
+  now: Date;
+  hostname?: () => string;
+  processProbe?: (pid: number) => Promise<ProcessProbeResult> | ProcessProbeResult;
+}): Promise<RecoveryOwnershipState> {
   const localHost = (input.hostname ?? osHostname)();
   const timestamp = input.run.leaseUpdatedAt ? Date.parse(input.run.leaseUpdatedAt) : Number.NaN;
   const hasLease = Number.isFinite(timestamp);
@@ -638,21 +645,21 @@ async function classifyOwnership(input: ClassifyScopedRecoveryRunInput): Promise
     : false;
 
   if (hasLease && timestamp > input.now.getTime()) {
-    return { kind: 'unknown', stale: false, process: 'unknown' };
+    return { kind: 'unknown', stale: false, process: 'unknown', localHost };
   }
   if (!input.run.host && !input.run.ownerPid && !input.run.leaseUpdatedAt) {
-    return { kind: 'legacy', stale: false, process: 'unknown' };
+    return { kind: 'legacy', stale: false, process: 'unknown', localHost };
   }
   const ownerPid = input.run.ownerPid;
   if (!input.run.host || typeof ownerPid !== 'number' || !Number.isInteger(ownerPid) || !hasLease) {
-    return { kind: 'unknown', stale: false, process: 'unknown' };
+    return { kind: 'unknown', stale: false, process: 'unknown', localHost, remoteHost: input.run.host };
   }
   if (input.run.host !== localHost) {
-    return { kind: 'cross-host', stale, process: 'unknown' };
+    return { kind: 'cross-host', stale, process: 'unknown', localHost, remoteHost: input.run.host };
   }
 
   const probe = input.processProbe ?? defaultProcessProbe;
-  return { kind: 'same-host', stale, process: await probe(ownerPid) };
+  return { kind: 'same-host', stale, process: await probe(ownerPid), localHost, remoteHost: input.run.host };
 }
 
 async function readReportState(run: RunnerProcessMetadata): Promise<ScopedRecoveryClassification['reportState']> {

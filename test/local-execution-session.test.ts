@@ -125,6 +125,51 @@ test('implementation publishability blocks failed configured checks before publi
   assert.equal(await git.isWorktreeClean(repo), false);
 });
 
+test('implementation publishability skips child checks outside scoped check policy', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await mkdir(join(repo, 'docs'), { recursive: true });
+  await writeFile(join(repo, 'docs', 'example.md'), '# fixture\nupdated\n', 'utf8');
+  await writeScopedReport(reportPath, { changes: ['docs/example.md'] });
+
+  const calls: string[] = [];
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: { test: 'npm test' },
+      checksPolicy: {
+        missingNpmScript: 'skip',
+        scope: {
+          test: { phases: ['parent-integration'] },
+        },
+      },
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async (command) => {
+      calls.push(command);
+      return { stdout: '', stderr: 'test failed', exitCode: 1 };
+    },
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.deepEqual(calls, []);
+  assert.deepEqual(
+    result.status === 'publish-ready'
+      ? result.validation.filter((line) => line.command === 'npm test').map((line) => line.status)
+      : [],
+    ['skipped'],
+  );
+});
+
 test('implementation publishability blocks changed files outside issue ownership scope', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();

@@ -262,6 +262,8 @@ export function parseAutonomousChildMetadata(
 export function collectExecutableChildBatches(
   nodes: AutonomousChildNode[],
   config: CodexOrchestratorConfig,
+  completedStableIds: string[] = [],
+  resumableBlockedStableIds: string[] = [],
 ): AutonomousChildBatchResult {
   const errors: string[] = [];
   const manualLabel = config.github.labels.manual.name;
@@ -269,6 +271,8 @@ export function collectExecutableChildBatches(
   const runningLabel = config.github.labels.running.name;
   const reviewLabel = config.github.labels.review.name;
   const nodesById = new Map<string, AutonomousChildNode>();
+  const completed = new Set(completedStableIds.map((id) => id.trim()).filter(Boolean));
+  const resumableBlocked = new Set(resumableBlockedStableIds.map((id) => id.trim()).filter(Boolean));
 
   for (const node of nodes) {
     const id = node.metadata.stableId.trim();
@@ -276,6 +280,9 @@ export function collectExecutableChildBatches(
       errors.push(`duplicate child stableId: ${id}`);
     }
     nodesById.set(id, node);
+    if (completed.has(id)) {
+      continue;
+    }
     const labels = new Set(node.issue.labels.map((label) => label.name));
     if (node.issue.state === 'CLOSED') {
       errors.push(`Issue #${node.issue.number} is closed`);
@@ -285,13 +292,15 @@ export function collectExecutableChildBatches(
     }
     for (const [label, reason] of [
       [manualLabel, 'manual'],
-      [blockedLabel, 'blocked'],
       [runningLabel, 'running'],
       [reviewLabel, 'review'],
     ] as const) {
       if (labels.has(label)) {
         errors.push(`Issue #${node.issue.number} is ${reason}`);
       }
+    }
+    if (labels.has(blockedLabel) && !resumableBlocked.has(id)) {
+      errors.push(`Issue #${node.issue.number} is blocked`);
     }
   }
 
@@ -304,7 +313,7 @@ export function collectExecutableChildBatches(
     return { ok: false, errors };
   }
 
-  const batches = scheduleExecutableBatches(nodes, Math.min(config.runner.maxParallelChildren, 3));
+  const batches = scheduleExecutableBatches(nodes, Math.min(config.runner.maxParallelChildren, 3), completed);
   return { ok: true, batches };
 }
 
@@ -466,9 +475,11 @@ function graphFromAutonomousNodes(nodes: AutonomousChildNode[]): PlanGraph {
   };
 }
 
-function scheduleExecutableBatches(nodes: AutonomousChildNode[], limit: number): AutonomousChildNode[][] {
-  const remaining = new Map(nodes.map((node) => [node.metadata.stableId, node]));
-  const completed = new Set<string>();
+function scheduleExecutableBatches(nodes: AutonomousChildNode[], limit: number, initiallyCompleted: Set<string>): AutonomousChildNode[][] {
+  const remaining = new Map(nodes
+    .filter((node) => !initiallyCompleted.has(node.metadata.stableId))
+    .map((node) => [node.metadata.stableId, node]));
+  const completed = new Set(initiallyCompleted);
   const batches: AutonomousChildNode[][] = [];
 
   while (remaining.size > 0) {

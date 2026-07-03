@@ -113,6 +113,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
     'run-plan-auto',
     'plan-auto-blocking',
     'tree-child-quality-rework',
+    'plan-auto-tree-recovery',
   ]);
   assert.equal(scenarios.includes('visual-proof'), false);
   assert.equal(scenarios.includes('scoped-local-commit'), false);
@@ -146,6 +147,7 @@ test('live smoke extended policy profile includes tree-child quality rework scen
   const source = await liveSmokeScriptSource();
 
   assert.match(source, /'extended-policy'[\s\S]*'tree-child-quality-rework'/);
+  assert.match(source, /'extended-policy'[\s\S]*'plan-auto-tree-recovery'/);
   assert.match(source, /runTreeChildQualityReworkScenario/);
 });
 

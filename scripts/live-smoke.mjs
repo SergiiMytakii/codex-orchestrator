@@ -37,6 +37,7 @@ const scenarioDefinitions = new Map([
   ['run-plan-auto', runDirectPlanAutoScenario],
   ['plan-auto-blocking', runPlanAutoBlockingScenario],
   ['tree-child-quality-rework', runTreeChildQualityReworkScenario],
+  ['plan-auto-tree-recovery', runTreeChildQualityReworkScenario],
 ]);
 
 const scenarioProfiles = new Map([
@@ -64,6 +65,7 @@ const scenarioProfiles = new Map([
     'acceptance-proof-negative',
     'plan-auto-blocking',
     'tree-child-quality-rework',
+    'plan-auto-tree-recovery',
   ]],
   ['proof-matrix', [
     'browser-proof',

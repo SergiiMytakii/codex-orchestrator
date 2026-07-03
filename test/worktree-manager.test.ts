@@ -182,6 +182,10 @@ async function tempGitProject(): Promise<{ root: string; repo: string; remote: s
   return { root, repo, remote };
 }
 
+function canonicalTestPath(path: string): string {
+  return path.startsWith('/private/') ? path.slice('/private'.length) : path;
+}
+
 test('mergeBranch creates a no-ff merge commit that can be pushed from parent worktree', async () => {
   const { root, repo, remote } = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -425,6 +429,33 @@ test('ensureIssueWorktree refuses to attach an existing branch that does not con
       allowResume: true,
     }),
     /was created from a different base/,
+  );
+});
+
+test('branch query helpers report branch existence, base containment, and merge ancestry without mutation', async () => {
+  const { root, repo } = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const baseSha = await git.getHead(repo);
+  const parent = join(root, 'parent');
+  const child = join(root, 'child');
+  await git.createIssueWorktree({ targetRoot: repo, workspacePath: parent, branchName: 'codex/tree-1', baseBranch: 'main' });
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: child,
+    branchName: 'codex/tree-1-issue-2',
+    baseBranch: 'codex/tree-1',
+  });
+  await writeFile(join(child, 'child.txt'), 'done\n', 'utf8');
+  await git.commitAll({ worktreePath: child, message: 'Codex: implement issue #2 for parent #1' });
+
+  assert.equal(await git.branchExists(repo, 'codex/tree-1'), true);
+  assert.equal(await git.branchExists(repo, 'codex/missing'), false);
+  assert.equal(await git.branchContainsCommit(repo, 'codex/tree-1', baseSha), true);
+  assert.equal(await git.isBranchAncestorOf(repo, 'codex/tree-1', 'codex/tree-1-issue-2'), true);
+  assert.equal(await git.isBranchAncestorOf(repo, 'codex/tree-1-issue-2', 'codex/tree-1'), false);
+  assert.deepEqual(
+    (await git.listWorktrees(repo)).map((worktree) => canonicalTestPath(worktree.path)).sort(),
+    [child, parent, repo].map(canonicalTestPath).sort(),
   );
 });
 

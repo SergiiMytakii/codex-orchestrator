@@ -9,10 +9,12 @@ import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/c
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { InMemoryGitHubIssueAdapter } from '../src/github/issues.js';
 import { InMemoryGitHubPullRequestAdapter } from '../src/github/pull-requests.js';
+import { GitWorktreeManager } from '../src/git/worktree.js';
 import type { CreateDraftPullRequestInput, GitHubPullRequest } from '../src/github/pull-requests.js';
 import { renderAutonomousChildMarker } from '../src/runner/issue-tree.js';
 import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
+import { SCOPED_RECOVERY_LEASE_STALE_MS } from '../src/runner/scoped-recovery.js';
 import { runPlanAutoCommand } from '../src/runner/plan-auto-command.js';
 import type { PlanAutoCompletionReport } from '../src/runner/prompt.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
@@ -246,6 +248,394 @@ test('plan-auto command plans parent, executes marked children, and opens one in
 
   const pushed = await execFileAsync('git', ['--git-dir', join(dirname(repo), 'remote.git'), 'log', '--oneline', 'codex/tree-156', '-1']);
   assert.match(pushed.stdout, /Codex: merge issue/);
+});
+
+test('plan-auto command resumes a clean stale parent worktree before creating a new one', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parentWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156');
+  const baseSha = await git.getHead(repo);
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: parentWorktree,
+    branchName: 'codex/tree-156',
+    baseBranch: 'main',
+  });
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [{
+      issueNumber: 156,
+      mode: 'plan-parent',
+      workspacePath: parentWorktree,
+      sessionId: 'plan-156-stale',
+      retryCount: 0,
+      createdAt: '2026-05-08T10:00:00.000Z',
+      updatedAt: '2026-05-08T10:00:00.000Z',
+      branchName: 'codex/tree-156',
+      reportPath: join(repo, '.codex-orchestrator', 'state', 'reports', 'issue-156-plan-156-stale.json'),
+      logPath: join(repo, '.codex-orchestrator', 'state', 'logs', 'issue-156-plan-156-stale.log'),
+      host: 'local-host',
+      ownerPid: 99999999,
+      leaseUpdatedAt: new Date(now.getTime() - SCOPED_RECOVERY_LEASE_STALE_MS).toISOString(),
+      baseSha,
+    }],
+  });
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name, labels.running.name], body: 'Plan parent' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const report = completedReport();
+  report.graph.nodes = [report.graph.nodes[0]!];
+  report.graph.edges = [];
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter: codexAdapterForReport(report),
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+    hostname: () => 'local-host',
+    processProbe: () => 'missing',
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(result.worktreePath, parentWorktree);
+  assert.equal(
+    issueAdapter.addedLabels.some((entry) => entry.issueNumber === 156 && entry.labels.includes(labels.blocked.name)),
+    false,
+  );
+  const parentTreeWorktrees = (await git.listWorktrees(repo)).filter((worktree) => worktree.branch === 'refs/heads/codex/tree-156');
+  assert.equal(parentTreeWorktrees.length, 1);
+});
+
+test('plan-auto parent recovery bypass does not override child-label eligibility', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name, labels.running.name, labels.child.name], body: 'Not a parent' }),
+  ]);
+
+  await assert.rejects(
+    runPlanAutoCommand({
+      targetRoot: repo,
+      issueNumber: 156,
+      issueAdapter,
+      pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+      codexAdapter: codexAdapterForReport(completedReport()),
+      shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+      now,
+    }),
+    /not eligible for agent:plan-auto planning: running label is present/,
+  );
+  assert.equal(issueAdapter.addedLabels.some((entry) => entry.labels.includes(labels.blocked.name)), false);
+});
+
+test('plan-auto command recovers a closed successful child already merged into the parent tree', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parentWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156');
+  const childWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156-issue-157');
+  const baseSha = await git.getHead(repo);
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: parentWorktree,
+    branchName: 'codex/tree-156',
+    baseBranch: 'main',
+  });
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: childWorktree,
+    branchName: 'codex/tree-156-issue-157',
+    baseBranch: 'codex/tree-156',
+  });
+  await writeFile(join(childWorktree, 'child-a.txt'), 'already done\n', 'utf8');
+  await git.commitAll({ worktreePath: childWorktree, message: 'Codex: implement issue #157 for parent #156' });
+  await git.mergeBranch({
+    worktreePath: parentWorktree,
+    branchName: 'codex/tree-156-issue-157',
+    message: 'Codex: merge issue #157 into parent #156',
+  });
+  const childSessionId = 'tree-156-issue-157-stale';
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [
+      {
+        issueNumber: 156,
+        mode: 'plan-parent',
+        workspacePath: parentWorktree,
+        sessionId: 'plan-156-stale',
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/tree-156',
+        reportPath: join(repo, '.codex-orchestrator', 'state', 'reports', 'issue-156-plan-156-stale.json'),
+        logPath: join(repo, '.codex-orchestrator', 'state', 'logs', 'issue-156-plan-156-stale.log'),
+        host: 'local-host',
+        ownerPid: 99999999,
+        leaseUpdatedAt: new Date(now.getTime() - SCOPED_RECOVERY_LEASE_STALE_MS).toISOString(),
+        baseSha,
+      },
+      {
+        issueNumber: 157,
+        parentIssueNumber: 156,
+        mode: 'tree-child',
+        workspacePath: childWorktree,
+        sessionId: childSessionId,
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/tree-156-issue-157',
+      },
+    ],
+  });
+  const summaryPath = join(repo, validConfig.runner.stateDir, 'summaries', `issue-157-${childSessionId}.json`);
+  await mkdir(dirname(summaryPath), { recursive: true });
+  await writeFile(summaryPath, JSON.stringify({
+    issueNumber: 157,
+    sessionId: childSessionId,
+    outcome: 'review-ready',
+    changedFiles: ['child-a.txt'],
+    confirmedFacts: ['1 changed file(s) detected'],
+    validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+    blockers: [],
+    skippedChecks: [],
+    residualRisks: [],
+    policySuggestions: [],
+    nextAction: 'Parent issue-tree integration should merge this child branch.',
+    evidence: {
+      reportPath: join(repo, 'reports', 'child-157.json'),
+      logPath: join(repo, 'logs', 'child-157.log'),
+    },
+  }), 'utf8');
+  const report = completedReport();
+  report.graph.nodes = [{ ...report.graph.nodes[0]!, issueNumber: 157 }];
+  report.graph.edges = [];
+  let childRuns = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+        return { stdout: 'ok', stderr: '', exitCode: 0 };
+      }
+      childRuns += 1;
+      throw new Error('recovered child should not execute');
+    },
+  };
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name, labels.running.name], body: 'Plan parent' }),
+    issueFixture({
+      number: 157,
+      state: 'CLOSED',
+      labels: [labels.child.name],
+      body: `${renderAutonomousChildMarker(156)}\nChild A body\n\n## codex-orchestrator metadata\nStable ID: child-a\nAFK/HITL: afk\nDepends on: none\nOwnership:\n- child-a.txt\nSpec gate: wave-level\nVerification:\n- npm test`,
+    }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+    hostname: () => 'local-host',
+    processProbe: () => 'missing',
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.equal(childRuns, 0);
+  assert.match(result.reportComment, /#157 recovered/);
+  assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /recovered from durable summary/);
+  assert.deepEqual(issueAdapter.createdIssues, []);
+});
+
+test('plan-auto command resumes retryable blocked child rework from existing tree-child state', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parentWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156');
+  const childWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156-issue-157');
+  const baseSha = await git.getHead(repo);
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: parentWorktree,
+    branchName: 'codex/tree-156',
+    baseBranch: 'main',
+  });
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: childWorktree,
+    branchName: 'codex/tree-156-issue-157',
+    baseBranch: 'codex/tree-156',
+  });
+  const childSessionId = 'tree-156-issue-157-blocked';
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [
+      {
+        issueNumber: 156,
+        mode: 'plan-parent',
+        workspacePath: parentWorktree,
+        sessionId: 'plan-156-stale',
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/tree-156',
+        host: 'local-host',
+        ownerPid: 99999999,
+        leaseUpdatedAt: new Date(now.getTime() - SCOPED_RECOVERY_LEASE_STALE_MS).toISOString(),
+        baseSha,
+      },
+      {
+        issueNumber: 157,
+        parentIssueNumber: 156,
+        mode: 'tree-child',
+        workspacePath: childWorktree,
+        sessionId: childSessionId,
+        retryCount: 0,
+        createdAt: '2026-05-08T10:00:00.000Z',
+        updatedAt: '2026-05-08T10:00:00.000Z',
+        branchName: 'codex/tree-156-issue-157',
+      },
+    ],
+  });
+  const summaryPath = join(repo, validConfig.runner.stateDir, 'summaries', `issue-157-${childSessionId}.json`);
+  await mkdir(dirname(summaryPath), { recursive: true });
+  await writeFile(summaryPath, JSON.stringify({
+    issueNumber: 157,
+    sessionId: childSessionId,
+    outcome: 'blocked',
+    changedFiles: [],
+    confirmedFacts: ['1 blocker(s) recorded'],
+    validation: [],
+    blockers: ['Codex completed without file changes'],
+    skippedChecks: [],
+    residualRisks: [],
+    policySuggestions: [],
+    nextAction: 'Retry the child with runner rework.',
+    evidence: {
+      reportPath: join(repo, 'reports', 'child-157.json'),
+      logPath: join(repo, 'logs', 'child-157.log'),
+    },
+  }), 'utf8');
+  const report = completedReport();
+  report.graph.nodes = [{ ...report.graph.nodes[0]!, issueNumber: 157 }];
+  report.graph.edges = [];
+  let reworkPrompt = '';
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.sessionId.startsWith('plan-')) {
+        await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
+      } else {
+        reworkPrompt = input.promptText;
+        const changedPath = await writeChildOwnedChange(input);
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: [changedPath],
+            validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 156, labels: [labels.planAuto.name, labels.running.name], body: 'Plan parent' }),
+    issueFixture({
+      number: 157,
+      labels: [labels.child.name, labels.blocked.name],
+      body: `${renderAutonomousChildMarker(156)}\nChild A body\n\n## codex-orchestrator metadata\nStable ID: child-a\nAFK/HITL: afk\nDepends on: none\nOwnership:\n- child-a.txt\nSpec gate: wave-level\nVerification:\n- npm test`,
+    }),
+  ]);
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter,
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+    hostname: () => 'local-host',
+    processProbe: () => 'missing',
+  });
+
+  assert.equal(result.status, 'review-ready');
+  assert.match(reworkPrompt, /automatic rework attempt \(#1\)/);
+  assert.match(reworkPrompt, /Codex completed without file changes/);
+  assert.deepEqual(issueAdapter.removedLabels.find((entry) => entry.issueNumber === 157)?.labels, [labels.blocked.name]);
+});
+
+test('plan-auto recovery hard-block uses stable parent marker without duplicate comments', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const parentWorktree = join(repo, '.codex-orchestrator', 'workspaces', 'tree-156');
+  const baseSha = await git.getHead(repo);
+  await git.createIssueWorktree({
+    targetRoot: repo,
+    workspacePath: parentWorktree,
+    branchName: 'codex/tree-156',
+    baseBranch: 'main',
+  });
+  await writeFile(join(parentWorktree, 'dirty.txt'), 'dirty\n', 'utf8');
+  await new RunnerStateStore(repo, validConfig).save({
+    version: 1,
+    runs: [{
+      issueNumber: 156,
+      mode: 'plan-parent',
+      workspacePath: parentWorktree,
+      sessionId: 'plan-156-stale',
+      retryCount: 0,
+      createdAt: '2026-05-08T10:00:00.000Z',
+      updatedAt: '2026-05-08T10:00:00.000Z',
+      branchName: 'codex/tree-156',
+      host: 'local-host',
+      ownerPid: 99999999,
+      leaseUpdatedAt: new Date(now.getTime() - SCOPED_RECOVERY_LEASE_STALE_MS).toISOString(),
+      baseSha,
+    }],
+  });
+  const marker = 'plan-auto-recovery-blocked parent=156 reason=parent-worktree-is-not-clean';
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({
+      number: 156,
+      labels: [labels.planAuto.name, labels.running.name],
+      body: 'Plan parent',
+      comments: [{
+        id: 'comment-1',
+        url: 'https://github.com/example/repo/issues/156#issuecomment-1',
+        body: `<!-- codex-orchestrator:${marker} -->\nexisting recovery block`,
+        createdAt: '2026-05-08T11:00:00.000Z',
+        author: { login: 'codex-orchestrator' },
+        authorAssociation: 'MEMBER',
+      }],
+    }),
+  ]);
+
+  const result = await runPlanAutoCommand({
+    targetRoot: repo,
+    issueNumber: 156,
+    issueAdapter,
+    pullRequestAdapter: new InMemoryGitHubPullRequestAdapter('example', 'repo'),
+    codexAdapter: codexAdapterForReport(completedReport()),
+    shellExecutor: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    now,
+    hostname: () => 'local-host',
+    processProbe: () => 'missing',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(issueAdapter.postedComments.length, 0);
+  assert.equal((await git.listWorktrees(repo)).some((worktree) => worktree.branch === 'refs/heads/codex/tree-156'), true);
 });
 
 test('plan-auto command renders parent risk-routing warnings without stopping warn-mode execution', async () => {

@@ -1,4 +1,5 @@
 import { mkdir, readFile } from 'node:fs/promises';
+import { hostname as osHostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
@@ -46,6 +47,12 @@ import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-e
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import { RunnerStateStore } from './local-state.js';
 import {
+  classifyPlanAutoBlockedChildRecovery,
+  classifyPlanAutoCompletedChildRecovery,
+  classifyPlanAutoParentRecovery,
+  type PlanAutoChildRecoveryDecision,
+} from './plan-auto-recovery.js';
+import {
   buildIssueTreeChildPrompt,
   buildPlanAutoPrompt,
   sessionPromptPath,
@@ -53,6 +60,7 @@ import {
   writeDurablePrompt,
 } from './prompt.js';
 import { decideImplementationRework } from './rework-policy.js';
+import type { ProcessProbeResult } from './scoped-recovery.js';
 import { evaluateParentRiskRoutingGate } from './review-gates.js';
 import {
   buildBlockedHandoffEvidence,
@@ -71,6 +79,8 @@ export interface PlanAutoCommandOptions {
   codexAdapter?: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
   shellExecutor?: ShellCommandExecutor;
   now?: Date;
+  hostname?: () => string;
+  processProbe?: (pid: number) => Promise<ProcessProbeResult> | ProcessProbeResult;
 }
 
 export interface PlanAutoCommandResult {
@@ -123,6 +133,7 @@ interface ChildExecutionResult {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
+  recovered?: boolean;
 }
 
 class ChildExecutionBlockedError extends Error {
@@ -153,8 +164,30 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     throw new Error(`Issue #${options.issueNumber} was not found`);
   }
 
+  const branchName = renderBranchTemplate(config.branches.issueTree, { parentIssueNumber: options.issueNumber });
+  const worktreePath = join(targetRoot, config.runner.workspaceRoot, `tree-${options.issueNumber}`);
+  const store = new RunnerStateStore(targetRoot, config);
+  const parentRecovery = await classifyPlanAutoParentRecovery({
+    targetRoot,
+    config,
+    parentIssue,
+    branchName,
+    worktreePath,
+    baseSha: resolvedBase.sha,
+    state: await store.load(),
+    git,
+    now,
+    hostname: options.hostname,
+    processProbe: options.processProbe,
+  });
   const decision = discoverIssueWork([parentIssue], config)[0];
-  if (!decision || decision.kind !== 'eligible' || decision.mode !== 'plan-parent') {
+  const parentLabels = new Set(parentIssue.labels.map((label) => label.name));
+  const alreadyRunningPlanParent = decision?.kind === 'skipped'
+    && decision.reasonCode === 'already-running'
+    && parentIssue.state === 'OPEN'
+    && parentLabels.has(config.github.labels.planAuto.name)
+    && !parentLabels.has(config.github.labels.child.name);
+  if (!decision || !((decision.kind === 'eligible' && decision.mode === 'plan-parent') || alreadyRunningPlanParent)) {
     const reason = decision?.kind === 'skipped' ? decision.reason : 'not agent:plan-auto';
     throw new Error(`Issue #${options.issueNumber} is not eligible for agent:plan-auto planning: ${reason}`);
   }
@@ -162,8 +195,6 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   const workflowPrompts = await readPlanWorkflowPrompts(targetRoot, config);
   const issueTreeWorkflowPrompt = await readIssueTreeWorkflowPrompt(targetRoot, config);
   const acceptanceProofWorkflowPrompt = await readAcceptanceProofWorkflowPrompt(targetRoot, config);
-  const branchName = renderBranchTemplate(config.branches.issueTree, { parentIssueNumber: options.issueNumber });
-  const worktreePath = join(targetRoot, config.runner.workspaceRoot, `tree-${options.issueNumber}`);
   let promptPath = '';
   let reportPath = '';
   let logPath = '';
@@ -171,22 +202,48 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
   let parentSnapshotPath = '';
   const childIssues: GitHubIssue[] = [];
   let pullRequest: GitHubPullRequest | undefined;
-  let store: RunnerStateStore | undefined;
   const executionResults: ChildExecutionResult[] = [];
   const events = new RunnerLifecycleEventStore(targetRoot, config);
   const buildBase = () =>
     baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues, sessionId, parentSnapshotPath);
 
-  await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
+  if (parentRecovery.kind === 'hard-block') {
+    return finishPlanBlocked(issueAdapter, config, events, buildBase(), [parentRecovery.reason], childIssues, parentRecovery.marker);
+  }
+  if (alreadyRunningPlanParent && parentRecovery.kind !== 'resume-parent') {
+    return finishPlanBlocked(
+      issueAdapter,
+      config,
+      events,
+      buildBase(),
+      ['parent recovery requires runner-owned metadata for running parent'],
+      childIssues,
+      `plan-auto-recovery-blocked parent=${options.issueNumber} reason=missing-runner-owned-metadata`,
+    );
+  }
+  if (!alreadyRunningPlanParent) {
+    await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
+  }
 
   try {
-    await git.createIssueWorktree({
-      targetRoot,
-      workspacePath: worktreePath,
-      branchName,
-      baseBranch: resolvedBase.sha,
-      requiredBaseSha: resolvedBase.sha,
-    });
+    if (parentRecovery.kind === 'resume-parent') {
+      await git.ensureIssueWorktree({
+        targetRoot,
+        workspacePath: worktreePath,
+        branchName,
+        baseBranch: resolvedBase.sha,
+        requiredBaseSha: resolvedBase.sha,
+        allowResume: true,
+      });
+    } else {
+      await git.createIssueWorktree({
+        targetRoot,
+        workspacePath: worktreePath,
+        branchName,
+        baseBranch: resolvedBase.sha,
+        requiredBaseSha: resolvedBase.sha,
+      });
+    }
     sessionId = `plan-${options.issueNumber}-${formatSessionTimestamp(now)}`;
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
@@ -238,7 +295,6 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       summary: 'Starting parent planning Codex session.',
       artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshot.path),
     });
-    store = new RunnerStateStore(targetRoot, config);
     await store.upsertRun({
       issueNumber: options.issueNumber,
       mode: 'plan-parent',
@@ -251,6 +307,10 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       retryCount: 0,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
+      ownerPid: process.pid,
+      host: (options.hostname ?? osHostname)(),
+      leaseUpdatedAt: now.toISOString(),
+      baseSha: resolvedBase.sha,
     });
 
     const beforeHead = await git.getHead(worktreePath);
@@ -339,7 +399,59 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     }
 
     const childNodes = await readAutonomousChildNodes(issueAdapter, config, options.issueNumber, childIssues);
-    const batches = collectExecutableChildBatches(childNodes, config);
+    const childRecoveryState = await store.load();
+    const childRecoveryDecisions = await Promise.all(childNodes.map(async (child) => {
+      const completed = await classifyPlanAutoCompletedChildRecovery({
+        targetRoot,
+        config,
+        parentIssueNumber: options.issueNumber,
+        parentBranchName: branchName,
+        child,
+        state: childRecoveryState,
+        git,
+      });
+      return completed.kind === 'execute-child'
+        ? classifyPlanAutoBlockedChildRecovery({
+          targetRoot,
+          config,
+          parentIssueNumber: options.issueNumber,
+          child,
+          state: childRecoveryState,
+          git,
+        })
+        : completed;
+    }));
+    const recoveredStableIds: string[] = [];
+    const resumableBlockedStableIds: string[] = [];
+    const childRecoveryByStableId = new Map<string, Extract<PlanAutoChildRecoveryDecision, { kind: 'resume-child-rework' }>>();
+    for (const decision of childRecoveryDecisions) {
+      if (decision.kind === 'hard-block') {
+        return finishPlanBlocked(issueAdapter, config, events, buildBase(), [decision.reason], childIssues, decision.marker);
+      }
+      if (decision.kind === 'recovered-completed-child') {
+        recoveredStableIds.push(decision.child.metadata.stableId);
+        executionResults.push({
+          child: decision.child,
+          branchName: decision.branchName,
+          worktreePath: decision.worktreePath,
+          promptPath: decision.promptPath,
+          reportPath: decision.reportPath,
+          logPath: decision.logPath,
+          changedFiles: decision.changedFiles,
+          validation: decision.validation,
+          artifacts: [],
+          commits: [],
+          skippedChecks: decision.skippedChecks,
+          residualRisks: decision.residualRisks,
+          durableRunSummary: decision.durableRunSummary,
+          recovered: true,
+        });
+      } else if (decision.kind === 'resume-child-rework') {
+        resumableBlockedStableIds.push(decision.child.metadata.stableId);
+        childRecoveryByStableId.set(decision.child.metadata.stableId, decision);
+      }
+    }
+    const batches = collectExecutableChildBatches(childNodes, config, recoveredStableIds, resumableBlockedStableIds);
     if (!batches.ok) {
       return finishPlanBlocked(issueAdapter, config, events, base, batches.errors, childIssues);
     }
@@ -360,6 +472,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         acceptanceProofWorkflowPrompt,
         now,
         events,
+        recovery: childRecoveryByStableId.get(child.metadata.stableId),
       })));
       const failures: Array<{
         child?: AutonomousChildNode;
@@ -447,7 +560,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       }
     }
 
-    const finalValidation = await runConfiguredChecks(config, worktreePath, shellExecutor, []);
+    const finalValidation = await runConfiguredChecks(config, worktreePath, shellExecutor, [], { phase: 'parent-integration' });
     const failedFinalValidation = finalValidation.filter((line) => line.status === 'failed');
     if (failedFinalValidation.length > 0) {
       await blockCompletedChildren(
@@ -528,7 +641,7 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
     if (pullRequest) {
       throw new Error(`Issue-tree execution failed after draft PR creation (${pullRequest.url}); not marking parent blocked: ${message}`);
     }
-    if (store && executionResults.length > 0) {
+    if (executionResults.length > 0) {
       await blockCompletedChildren(
         issueAdapter,
         config,
@@ -617,6 +730,7 @@ async function executeChild(input: {
   acceptanceProofWorkflowPrompt: string;
   now: Date;
   events: RunnerLifecycleEventStore;
+  recovery?: Extract<PlanAutoChildRecoveryDecision, { kind: 'resume-child-rework' }>;
 }): Promise<ChildExecutionResult> {
   const childIssueNumber = input.child.issue.number;
   const branchName = `codex/tree-${input.parentIssue.number}-issue-${childIssueNumber}`;
@@ -628,26 +742,39 @@ async function executeChild(input: {
   let logPath = '';
   let snapshotPath = '';
 
-  await input.git.createIssueWorktree({
-    targetRoot: input.targetRoot,
-    workspacePath: worktreePath,
-    branchName,
-    baseBranch: input.parentBranchName,
-  });
-  await input.issueAdapter.addLabels(childIssueNumber, [input.config.github.labels.running.name]);
-  await input.issueAdapter.postComment(
-    childIssueNumber,
-    `codex-orchestrator: claimed #${childIssueNumber} for tree-child autonomous work under #${input.parentIssue.number} at ${input.now.toISOString()}.`,
-  );
+  if (input.recovery) {
+    await input.git.ensureIssueWorktree({
+      targetRoot: input.targetRoot,
+      workspacePath: worktreePath,
+      branchName,
+      baseBranch: input.parentBranchName,
+      allowResume: true,
+    });
+    await input.issueAdapter.removeLabels(childIssueNumber, [input.config.github.labels.blocked.name]);
+    await input.issueAdapter.addLabels(childIssueNumber, [input.config.github.labels.running.name]);
+  } else {
+    await input.git.createIssueWorktree({
+      targetRoot: input.targetRoot,
+      workspacePath: worktreePath,
+      branchName,
+      baseBranch: input.parentBranchName,
+    });
+    await input.issueAdapter.addLabels(childIssueNumber, [input.config.github.labels.running.name]);
+    await input.issueAdapter.postComment(
+      childIssueNumber,
+      `codex-orchestrator: claimed #${childIssueNumber} for tree-child autonomous work under #${input.parentIssue.number} at ${input.now.toISOString()}.`,
+    );
+  }
 
   let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
-  let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined;
+  let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined = input.recovery?.rework;
   const reworkAttempts: ReworkAttemptEvidence[] = [];
   const maxReworkAttempts = Math.max(
     input.config.loopPolicy.rework.maxAttempts,
     input.config.reviewGates.acceptanceProof.maxIterations - 1,
   );
-  for (let attempt = 0; attempt <= maxReworkAttempts; attempt++) {
+  const firstAttempt = input.recovery ? input.recovery.rework.attempt : 0;
+  for (let attempt = firstAttempt; attempt <= maxReworkAttempts; attempt++) {
     const attemptNow = new Date(input.now.getTime() + attempt);
     sessionId = `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`;
     promptPath = sessionPromptPath({
@@ -1092,6 +1219,10 @@ async function markCompletedChildrenReviewReady(
   childResults: ChildExecutionResult[],
 ): Promise<void> {
   for (const childResult of childResults) {
+    if (childResult.recovered) {
+      await store.removeRun(childResult.child.issue.number);
+      continue;
+    }
     await issueAdapter.removeLabels(childResult.child.issue.number, [config.github.labels.running.name]);
     await issueAdapter.addLabels(childResult.child.issue.number, [config.github.labels.review.name]);
     await issueAdapter.postComment(
@@ -1112,6 +1243,9 @@ async function blockCompletedChildren(
   parentWorktreePath: string,
 ): Promise<void> {
   for (const result of childResults) {
+    if (result.recovered) {
+      continue;
+    }
     await issueAdapter.removeLabels(result.child.issue.number, [config.github.labels.running.name]);
     await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
     await issueAdapter.postComment(
@@ -1139,16 +1273,21 @@ async function finishPlanBlocked(
   result: PlanBlockedContext,
   reasons: string[],
   mutatedChildren: GitHubIssue[],
+  commentMarker?: string,
 ): Promise<PlanAutoCommandResult> {
-  const reportComment = buildParentBlockedReport({
+  const reportBody = buildParentBlockedReport({
     parentIssueNumber: result.parentIssueNumber,
     reasons,
     logPath: result.logPath,
     mutatedChildren,
   });
+  const reportComment = commentMarker ? `<!-- codex-orchestrator:${commentMarker} -->\n${reportBody}` : reportBody;
   await issueAdapter.removeLabels(result.parentIssueNumber, [config.github.labels.running.name]);
   await issueAdapter.addLabels(result.parentIssueNumber, [config.github.labels.blocked.name]);
-  await issueAdapter.postComment(result.parentIssueNumber, reportComment);
+  const currentIssue = commentMarker ? await issueAdapter.getIssue(result.parentIssueNumber) : undefined;
+  if (!commentMarker || !currentIssue?.comments.some((comment) => comment.body.includes(commentMarker))) {
+    await issueAdapter.postComment(result.parentIssueNumber, reportComment);
+  }
   await safeAppendEvent(events, {
     issueNumber: result.parentIssueNumber,
     mode: 'plan-parent',

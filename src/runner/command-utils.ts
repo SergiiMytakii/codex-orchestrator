@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
-import { validateConfig, type CodexOrchestratorConfig } from '../config/schema.js';
+import { validateConfig, type CheckExecutionPhase, type CodexOrchestratorConfig } from '../config/schema.js';
+import { globMatches } from '../path-policy.js';
 import type { ShellCommandExecutor } from '../process/command.js';
 import {
   applyTargetPackageConfigDefaults,
@@ -10,6 +11,11 @@ import {
 } from '../setup/project-config.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+
+export interface RunConfiguredChecksOptions {
+  phase?: CheckExecutionPhase;
+  changedFiles?: string[];
+}
 
 export async function readRunnerConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
   const content = await readFile(projectConfigPath(targetRoot), 'utf8');
@@ -134,9 +140,11 @@ export async function runConfiguredChecks(
   worktreePath: string,
   shellExecutor: ShellCommandExecutor,
   reportValidation: RunnerValidationLine[],
-  changedFiles: string[] = [],
+  options: RunConfiguredChecksOptions | string[] = {},
 ): Promise<RunnerValidationLine[]> {
   const lines = [...reportValidation];
+  const runOptions = Array.isArray(options) ? { changedFiles: options } : options;
+  const changedFiles = runOptions.changedFiles ?? [];
   const policy = config.checksPolicy ?? {};
   const missingNpmScript = policy.missingNpmScript ?? 'skip';
   const lintBaseline = policy.lintBaseline ?? { mode: 'strict' as const };
@@ -147,6 +155,21 @@ export async function runConfiguredChecks(
   };
 
   for (const [name, command] of Object.entries(config.checks)) {
+    const applicability = configuredCheckApplicability({
+      name,
+      policy,
+      phase: runOptions.phase,
+      changedFiles,
+    });
+    if (!applicability.run) {
+      lines.push({
+        command,
+        status: 'skipped',
+        summary: `${name}: skipped (${applicability.reason})`,
+      });
+      continue;
+    }
+
     const result = await shellExecutor(command, { cwd: worktreePath, env: baseEnv });
     if (result.exitCode === 0) {
       lines.push({ command, status: 'passed', summary: `${name}: passed` });
@@ -195,6 +218,33 @@ export async function runConfiguredChecks(
     });
   }
   return lines;
+}
+
+function configuredCheckApplicability(input: {
+  name: string;
+  policy: NonNullable<CodexOrchestratorConfig['checksPolicy']>;
+  phase?: CheckExecutionPhase;
+  changedFiles: string[];
+}): { run: true } | { run: false; reason: string } {
+  const scope = input.policy.scope?.[input.name];
+  if (!scope) {
+    return { run: true };
+  }
+
+  if (input.phase && scope.phases && !scope.phases.includes(input.phase)) {
+    return { run: false, reason: `not configured for ${input.phase}` };
+  }
+
+  if (input.phase === 'child' && scope.changedPathGlobs && scope.changedPathGlobs.length > 0) {
+    const matchesChangedPath = input.changedFiles.some((path) =>
+      scope.changedPathGlobs?.some((pattern) => globMatches(pattern, path)),
+    );
+    if (!matchesChangedPath) {
+      return { run: false, reason: 'no changed files matched configured scope' };
+    }
+  }
+
+  return { run: true };
 }
 
 function currentProcessEnv(): Record<string, string> {

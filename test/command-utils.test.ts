@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { readRunnerConfig } from '../src/runner/command-utils.js';
+import { readRunnerConfig, runConfiguredChecks } from '../src/runner/command-utils.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { fallbackWorkflows } from './fixtures/config.js';
 
@@ -56,4 +56,39 @@ test('runner config reader backfills package-owned proof command and drops unsup
     allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
   });
   assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
+});
+
+test('configured checks still run during parent integration when scoped to parent phase', async () => {
+  const config = buildProjectConfig({
+    owner: 'SergiiMytakii',
+    repo: 'IntelleReach',
+    prepareLabels: 'report-only',
+    workflows: fallbackWorkflows,
+  });
+  config.checks = { test: 'npm test' };
+  config.checksPolicy = {
+    missingNpmScript: 'skip',
+    scope: {
+      test: { phases: ['parent-integration'] },
+    },
+  };
+
+  const calls: string[] = [];
+  const validation = await runConfiguredChecks(
+    config,
+    '/tmp/worktree',
+    async (command) => {
+      calls.push(command);
+      return { stdout: '', stderr: 'parent test failed', exitCode: 1 };
+    },
+    [],
+    { phase: 'parent-integration' },
+  );
+
+  assert.deepEqual(calls, ['npm test']);
+  assert.deepEqual(validation, [{
+    command: 'npm test',
+    status: 'failed',
+    summary: 'test: parent test failed',
+  }]);
 });

@@ -38,6 +38,8 @@ change:
 If multiple rows apply, use the broader matching profile. If no row applies, use
 `core-release`. Do not use `full` as the default after every implementation; it
 is the expensive release-signoff and broad-regression profile.
+The focused `plan-auto-tree-recovery` scenario mutates the scratch GitHub
+repository and should be run only after explicit approval.
 
 Run focused subsets while developing:
 
@@ -51,6 +53,8 @@ npm run smoke:live -- --scenario acceptance-proof-negative
 npm run smoke:live -- --scenario diagnostics
 npm run smoke:live -- --scenario risk-routing
 npm run smoke:live -- --scenario plan-auto-blocking
+npm run smoke:live -- --scenario tree-child-quality-rework --cleanup
+npm run smoke:live -- --scenario plan-auto-tree-recovery --cleanup
 ```
 
 Run the full live smoke matrix before a release when policy/proof coverage
@@ -108,6 +112,10 @@ alternate scratch repository; do not point routine smoke runs at the source repo
 - `run-plan-auto` - direct `codex-orchestrator run --issue` plan-auto success.
 - `plan-auto-blocking` - blocks malformed graph, planning file mutation, and
   arbitrary existing issue updates before integration publication.
+- `tree-child-quality-rework` - proves bounded rework for a plan-auto child
+  quality-gate failure and focused child validation behavior.
+- `plan-auto-tree-recovery` - focused proof for parent tree recovery, recovered
+  child evidence, and retryable child rework resume in the scratch repository.
 
 ## Smoke contract
 

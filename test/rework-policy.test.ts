@@ -96,6 +96,28 @@ test('acceptance proof blockers use proof iteration budget', () => {
   });
 });
 
+test('failed command summaries stay retryable with configured check blockers', () => {
+  const config = withReworkConfig({ maxAttempts: 1 });
+  const reasons = [
+    'One or more configured checks failed.',
+    'npm test: failed - FAIL src/prediction-markets/prediction-markets.controller.spec.ts\n  thrown: "Exceeded timeout of 5000 ms"',
+  ];
+
+  assert.deepEqual(decideImplementationRework({ reasons, config, attempt: 0 }), {
+    kind: 'retry',
+    attempt: 0,
+    nextAttempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['failed-configured-checks'],
+    reasons,
+    rework: {
+      attempt: 1,
+      blockedReasons: reasons,
+      disableOptionalFigmaMcp: false,
+    },
+  });
+});
+
 test('risk routing policy blockers retry only when configured', () => {
   const reason = 'Risk routing gate requires: scoped review handoff is required.';
 

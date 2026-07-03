@@ -598,6 +598,32 @@ and does not rerun Codex just to finish a handoff. The package live-smoke suite
 is not part of the default recovery gate because it creates or updates real
 GitHub issues and pull requests.
 
+### Plan-Auto Tree Recovery
+
+`agent:plan-auto` has its own tree recovery path because parent branches and
+child branches have different safety contracts than standalone scoped issues.
+Before creating the parent worktree, the runner classifies local tree evidence.
+A parent tree resumes only when runner metadata proves `plan-parent` ownership,
+the issue number, branch, worktree path, session, stale same-host lease, clean
+worktree, and configured base SHA all match. Ambiguous evidence, dirty
+worktrees, foreign hosts, active or unknown processes, missing base evidence,
+or branch drift hard-block with a stable recovery marker and preserve the local
+worktree.
+
+During child scheduling, a closed child can be treated as recovered only when
+the current GitHub child issue still has the child label and parent marker,
+tree-child runner metadata matches the parent, a current durable run summary is
+`review-ready`, and Git proves the child branch is already merged into the
+parent branch. Recovered children satisfy dependency ordering and render as
+recovered evidence in the parent handoff instead of being re-executed.
+
+Blocked children resume only when their tree-child metadata, existing branch and
+worktree, blocked durable summary, and `decideImplementationRework()` all prove
+that the next bounded rework attempt is allowed. The retry reuses the existing
+worktree, starts with the normal automatic rework prompt, and still passes
+through the usual publishability, quality, acceptance-proof, durable-summary,
+and parent integration gates.
+
 ## Prompt and Workflow System
 
 Workflows are configured in `config.json`.

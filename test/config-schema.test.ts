@@ -166,6 +166,46 @@ test('accepts config without scoped issue daemon concurrency for migration compa
   assert.equal(result.ok, true);
 });
 
+test('accepts scoped configured-check policy', () => {
+  const result = validateConfig({
+    ...validConfig,
+    checksPolicy: {
+      ...validConfig.checksPolicy,
+      scope: {
+        test: {
+          phases: ['child', 'parent-integration'],
+          changedPathGlobs: ['src/**', 'test/**'],
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.value.checksPolicy?.scope?.test?.phases, ['child', 'parent-integration']);
+    assert.deepEqual(result.value.checksPolicy?.scope?.test?.changedPathGlobs, ['src/**', 'test/**']);
+  }
+});
+
+test('rejects invalid scoped configured-check phase', () => {
+  const result = validateConfig({
+    ...validConfig,
+    checksPolicy: {
+      ...validConfig.checksPolicy,
+      scope: {
+        test: {
+          phases: ['child', 'release'],
+        },
+      },
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.ok ? [] : result.errors, [
+    'checksPolicy.scope.test.phases must contain only child, parent-integration',
+  ]);
+});
+
 test('rejects invalid explicit base branch config', () => {
   const result = validateConfig({
     ...validConfig,

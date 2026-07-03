@@ -24,6 +24,8 @@ export type RetryableReworkBlocker =
   | 'optional-figma-mcp-failure';
 export type FreshContextReviewMode = 'advisory';
 export type RiskRoutingMode = 'warn' | 'block';
+export const checkExecutionPhaseKeys = ['child', 'parent-integration'] as const;
+export type CheckExecutionPhase = (typeof checkExecutionPhaseKeys)[number];
 export const acceptanceProofStrategies = [
   'auto',
   'visual',
@@ -178,6 +180,10 @@ export interface CodexOrchestratorConfig {
       mode?: 'strict' | 'touched-only';
       touchedFilesCommand?: string;
     };
+    scope?: Record<string, {
+      phases?: CheckExecutionPhase[];
+      changedPathGlobs?: string[];
+    }>;
   };
   reviewGates: {
     acceptanceProof: {
@@ -736,6 +742,38 @@ function validateChecksPolicy(policy: ObjectRecord, errors: string[]): void {
     }
     if ('touchedFilesCommand' in lintBaseline) {
       expectString(lintBaseline, 'checksPolicy.lintBaseline.touchedFilesCommand', errors);
+    }
+  }
+
+  const scope = 'scope' in policy ? asObject(policy.scope) : undefined;
+  if ('scope' in policy && !scope) {
+    errors.push('checksPolicy.scope must be an object');
+    return;
+  }
+  if (scope) {
+    validateChecksPolicyScope(scope, errors);
+  }
+}
+
+function validateChecksPolicyScope(scope: ObjectRecord, errors: string[]): void {
+  for (const [checkName, rawRule] of Object.entries(scope)) {
+    if (checkName.length === 0) {
+      errors.push('checksPolicy.scope must map non-empty check names to objects');
+      continue;
+    }
+    const rule = asObject(rawRule);
+    if (!rule) {
+      errors.push(`checksPolicy.scope.${checkName} must be an object`);
+      continue;
+    }
+    if ('phases' in rule) {
+      const phases = expectOptionalStringArray(rule, `checksPolicy.scope.${checkName}.phases`, errors);
+      if (phases && phases.some((phase) => !checkExecutionPhaseKeys.includes(phase as CheckExecutionPhase))) {
+        errors.push(`checksPolicy.scope.${checkName}.phases must contain only ${checkExecutionPhaseKeys.join(', ')}`);
+      }
+    }
+    if ('changedPathGlobs' in rule) {
+      expectOptionalStringArray(rule, `checksPolicy.scope.${checkName}.changedPathGlobs`, errors);
     }
   }
 }

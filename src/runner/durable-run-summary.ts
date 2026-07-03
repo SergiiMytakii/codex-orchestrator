@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
@@ -39,6 +39,57 @@ export interface ReworkAttemptEvidence {
   reportPath: string;
   logPath: string;
   snapshotPath?: string;
+}
+
+export type DurableRunSummaryReadResult =
+  | { kind: 'valid'; path: string; summary: DurableRunSummary }
+  | { kind: 'missing'; path: string }
+  | { kind: 'invalid'; path: string; reason: string };
+
+export async function readDurableRunSummary(path: string): Promise<DurableRunSummaryReadResult> {
+  let content: string;
+  try {
+    content = await readFile(path, 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return { kind: 'missing', path };
+    }
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    assertDurableRunSummary(parsed);
+    return { kind: 'valid', path, summary: parsed };
+  } catch (error) {
+    return { kind: 'invalid', path, reason: error instanceof Error ? error.message : 'summary is invalid' };
+  }
+}
+
+export async function findDurableRunSummariesForIssue(input: {
+  targetRoot: string;
+  config: CodexOrchestratorConfig;
+  issueNumber: number;
+  sessionId?: string;
+}): Promise<DurableRunSummaryReadResult[]> {
+  const summariesDir = join(input.targetRoot, input.config.runner.stateDir, 'summaries');
+  if (input.sessionId) {
+    return [await readDurableRunSummary(join(summariesDir, `issue-${input.issueNumber}-${input.sessionId}.json`))];
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(summariesDir);
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      return [];
+    }
+    throw error;
+  }
+  const prefix = `issue-${input.issueNumber}-`;
+  const paths = entries
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith('.json'))
+    .sort()
+    .map((entry) => join(summariesDir, entry));
+  return Promise.all(paths.map((path) => readDurableRunSummary(path)));
 }
 
 export async function writeDurableRunSummary(input: {
@@ -148,4 +199,61 @@ function buildConfirmedFacts(input: {
     facts.push(`${input.blockers.length} blocker(s) recorded`);
   }
   return facts;
+}
+
+function assertDurableRunSummary(value: unknown): asserts value is DurableRunSummary {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('durable run summary must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (!Number.isInteger(record.issueNumber)) {
+    throw new Error('durable run summary issueNumber must be an integer');
+  }
+  if (typeof record.sessionId !== 'string' || record.sessionId.length === 0) {
+    throw new Error('durable run summary sessionId must be a non-empty string');
+  }
+  if (record.outcome !== 'review-ready' && record.outcome !== 'blocked' && record.outcome !== 'promotion-requested') {
+    throw new Error('durable run summary outcome is invalid');
+  }
+  assertStringArray(record.changedFiles, 'changedFiles');
+  assertStringArray(record.confirmedFacts, 'confirmedFacts');
+  assertValidation(record.validation);
+  assertStringArray(record.blockers, 'blockers');
+  assertStringArray(record.skippedChecks, 'skippedChecks');
+  assertStringArray(record.residualRisks, 'residualRisks');
+  assertStringArray(record.policySuggestions, 'policySuggestions');
+  if (typeof record.nextAction !== 'string') {
+    throw new Error('durable run summary nextAction must be a string');
+  }
+  if (typeof record.evidence !== 'object' || record.evidence === null || Array.isArray(record.evidence)) {
+    throw new Error('durable run summary evidence must be an object');
+  }
+  const evidence = record.evidence as Record<string, unknown>;
+  if (typeof evidence.logPath !== 'string' || evidence.logPath.length === 0) {
+    throw new Error('durable run summary evidence.logPath must be a non-empty string');
+  }
+  if (typeof evidence.reportPath !== 'string' || evidence.reportPath.length === 0) {
+    throw new Error('durable run summary evidence.reportPath must be a non-empty string');
+  }
+}
+
+function assertStringArray(value: unknown, key: string): asserts value is string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(`durable run summary ${key} must be a string array`);
+  }
+}
+
+function assertValidation(value: unknown): asserts value is RunnerValidationLine[] {
+  if (!Array.isArray(value)) {
+    throw new Error('durable run summary validation must be an array');
+  }
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('durable run summary validation item must be an object');
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.command !== 'string' || !['passed', 'failed', 'skipped'].includes(String(record.status)) || typeof record.summary !== 'string') {
+      throw new Error('durable run summary validation item is malformed');
+    }
+  }
 }
