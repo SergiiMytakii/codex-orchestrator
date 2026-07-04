@@ -458,6 +458,12 @@ test('review creates or reuses only agent:manual self-improvement follow-ups', a
     const result = await runner.review({ preflight: false });
     assert.equal(result.status, 'completed');
     assert.equal(result.created.length, 1);
+    assert.deepEqual(result.created[0], {
+      status: 'created',
+      issueNumber: 88,
+      url: 'https://github.com/SergiiMytakii/codex-orchestrator/issues/88',
+      fingerprint: fingerprintFinding(validFinding),
+    });
     const createCall = exec.calls.find((call) => call.args[0] === 'issue' && call.args[1] === 'create');
     assert.ok(createCall);
     assert.equal(createCall.args.includes('agent:auto'), false);
@@ -496,7 +502,7 @@ test('review skips running and blocked sources and reuses duplicate finding fing
         }) };
       }
       if (args[0] === 'issue' && args[1] === 'list' && args.some((arg) => String(arg).startsWith('finding-fingerprint:'))) {
-        return { code: 0, stdout: JSON.stringify([{ number: 90, title: 'existing' }]) };
+        return { code: 0, stdout: JSON.stringify([{ number: 90, title: 'existing', url: 'https://example.test/90' }]) };
       }
       throw new Error(`unexpected gh call ${args.join(' ')}`);
     },
@@ -509,6 +515,12 @@ test('review skips running and blocked sources and reuses duplicate finding fing
   try {
     const result = await runner.review({ preflight: false });
     assert.equal(result.reused.length, 1);
+    assert.deepEqual(result.reused[0], {
+      status: 'reused',
+      issueNumber: 90,
+      url: 'https://example.test/90',
+      fingerprint: fingerprintFinding(validFinding),
+    });
     assert.equal(exec.calls.filter((call) => call.args[0] === 'issue' && call.args[1] === 'view').length, 1);
     assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
   } finally {

@@ -483,6 +483,41 @@ export function createRunner(options = {}) {
     return Array.isArray(issues) && issues.length > 0 ? issues[0] : null;
   }
 
+  async function publishSelfImprovementIssue({
+    marker,
+    fingerprint,
+    title,
+    body,
+    agentLabel,
+    tmpPrefix = 'self-improvement-issue-',
+  }) {
+    const existing = await searchIssueByMarker(marker);
+    if (existing) {
+      return { status: 'reused', issueNumber: existing.number, url: existing.url, fingerprint };
+    }
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), tmpPrefix));
+    const bodyPath = path.join(tmp, 'body.md');
+    await writeFile(bodyPath, body);
+    const created = await exec('gh', [
+      'issue',
+      'create',
+      '--repo',
+      REPO,
+      '--title',
+      title,
+      '--body-file',
+      bodyPath,
+      '--label',
+      agentLabel,
+      '--label',
+      'self-improvement',
+    ], { cwd });
+    if (created.code !== 0) return { status: 'failed', reason: `issue create failed: ${summarizeOutput(created)}`, fingerprint };
+    const url = created.stdout.trim();
+    return { status: 'created', issueNumber: issueNumberFromUrl(url), url, fingerprint };
+  }
+
   async function discover({ preflight: runPreflight = true } = {}) {
     if (runPreflight) {
       const check = await preflight();
@@ -499,34 +534,26 @@ export function createRunner(options = {}) {
     if (!validation.ok) return { status: 'skipped', reason: validation.reason };
     const candidate = validation.candidates[0];
     const fingerprint = fingerprintCandidate(candidate);
-    const existing = await searchIssueByMarker(`source-candidate-fingerprint:${fingerprint}`);
-    if (existing) {
-      const state = await loadState();
-      await saveState({ ...state, lastDiscovery: { status: 'reused', issueNumber: existing.number, fingerprint, at: now().toISOString() } });
-      return { status: 'reused', issueNumber: existing.number, url: existing.url, fingerprint };
-    }
-    const tmp = await mkdtemp(path.join(os.tmpdir(), 'self-improvement-issue-'));
-    const bodyPath = path.join(tmp, 'body.md');
-    await writeFile(bodyPath, renderDiscoveryIssue(candidate, fingerprint, now().toISOString().slice(0, 10)));
-    const created = await exec('gh', [
-      'issue',
-      'create',
-      '--repo',
-      REPO,
-      '--title',
-      `Self-improvement: ${candidate.title}`,
-      '--body-file',
-      bodyPath,
-      '--label',
-      'agent:auto',
-      '--label',
-      'self-improvement',
-    ], { cwd });
-    if (created.code !== 0) return { status: 'failed', reason: `issue create failed: ${summarizeOutput(created)}` };
-    const issueNumber = issueNumberFromUrl(created.stdout);
+    const publication = await publishSelfImprovementIssue({
+      marker: `source-candidate-fingerprint:${fingerprint}`,
+      fingerprint,
+      title: `Self-improvement: ${candidate.title}`,
+      body: renderDiscoveryIssue(candidate, fingerprint, now().toISOString().slice(0, 10)),
+      agentLabel: 'agent:auto',
+      tmpPrefix: 'self-improvement-issue-',
+    });
+    if (publication.status === 'failed') return { status: 'failed', reason: publication.reason };
     const state = await loadState();
-    await saveState({ ...state, lastDiscovery: { status: 'created', issueNumber, fingerprint, at: now().toISOString() } });
-    return { status: 'created', issueNumber, url: created.stdout.trim(), fingerprint };
+    await saveState({
+      ...state,
+      lastDiscovery: {
+        status: publication.status,
+        issueNumber: publication.issueNumber,
+        fingerprint,
+        at: now().toISOString(),
+      },
+    });
+    return publication;
   }
 
   async function implement({ issue } = {}) {
@@ -609,29 +636,16 @@ export function createRunner(options = {}) {
       if (!validation.ok) continue;
       for (const finding of validation.findings.slice(0, 5)) {
         const fingerprint = fingerprintFinding(finding);
-        const existing = await searchIssueByMarker(`finding-fingerprint:${fingerprint}`);
-        if (existing) {
-          reused.push({ issueNumber: existing.number, fingerprint });
-          continue;
-        }
-        const tmp = await mkdtemp(path.join(os.tmpdir(), 'self-improvement-follow-up-'));
-        const bodyPath = path.join(tmp, 'body.md');
-        await writeFile(bodyPath, renderFollowUpIssue(finding, fingerprint));
-        const result = await exec('gh', [
-          'issue',
-          'create',
-          '--repo',
-          REPO,
-          '--title',
-          `Self-improvement follow-up: ${finding.summary}`,
-          '--body-file',
-          bodyPath,
-          '--label',
-          'agent:manual',
-          '--label',
-          'self-improvement',
-        ], { cwd });
-        if (result.code === 0) created.push({ issueNumber: issueNumberFromUrl(result.stdout), fingerprint });
+        const publication = await publishSelfImprovementIssue({
+          marker: `finding-fingerprint:${fingerprint}`,
+          fingerprint,
+          title: `Self-improvement follow-up: ${finding.summary}`,
+          body: renderFollowUpIssue(finding, fingerprint),
+          agentLabel: 'agent:manual',
+          tmpPrefix: 'self-improvement-follow-up-',
+        });
+        if (publication.status === 'created') created.push(publication);
+        if (publication.status === 'reused') reused.push(publication);
       }
     }
     const state = await loadState();
