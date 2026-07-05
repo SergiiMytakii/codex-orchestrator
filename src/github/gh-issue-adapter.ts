@@ -26,6 +26,14 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
+    return this.listIssuesWithAnyLabel(labels, 'open');
+  }
+
+  public async listClosedIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
+    return this.listIssuesWithAnyLabel(labels, 'closed');
+  }
+
+  private async listIssuesWithAnyLabel(labels: string[], state: 'open' | 'closed'): Promise<GitHubIssue[]> {
     const wanted = new Set(labels);
     const result = await this.executor('gh', [
       'issue',
@@ -33,7 +41,7 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
       '--repo',
       this.repo,
       '--state',
-      'open',
+      state,
       '--limit',
       '1000',
       '--json',

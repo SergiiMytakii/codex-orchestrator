@@ -28,11 +28,12 @@ export function buildBlockedHandoffEvidence(input: {
     : input.publishability.status === 'blocked'
       ? input.publishability.reasons
       : [];
+  const validation = input.publishability.validation ?? [];
   return {
     outcome: 'blocked',
     changedFiles: input.publishability.changedFiles,
-    validation: input.publishability.validation ?? [],
-    skippedChecks: input.publishability.skippedChecks,
+    validation,
+    skippedChecks: reconcileSkippedChecks(input.publishability.skippedChecks, validation),
     residualRisks: [
       ...input.publishability.residualRisks,
       ...(input.freshContextReview?.residualRisks ?? []),
@@ -79,7 +80,7 @@ export function buildReviewReadyHandoffEvidence(input: {
     outcome: 'review-ready',
     changedFiles: input.publishability.changedFiles,
     validation: input.publishability.validation,
-    skippedChecks: input.publishability.skippedChecks,
+    skippedChecks: reconcileSkippedChecks(input.publishability.skippedChecks, input.publishability.validation),
     residualRisks: [
       ...input.publishability.residualRisks,
       ...(input.freshContextReview?.residualRisks ?? []),
@@ -102,9 +103,32 @@ function promotionHandoffEvidence(input: {
     outcome: input.outcome,
     changedFiles: [],
     validation: input.publishability.report.validation,
-    skippedChecks: input.publishability.report.skippedChecks,
+    skippedChecks: reconcileSkippedChecks(input.publishability.report.skippedChecks, input.publishability.report.validation),
     residualRisks: input.publishability.report.residualRisks,
     blockers: [promotion?.reason ?? input.fallbackReason],
     nextAction: input.nextAction,
   };
+}
+
+function reconcileSkippedChecks(skippedChecks: string[], validation: RunnerValidationLine[]): string[] {
+  const passedCommands = validation
+    .filter((line) => line.status === 'passed')
+    .map((line) => line.command.trim())
+    .filter(Boolean);
+
+  return skippedChecks.filter((check) =>
+    !passedCommands.some((command) => skippedCheckContradictsPassedCommand(check, command)),
+  );
+}
+
+function skippedCheckContradictsPassedCommand(check: string, command: string): boolean {
+  const normalizedCheck = normalizeEvidenceText(check);
+  const normalizedCommand = normalizeEvidenceText(command);
+  return normalizedCheck.includes(`${normalizedCommand} not run`)
+    || normalizedCheck.includes(`${normalizedCommand} was not run`)
+    || normalizedCheck.includes(`${normalizedCommand} did not run`);
+}
+
+function normalizeEvidenceText(value: string): string {
+  return value.toLowerCase().replace(/\s+/gu, ' ').trim();
 }

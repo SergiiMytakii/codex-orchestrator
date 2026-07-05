@@ -85,6 +85,25 @@ test('runner handoff decision builds review-ready evidence without publication s
   assert.equal('pullRequest' in evidence, false);
 });
 
+test('runner handoff decision drops skipped checks contradicted by passed runner validation', () => {
+  const publishability = {
+    ...publishReady(),
+    skippedChecks: [
+      'npm test not run; the focused test covered the changed contract.',
+      'Live smoke not run because it mutates real GitHub state.',
+    ],
+  };
+
+  const evidence = buildReviewReadyHandoffEvidence({
+    publishability,
+    nextAction: 'Review the draft pull request before merge.',
+  });
+
+  assert.deepEqual(evidence.skippedChecks, [
+    'Live smoke not run because it mutates real GitHub state.',
+  ]);
+});
+
 function blockedPublishability(input: {
   reasons: string[];
   residualRisks: string[];
