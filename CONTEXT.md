@@ -16,6 +16,10 @@ _Avoid_: agent, worker
 The Codex session that performs local implementation work inside the runner-prepared workspace.
 _Avoid_: runner, publisher
 
+**Agent Attempt**:
+One bounded Agent implementation run inside a runner-prepared worktree, including its prompt, report, log, context snapshot, local runner state, and any runner-scheduled Rework Loop retry.
+_Avoid_: job, worker attempt
+
 **Issue Work Queue**:
 The set of open GitHub Issues whose labels make them visible to the runner.
 _Avoid_: backlog, task list
@@ -101,6 +105,7 @@ _Avoid_: completion, merge
 - A **Runner** chooses one **Eligible Issue** from the **Issue Work Queue** using the **Issue Selection Policy**.
 - A **Loop Policy** contains the **Issue Selection Policy**, **Rework Loop**, **Fresh-Context Review**, **Durable Run Summary**, and **Policy Suggestion** rules.
 - An **Agent** works inside a runner-prepared worktree and must not cross the **Runner-Owned Publication Boundary**.
+- An **Agent Attempt** is created and recorded by the **Runner**, then evaluated through validation, **Acceptance Proof**, and the **Rework Loop** before any **Draft PR Handoff**.
 - A **Review Gate** can block a **Draft PR Handoff**.
 - **Acceptance Proof** is a **Review Gate** when issue policy requires live evidence.
 - An **Adaptive Proof Agent** runs inside **Acceptance Proof** and produces a **Proof Report** plus **Proof Artifacts** for the **Runner** to validate.

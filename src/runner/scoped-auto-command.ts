@@ -1,6 +1,6 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { CodexCommandAdapter, type CodexCommandRunInput, type CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
@@ -26,10 +26,8 @@ import {
 import { writeDurableRunSummary, type ReworkAttemptEvidence } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
 import { claimIssue, discoverIssueWork } from './issue-state-machine.js';
-import { writeContextSnapshot } from './context-snapshot.js';
 import type { ScopedCompletionReport } from './completion-report.js';
 import {
-  runImplementationPublishabilityCheck,
   type ImplementationPublishabilityResult,
   type LocalExecutionPhaseExecutor,
 } from './local-execution-session.js';
@@ -38,18 +36,14 @@ import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-e
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import {
   buildScopedImplementationPrompt,
-  sessionPromptPath,
-  sessionReportPath,
-  writeDurablePrompt,
 } from './prompt.js';
-import { decideImplementationRework } from './rework-policy.js';
+import { runAgentAttemptLoop } from './agent-attempt.js';
 import {
   buildBlockedHandoffEvidence,
   buildPromotionRequestedHandoffEvidence,
   buildReviewReadyHandoffEvidence,
 } from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
-import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -185,194 +179,76 @@ async function runScopedAutoCommandInternal(
       config.loopPolicy.rework.maxAttempts,
       config.reviewGates.acceptanceProof.maxIterations - 1,
     );
-    let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined = recovery?.initialRework;
-    let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
-    const reworkAttempts: ReworkAttemptEvidence[] = [];
-
-    for (let attempt = recovery?.startAttempt ?? 0; attempt <= maxReworkAttempts; attempt++) {
-      const attemptNow = attempt === 0 ? now : new Date(now.getTime() + attempt);
-      sessionId = `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`;
-      promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-      reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-      logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-      const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
-      await mkdir(dirname(reportPath), { recursive: true });
-      await mkdir(isolatedHomePath, { recursive: true });
-      const promptText = buildScopedImplementationPrompt({
+    const attemptLoop = await runAgentAttemptLoop({
+      targetRoot,
+      config,
+      issue,
+      issueNumber: options.issueNumber,
+      mode: 'scoped-issue',
+      phase: 'scoped-issue',
+      branchName,
+      worktreePath,
+      baseBranch: resolvedBase.prBaseBranch,
+      base: resolvedBase,
+      createdAt: now,
+      firstAttempt: recovery?.startAttempt,
+      initialRework: recovery?.initialRework,
+      buildSessionId: ({ attempt, attemptNow }) =>
+        `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`,
+      buildPrompt: ({ promptPath: attemptPromptPath, reportPath: attemptReportPath, rework }) => buildScopedImplementationPrompt({
         issue,
         config,
         workflowPromptText,
-        promptPath,
-        reportPath,
+        promptPath: attemptPromptPath,
+        reportPath: attemptReportPath,
         branchName,
         worktreePath,
         rework,
-      });
-      await writeDurablePrompt({
+      }),
+      buildSnapshotDecision: () => 'has configured auto label and no blocking state labels',
+      startedSummary: () => 'Starting scoped Codex implementation session.',
+      reworkScheduledSummary: ({ nextAttempt }) => `Runner scheduled scoped rework attempt #${nextAttempt}.`,
+      reworkEventPhase: 'quality-review',
+      missingPublishabilityMessage: 'Runner internal error: missing publishability result',
+      codexAdapter,
+      codexTimeoutMs,
+      git,
+      shellExecutor,
+      commitMessage: `Codex: implement issue #${options.issueNumber}`,
+      events,
+      localPhases: options.localPhases,
+      localPhaseExecutor: options.localPhaseExecutor,
+      acceptanceProof: {
         targetRoot,
-        config,
-        issueNumber: options.issueNumber,
-        sessionId,
-        promptText,
-      });
-      const snapshot = await writeContextSnapshot({
-        targetRoot,
-        config,
-        issue,
-        mode: 'scoped-issue',
-        phase: 'scoped-issue',
-        decision: 'has configured auto label and no blocking state labels',
-        sessionId,
-        worktreePath,
-        promptPath,
-        reportPath,
-        logPath,
-        branchName,
-        baseBranch: resolvedBase.prBaseBranch,
-        base: resolvedBase,
-        createdAt: attemptNow,
-      });
-      snapshotPath = snapshot.path;
-      await store.upsertRun({
+        workflowPromptText: acceptanceProofWorkflowText,
+        codexAdapter,
+      },
+      onAcceptanceProofAttemptEvent: ({ sessionId: attemptSessionId, event }) => appendAcceptanceProofEvent({
+        events,
         issueNumber: options.issueNumber,
         mode: 'scoped-issue',
-        workspacePath: worktreePath,
-        sessionId,
-        branchName,
-        promptPath,
-        reportPath,
-        logPath,
-        retryCount: attempt,
-        createdAt: now.toISOString(),
-        updatedAt: attemptNow.toISOString(),
+        sessionId: attemptSessionId,
+        event,
+      }),
+      runMetadata: ({ attemptNow }) => ({
         ownerPid: process.pid,
         host: hostname(),
         leaseUpdatedAt: attemptNow.toISOString(),
-        attemptStartedAt: attemptNow.toISOString(),
         baseSha: resolvedBase.sha,
-        snapshotPath,
-      });
-      await safeAppendEvent(events, {
-        timestamp: attemptNow,
-        issueNumber: options.issueNumber,
-        mode: 'scoped-issue',
-        sessionId,
-        phase: 'scoped-issue',
-        status: 'started',
-        summary: 'Starting scoped Codex implementation session.',
-        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-      });
-
-      const beforeHead = await git.getHead(worktreePath);
-      let codexResult: CodexCommandRunResult;
-      try {
-        codexResult = await codexAdapter.run({
-          targetRoot,
-          config,
-          worktreePath,
-          promptPath,
-          promptText,
-          reportPath,
-          isolatedHomePath,
-          issueNumber: options.issueNumber,
-          sessionId,
-          branchName,
-          phase: 'scoped-issue',
-          timeoutMs: codexTimeoutMs,
-          logPath,
-          disableOptionalFigmaMcp: rework?.disableOptionalFigmaMcp,
-        });
-      } finally {
-        await cleanupSessionCodexHome(isolatedHomePath);
-      }
-      const afterHead = await git.getHead(worktreePath);
-      publishability = await runImplementationPublishabilityCheck({
-        config,
-        issue,
-        targetRoot,
-        worktreePath,
-        reportPath,
-        beforeHead,
-        afterHead,
-        codexResult,
-        git,
-        shellExecutor,
-        commitMessage: `Codex: implement issue #${options.issueNumber}`,
-        localPhases: options.localPhases,
-        localPhaseExecutor: options.localPhaseExecutor,
-        acceptanceProof: {
-          targetRoot,
-          sessionId,
-          branchName,
-          workflowPromptText: acceptanceProofWorkflowText,
-          codexAdapter,
-          onAttemptEvent: (event) => appendAcceptanceProofEvent({
-            events,
-            issueNumber: options.issueNumber,
-            mode: 'scoped-issue',
-            sessionId,
-            event,
-          }),
-        },
-      });
-      await safeAppendEvent(events, {
-        issueNumber: options.issueNumber,
-        mode: 'scoped-issue',
-        sessionId,
+      }),
+      publishabilityEvent: ({ publishability }) => ({
         phase: 'quality-review',
         status: publishability.status === 'blocked' ? 'blocked' : 'completed',
         summary: `Runner publishability gate returned ${publishability.status}.`,
-        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-      });
-
-      if (publishability.status === 'blocked') {
-        const reworkDecision = decideImplementationRework({
-          reasons: publishability.reasons,
-          config,
-          attempt,
-        });
-        reworkAttempts.push({
-          attempt,
-          maxAttempts: 'maxAttempts' in reworkDecision ? reworkDecision.maxAttempts : undefined,
-          decisionKind: reworkDecision.kind,
-          reasons: publishability.reasons,
-          promptPath,
-          reportPath,
-          logPath,
-          snapshotPath,
-        });
-        if (reworkDecision.kind === 'retry') {
-          rework = reworkDecision.rework;
-          await safeAppendEvent(events, {
-            timestamp: attemptNow,
-            issueNumber: options.issueNumber,
-            mode: 'scoped-issue',
-            sessionId,
-            phase: 'quality-review',
-            status: 'needs-rework',
-            summary: `Runner scheduled scoped rework attempt #${reworkDecision.nextAttempt}.`,
-            artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-          });
-          continue;
-        }
-        await safeAppendEvent(events, {
-          timestamp: attemptNow,
-          issueNumber: options.issueNumber,
-          mode: 'scoped-issue',
-          sessionId,
-          phase: 'quality-review',
-          status: 'blocked',
-          summary: `Runner rework decision: ${reworkDecision.kind}.`,
-          artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-        });
-      }
-
-      break;
-    }
-
-    if (!publishability) {
-      throw new Error('Runner internal error: missing publishability result');
-    }
+      }),
+    });
+    const publishability = attemptLoop.publishability;
+    sessionId = attemptLoop.sessionId;
+    promptPath = attemptLoop.promptPath;
+    reportPath = attemptLoop.reportPath;
+    logPath = attemptLoop.logPath;
+    snapshotPath = attemptLoop.snapshotPath;
+    const reworkAttempts = attemptLoop.reworkAttempts;
 
     if (publishability.status === 'promotion-requested') {
       const evidence = buildPromotionRequestedHandoffEvidence({

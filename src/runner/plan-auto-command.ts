@@ -42,7 +42,6 @@ import {
   topologicalPlanNodes,
   type AutonomousChildNode,
 } from './issue-tree.js';
-import { runImplementationPublishabilityCheck } from './local-execution-session.js';
 import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import { RunnerStateStore } from './local-state.js';
@@ -59,7 +58,7 @@ import {
   sessionReportPath,
   writeDurablePrompt,
 } from './prompt.js';
-import { decideImplementationRework } from './rework-policy.js';
+import { runAgentAttemptLoop } from './agent-attempt.js';
 import type { ProcessProbeResult } from './scoped-recovery.js';
 import { evaluateParentRiskRoutingGate } from './review-gates.js';
 import {
@@ -735,7 +734,6 @@ async function executeChild(input: {
   const childIssueNumber = input.child.issue.number;
   const branchName = `codex/tree-${input.parentIssue.number}-issue-${childIssueNumber}`;
   const worktreePath = join(input.targetRoot, input.config.runner.workspaceRoot, `tree-${input.parentIssue.number}-issue-${childIssueNumber}`);
-  const store = new RunnerStateStore(input.targetRoot, input.config);
   let sessionId = '';
   let promptPath = '';
   let reportPath = '';
@@ -766,208 +764,70 @@ async function executeChild(input: {
     );
   }
 
-  let publishability: Awaited<ReturnType<typeof runImplementationPublishabilityCheck>> | undefined;
-  let rework: { attempt: number; blockedReasons: string[]; disableOptionalFigmaMcp?: boolean } | undefined = input.recovery?.rework;
-  const reworkAttempts: ReworkAttemptEvidence[] = [];
-  const maxReworkAttempts = Math.max(
-    input.config.loopPolicy.rework.maxAttempts,
-    input.config.reviewGates.acceptanceProof.maxIterations - 1,
-  );
-  const firstAttempt = input.recovery ? input.recovery.rework.attempt : 0;
-  for (let attempt = firstAttempt; attempt <= maxReworkAttempts; attempt++) {
-    const attemptNow = new Date(input.now.getTime() + attempt);
-    sessionId = `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`;
-    promptPath = sessionPromptPath({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issueNumber: childIssueNumber,
-      sessionId,
-    });
-    reportPath = sessionReportPath({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issueNumber: childIssueNumber,
-      sessionId,
-    });
-    logPath = sessionLogPath({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issueNumber: childIssueNumber,
-      sessionId,
-    });
-    const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
-    await mkdir(dirname(reportPath), { recursive: true });
-    await mkdir(isolatedHomePath, { recursive: true });
-    const promptText = buildIssueTreeChildPrompt({
-      parentIssue: input.parentIssue,
-      childIssue: input.child.issue,
-      config: input.config,
-      workflowPromptText: input.issueTreeWorkflowPrompt,
-      childMetadata: input.child.metadata,
-      dependencyIssues: input.dependencyIssues,
-      promptPath,
-      reportPath,
-      branchName,
-      worktreePath,
-    });
-    const attemptPromptText = rework
-      ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\n${rework.disableOptionalFigmaMcp ? 'Optional Figma MCP failed in the previous attempt. Continue without optional Figma MCP access unless the issue explicitly requires Figma.\n' : ''}Address the blockers, then produce a fresh completion report JSON for the runner.`
-      : promptText;
-    await writeDurablePrompt({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issueNumber: childIssueNumber,
-      sessionId,
-      promptText: attemptPromptText,
-    });
-    const snapshot = await writeContextSnapshot({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issue: input.child.issue,
-      mode: 'tree-child',
-      phase: 'tree-child',
-      decision: rework
-        ? `tree-child rework attempt #${rework.attempt} under parent #${input.parentIssue.number}`
-        : `child issue execution under parent #${input.parentIssue.number}`,
-      sessionId,
-      worktreePath,
-      promptPath,
-      reportPath,
-      logPath,
-      branchName,
-      baseBranch: input.parentBranchName,
-      parentIssueNumber: input.parentIssue.number,
-      blockedBy: [],
-      createdAt: attemptNow,
-    });
-    snapshotPath = snapshot.path;
-    await store.upsertRun({
-      issueNumber: childIssueNumber,
-      parentIssueNumber: input.parentIssue.number,
-      mode: 'tree-child',
-      workspacePath: worktreePath,
-      sessionId,
-      branchName,
-      promptPath,
-      reportPath,
-      logPath,
-      retryCount: attempt,
-      createdAt: input.now.toISOString(),
-      updatedAt: attemptNow.toISOString(),
-      attemptStartedAt: attemptNow.toISOString(),
-      snapshotPath,
-    });
-    await safeAppendEvent(input.events, {
-      timestamp: attemptNow,
-      issueNumber: childIssueNumber,
-      parentIssueNumber: input.parentIssue.number,
-      mode: 'tree-child',
-      sessionId,
-      phase: 'tree-child',
-      status: 'started',
-      summary: rework ? `Starting tree-child rework attempt #${rework.attempt}.` : 'Starting tree-child Codex session.',
-      artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-    });
-    const beforeHead = await input.git.getHead(worktreePath);
-    let codexResult: CodexCommandRunResult;
-    try {
-      codexResult = await input.codexAdapter.run({
-        targetRoot: input.targetRoot,
+  const attemptLoop = await runAgentAttemptLoop({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issue: input.child.issue,
+    issueNumber: childIssueNumber,
+    parentIssueNumber: input.parentIssue.number,
+    mode: 'tree-child',
+    phase: 'tree-child',
+    branchName,
+    worktreePath,
+    baseBranch: input.parentBranchName,
+    createdAt: input.now,
+    firstAttempt: input.recovery ? input.recovery.rework.attempt : 0,
+    initialRework: input.recovery?.rework,
+    buildSessionId: ({ attempt, attemptNow }) =>
+      `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`,
+    buildPrompt: ({ promptPath: attemptPromptPath, reportPath: attemptReportPath, rework }) => {
+      const promptText = buildIssueTreeChildPrompt({
+        parentIssue: input.parentIssue,
+        childIssue: input.child.issue,
         config: input.config,
+        workflowPromptText: input.issueTreeWorkflowPrompt,
+        childMetadata: input.child.metadata,
+        dependencyIssues: input.dependencyIssues,
+        promptPath: attemptPromptPath,
+        reportPath: attemptReportPath,
+        branchName,
         worktreePath,
-        promptPath,
-        promptText: attemptPromptText,
-        reportPath,
-        isolatedHomePath,
-        issueNumber: childIssueNumber,
-        sessionId,
-        branchName,
-        phase: 'tree-child',
-        logPath,
-        disableOptionalFigmaMcp: rework?.disableOptionalFigmaMcp,
       });
-    } finally {
-      await cleanupSessionCodexHome(isolatedHomePath);
-    }
-    const afterHead = await input.git.getHead(worktreePath);
-    publishability = await runImplementationPublishabilityCheck({
-      config: input.config,
-      issue: input.child.issue,
+      return rework
+        ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\n${rework.disableOptionalFigmaMcp ? 'Optional Figma MCP failed in the previous attempt. Continue without optional Figma MCP access unless the issue explicitly requires Figma.\n' : ''}Address the blockers, then produce a fresh completion report JSON for the runner.`
+        : promptText;
+    },
+    buildSnapshotDecision: ({ rework }) => rework
+      ? `tree-child rework attempt #${rework.attempt} under parent #${input.parentIssue.number}`
+      : `child issue execution under parent #${input.parentIssue.number}`,
+    startedSummary: ({ rework }) => rework ? `Starting tree-child rework attempt #${rework.attempt}.` : 'Starting tree-child Codex session.',
+    reworkScheduledSummary: ({ nextAttempt }) => `Runner scheduled tree-child rework attempt #${nextAttempt}.`,
+    missingPublishabilityMessage: 'Runner internal error: missing child publishability result',
+    codexAdapter: input.codexAdapter,
+    git: input.git,
+    shellExecutor: input.shellExecutor,
+    commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
+    events: input.events,
+    acceptanceProof: {
       targetRoot: input.targetRoot,
-      worktreePath,
-      reportPath,
-      beforeHead,
-      afterHead,
-      codexResult,
-      git: input.git,
-      shellExecutor: input.shellExecutor,
-      commitMessage: `Codex: implement issue #${childIssueNumber} for parent #${input.parentIssue.number}`,
-      acceptanceProof: {
-        targetRoot: input.targetRoot,
-        sessionId,
-        branchName,
-        workflowPromptText: input.acceptanceProofWorkflowPrompt,
-        codexAdapter: input.codexAdapter,
-        onAttemptEvent: (event) => appendAcceptanceProofEvent({
-          events: input.events,
-          issueNumber: childIssueNumber,
-          parentIssueNumber: input.parentIssue.number,
-          sessionId,
-          event,
-        }),
-      },
-    });
-
-    if (publishability.status === 'blocked') {
-      const reworkDecision = decideImplementationRework({
-        reasons: publishability.reasons,
-        config: input.config,
-        attempt,
-      });
-      reworkAttempts.push({
-        attempt,
-        maxAttempts: 'maxAttempts' in reworkDecision ? reworkDecision.maxAttempts : undefined,
-        decisionKind: reworkDecision.kind,
-        reasons: publishability.reasons,
-        promptPath,
-        reportPath,
-        logPath,
-        snapshotPath,
-      });
-      if (reworkDecision.kind === 'retry') {
-        rework = reworkDecision.rework;
-        await safeAppendEvent(input.events, {
-          timestamp: attemptNow,
-          issueNumber: childIssueNumber,
-          parentIssueNumber: input.parentIssue.number,
-          mode: 'tree-child',
-          sessionId,
-          phase: 'tree-child',
-          status: 'needs-rework',
-          summary: `Runner scheduled tree-child rework attempt #${reworkDecision.nextAttempt}.`,
-          artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-        });
-        await mkdir(isolatedHomePath, { recursive: true });
-        continue;
-      }
-      await safeAppendEvent(input.events, {
-        timestamp: attemptNow,
-        issueNumber: childIssueNumber,
-        parentIssueNumber: input.parentIssue.number,
-        mode: 'tree-child',
-        sessionId,
-        phase: 'tree-child',
-        status: 'blocked',
-        summary: `Runner rework decision: ${reworkDecision.kind}.`,
-        artifacts: sessionArtifacts(promptPath, reportPath, logPath, snapshotPath),
-      });
-    }
-    break;
-  }
-
-  if (!publishability) {
-    throw new Error('Runner internal error: missing child publishability result');
-  }
+      workflowPromptText: input.acceptanceProofWorkflowPrompt,
+      codexAdapter: input.codexAdapter,
+    },
+    onAcceptanceProofAttemptEvent: ({ sessionId: attemptSessionId, event }) => appendAcceptanceProofEvent({
+      events: input.events,
+      issueNumber: childIssueNumber,
+      parentIssueNumber: input.parentIssue.number,
+      sessionId: attemptSessionId,
+      event,
+    }),
+  });
+  const publishability = attemptLoop.publishability;
+  sessionId = attemptLoop.sessionId;
+  promptPath = attemptLoop.promptPath;
+  reportPath = attemptLoop.reportPath;
+  logPath = attemptLoop.logPath;
+  snapshotPath = attemptLoop.snapshotPath;
+  const reworkAttempts = attemptLoop.reworkAttempts;
 
   if (publishability.status === 'promotion-requested') {
     const promotion = publishability.report.promotion;
