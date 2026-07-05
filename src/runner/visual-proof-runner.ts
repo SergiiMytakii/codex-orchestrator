@@ -17,6 +17,7 @@ import {
   readAcceptanceProofReport,
   type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof.js';
+import type { AcceptanceProofAdapterResult } from './acceptance-proof-loop.js';
 import { browserProofRuntimeEnv } from './browser-proof-contract.js';
 import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
 
@@ -46,11 +47,13 @@ export interface RunnerVisualProofResult {
   proofArtifactDir?: string;
 }
 
-export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promise<RunnerVisualProofResult> {
+export async function runRunnerVisualProofAdapter(
+  input: RunnerVisualProofInput,
+): Promise<AcceptanceProofAdapterResult | undefined> {
   const policy = runnerVisualProofPolicy(input.config);
   const commandTemplate = policy.commandTemplate;
   if (!commandTemplate || !shouldApplyVisualProofGate(input)) {
-    return { validation: [], artifacts: [] };
+    return undefined;
   }
 
   const proofDir = join(
@@ -113,6 +116,30 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     path,
     description: `runner visual proof ${path.split('/').at(-1) ?? path}`,
   }));
+  return {
+    adapterKind: 'command',
+    command,
+    exitCode: result.exitCode,
+    outputSummary: result.stderr || result.stdout || 'no output',
+    reportPath: proofReportPath,
+    artifactDir: proofDir,
+    artifactPaths: artifacts.flatMap((artifact) => artifact.path ? [artifact.path] : []),
+    preliminaryArtifacts: artifacts,
+    residualRisks: [],
+  };
+}
+
+export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promise<RunnerVisualProofResult> {
+  const policy = runnerVisualProofPolicy(input.config);
+  const adapterResult = await runRunnerVisualProofAdapter(input);
+  if (!adapterResult) {
+    return { validation: [], artifacts: [] };
+  }
+
+  const command = adapterResult.command;
+  const proofReportPath = adapterResult.reportPath;
+  const proofDir = adapterResult.artifactDir;
+  const artifacts = adapterResult.preliminaryArtifacts;
   const proofReport = await readAcceptanceProofReport(proofReportPath);
   if (proofReport.kind === 'invalid') {
     const outcome = buildBlockedAcceptanceProofOutcome({
@@ -123,8 +150,8 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       validationSummary: proofReport.message,
       blockers: [`Acceptance proof blocked: ${proofReport.message}`],
       residualRisks: [],
-      commandExitCode: result.exitCode,
-      commandOutputSummary: `command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+      commandExitCode: adapterResult.exitCode,
+      commandOutputSummary: `command exited ${adapterResult.exitCode}: ${adapterResult.outputSummary}`,
     });
     return {
       validation: outcome.validation,
@@ -141,8 +168,8 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
       report: proofReport.report,
       proofPhaseChangedFiles: [],
       artifactExists: (path) => existsSync(join(input.worktreePath, path)),
-      commandExitCode: result.exitCode,
-      commandOutputSummary: result.stderr || result.stdout || 'no output',
+      commandExitCode: adapterResult.exitCode,
+      commandOutputSummary: adapterResult.outputSummary,
       reportPath: proofReportPath,
       artifactDir: proofDir,
       passedSummary: (report) => `runner acceptance proof passed: ${report.criteria.length} criterion/criteria mapped to artifacts.`,
@@ -157,8 +184,8 @@ export async function runRunnerVisualProof(input: RunnerVisualProofInput): Promi
     };
   }
 
-  if (result.exitCode !== 0) {
-    const summary = `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`;
+  if (adapterResult.exitCode !== 0) {
+    const summary = `${policy.blockOnMissingProof ? 'runner acceptance proof failed' : 'runner visual proof warning'}: ${adapterResult.outputSummary || `exit ${adapterResult.exitCode}`}`;
     const outcome = policy.blockOnMissingProof
       ? buildBlockedAcceptanceProofOutcome({
         command,

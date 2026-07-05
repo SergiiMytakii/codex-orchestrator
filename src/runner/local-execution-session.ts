@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { GitWorktreeManager, SessionCommitInfo } from '../git/worktree.js';
@@ -6,11 +9,6 @@ import type { ShellCommandExecutor } from '../process/command.js';
 import { mergeArtifacts, runConfiguredChecks } from './command-utils.js';
 import { readScopedCompletionReport, type ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
-import {
-  buildForbiddenAcceptanceProofDiffEvidence,
-  classifyAcceptanceProofDiff,
-  createAcceptanceProofDiffCapture,
-} from './acceptance-proof.js';
 import { evaluateReviewGates, shouldApplyVisualProofGate } from './review-gates.js';
 import {
   validateChangedPaths,
@@ -18,12 +16,12 @@ import {
   validateNoAgentOwnedGitPublication,
 } from './safety.js';
 import { evaluateScopeIsolation } from './scope-isolation-policy.js';
-import { runRunnerVisualProof } from './visual-proof-runner.js';
+import { runRunnerVisualProofAdapter } from './visual-proof-runner.js';
 import {
-  runAcceptanceProofAttempt,
-  shouldRunAcceptanceProofAttempt,
+  runAcceptanceProofAdapter,
   type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof-runner.js';
+import { runAcceptanceProofLoopAttempt } from './acceptance-proof-loop.js';
 import {
   MISSING_COMPLETION_REPORT_REASON,
   OPTIONAL_FIGMA_MCP_FAILURE_REASON,
@@ -271,141 +269,81 @@ export async function runImplementationPublishabilityCheck(
   }
   const residualRisks = [...report.residualRisks];
   let acceptanceProofAttempt: AcceptanceProofAttemptEvidence | undefined;
-  const adaptiveProofConfigured = input.acceptanceProof
-    && input.targetRoot
-    && (
-      Boolean(input.config.codex.profiles?.['acceptance-proof'])
-      || !input.config.reviewGates.acceptanceProof.runnerValidationCommand?.trim()
-    )
-    && shouldRunAcceptanceProofAttempt({
+  let proofChangeSet: typeof changeSet | undefined;
+  const proofOutcome = await runAcceptanceProofLoopAttempt({
+    config: input.config,
+    issue: input.issue,
+    worktreePath: input.worktreePath,
+    beforeHead: input.beforeHead,
+    initialChangedFiles: changedFiles,
+    adaptiveAdapterAvailable: Boolean(input.acceptanceProof),
+    executeAdaptiveProof: input.acceptanceProof
+      ? async () => {
+          await input.acceptanceProof?.onAttemptEvent?.({ status: 'started' });
+          return runAcceptanceProofAdapter({
+            config: input.config,
+            issue: input.issue,
+            targetRoot: input.acceptanceProof!.targetRoot,
+            worktreePath: input.worktreePath,
+            changedFiles,
+            implementationReport: report,
+            codexAdapter: input.acceptanceProof!.codexAdapter,
+            sessionId: input.acceptanceProof!.sessionId,
+            branchName: input.acceptanceProof!.branchName,
+            workflowPromptText: input.acceptanceProof!.workflowPromptText,
+          });
+        }
+      : undefined,
+    executeCommandProof: async () => {
+      const result = await runRunnerVisualProofAdapter({
+        config: input.config,
+        issue: input.issue,
+        issueNumber: input.issue.number,
+        targetRoot: input.targetRoot,
+        worktreePath: input.worktreePath,
+        changedFiles,
+        report,
+        shellExecutor: input.shellExecutor,
+      });
+      if (!result) {
+        throw new Error('Acceptance proof planning selected command proof, but runner visual proof adapter did not execute.');
+      }
+      return result;
+    },
+    collectChangeSet: async ({ worktreePath, baseHead }) => {
+      proofChangeSet = await input.git.collectSessionChangeSet({ worktreePath, baseHead });
+      return proofChangeSet;
+    },
+    evaluateScope: ({ changedFiles: finalChangedFiles }) => evaluateScopeIsolation({
       config: input.config,
       issue: input.issue,
-      changedFiles,
-    });
-
-  if (adaptiveProofConfigured && input.acceptanceProof) {
-    await input.acceptanceProof.onAttemptEvent?.({ status: 'started' });
-    const proofResult = await runAcceptanceProofAttempt({
-      config: input.config,
-      issue: input.issue,
-      targetRoot: input.acceptanceProof.targetRoot,
-      worktreePath: input.worktreePath,
-      changedFiles,
-      implementationReport: report,
-      codexAdapter: input.acceptanceProof.codexAdapter,
-      git: input.git,
-      beforeHead: input.beforeHead,
-      sessionId: input.acceptanceProof.sessionId,
-      branchName: input.acceptanceProof.branchName,
-      workflowPromptText: input.acceptanceProof.workflowPromptText,
-    });
-    acceptanceProofAttempt = proofResult.evidence;
-    await input.acceptanceProof.onAttemptEvent?.({
-      status: proofResult.evidence.status,
-      evidence: proofResult.evidence,
-    });
-    validation = [...validation, ...proofResult.validation];
+      changedFiles: finalChangedFiles,
+    }),
+    artifactExists: (path) => existsSync(join(input.worktreePath, path)),
+  });
+  if (proofOutcome.status !== 'skipped') {
+    validation = [...validation, ...proofOutcome.validation];
+    acceptanceProofAttempt = proofOutcome.evidence ?? acceptanceProofAttempt;
+    if (acceptanceProofAttempt) {
+      await input.acceptanceProof?.onAttemptEvent?.({
+        status: acceptanceProofAttempt.status,
+        evidence: acceptanceProofAttempt,
+      });
+    }
     report = {
       ...report,
-      artifacts: mergeArtifacts(report.artifacts, proofResult.artifacts),
-      residualRisks: [...report.residualRisks, ...proofResult.residualRisks],
+      artifacts: mergeArtifacts(report.artifacts, proofOutcome.artifacts),
+      residualRisks: [...report.residualRisks, ...proofOutcome.residualRisks],
     };
-    residualRisks.push(...proofResult.residualRisks);
-    changedFiles = proofResult.changedFiles;
-    const postProofScopeIsolation = evaluateScopeIsolation({
-      config: input.config,
-      issue: input.issue,
-      changedFiles,
-    });
-    if (postProofScopeIsolation.blockers.length > 0) {
-      return {
-        status: 'blocked',
-        reasons: postProofScopeIsolation.blockers,
-        changedFiles,
-        validation,
-        skippedChecks: report.skippedChecks,
-        residualRisks,
-        commits: changeSet.commits,
-        acceptanceProofAttempt,
-      };
+    residualRisks.push(...proofOutcome.residualRisks);
+    changedFiles = proofOutcome.changedFiles;
+    if (proofChangeSet) {
+      changeSet = proofChangeSet;
     }
-
-    if (proofResult.status === 'blocked') {
+    if (proofOutcome.status === 'blocked') {
       return {
         status: 'blocked',
-        reasons: proofResult.blockers,
-        changedFiles,
-        validation,
-        skippedChecks: report.skippedChecks,
-        residualRisks,
-        commits: changeSet.commits,
-        acceptanceProofAttempt,
-      };
-    }
-  }
-
-  const proofDiffCapture = adaptiveProofConfigured
-    ? undefined
-    : await createAcceptanceProofDiffCapture({
-      worktreePath: input.worktreePath,
-      changedFiles,
-    });
-  const runnerVisualProof = adaptiveProofConfigured
-    ? { validation: [], artifacts: [] }
-    : await runRunnerVisualProof({
-      config: input.config,
-      issue: input.issue,
-      issueNumber: input.issue.number,
-      targetRoot: input.targetRoot,
-      worktreePath: input.worktreePath,
-      changedFiles,
-      report,
-      shellExecutor: input.shellExecutor,
-    });
-  validation = [...validation, ...runnerVisualProof.validation];
-  acceptanceProofAttempt = runnerVisualProof.acceptanceProofAttempt ?? acceptanceProofAttempt;
-  report = {
-    ...report,
-    artifacts: mergeArtifacts(report.artifacts, runnerVisualProof.artifacts),
-  };
-  if (!adaptiveProofConfigured && (runnerVisualProof.validation.length > 0 || runnerVisualProof.artifacts.length > 0)) {
-    changeSet = await input.git.collectSessionChangeSet({
-      worktreePath: input.worktreePath,
-      baseHead: input.beforeHead,
-    });
-    const proofPhaseChangedFiles = await proofDiffCapture!.collectProofPhaseChangedFiles(changeSet.changedPaths);
-    changedFiles = changeSet.changedPaths;
-    const proofDiff = classifyAcceptanceProofDiff(input.config, proofPhaseChangedFiles);
-    if (proofDiff.forbiddenProductPaths.length > 0) {
-      acceptanceProofAttempt = buildForbiddenAcceptanceProofDiffEvidence({
-        command: 'runner acceptance proof',
-        baseEvidence: acceptanceProofAttempt,
-        reportPath: runnerVisualProof.proofReportPath,
-        artifactDir: runnerVisualProof.proofArtifactDir,
-        artifactPaths: proofPhaseChangedFiles,
-        forbiddenProductPaths: proofDiff.forbiddenProductPaths,
-      });
-      validation = [...validation, ...acceptanceProofAttempt.validation];
-      return {
-        status: 'blocked',
-        reasons: acceptanceProofAttempt.blockers,
-        changedFiles,
-        validation,
-        skippedChecks: report.skippedChecks,
-        residualRisks: report.residualRisks,
-        commits: changeSet.commits,
-        acceptanceProofAttempt,
-      };
-    }
-    const postRunnerProofScopeIsolation = evaluateScopeIsolation({
-      config: input.config,
-      issue: input.issue,
-      changedFiles,
-    });
-    if (postRunnerProofScopeIsolation.blockers.length > 0) {
-      return {
-        status: 'blocked',
-        reasons: postRunnerProofScopeIsolation.blockers,
+        reasons: proofOutcome.blockers,
         changedFiles,
         validation,
         skippedChecks: report.skippedChecks,

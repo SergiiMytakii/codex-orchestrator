@@ -1,22 +1,12 @@
-import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/command-adapter.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
-import type { GitWorktreeManager } from '../git/worktree.js';
 import type { GitHubIssue } from '../github/issues.js';
-import { globMatches } from '../path-policy.js';
 import type { ScopedCompletionReport } from './completion-report.js';
-import type { RunnerValidationLine } from './handoff-evidence.js';
-import {
-  buildAcceptanceProofReportOutcome,
-  buildBlockedAcceptanceProofOutcome,
-  createAcceptanceProofDiffCapture,
-  readAcceptanceProofReport,
-  uiEvidenceFailureDimensions,
-  type AcceptanceProofAttemptEvidence,
-} from './acceptance-proof.js';
+import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
+import type { AcceptanceProofAdapterResult } from './acceptance-proof-loop.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
 export type { AcceptanceProofAttemptEvidence } from './acceptance-proof.js';
@@ -29,42 +19,15 @@ export interface RunAcceptanceProofAttemptInput {
   changedFiles: string[];
   implementationReport: ScopedCompletionReport;
   codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
-  git: Pick<GitWorktreeManager, 'collectSessionChangeSet'>;
-  beforeHead: string;
   sessionId: string;
   branchName: string;
   workflowPromptText: string;
   logPath?: string;
 }
 
-export interface AcceptanceProofAttemptResult {
-  status: 'passed' | 'blocked';
-  changedFiles: string[];
-  validation: RunnerValidationLine[];
-  artifacts: ScopedCompletionReport['artifacts'];
-  residualRisks: string[];
-  blockers: string[];
-  evidence: AcceptanceProofAttemptEvidence;
-}
-
-export function shouldRunAcceptanceProofAttempt(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}): boolean {
-  const acceptanceProof = input.config.reviewGates.acceptanceProof;
-  if (!acceptanceProof.enabled) {
-    return false;
-  }
-
-  const issueText = `${input.issue.title}\n${input.issue.body}`;
-  return acceptanceProof.issueTextPatterns.some((pattern) => new RegExp(pattern, 'iu').test(issueText))
-    || input.changedFiles.some((path) => acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)));
-}
-
-export async function runAcceptanceProofAttempt(
+export async function runAcceptanceProofAdapter(
   input: RunAcceptanceProofAttemptInput,
-): Promise<AcceptanceProofAttemptResult> {
+): Promise<AcceptanceProofAdapterResult> {
   const proofDir = join(
     input.worktreePath,
     input.config.reviewGates.acceptanceProof.artifactDir,
@@ -95,10 +58,6 @@ export async function runAcceptanceProofAttempt(
     worktreePath: input.worktreePath,
   });
   await writeFile(proofPromptPath, promptText, 'utf8');
-  const proofDiffCapture = await createAcceptanceProofDiffCapture({
-    worktreePath: input.worktreePath,
-    changedFiles: input.changedFiles,
-  });
   let proofResult: CodexCommandRunResult;
   try {
     proofResult = await input.codexAdapter.run({
@@ -125,78 +84,17 @@ export async function runAcceptanceProofAttempt(
   } finally {
     await cleanupSessionCodexHome(isolatedHomePath);
   }
-
-  const changeSet = await input.git.collectSessionChangeSet({
-    worktreePath: input.worktreePath,
-    baseHead: input.beforeHead,
-  });
-  const proofPhaseChangedFiles = await proofDiffCapture.collectProofPhaseChangedFiles(changeSet.changedPaths);
-  const reportRead = await readAcceptanceProofReport(proofReportPath);
-
-  if (reportRead.kind === 'missing') {
-    return blocked({
-      commandExitCode: proofResult.exitCode,
-      commandOutputSummary: `Codex exited with code ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
-      proofPromptPath,
-      proofReportPath,
-      proofDir,
-      changedFiles: changeSet.changedPaths,
-      artifactPaths: proofPhaseChangedFiles,
-      validationSummary: 'Acceptance proof blocked: proof session did not write CODEX_ORCHESTRATOR_PROOF_REPORT_PATH.',
-      blockers: ['Acceptance proof blocked: proof session did not write CODEX_ORCHESTRATOR_PROOF_REPORT_PATH.'],
-      residualRisks: [],
-    });
-  }
-  if (reportRead.kind === 'invalid') {
-    return blocked({
-      commandExitCode: proofResult.exitCode,
-      commandOutputSummary: `Codex exited with code ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
-      proofPromptPath,
-      proofReportPath,
-      proofDir,
-      changedFiles: changeSet.changedPaths,
-      artifactPaths: proofPhaseChangedFiles,
-      validationSummary: reportRead.message,
-      blockers: [`Acceptance proof blocked: ${reportRead.message}`],
-      residualRisks: [],
-    });
-  }
-
-  const outcome = buildAcceptanceProofReportOutcome({
+  return {
+    adapterKind: 'adaptive',
     command: 'adaptive acceptance proof',
-    config: input.config,
-    report: reportRead.report,
-    proofPhaseChangedFiles,
-    artifactExists: (path) => existsSync(join(input.worktreePath, path)),
-    commandExitCode: proofResult.exitCode,
-    commandOutputSummary: `proof session exited ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
+    exitCode: proofResult.exitCode,
+    outputSummary: `proof session exited ${proofResult.exitCode}: ${proofResult.stderr || proofResult.stdout}`,
     promptPath: proofPromptPath,
     reportPath: proofReportPath,
     artifactDir: proofDir,
-    passedSummary: (report) => `Acceptance proof passed: ${report.criteria.length} criterion/criteria mapped to high-confidence artifacts.`,
-    failedSummaryPrefix: 'Acceptance proof',
-  });
-
-  if (outcome.status !== 'passed') {
-    return {
-      status: 'blocked',
-      changedFiles: changeSet.changedPaths,
-      validation: outcome.validation,
-      artifacts: outcome.artifacts,
-      residualRisks: outcome.residualRisks,
-      blockers: outcome.blockers,
-      evidence: outcome.evidence,
-    };
-  }
-
-  return {
-    status: 'passed',
-    changedFiles: changeSet.changedPaths,
-    validation: outcome.validation,
-    artifacts: outcome.artifacts,
-    residualRisks: outcome.residualRisks,
-    blockers: [],
-    evidence: outcome.evidence,
+    artifactPaths: [],
+    preliminaryArtifacts: [],
+    residualRisks: [],
   };
 }
 
@@ -246,39 +144,4 @@ function buildAcceptanceProofPrompt(input: {
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
     'Schema: { "status": "passed" | "needs-rework" | "blocked", "criteria": { "id": string, "description": string, "status": "passed" | "failed" | "unknown", "confidence": "high" | "medium" | "low", "reasoningSummary": string, "artifactRefs": string[] }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "uiEvidence"?: { "workflowScope": { "entrypoint": string, "path": string[], "screenState": string, "authPath"?: "real-login" | "seeded-session" | "not-required" | "blocked", "authShortcutReason"?: string }, "viewportCoverage": { "name": string, "width": number, "height": number, "artifactRefs": string[], "requiredBy": "desktop-web-layout" | "mobile-or-responsive" | "issue-specific" | "other" }[], "artifactFreshness": { "currentArtifactRefs": string[], "checkedAfterFinalRun": boolean }, "layoutReview": { "checked": boolean, "findings": { "summary": string, "artifactRefs": string[] }[] }, "copyReview": { "checked": boolean, "acceptedTerms"?: string[], "rejectedTermsAbsent"?: string[], "findings": { "summary": string, "artifactRefs": string[] }[] }, "sourceInputs": { "acceptanceCriteriaRefs": string[], "implementationEvidenceRefs": string[], "reproductionSignalRefs"?: string[], "manualQaPlanRefs"?: string[], "runtimeValidationRefs"?: string[] } }, "proofScriptRepair"?: { "changedPaths": string[], "summary": string }, "proofPhaseDiff": { "allowedProofPaths": string[], "forbiddenProductPaths": string[] }, "reworkRequest"?: { "summary": string, "requiredChanges": string[], "evidenceRefs": string[] }, "residualRisks": string[] }.',
   ].join('\n\n');
-}
-
-function blocked(input: {
-  commandExitCode: number;
-  commandOutputSummary?: string;
-  proofPromptPath: string;
-  proofReportPath: string;
-  proofDir: string;
-  changedFiles: string[];
-  artifactPaths: string[];
-  validationSummary: string;
-  blockers: string[];
-  residualRisks: string[];
-}): AcceptanceProofAttemptResult {
-  const outcome = buildBlockedAcceptanceProofOutcome({
-    command: 'adaptive acceptance proof',
-    promptPath: input.proofPromptPath,
-    reportPath: input.proofReportPath,
-    artifactDir: input.proofDir,
-    artifactPaths: input.artifactPaths,
-    validationSummary: input.validationSummary,
-    blockers: input.blockers,
-    residualRisks: input.residualRisks,
-    commandExitCode: input.commandExitCode,
-    commandOutputSummary: input.commandOutputSummary,
-  });
-  return {
-    status: 'blocked',
-    changedFiles: input.changedFiles,
-    validation: outcome.validation,
-    artifacts: outcome.artifacts,
-    residualRisks: outcome.residualRisks,
-    blockers: outcome.blockers,
-    evidence: outcome.evidence,
-  };
 }

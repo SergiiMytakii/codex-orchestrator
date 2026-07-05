@@ -1,7 +1,15 @@
-import type { AcceptanceProofStrategy, CodexOrchestratorConfig } from '../config/schema.js';
+import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
-import { globMatches } from '../path-policy.js';
 import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
+import {
+  classifyVisualProofDispatchTarget as planVisualProofDispatchTarget,
+  decideProofRouting as planProofRouting,
+  isVisualProofDesirable as planVisualProofDesirable,
+  runnerVisualProofPolicy as planRunnerVisualProofPolicy,
+  shouldApplyVisualProofGate as planShouldApplyVisualProofGate,
+  type ProofRoutingDecision,
+  type VisualProofDispatchTarget,
+} from './acceptance-proof-loop.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
@@ -142,83 +150,17 @@ export function shouldApplyVisualProofGate(input: {
   issue: GitHubIssue;
   changedFiles: string[];
 }): boolean {
-  return decideProofRouting(input).applies;
+  return planShouldApplyVisualProofGate(input);
 }
 
-export type VisualProofDispatchTarget = 'browser' | 'mobile' | 'none';
-export type ProofRoutingAction = 'skip' | 'dispatch' | 'allow-non-visual' | 'error';
-
-export interface ProofRoutingDecision {
-  applies: boolean;
-  desirable: boolean;
-  dispatchTarget: VisualProofDispatchTarget;
-  proofStrategy: AcceptanceProofStrategy;
-  action: ProofRoutingAction;
-  reason: string;
-}
+export type { ProofRoutingAction, ProofRoutingDecision, VisualProofDispatchTarget } from './acceptance-proof-loop.js';
 
 export function decideProofRouting(input: {
   config: CodexOrchestratorConfig;
   issue: GitHubIssue;
   changedFiles: string[];
 }): ProofRoutingDecision {
-  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
-  const dispatchTarget = proofStrategyDispatchTarget(input, proofStrategy);
-  const desirable = visualProofDesirable(input, proofStrategy);
-  const applies = visualProofGateApplies(input, proofStrategy, desirable);
-
-  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
-    return {
-      applies,
-      desirable,
-      dispatchTarget,
-      proofStrategy,
-      action: 'skip',
-      reason: 'proof strategy disables browser/mobile visual proof',
-    };
-  }
-
-  if (dispatchTarget === 'browser' || dispatchTarget === 'mobile') {
-    return {
-      applies,
-      desirable,
-      dispatchTarget,
-      proofStrategy,
-      action: 'dispatch',
-      reason: `${dispatchTarget} proof target matched`,
-    };
-  }
-
-  if (applies && !desirable) {
-    return {
-      applies,
-      desirable,
-      dispatchTarget,
-      proofStrategy,
-      action: 'allow-non-visual',
-      reason: 'acceptance proof applies without browser or mobile dispatch',
-    };
-  }
-
-  if (applies || desirable) {
-    return {
-      applies,
-      desirable,
-      dispatchTarget,
-      proofStrategy,
-      action: 'error',
-      reason: 'visual proof is desirable but no browser or mobile dispatch target matched',
-    };
-  }
-
-  return {
-    applies,
-    desirable,
-    dispatchTarget,
-    proofStrategy,
-    action: 'error',
-    reason: 'proof routing did not match issue text or changed paths',
-  };
+  return planProofRouting(input);
 }
 
 export function classifyVisualProofDispatchTarget(input: {
@@ -226,32 +168,7 @@ export function classifyVisualProofDispatchTarget(input: {
   issue: GitHubIssue;
   changedFiles: string[];
 }): VisualProofDispatchTarget {
-  return decideProofRouting(input).dispatchTarget;
-}
-
-function proofStrategyDispatchTarget(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}, proofStrategy: AcceptanceProofStrategy): VisualProofDispatchTarget {
-  const normalizedFiles = input.changedFiles.map((path) => path.replaceAll('\\', '/').replace(/^\.\//u, ''));
-  const issueText = `${input.issue.title}\n${input.issue.body}`;
-  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
-    return 'none';
-  }
-  if (proofStrategy === 'browser-visual') {
-    return 'browser';
-  }
-  if (proofStrategy === 'mobile-visual') {
-    return 'mobile';
-  }
-  if (normalizedFiles.some(isMobileProofPath) || normalizedFiles.some((path) => isFlutterEntrypoint(path) && isMobileIssueText(issueText))) {
-    return 'mobile';
-  }
-  if (normalizedFiles.some((path) => input.config.reviewGates.visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)))) {
-    return 'browser';
-  }
-  return 'none';
+  return planVisualProofDispatchTarget(input);
 }
 
 export function isVisualProofDesirable(input: {
@@ -259,78 +176,7 @@ export function isVisualProofDesirable(input: {
   issue: GitHubIssue;
   changedFiles: string[];
 }): boolean {
-  return decideProofRouting(input).desirable;
-}
-
-function visualProofDesirable(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}, proofStrategy: AcceptanceProofStrategy): boolean {
-  const visualProof = input.config.reviewGates.visualProof;
-  if (!visualProof.enabled) {
-    return false;
-  }
-
-  const issueText = `${input.issue.title}\n${input.issue.body}`;
-  const command = runnerVisualProofPolicy(input.config).commandTemplate;
-  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
-    return false;
-  }
-  if (proofStrategy === 'browser-visual' || proofStrategy === 'mobile-visual' || proofStrategy === 'visual') {
-    return Boolean(command);
-  }
-  const internalRunnerProofOnlyChange = input.changedFiles.length > 0
-    && input.changedFiles.every(isInternalRunnerProofPath);
-  const issueNeedsVisualProof = visualProof.enabled
-    && !internalRunnerProofOnlyChange
-    && visualProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
-  const changedProofFiles = input.changedFiles.filter((path) =>
-    visualProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
-  );
-
-  return issueNeedsVisualProof || changedProofFiles.length > 0;
-}
-
-function visualProofGateApplies(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}, proofStrategy: AcceptanceProofStrategy, desirable: boolean): boolean {
-  const acceptanceProof = input.config.reviewGates.acceptanceProof;
-  if (!acceptanceProof.enabled) {
-    return false;
-  }
-
-  const policy = runnerVisualProofPolicy(input.config);
-  if (!policy.commandTemplate) {
-    return false;
-  }
-
-  const issueText = `${input.issue.title}\n${input.issue.body}`;
-  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim();
-  if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
-    return false;
-  }
-  if (proofStrategy === 'browser-visual' || proofStrategy === 'mobile-visual' || proofStrategy === 'visual') {
-    return Boolean(acceptanceCommand);
-  }
-  const internalRunnerProofOnlyChange = input.changedFiles.length > 0
-    && input.changedFiles.every(isInternalRunnerProofPath);
-  const canRunGenericAcceptanceProof = Boolean(acceptanceCommand) && !isMobileVisualProofCommand(acceptanceCommand);
-  const issueNeedsAcceptanceProof = canRunGenericAcceptanceProof
-    && !internalRunnerProofOnlyChange
-    && acceptanceProof.issueTextPatterns.some((pattern) => regexMatches(pattern, issueText));
-  const changedAcceptanceProofFiles = canRunGenericAcceptanceProof
-    && input.changedFiles.some((path) =>
-      acceptanceProof.changedPathGlobs.some((pattern) => globMatches(pattern, path)),
-    );
-  return issueNeedsAcceptanceProof || changedAcceptanceProofFiles || desirable;
-}
-
-function isInternalRunnerProofPath(path: string): boolean {
-  return /^src\/runner\/(?:acceptance-proof|visual-proof-runner)\.ts$/u.test(path)
-    || /^test\/(?:acceptance-proof|visual-proof-runner)\.test\.ts$/u.test(path);
+  return planVisualProofDesirable(input);
 }
 
 export function hasPassedValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
@@ -403,64 +249,7 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
     strictNetworkFailures: boolean;
   };
 } {
-  const visualProof = config.reviewGates.visualProof;
-  const acceptanceProof = config.reviewGates.acceptanceProof;
-  const preferLegacyVisual = isLegacyVisualProofOverride(acceptanceProof, visualProof);
-  const commandTemplate = preferLegacyVisual
-    ? visualProof.runnerValidationCommand?.trim()
-    : acceptanceProof.runnerValidationCommand?.trim() || visualProof.runnerValidationCommand?.trim();
-  return {
-    commandTemplate: commandTemplate || undefined,
-    artifactDir: preferLegacyVisual ? visualProof.artifactDir : acceptanceProof.artifactDir,
-    envPassthrough: preferLegacyVisual
-      ? visualProof.envPassthrough ?? acceptanceProof.envPassthrough ?? []
-      : acceptanceProof.envPassthrough?.length
-        ? acceptanceProof.envPassthrough
-        : visualProof.envPassthrough ?? [],
-    timeoutMs: preferLegacyVisual
-      ? visualProof.runnerTimeoutMs ?? acceptanceProof.runnerTimeoutMs
-      : acceptanceProof.runnerTimeoutMs ?? visualProof.runnerTimeoutMs,
-    minScreenshotArtifacts: visualProof.minScreenshotArtifacts,
-    requireWhenDesirable: visualProof.requireWhenDesirable ?? false,
-    blockOnMissingProof: !preferLegacyVisual,
-    browserProof: {
-      strictConsoleErrors: acceptanceProof.browserProof?.strictConsoleErrors ?? false,
-      strictNetworkFailures: acceptanceProof.browserProof?.strictNetworkFailures ?? false,
-      scenarioPath: acceptanceProof.browserProof?.scenarioPath,
-      baseUrl: acceptanceProof.browserProof?.baseUrl,
-    },
-  };
-}
-
-function isLegacyVisualProofOverride(
-  acceptanceProof: CodexOrchestratorConfig['reviewGates']['acceptanceProof'],
-  visualProof: CodexOrchestratorConfig['reviewGates']['visualProof'],
-): boolean {
-  const defaultMobileCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
-  const defaultAutoCommand = 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
-  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim() || '';
-  return (acceptanceCommand === defaultMobileCommand || acceptanceCommand === defaultAutoCommand)
-    && Boolean(visualProof.runnerValidationCommand?.trim())
-    && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand
-    && visualProof.runnerValidationCommand?.trim() !== defaultAutoCommand;
-}
-
-function isMobileVisualProofCommand(command: string | undefined): boolean {
-  return /\bcodex-orchestrator\s+visual-proof\s+(?:mobile|android|ios)\b/iu.test(command ?? '');
-}
-
-function isMobileProofPath(path: string): boolean {
-  return /^(?:android|ios)\//u.test(path)
-    || /\.(?:xcodeproj|xcworkspace)\//u.test(path)
-    || /(?:^|\/)(?:build\.gradle|build\.gradle\.kts|gradlew|gradlew\.bat)$/u.test(path);
-}
-
-function isFlutterEntrypoint(path: string): boolean {
-  return path === 'pubspec.yaml' || /^lib\/.+\.dart$/u.test(path);
-}
-
-function isMobileIssueText(text: string): boolean {
-  return /\b(?:android|ios|iphone|ipad|flutter|mobile|emulator|apk|aab|dart)\b/iu.test(text);
+  return planRunnerVisualProofPolicy(config);
 }
 
 function hasTddRedEvidence(text: string): boolean {
