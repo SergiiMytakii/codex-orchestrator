@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve } from 'node:path';
 
 import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
-import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
+import { hasIssueClosureEvidence, type GitHubIssue, type GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager } from '../git/worktree.js';
@@ -165,6 +165,16 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
       emit(`[${now().toISOString()}] worktree cleanup failed: ${message}`);
     }
 
+    try {
+      const staleReviewIssues = await cleanupClosedReviewLabels({ adapter, config });
+      for (const issue of staleReviewIssues) {
+        emit(`[${now().toISOString()}] removed stale review label from closed #${issue.number}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'closed review-label cleanup failed';
+      emit(`[${now().toISOString()}] closed review-label cleanup failed: ${message}`);
+    }
+
     if (once || (maxRuns !== undefined && executed.length >= maxRuns)) {
       break;
     }
@@ -173,6 +183,23 @@ export async function runDaemonCommand(options: DaemonCommandOptions): Promise<D
   }
 
   return { output: lines.join('\n'), scanned, executed };
+}
+
+async function cleanupClosedReviewLabels(input: {
+  adapter: GitHubIssueAdapter;
+  config: Awaited<ReturnType<typeof readRunnerConfig>>;
+}): Promise<GitHubIssue[]> {
+  const reviewLabel = input.config.github.labels.review.name;
+  const issues = await input.adapter.listClosedIssuesWithAnyLabel([reviewLabel]);
+  const cleaned: GitHubIssue[] = [];
+  for (const issue of issues) {
+    if (!hasIssueClosureEvidence(issue)) {
+      continue;
+    }
+    await input.adapter.removeLabels(issue.number, [reviewLabel]);
+    cleaned.push(issue);
+  }
+  return cleaned;
 }
 
 async function findNextEligibleIssues(

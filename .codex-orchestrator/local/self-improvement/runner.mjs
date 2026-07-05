@@ -192,6 +192,11 @@ function issueNumberFromUrl(value) {
   return match ? Number(match[1]) : undefined;
 }
 
+function markerValue(marker) {
+  const index = String(marker).indexOf(':');
+  return index === -1 ? String(marker) : String(marker).slice(index + 1);
+}
+
 function labelsOf(issue) {
   return (issue.labels ?? []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
 }
@@ -485,18 +490,17 @@ export function createRunner(options = {}) {
 
   async function publishSelfImprovementIssue({
     marker,
-    fingerprint,
     title,
     body,
     agentLabel,
-    tmpPrefix = 'self-improvement-issue-',
   }) {
     const existing = await searchIssueByMarker(marker);
+    const fingerprint = markerValue(marker);
     if (existing) {
       return { status: 'reused', issueNumber: existing.number, url: existing.url, fingerprint };
     }
 
-    const tmp = await mkdtemp(path.join(os.tmpdir(), tmpPrefix));
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'self-improvement-issue-'));
     const bodyPath = path.join(tmp, 'body.md');
     await writeFile(bodyPath, body);
     const created = await exec('gh', [
@@ -536,11 +540,9 @@ export function createRunner(options = {}) {
     const fingerprint = fingerprintCandidate(candidate);
     const publication = await publishSelfImprovementIssue({
       marker: `source-candidate-fingerprint:${fingerprint}`,
-      fingerprint,
       title: `Self-improvement: ${candidate.title}`,
       body: renderDiscoveryIssue(candidate, fingerprint, now().toISOString().slice(0, 10)),
       agentLabel: 'agent:auto',
-      tmpPrefix: 'self-improvement-issue-',
     });
     if (publication.status === 'failed') return { status: 'failed', reason: publication.reason };
     const state = await loadState();
@@ -638,11 +640,9 @@ export function createRunner(options = {}) {
         const fingerprint = fingerprintFinding(finding);
         const publication = await publishSelfImprovementIssue({
           marker: `finding-fingerprint:${fingerprint}`,
-          fingerprint,
           title: `Self-improvement follow-up: ${finding.summary}`,
           body: renderFollowUpIssue(finding, fingerprint),
           agentLabel: 'agent:manual',
-          tmpPrefix: 'self-improvement-follow-up-',
         });
         if (publication.status === 'created') created.push(publication);
         if (publication.status === 'reused') reused.push(publication);
@@ -704,6 +704,7 @@ export function createRunner(options = {}) {
     saveState,
     runCodexJson,
     searchIssueByMarker,
+    publishSelfImprovementIssue,
     discover,
     implement,
     runLiveSmoke,

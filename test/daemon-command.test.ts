@@ -312,6 +312,28 @@ test('daemon removes clean merged worktrees after polling', async () => {
   assert.match(result.output, /cleaned worktree .*issue-155 for PR #7/);
 });
 
+test('daemon removes stale review labels from closed issues with completion evidence', async () => {
+  const targetRoot = await tempRepo();
+  const adapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({
+      number: 1132,
+      state: 'CLOSED',
+      labels: [labels.review.name, labels.auto.name],
+      pullRequests: [{ number: 1134, url: 'https://github.com/example/repo/pull/1134', state: 'MERGED' }],
+    }),
+  ]);
+
+  const result = await runDaemonCommand({
+    targetRoot,
+    issueAdapter: adapter,
+    once: true,
+    now: () => new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.deepEqual(adapter.removedLabels, [{ issueNumber: 1132, labels: [labels.review.name] }]);
+  assert.match(result.output, /removed stale review label from closed #1132/);
+});
+
 test('daemon preserves active and dirty merged worktrees', async () => {
   const targetRoot = await tempGitRepo();
   const activeWorktreePath = join(targetRoot, validConfig.runner.workspaceRoot, 'issue-155');

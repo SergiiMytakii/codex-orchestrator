@@ -321,6 +321,70 @@ test('discovery creates exactly one agent:auto self-improvement issue for the fi
   }
 });
 
+test('publication helper owns marker reuse, body files, labels, and result shape', async () => {
+  const createdExec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]' };
+      if (args[0] === 'issue' && args[1] === 'create') return { code: 0, stdout: 'https://github.com/SergiiMytakii/codex-orchestrator/issues/91' };
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const createdRunner = await makeRunner({ exec: createdExec });
+  try {
+    const marker = 'finding-fingerprint:publication-helper';
+    const result = await createdRunner.runner.publishSelfImprovementIssue({
+      marker,
+      title: 'Self-improvement follow-up: Helper test',
+      body: `Body\n\n${marker}\n`,
+      agentLabel: 'agent:manual',
+    });
+    assert.deepEqual(result, {
+      status: 'created',
+      issueNumber: 91,
+      url: 'https://github.com/SergiiMytakii/codex-orchestrator/issues/91',
+      fingerprint: 'publication-helper',
+    });
+    const createCall = createdExec.calls.find((call) => call.args[0] === 'issue' && call.args[1] === 'create');
+    const bodyPath = createCall.args.at(createCall.args.indexOf('--body-file') + 1);
+    assert.equal(await readFile(bodyPath, 'utf8'), `Body\n\n${marker}\n`);
+    assert.deepEqual(createCall.args.filter((arg) => arg === '--label' || arg === 'agent:manual' || arg === 'self-improvement'), [
+      '--label',
+      'agent:manual',
+      '--label',
+      'self-improvement',
+    ]);
+  } finally {
+    await createdRunner.cleanup();
+  }
+
+  const reusedExec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return { code: 0, stdout: JSON.stringify([{ number: 92, url: 'https://example.test/92' }]) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const reusedRunner = await makeRunner({ exec: reusedExec });
+  try {
+    const result = await reusedRunner.runner.publishSelfImprovementIssue({
+      marker: 'source-candidate-fingerprint:reused-helper',
+      title: 'Self-improvement: Reused helper',
+      body: 'body',
+      agentLabel: 'agent:auto',
+    });
+    assert.deepEqual(result, {
+      status: 'reused',
+      issueNumber: 92,
+      url: 'https://example.test/92',
+      fingerprint: 'reused-helper',
+    });
+    assert.equal(reusedExec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
+  } finally {
+    await reusedRunner.cleanup();
+  }
+});
+
 test('discovery reuses existing marker match and does not create a duplicate issue', async () => {
   const exec = makeExecStub({
     '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {

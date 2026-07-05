@@ -151,10 +151,20 @@ export async function writeDurableRunSummary(input: {
       `confirmed facts: ${summary.confirmedFacts.length === 0 ? 'none' : summary.confirmedFacts.join('; ')}`,
       `residual risks: ${summary.residualRisks.length === 0 ? 'none' : summary.residualRisks.join('; ')}`,
       `rework attempts: ${summary.reworkAttempts?.length ?? 0}`,
-      `acceptance proof: ${summary.acceptanceProof?.status ?? 'not-run'}`,
+      `acceptance proof: ${formatAcceptanceProofStatus(summary)}`,
       `policy suggestions: ${summary.policySuggestions.length === 0 ? 'none' : summary.policySuggestions.join('; ')}`,
     ],
   };
+}
+
+function formatAcceptanceProofStatus(summary: DurableRunSummary): string {
+  if (summary.acceptanceProof) {
+    return summary.acceptanceProof.status;
+  }
+  if (summary.outcome === 'review-ready') {
+    return 'satisfied-by-validation';
+  }
+  return 'not-run';
 }
 
 function buildPolicySuggestions(input: {

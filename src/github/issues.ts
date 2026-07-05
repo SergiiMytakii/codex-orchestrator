@@ -63,6 +63,7 @@ export interface CloseIssueEvidenceInput {
 
 export interface GitHubIssueAdapter {
   listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
+  listClosedIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   getIssue(number: number): Promise<GitHubIssue | undefined>;
   createIssue(input: CreateIssueInput): Promise<GitHubIssue>;
   updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue>;
@@ -173,9 +174,17 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
+    return this.listIssuesWithAnyLabel(labels, 'OPEN');
+  }
+
+  public async listClosedIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
+    return this.listIssuesWithAnyLabel(labels, 'CLOSED');
+  }
+
+  private listIssuesWithAnyLabel(labels: string[], state: IssueState): GitHubIssue[] {
     const wanted = new Set(labels);
     return Array.from(this.issues.values())
-      .filter((issue) => issue.state === 'OPEN' && issue.labels.some((label) => wanted.has(label.name)))
+      .filter((issue) => issue.state === state && issue.labels.some((label) => wanted.has(label.name)))
       .sort((left, right) => left.number - right.number)
       .map(cloneIssue);
   }
