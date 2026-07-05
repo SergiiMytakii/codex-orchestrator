@@ -7,14 +7,14 @@ small, evidence-backed, and scoped to a repeatable package pattern.
 
 ## Active Lessons
 
-## 2026-06-26 - Treat ignored local self-improvement files as publication blockers
+## 2026-07-03 - Separate tracked self-improvement sources from ignored local outputs
 
 Scope: agent workflow
-Evidence: `.codex-orchestrator/state/summaries/issue-1043-issue-1043-20260619070305.json` ended `blocked` with `Codex completed without file changes` after validated edits under ignored local self-improvement files, and `.codex-orchestrator/state/summaries/issue-1050-issue-1050-20260620075357.json` ended `promotion-requested` because verified changes in `.codex-orchestrator/local/` could not be carried through the normal git change set.
-Lesson: When work is scoped only to `.codex-orchestrator/local/self-improvement/*`, treat normal runner publication as blocked up front. Those paths are ignored by git, so a child can complete valid local changes and still surface as `no file changes` or `promotion-requested`. Validate the local result, then report it as local-only or promotion-needed instead of expecting draft PR handoff.
-Use when: A self-improvement or local-runner task edits only `.codex-orchestrator/local/` files and the run report conflicts with the verified local diff.
-Do not use when: The task changes tracked package files in `src/`, `test/`, `prompts/`, or other publishable paths, or when the workflow is intentionally read-only.
-Review after: 2026-07-26
+Evidence: `git log --since='7 days ago' --stat -- .codex-orchestrator/local/self-improvement` shows `607e685` added tracked self-improvement runner sources and `a2d060d` updated them, while `.codex-orchestrator/state/summaries/issue-1132-issue-1132-20260702060356.json` ended `review-ready` with those two tracked files in `changedFiles`.
+Lesson: Do not treat `.codex-orchestrator/local/self-improvement/*` as automatically local-only. The tracked runner source and test files now publish through the normal package flow; only ignored or generated local artifacts should trigger local-only or promotion-needed handling.
+Use when: A self-improvement task touches `.codex-orchestrator/local/self-improvement/*` and you need to decide whether normal runner publication should proceed.
+Do not use when: The diff is limited to ignored outputs such as local reports or runner state, or when the task is intentionally read-only.
+Review after: 2026-08-03
 
 ## 2026-06-12 - Verify proof commands against the package-local CLI
 
@@ -29,3 +29,7 @@ Review after: 2026-07-12
 
 Move entries here when they were promoted to source-of-truth docs, superseded by
 code changes, or expired after review.
+
+## 2026-06-26 - Treat ignored local self-improvement files as publication blockers
+
+Retired: Superseded on 2026-07-03 after `607e685` made the self-improvement runner sources tracked package files and issue `#1132` reached normal `review-ready` handoff with changes in those files.

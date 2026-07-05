@@ -125,6 +125,63 @@ test('implementation publishability blocks failed configured checks before publi
   assert.equal(await git.isWorktreeClean(repo), false);
 });
 
+test('implementation publishability accepts structured TDD red evidence without treating it as a failed check', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nupdated\n', 'utf8');
+  await mkdir(join(reportPath, '..'), { recursive: true });
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['README.md'],
+      validation: [
+        {
+          command: 'git cat-file -e HEAD~1:test/example.test.ts',
+          status: 'failed',
+          summary: 'Red baseline confirmed: test file did not exist before implementation.',
+          evidence: {
+            kind: 'tdd-red-green',
+            red: {
+              command: 'git cat-file -e HEAD~1:test/example.test.ts',
+              status: 'failed',
+              summary: 'Exited 128 because the targeted test file was absent at HEAD~1.',
+            },
+            green: {
+              command: 'npm test -- example.test.ts',
+              status: 'passed',
+              summary: 'Focused tests passed on HEAD.',
+            },
+          },
+        },
+      ],
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    }),
+    'utf8',
+  );
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config(),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'publish-ready');
+});
+
 test('implementation publishability skips child checks outside scoped check policy', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();

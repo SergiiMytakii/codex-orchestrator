@@ -416,7 +416,7 @@ export async function runImplementationPublishabilityCheck(
     }
   }
 
-  const failedValidation = validation.filter((line) => line.status === 'failed');
+  const failedValidation = validation.filter((line) => line.status === 'failed' && !isStructuredTddRedEvidence(line));
   if (failedValidation.length > 0) {
     residualRisks.push('One or more configured checks failed.');
     return {
@@ -498,6 +498,17 @@ function applicableSkippedChecks(
 
 function isRunnerOwnedVisualProofNonExecutionSkip(check: string): boolean {
   return /\brunner-owned\b[\s\S]*\bvisual[- ]proof\b[\s\S]*\bnot executed\b/iu.test(check);
+}
+
+function isStructuredTddRedEvidence(line: RunnerValidationLine): boolean {
+  const evidence = line.evidence;
+  return evidence?.kind === 'tdd-red-green'
+    && evidence.red.status === 'failed'
+    && evidence.red.command.trim().length > 0
+    && evidence.red.summary.trim().length > 0
+    && evidence.green.status === 'passed'
+    && evidence.green.command.trim().length > 0
+    && evidence.green.summary.trim().length > 0;
 }
 
 async function defaultPassingLocalPhaseExecutor(input: { phaseId: string; worktreePath: string }) {
