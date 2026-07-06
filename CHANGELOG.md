@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-07-06
+
+### Added
+- Added `codex-orchestrator acceptance-proof validate --report <path>` so proof
+  agents can check machine-readable Acceptance Proof reports before handoff.
+
+### Changed
+- Adaptive Acceptance Proof prompts now include a minimal valid JSON report
+  template generated from the runner-owned report contract instead of a long
+  prose schema line.
+- Malformed adaptive proof reports now return all structural schema errors at
+  once and get one proof-report repair attempt before hard-blocking.
+
 ## [0.1.42] - 2026-07-06
 
 ### Changed

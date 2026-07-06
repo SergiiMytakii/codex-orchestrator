@@ -45,6 +45,13 @@ export interface AcceptanceProofAdapterResult {
   residualRisks: string[];
 }
 
+export interface AcceptanceProofRepairInput {
+  reportPath: string;
+  artifactDir: string;
+  schemaErrors: string[];
+  previousResult: AcceptanceProofAdapterResult;
+}
+
 export interface AcceptanceProofLoopOutcome {
   status: 'passed' | 'blocked' | 'skipped';
   changedFiles: string[];
@@ -74,6 +81,7 @@ export interface RunAcceptanceProofLoopAttemptInput {
   initialChangedFiles: string[];
   adaptiveAdapterAvailable: boolean;
   executeAdaptiveProof?: () => Promise<AcceptanceProofAdapterResult>;
+  executeAdaptiveProofRepair?: (input: AcceptanceProofRepairInput) => Promise<AcceptanceProofAdapterResult>;
   executeCommandProof?: () => Promise<AcceptanceProofAdapterResult>;
   collectChangeSet: (input: { worktreePath: string; baseHead: string }) => Promise<AcceptanceProofLoopChangeSet>;
   evaluateScope: (input: { changedFiles: string[] }) => AcceptanceProofScopeResult;
@@ -154,7 +162,8 @@ export async function runAcceptanceProofLoopAttempt(
     worktreePath: input.worktreePath,
     changedFiles: input.initialChangedFiles,
   });
-  const adapterResult = await executeSelectedAdapter(input, plan);
+  let adapterResult = await executeSelectedAdapter(input, plan);
+  adapterResult = await repairInvalidAdaptiveProofReport(input, adapterResult);
   const changeSet = await input.collectChangeSet({
     worktreePath: input.worktreePath,
     baseHead: input.beforeHead,
@@ -224,6 +233,32 @@ export async function runAcceptanceProofLoopAttempt(
   };
 }
 
+async function repairInvalidAdaptiveProofReport(
+  input: RunAcceptanceProofLoopAttemptInput,
+  adapterResult: AcceptanceProofAdapterResult,
+): Promise<AcceptanceProofAdapterResult> {
+  const maxSchemaRepairAttempts = 1;
+  if (adapterResult.adapterKind !== 'adaptive' || !input.executeAdaptiveProofRepair) {
+    return adapterResult;
+  }
+
+  let currentResult = adapterResult;
+  for (let attempt = 0; attempt < maxSchemaRepairAttempts; attempt += 1) {
+    const reportRead = await readAcceptanceProofReport(currentResult.reportPath);
+    if (reportRead.kind !== 'invalid') {
+      return currentResult;
+    }
+    currentResult = await input.executeAdaptiveProofRepair({
+      reportPath: currentResult.reportPath,
+      artifactDir: currentResult.artifactDir,
+      schemaErrors: reportRead.errors,
+      previousResult: currentResult,
+    });
+  }
+
+  return currentResult;
+}
+
 async function executeSelectedAdapter(
   input: RunAcceptanceProofLoopAttemptInput,
   plan: AcceptanceProofPlan,
@@ -269,14 +304,15 @@ async function evaluateAdapterReport(input: {
     });
   }
   if (reportRead.kind === 'invalid') {
+    const validationSummary = invalidReportSchemaSummary(reportRead.errors);
     return buildBlockedAcceptanceProofOutcome({
       command: input.adapterResult.command,
       promptPath: input.adapterResult.promptPath,
       reportPath: input.adapterResult.reportPath,
       artifactDir: input.adapterResult.artifactDir,
       artifactPaths: input.adapterResult.artifactPaths,
-      validationSummary: reportRead.message,
-      blockers: [`Acceptance proof blocked: ${reportRead.message}`],
+      validationSummary,
+      blockers: [validationSummary],
       residualRisks: input.adapterResult.residualRisks,
       commandExitCode: input.adapterResult.exitCode,
       commandOutputSummary: input.adapterResult.outputSummary,
@@ -297,6 +333,10 @@ async function evaluateAdapterReport(input: {
     passedSummary: (report) => `${input.adapterResult.adapterKind === 'adaptive' ? 'Acceptance proof' : 'runner acceptance proof'} passed: ${report.criteria.length} criterion/criteria mapped to high-confidence artifacts.`,
     failedSummaryPrefix: input.adapterResult.adapterKind === 'adaptive' ? 'Acceptance proof' : 'runner acceptance proof',
   });
+}
+
+function invalidReportSchemaSummary(errors: string[]): string {
+  return `Invalid acceptance proof report schema: ${errors.join('; ')}`;
 }
 
 function missingReportValidationSummary(adapterResult: AcceptanceProofAdapterResult): string {

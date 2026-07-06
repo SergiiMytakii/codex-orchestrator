@@ -71,13 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.42` (2026-07-06):
-  - Review-ready, blocked, and promotion-requested finalization now share a
-    terminal-outcome module.
-  - Scoped runs, recovered scoped runs, parent plan-auto runs, and child
-    handoffs now use one tested mutation ordering contract.
-  - Durable Run Summary evidence, terminal labels, comments, draft PR handoff,
-    and child state cleanup now have focused ordering coverage.
+- `0.1.43` (2026-07-06):
+  - Acceptance Proof report shape validation now returns all structural schema
+    errors at once from the runner-owned contract.
+  - Adaptive proof prompts now include a generated minimal JSON template and a
+    local `acceptance-proof validate --report` self-check.
+  - Malformed adaptive proof reports now get one proof-artifact repair attempt
+    before hard-blocking instead of consuming implementation rework attempts.
 
 ## Final Response
 

@@ -5,7 +5,7 @@ import type { CodexCommandRunInput, CodexCommandRunResult } from '../codex/comma
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { ScopedCompletionReport } from './completion-report.js';
-import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
+import { renderAcceptanceProofReportTemplate, uiEvidenceFailureDimensions } from './acceptance-proof.js';
 import type { AcceptanceProofAdapterResult } from './acceptance-proof-loop.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 
@@ -23,6 +23,7 @@ export interface RunAcceptanceProofAttemptInput {
   branchName: string;
   workflowPromptText: string;
   logPath?: string;
+  repairSchemaErrors?: string[];
 }
 
 export async function runAcceptanceProofAdapter(
@@ -56,6 +57,7 @@ export async function runAcceptanceProofAdapter(
     reportPath: proofReportPath,
     artifactDir: proofDir,
     worktreePath: input.worktreePath,
+    repairSchemaErrors: input.repairSchemaErrors,
   });
   await writeFile(proofPromptPath, promptText, 'utf8');
   let proofResult: CodexCommandRunResult;
@@ -108,7 +110,17 @@ function buildAcceptanceProofPrompt(input: {
   reportPath: string;
   artifactDir: string;
   worktreePath: string;
+  repairSchemaErrors?: string[];
 }): string {
+  const repairSection = input.repairSchemaErrors?.length
+    ? [
+        '## Proof Report Schema Repair',
+        'The previous proof report JSON was structurally invalid. Repair only the proof report JSON and proof-owned artifacts needed to support it.',
+        'Do not change product code. Do not edit GitHub state. Do not start implementation work.',
+        'Schema errors to fix:',
+        ...input.repairSchemaErrors.map((error) => `- ${error}`),
+      ].join('\n')
+    : '';
   return [
     '# Adaptive Proof Agent',
     '## Workflow',
@@ -116,6 +128,7 @@ function buildAcceptanceProofPrompt(input: {
     '## Issue',
     `#${input.issue.number} ${input.issue.title}`,
     input.issue.body,
+    ...(repairSection ? [repairSection] : []),
     '## Changed Files',
     input.changedFiles.length === 0 ? 'none' : input.changedFiles.map((path) => `- ${path}`).join('\n'),
     '## Implementation Evidence',
@@ -141,7 +154,14 @@ function buildAcceptanceProofPrompt(input: {
     'copyReview findings must cover user-facing copy and rejected implementation terms when copy is part of the acceptance path, with each finding mapped to artifactRefs.',
     'sourceInputs must cite acceptanceCriteriaRefs and implementationEvidenceRefs; cite reproductionSignalRefs, manualQaPlanRefs, and runtimeValidationRefs when those inputs exist. Source inputs cannot replace workflow, viewport, freshness, layout, or copy evidence.',
     `Stable UI Evidence failure dimensions are: ${uiEvidenceFailureDimensions.join(', ')}.`,
+    '## Acceptance Proof Report JSON template',
+    'Use this minimal valid JSON shape as the starting point. Replace placeholder values with task-specific criteria and artifacts. Add optional uiEvidence, proofScriptRepair, or reworkRequest only when the proof result needs them.',
+    '```json',
+    renderAcceptanceProofReportTemplate(),
+    '```',
+    'Before your final response, write the report JSON to CODEX_ORCHESTRATOR_PROOF_REPORT_PATH, then run:',
+    'codex-orchestrator acceptance-proof validate --report "$CODEX_ORCHESTRATOR_PROOF_REPORT_PATH"',
+    'Fix every validation error reported by that command. After it passes, return exactly the validated JSON as your final response.',
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'Schema: { "status": "passed" | "needs-rework" | "blocked", "criteria": { "id": string, "description": string, "status": "passed" | "failed" | "unknown", "confidence": "high" | "medium" | "low", "reasoningSummary": string, "artifactRefs": string[] }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "uiEvidence"?: { "workflowScope": { "entrypoint": string, "path": string[], "screenState": string, "authPath"?: "real-login" | "seeded-session" | "not-required" | "blocked", "authShortcutReason"?: string }, "viewportCoverage": { "name": string, "width": number, "height": number, "artifactRefs": string[], "requiredBy": "desktop-web-layout" | "mobile-or-responsive" | "issue-specific" | "other" }[], "artifactFreshness": { "currentArtifactRefs": string[], "checkedAfterFinalRun": boolean }, "layoutReview": { "checked": boolean, "findings": { "summary": string, "artifactRefs": string[] }[] }, "copyReview": { "checked": boolean, "acceptedTerms"?: string[], "rejectedTermsAbsent"?: string[], "findings": { "summary": string, "artifactRefs": string[] }[] }, "sourceInputs": { "acceptanceCriteriaRefs": string[], "implementationEvidenceRefs": string[], "reproductionSignalRefs"?: string[], "manualQaPlanRefs"?: string[], "runtimeValidationRefs"?: string[] } }, "proofScriptRepair"?: { "changedPaths": string[], "summary": string }, "proofPhaseDiff": { "allowedProofPaths": string[], "forbiddenProductPaths": string[] }, "reworkRequest"?: { "summary": string, "requiredChanges": string[], "evidenceRefs": string[] }, "residualRisks": string[] }.',
   ].join('\n\n');
 }

@@ -294,6 +294,21 @@ export async function runImplementationPublishabilityCheck(
           });
         }
       : undefined,
+    executeAdaptiveProofRepair: input.acceptanceProof
+      ? async ({ schemaErrors }) => runAcceptanceProofAdapter({
+          config: input.config,
+          issue: input.issue,
+          targetRoot: input.acceptanceProof!.targetRoot,
+          worktreePath: input.worktreePath,
+          changedFiles,
+          implementationReport: report,
+          codexAdapter: input.acceptanceProof!.codexAdapter,
+          sessionId: input.acceptanceProof!.sessionId,
+          branchName: input.acceptanceProof!.branchName,
+          workflowPromptText: input.acceptanceProof!.workflowPromptText,
+          repairSchemaErrors: schemaErrors,
+        })
+      : undefined,
     executeCommandProof: async () => {
       const result = await runRunnerVisualProofAdapter({
         config: input.config,

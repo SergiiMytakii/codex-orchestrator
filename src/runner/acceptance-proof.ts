@@ -154,8 +154,13 @@ export interface AcceptanceProofDiffCapture {
 
 export type AcceptanceProofReportReadResult =
   | { kind: 'missing' }
-  | { kind: 'invalid'; message: string }
+  | { kind: 'invalid'; message: string; errors: string[] }
   | { kind: 'valid'; report: AcceptanceProofReport };
+
+export interface AcceptanceProofReportShapeValidationResult {
+  ok: boolean;
+  errors: string[];
+}
 
 export async function readAcceptanceProofReport(path: string): Promise<AcceptanceProofReportReadResult> {
   let content = '';
@@ -170,12 +175,69 @@ export async function readAcceptanceProofReport(path: string): Promise<Acceptanc
 
   try {
     const parsed = JSON.parse(content) as unknown;
-    assertAcceptanceProofReport(parsed);
-    return { kind: 'valid', report: parsed };
+    const validation = validateAcceptanceProofReportShape(parsed);
+    if (!validation.ok) {
+      return { kind: 'invalid', message: formatAcceptanceProofShapeErrors(validation.errors), errors: validation.errors };
+    }
+    return { kind: 'valid', report: parsed as AcceptanceProofReport };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Invalid acceptance proof report';
-    return { kind: 'invalid', message };
+    return { kind: 'invalid', message, errors: [message] };
   }
+}
+
+export function validateAcceptanceProofReportShape(value: unknown): AcceptanceProofReportShapeValidationResult {
+  const errors: string[] = [];
+  const record = valueRecord(value);
+  if (!record) {
+    return { ok: false, errors: ['report must be an object'] };
+  }
+
+  if (!['passed', 'needs-rework', 'blocked'].includes(String(record.status))) {
+    errors.push('status must be passed, needs-rework, or blocked');
+  }
+  validateCriteriaShape(record.criteria, errors);
+  validateArtifactsShape(record.artifacts, errors);
+  if ('uiEvidence' in record && valueRecord(record.uiEvidence) === undefined) {
+    errors.push('uiEvidence must be an object');
+  }
+  validateProofScriptRepairShape(record.proofScriptRepair, errors);
+  validateProofPhaseDiffShape(record.proofPhaseDiff, errors);
+  validateReworkRequestShape(record.reworkRequest, errors);
+  validateStringArrayShape(record.residualRisks, 'residualRisks', errors);
+
+  return {
+    ok: errors.length === 0,
+    errors,
+  };
+}
+
+export function formatAcceptanceProofShapeErrors(errors: string[]): string {
+  return `Invalid acceptance proof report: ${errors.join('; ')}`;
+}
+
+export function renderAcceptanceProofReportTemplate(): string {
+  return JSON.stringify({
+    status: 'passed',
+    criteria: [{
+      id: 'ac-1',
+      description: 'Describe the acceptance criterion being proven.',
+      status: 'passed',
+      confidence: 'high',
+      reasoningSummary: 'Summarize why the linked artifacts prove this criterion.',
+      artifactRefs: ['.codex-orchestrator/proofs/issue-000/artifact.txt'],
+    }],
+    artifacts: [{
+      type: 'smoke-output',
+      path: '.codex-orchestrator/proofs/issue-000/artifact.txt',
+      description: 'Describe the proof artifact.',
+    }],
+    proofPhaseDiff: {
+      allowedProofPaths: ['.codex-orchestrator/proofs/issue-000/artifact.txt'],
+      forbiddenProductPaths: [],
+    },
+    residualRisks: [],
+  }, null, 2);
 }
 
 export async function createAcceptanceProofDiffCapture(
@@ -704,84 +766,110 @@ async function fileHash(path: string): Promise<string | undefined> {
 }
 
 export function assertAcceptanceProofReport(value: unknown): asserts value is AcceptanceProofReport {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid acceptance proof report: report must be an object');
+  const validation = validateAcceptanceProofReportShape(value);
+  if (!validation.ok) {
+    throw new Error(formatAcceptanceProofShapeErrors(validation.errors));
   }
-  const record = value as Record<string, unknown>;
-  if (!['passed', 'needs-rework', 'blocked'].includes(String(record.status))) {
-    throw new Error('Invalid acceptance proof report: status must be passed, needs-rework, or blocked');
-  }
-  assertCriteria(record.criteria);
-  assertArtifacts(record.artifacts);
-  if ('uiEvidence' in record && valueRecord(record.uiEvidence) === undefined) {
-    throw new Error('Invalid acceptance proof report: uiEvidence must be an object');
-  }
-  assertProofPhaseDiff(record.proofPhaseDiff);
-  assertStringArray(record.residualRisks, 'residualRisks');
 }
 
-function assertCriteria(value: unknown): asserts value is AcceptanceProofCriterion[] {
+function validateCriteriaShape(value: unknown, errors: string[]): void {
   if (!Array.isArray(value)) {
-    throw new Error('Invalid acceptance proof report: criteria must be an array');
+    errors.push('criteria must be an array');
+    return;
   }
-  for (const item of value) {
+  for (const [index, item] of value.entries()) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error('Invalid acceptance proof report: criterion must be an object');
+      errors.push(`criteria[${index}] must be an object`);
+      continue;
     }
     const record = item as Record<string, unknown>;
     for (const key of ['id', 'description', 'reasoningSummary']) {
       if (typeof record[key] !== 'string' || record[key].trim().length === 0) {
-        throw new Error(`Invalid acceptance proof report: criterion.${key} must be a non-empty string`);
+        errors.push(`criteria[${index}].${key} must be a non-empty string`);
       }
     }
     if (!['passed', 'failed', 'unknown'].includes(String(record.status))) {
-      throw new Error('Invalid acceptance proof report: criterion.status is invalid');
+      errors.push(`criteria[${index}].status is invalid`);
     }
     if (!['high', 'medium', 'low'].includes(String(record.confidence))) {
-      throw new Error('Invalid acceptance proof report: criterion.confidence is invalid');
+      errors.push(`criteria[${index}].confidence is invalid`);
     }
-    assertStringArray(record.artifactRefs, 'criterion.artifactRefs');
+    validateStringArrayShape(record.artifactRefs, `criteria[${index}].artifactRefs`, errors);
   }
 }
 
-function assertArtifacts(value: unknown): asserts value is AcceptanceProofArtifact[] {
+function validateArtifactsShape(value: unknown, errors: string[]): void {
   if (!Array.isArray(value)) {
-    throw new Error('Invalid acceptance proof report: artifacts must be an array');
+    errors.push('artifacts must be an array');
+    return;
   }
-  for (const item of value) {
+  for (const [index, item] of value.entries()) {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new Error('Invalid acceptance proof report: artifact must be an object');
+      errors.push(`artifacts[${index}] must be an object`);
+      continue;
     }
     const record = item as Record<string, unknown>;
     if (!scopedArtifactTypes.includes(record.type as ScopedArtifactType)) {
-      throw new Error('Invalid acceptance proof report: artifact.type is invalid');
+      errors.push(`artifacts[${index}].type is invalid`);
     }
     if (typeof record.description !== 'string' || record.description.trim().length === 0) {
-      throw new Error('Invalid acceptance proof report: artifact.description must be a non-empty string');
+      errors.push(`artifacts[${index}].description must be a non-empty string`);
     }
     if ('path' in record && typeof record.path !== 'string') {
-      throw new Error('Invalid acceptance proof report: artifact.path must be a string');
+      errors.push(`artifacts[${index}].path must be a string`);
     }
     if ('url' in record && typeof record.url !== 'string') {
-      throw new Error('Invalid acceptance proof report: artifact.url must be a string');
+      errors.push(`artifacts[${index}].url must be a string`);
     }
     if (!record.path && !record.url) {
-      throw new Error('Invalid acceptance proof report: artifact must include path or url');
+      errors.push(`artifacts[${index}] must include path or url`);
     }
   }
 }
 
-function assertProofPhaseDiff(value: unknown): void {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid acceptance proof report: proofPhaseDiff must be an object');
+function validateProofScriptRepairShape(value: unknown, errors: string[]): void {
+  if (value === undefined) {
+    return;
   }
-  const record = value as Record<string, unknown>;
-  assertStringArray(record.allowedProofPaths, 'proofPhaseDiff.allowedProofPaths');
-  assertStringArray(record.forbiddenProductPaths, 'proofPhaseDiff.forbiddenProductPaths');
+  const record = valueRecord(value);
+  if (!record) {
+    errors.push('proofScriptRepair must be an object');
+    return;
+  }
+  validateStringArrayShape(record.changedPaths, 'proofScriptRepair.changedPaths', errors);
+  if (typeof record.summary !== 'string' || record.summary.trim().length === 0) {
+    errors.push('proofScriptRepair.summary must be a non-empty string');
+  }
 }
 
-function assertStringArray(value: unknown, key: string): asserts value is string[] {
+function validateProofPhaseDiffShape(value: unknown, errors: string[]): void {
+  const record = valueRecord(value);
+  if (!record) {
+    errors.push('proofPhaseDiff must be an object');
+    return;
+  }
+  validateStringArrayShape(record.allowedProofPaths, 'proofPhaseDiff.allowedProofPaths', errors);
+  validateStringArrayShape(record.forbiddenProductPaths, 'proofPhaseDiff.forbiddenProductPaths', errors);
+}
+
+function validateReworkRequestShape(value: unknown, errors: string[]): void {
+  if (value === undefined) {
+    return;
+  }
+  const record = valueRecord(value);
+  if (!record) {
+    errors.push('reworkRequest must be an object');
+    return;
+  }
+  if (typeof record.summary !== 'string' || record.summary.trim().length === 0) {
+    errors.push('reworkRequest.summary must be a non-empty string');
+  }
+  validateStringArrayShape(record.requiredChanges, 'reworkRequest.requiredChanges', errors);
+  validateStringArrayShape(record.evidenceRefs, 'reworkRequest.evidenceRefs', errors);
+}
+
+function validateStringArrayShape(value: unknown, key: string, errors: string[]): void {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error(`Invalid acceptance proof report: ${key} must be a string array`);
+    errors.push(`${key} must be a string array`);
   }
 }

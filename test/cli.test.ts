@@ -64,6 +64,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /doctor/);
   assert.match(result.stdout, /status/);
   assert.match(result.stdout, /daemon/);
+  assert.match(result.stdout, /acceptance-proof/);
   assert.match(result.stdout, /agent:auto/);
   assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--prepare-labels/);
@@ -86,6 +87,57 @@ test('runs no-op health command', async () => {
   assert.equal(result.status, 0);
   assert.equal(result.stderr, '');
   assert.equal(result.stdout, 'codex-orchestrator health: ok\n');
+});
+
+test('acceptance-proof validate reports proof report shape errors', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-acceptance-proof-'));
+  const invalidReportPath = join(tempDir, 'invalid-report.json');
+  const validReportPath = join(tempDir, 'valid-report.json');
+  await writeFile(invalidReportPath, JSON.stringify({
+    status: 'passed',
+    criteria: [{
+      id: 'ac-1',
+      status: 'passed',
+      confidence: 'high',
+    }],
+  }), 'utf8');
+  await writeFile(validReportPath, JSON.stringify({
+    status: 'passed',
+    criteria: [{
+      id: 'ac-1',
+      description: 'CLI behavior is observable.',
+      status: 'passed',
+      confidence: 'high',
+      reasoningSummary: 'Smoke output proves the behavior.',
+      artifactRefs: ['.codex-orchestrator/proofs/issue-1/smoke-output.txt'],
+    }],
+    artifacts: [{
+      type: 'smoke-output',
+      path: '.codex-orchestrator/proofs/issue-1/smoke-output.txt',
+      description: 'smoke output',
+    }],
+    proofPhaseDiff: {
+      allowedProofPaths: ['.codex-orchestrator/proofs/issue-1/smoke-output.txt'],
+      forbiddenProductPaths: [],
+    },
+    residualRisks: [],
+  }), 'utf8');
+
+  const missingArg = await runCli(['acceptance-proof', 'validate']);
+  assert.equal(missingArg.status, 2);
+  assert.match(missingArg.stderr, /acceptance-proof validate requires --report <path>/);
+
+  const invalid = await runCli(['acceptance-proof', 'validate', '--report', invalidReportPath]);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /criteria\[0\]\.description must be a non-empty string/);
+  assert.match(invalid.stderr, /criteria\[0\]\.reasoningSummary must be a non-empty string/);
+  assert.match(invalid.stderr, /criteria\[0\]\.artifactRefs must be a string array/);
+  assert.match(invalid.stderr, /artifacts must be an array/);
+
+  const valid = await runCli(['acceptance-proof', 'validate', '--report', validReportPath]);
+  assert.equal(valid.status, 0);
+  assert.equal(valid.stderr, '');
+  assert.equal(valid.stdout, 'acceptance proof report shape valid\n');
 });
 
 test('runs setup dry-run without launching Codex', async () => {

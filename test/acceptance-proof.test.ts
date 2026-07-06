@@ -9,6 +9,7 @@ import {
   createAcceptanceProofDiffCapture,
   evaluateAcceptanceProofReport,
   readAcceptanceProofReport,
+  validateAcceptanceProofReportShape,
   type AcceptanceProofUiEvidence,
   type AcceptanceProofReport,
 } from '../src/runner/acceptance-proof.js';
@@ -312,14 +313,48 @@ test('acceptance proof loads and classifies missing, invalid, and valid proof re
   assert.deepEqual(await readAcceptanceProofReport(join(tempDir, 'missing-report.json')), {
     kind: 'missing',
   });
-  assert.deepEqual(await readAcceptanceProofReport(invalidReportPath), {
-    kind: 'invalid',
-    message: 'Invalid acceptance proof report: criteria must be an array',
-  });
+  const invalid = await readAcceptanceProofReport(invalidReportPath);
+  assert.equal(invalid.kind, 'invalid');
+  assert.match(invalid.kind === 'invalid' ? invalid.message : '', /criteria must be an array/);
+  assert.match(invalid.kind === 'invalid' ? invalid.message : '', /artifacts must be an array/);
+  assert.match(invalid.kind === 'invalid' ? invalid.message : '', /proofPhaseDiff must be an object/);
+  assert.match(invalid.kind === 'invalid' ? invalid.message : '', /residualRisks must be a string array/);
   assert.deepEqual(await readAcceptanceProofReport(validReportPath), {
     kind: 'valid',
     report: passingReport,
   });
+});
+
+test('acceptance proof shape validation reports all schema errors at once', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'codex-orchestrator-acceptance-proof-shape-'));
+  const invalidReportPath = join(tempDir, 'invalid-report.json');
+  const invalidReport = {
+    status: 'complete',
+    criteria: [{
+      id: 'ac-1',
+      status: 'done',
+      confidence: 'certain',
+    }],
+  };
+  await writeFile(invalidReportPath, JSON.stringify(invalidReport), 'utf8');
+
+  const validation = validateAcceptanceProofReportShape(invalidReport);
+  assert.equal(validation.ok, false);
+  assert.match(validation.errors.join('\n'), /status must be passed, needs-rework, or blocked/);
+  assert.match(validation.errors.join('\n'), /criteria\[0\]\.description must be a non-empty string/);
+  assert.match(validation.errors.join('\n'), /criteria\[0\]\.status is invalid/);
+  assert.match(validation.errors.join('\n'), /criteria\[0\]\.confidence is invalid/);
+  assert.match(validation.errors.join('\n'), /criteria\[0\]\.reasoningSummary must be a non-empty string/);
+  assert.match(validation.errors.join('\n'), /criteria\[0\]\.artifactRefs must be a string array/);
+  assert.match(validation.errors.join('\n'), /artifacts must be an array/);
+  assert.match(validation.errors.join('\n'), /proofPhaseDiff must be an object/);
+  assert.match(validation.errors.join('\n'), /residualRisks must be a string array/);
+
+  const read = await readAcceptanceProofReport(invalidReportPath);
+  assert.equal(read.kind, 'invalid');
+  assert.match(read.message, /criteria\[0\]\.description must be a non-empty string/);
+  assert.match(read.message, /criteria\[0\]\.reasoningSummary must be a non-empty string/);
+  assert.match(read.message, /criteria\[0\]\.artifactRefs must be a string array/);
 });
 
 function completeUiEvidence(): AcceptanceProofUiEvidence {

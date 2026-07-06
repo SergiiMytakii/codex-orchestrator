@@ -335,6 +335,14 @@ test('scoped auto command invokes adaptive proof phase and records durable evide
   assert.match(proofInput.promptText, /Manual QA Plan/);
   assert.match(proofInput.promptText, /authPath/);
   assert.match(proofInput.promptText, /authShortcutReason/);
+  assert.match(proofInput.promptText, /Acceptance Proof Report JSON template/);
+  assert.match(proofInput.promptText, /"description": "Describe the acceptance criterion being proven."/);
+  assert.match(proofInput.promptText, /codex-orchestrator acceptance-proof validate --report "\$CODEX_ORCHESTRATOR_PROOF_REPORT_PATH"/);
+  assert.match(proofInput.promptText, /write the report JSON to CODEX_ORCHESTRATOR_PROOF_REPORT_PATH/i);
+  assert.match(proofInput.promptText, /return exactly the validated JSON as your final response/i);
+  assert.doesNotMatch(proofInput.promptText, /Schema: \{/);
+  const acceptanceProofRunnerSource = await readFile('src/runner/acceptance-proof-runner.ts', 'utf8');
+  assert.doesNotMatch(acceptanceProofRunnerSource, /Schema: \{/);
   await assert.rejects(stat(proofInput.isolatedHomePath), /ENOENT/);
 
   const summary = JSON.parse(

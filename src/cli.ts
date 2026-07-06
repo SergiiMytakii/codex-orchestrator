@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { GhCliIssueAdapter } from './github/gh-issue-adapter.js';
@@ -19,6 +20,7 @@ import { parseMobileVisualProofArgs, runMobileVisualProofCommand } from './runne
 import { runSetupCommand } from './setup/setup-command.js';
 import { promptSyncModes, type PromptSyncMode } from './setup/prompt-sync.js';
 import { runAutoVisualProofCommand } from './runner/auto-visual-proof-command.js';
+import { formatAcceptanceProofShapeErrors, validateAcceptanceProofReportShape } from './runner/acceptance-proof.js';
 
 const helpText = `codex-orchestrator
 
@@ -31,6 +33,7 @@ Usage:
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
+  codex-orchestrator acceptance-proof validate --report <path>
   codex-orchestrator visual-proof auto --issue <number> [--target <path>]
   codex-orchestrator visual-proof browser --issue <number> [--target <path>] [--scenario <path>] [--base-url <url>]
   codex-orchestrator visual-proof mobile --issue <number> [--target <path>]
@@ -44,6 +47,7 @@ Commands:
   status       Show eligible/skipped issue work and local recovery state.
   run          Execute one authorized issue: scoped agent:auto or full agent:plan-auto issue tree.
   daemon       Poll GitHub Issues and execute eligible autonomous work until stopped.
+  acceptance-proof Validate machine-readable Acceptance Proof reports.
   visual-proof Run package-owned proof commands used by review gates.
 
 Options:
@@ -89,6 +93,10 @@ interface DaemonCliArgs {
   once: boolean;
   maxRuns?: number;
   concurrency?: number;
+}
+
+interface AcceptanceProofValidateCliArgs {
+  report?: string;
 }
 
 async function main(args: string[]): Promise<number> {
@@ -228,6 +236,32 @@ async function main(args: string[]): Promise<number> {
     }
   }
 
+  if (command === 'acceptance-proof') {
+    const [kind, ...rest] = args.slice(1);
+    if (kind !== 'validate') {
+      process.stderr.write('acceptance-proof requires a supported kind: validate\nRun codex-orchestrator --help for usage.\n');
+      return 2;
+    }
+    const parsed = parseAcceptanceProofValidateArgs(rest);
+    if (!parsed.ok) {
+      process.stderr.write(`${parsed.error}\nRun codex-orchestrator --help for usage.\n`);
+      return 2;
+    }
+    try {
+      const result = await validateAcceptanceProofReportFile(parsed.value.report);
+      if (!result.ok) {
+        process.stderr.write(`${result.message}\n`);
+        return 1;
+      }
+      process.stdout.write('acceptance proof report shape valid\n');
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'acceptance-proof validate failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   if (command === 'visual-proof') {
     const [kind, ...rest] = args.slice(1);
     if (kind !== 'auto' && kind !== 'browser' && kind !== 'mobile' && kind !== 'android' && kind !== 'ios') {
@@ -282,6 +316,21 @@ async function main(args: string[]): Promise<number> {
 
   process.stderr.write(`Unknown command: ${command}\nRun codex-orchestrator --help for usage.\n`);
   return 1;
+}
+
+async function validateAcceptanceProofReportFile(reportPath: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(reportPath, 'utf8')) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid JSON';
+    return { ok: false, message: `Invalid acceptance proof report JSON: ${message}` };
+  }
+
+  const validation = validateAcceptanceProofReportShape(parsed);
+  return validation.ok
+    ? { ok: true }
+    : { ok: false, message: formatAcceptanceProofShapeErrors(validation.errors) };
 }
 
 function visualProofTargetFromArgs(args: string[]): string | undefined {
@@ -370,6 +419,35 @@ function parseRunArgs(
   }
 
   return { ok: true, value: { ...parsed, target: parsed.target, issue: parsed.issue } };
+}
+
+function parseAcceptanceProofValidateArgs(
+  args: string[],
+): { ok: true; value: AcceptanceProofValidateCliArgs & { report: string } } | { ok: false; error: string } {
+  const parsed: AcceptanceProofValidateCliArgs = {};
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    const next = args[index + 1];
+
+    switch (arg) {
+      case '--report':
+        if (!next || next.startsWith('--')) {
+          return { ok: false, error: `${arg} requires a value` };
+        }
+        parsed.report = next;
+        index += 1;
+        break;
+      default:
+        return { ok: false, error: `Unknown acceptance-proof validate option: ${arg ?? ''}` };
+    }
+  }
+
+  if (!parsed.report) {
+    return { ok: false, error: 'acceptance-proof validate requires --report <path>' };
+  }
+
+  return { ok: true, value: { ...parsed, report: parsed.report } };
 }
 
 function parseStatusArgs(args: string[]): { ok: true; value: StatusCliArgs & { target: string } } | { ok: false; error: string } {

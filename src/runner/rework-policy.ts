@@ -15,6 +15,7 @@ export type ReworkBlockerKey =
   | 'no-changed-files'
   | 'failed-configured-checks'
   | 'missing-quality-gate-evidence'
+  | 'invalid-acceptance-proof-report'
   | 'failed-acceptance-proof'
   | 'risk-routing-policy'
   | 'optional-figma-mcp-failure'
@@ -70,6 +71,7 @@ const blockerPatterns: Array<[ReworkBlockerKey, RegExp]> = [
   ['optional-figma-mcp-failure', optionalFigmaPattern],
   ['missing-quality-gate-evidence', /Quality gate requires/iu],
   ['failed-configured-checks', /One or more configured checks failed|^(?!Codex exited\b)[^\n:]+:\s*failed\b/iu],
+  ['invalid-acceptance-proof-report', /Invalid acceptance proof report schema/iu],
   ['failed-acceptance-proof', /Acceptance proof/iu],
   ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],
@@ -82,6 +84,7 @@ const hardBlockerKeys = new Set<ReworkBlockerKey>([
   'publication-violation',
   'destructive-or-production-action',
   'required-figma-mcp-failure',
+  'invalid-acceptance-proof-report',
   'unknown',
 ]);
 
@@ -144,7 +147,10 @@ function classifyBlockerKeys(reasons: string[]): ReworkBlockerKey[] {
       pushUnique(keys, 'unknown');
       continue;
     }
-    for (const key of matched) {
+    const effectiveMatched = matched.includes('invalid-acceptance-proof-report')
+      ? matched.filter((key) => key !== 'failed-acceptance-proof')
+      : matched;
+    for (const key of effectiveMatched) {
       pushUnique(keys, key);
     }
   }

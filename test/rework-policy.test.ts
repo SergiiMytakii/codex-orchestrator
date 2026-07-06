@@ -96,6 +96,17 @@ test('acceptance proof blockers use proof iteration budget', () => {
   });
 });
 
+test('invalid acceptance proof report schema hard-blocks implementation rework', () => {
+  const reasons = ['Invalid acceptance proof report schema: criteria must be an array; artifacts must be an array'];
+
+  assert.deepEqual(decideImplementationRework({ reasons, config: withReworkConfig(), attempt: 0 }), {
+    kind: 'hard-block',
+    attempt: 0,
+    blockerKeys: ['invalid-acceptance-proof-report'],
+    reasons,
+  });
+});
+
 test('failed command summaries stay retryable with configured check blockers', () => {
   const config = withReworkConfig({ maxAttempts: 1 });
   const reasons = [

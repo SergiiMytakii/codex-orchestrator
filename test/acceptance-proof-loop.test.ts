@@ -461,6 +461,79 @@ test('acceptance proof loop gives adaptive proof the same evidence vocabulary as
   assert.equal(passed.evidence?.status, 'passed');
 });
 
+test('acceptance proof loop repairs invalid adaptive proof report shape once', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
+  const proof = await proofPaths(worktreePath, 627);
+  let repairCalls = 0;
+
+  const result = await runAcceptanceProofLoopAttempt({
+    config: adaptiveProofConfig(),
+    issue: issueFixture({ number: 627, title: 'Acceptance proof adaptive repair', body: 'Needs acceptance proof.' }),
+    worktreePath,
+    beforeHead: 'before',
+    initialChangedFiles: [],
+    adaptiveAdapterAvailable: true,
+    executeAdaptiveProof: async () => {
+      await writeFile(proof.reportPath, JSON.stringify({
+        status: 'passed',
+        criteria: [{ id: 'ac-1', status: 'passed', confidence: 'high' }],
+      }), 'utf8');
+      return adaptiveResult(proof);
+    },
+    executeAdaptiveProofRepair: async ({ reportPath, artifactDir, schemaErrors, previousResult }) => {
+      repairCalls += 1;
+      assert.equal(reportPath, proof.reportPath);
+      assert.equal(artifactDir, proof.artifactDir);
+      assert.equal(previousResult.reportPath, proof.reportPath);
+      assert.match(schemaErrors.join('\n'), /criteria\[0\]\.description/);
+      assert.match(schemaErrors.join('\n'), /criteria\[0\]\.reasoningSummary/);
+      assert.match(schemaErrors.join('\n'), /criteria\[0\]\.artifactRefs/);
+      await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
+      await writeFile(proof.reportPath, JSON.stringify(passingReport(proof.smokeArtifactPath)), 'utf8');
+      return adaptiveResult(proof, { artifactPaths: [proof.smokeArtifactPath], outputSummary: 'schema repair ok' });
+    },
+    collectChangeSet: async () => ({ changedPaths: [proof.smokeArtifactPath], commits: [], hasChanges: true }),
+    evaluateScope: () => ({ blockers: [] }),
+    artifactExists: (path) => existsSync(join(worktreePath, path)),
+  });
+
+  assert.equal(repairCalls, 1);
+  assert.equal(result.status, 'passed');
+  assert.equal(result.evidence?.status, 'passed');
+});
+
+test('acceptance proof loop hard-blocks adaptive proof report shape after one failed repair', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
+  const proof = await proofPaths(worktreePath, 628);
+  let repairCalls = 0;
+
+  const result = await runAcceptanceProofLoopAttempt({
+    config: adaptiveProofConfig(),
+    issue: issueFixture({ number: 628, title: 'Acceptance proof adaptive repair exhausted', body: 'Needs acceptance proof.' }),
+    worktreePath,
+    beforeHead: 'before',
+    initialChangedFiles: [],
+    adaptiveAdapterAvailable: true,
+    executeAdaptiveProof: async () => {
+      await writeFile(proof.reportPath, '{"status":"passed"}', 'utf8');
+      return adaptiveResult(proof);
+    },
+    executeAdaptiveProofRepair: async () => {
+      repairCalls += 1;
+      await writeFile(proof.reportPath, '{"status":"passed"}', 'utf8');
+      return adaptiveResult(proof, { outputSummary: 'schema repair still invalid' });
+    },
+    collectChangeSet: async () => ({ changedPaths: [], commits: [], hasChanges: false }),
+    evaluateScope: () => ({ blockers: [] }),
+  });
+
+  assert.equal(repairCalls, 1);
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.evidence?.status, 'blocked');
+  assert.match(result.blockers.join('\n'), /Invalid acceptance proof report schema/);
+  assert.match(result.blockers.join('\n'), /criteria must be an array/);
+});
+
 test('acceptance proof loop preserves legacy visual command without expanding proof-owned paths', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
   const proof = await proofPaths(worktreePath, 626);

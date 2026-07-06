@@ -99,6 +99,12 @@ After polling, the daemon can clean up runner-owned worktrees whose pull
 requests have already been merged. Dirty, blocked, active, or unpublished
 worktrees are preserved.
 
+### `acceptance-proof validate`
+
+Validates the machine-readable Acceptance Proof report shape from a local file.
+Proof agents use this command before returning their final JSON, and the runner
+uses the same report contract when it reads `acceptance-proof-report.json`.
+
 ## Issue Authorization Model
 
 The runner only starts work that is explicitly authorized.
@@ -327,6 +333,13 @@ The runner validates the report independently. It rejects malformed JSON, empty
 criteria, low or medium confidence, failed or unknown criteria, missing artifact
 references, artifact paths that do not exist, and forbidden product-code diffs
 from the proof phase.
+
+Adaptive proof prompts include a minimal report template and require the proof
+agent to validate the report with `codex-orchestrator acceptance-proof validate
+--report "$CODEX_ORCHESTRATOR_PROOF_REPORT_PATH"` before returning the final
+JSON. If an adaptive proof report is structurally invalid, the runner may ask
+the proof phase to repair the report once; repeated schema failure blocks rather
+than consuming another product implementation rework attempt.
 
 For UI proof, the proof report must satisfy the UI Evidence Contract. Screenshot
 or UI-dump artifacts must be mapped to:
