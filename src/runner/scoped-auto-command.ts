@@ -8,7 +8,6 @@ import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
-import { verifyPullRequestRefs } from '../github/pull-requests.js';
 import { resolveBaseBranch } from '../git/base-branch.js';
 import { GitWorktreeManager, renderBranchTemplate } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
@@ -44,6 +43,11 @@ import {
   buildReviewReadyHandoffEvidence,
 } from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
+import {
+  finishBlockedTerminalOutcome,
+  finishPromotionRequestedTerminalOutcome,
+  finishReviewReadyTerminalOutcome,
+} from './terminal-outcome.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -616,38 +620,10 @@ export interface FinishScopedReviewReadyHandoffInput {
 export async function finishScopedReviewReadyHandoff(
   input: FinishScopedReviewReadyHandoffInput,
 ): Promise<{ pullRequest: GitHubPullRequest; reportComment: string }> {
-  await input.git.pushBranch({ worktreePath: input.worktreePath, branchName: input.branchName });
-  let pullRequest = await input.pullRequestAdapter.findOpenPullRequestByHeadAndBase(input.branchName, input.baseBranch);
-  if (!pullRequest) {
-    pullRequest = await input.pullRequestAdapter.createDraftPullRequest({
-      title: renderTemplate(input.config.pullRequests.scopedIssueTitle, input.issueNumber),
-      body: buildScopedPullRequestBody({
-        config: input.config,
-        branchName: input.branchName,
-        issueNumber: input.issueNumber,
-        changedFiles: input.publishability.changedFiles,
-        validation: input.publishability.validation,
-        artifacts: input.publishability.artifacts,
-        skippedChecks: input.publishability.skippedChecks,
-        residualRisks: input.publishability.residualRisks,
-        reviewHandoff: input.publishability.report.reviewHandoff,
-        logPath: input.logPath,
-        commits: input.publishability.commits,
-        freshContextReview: input.freshContextReview,
-        durableRunSummary: input.durableRunSummary,
-        acceptanceProof: input.acceptanceProof,
-      }),
-      headBranch: input.branchName,
-      baseBranch: input.baseBranch,
-    });
-  }
-  pullRequest = await verifyPullRequestRefs(input.pullRequestAdapter, pullRequest, input.branchName, input.baseBranch);
-  input.onPullRequestReady?.(pullRequest);
-  const reportComment = buildScopedReviewReport({
+  const pullRequestBody = buildScopedPullRequestBody({
     config: input.config,
     branchName: input.branchName,
     issueNumber: input.issueNumber,
-    pullRequest,
     changedFiles: input.publishability.changedFiles,
     validation: input.publishability.validation,
     artifacts: input.publishability.artifacts,
@@ -660,10 +636,38 @@ export async function finishScopedReviewReadyHandoff(
     durableRunSummary: input.durableRunSummary,
     acceptanceProof: input.acceptanceProof,
   });
-  await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);
-  await input.issueAdapter.addLabels(input.issueNumber, [input.config.github.labels.review.name]);
-  await input.issueAdapter.postComment(input.issueNumber, reportComment);
-  return { pullRequest, reportComment };
+  return finishReviewReadyTerminalOutcome({
+    issueNumber: input.issueNumber,
+    branchName: input.branchName,
+    baseBranch: input.baseBranch,
+    worktreePath: input.worktreePath,
+    config: input.config,
+    git: input.git,
+    pullRequestAdapter: input.pullRequestAdapter,
+    issueAdapter: input.issueAdapter,
+    pullRequest: {
+      title: renderTemplate(input.config.pullRequests.scopedIssueTitle, input.issueNumber),
+      body: pullRequestBody,
+    },
+    reportComment: (pullRequest) => buildScopedReviewReport({
+      config: input.config,
+      branchName: input.branchName,
+      issueNumber: input.issueNumber,
+      pullRequest,
+      changedFiles: input.publishability.changedFiles,
+      validation: input.publishability.validation,
+      artifacts: input.publishability.artifacts,
+      skippedChecks: input.publishability.skippedChecks,
+      residualRisks: input.publishability.residualRisks,
+      reviewHandoff: input.publishability.report.reviewHandoff,
+      logPath: input.logPath,
+      commits: input.publishability.commits,
+      freshContextReview: input.freshContextReview,
+      durableRunSummary: input.durableRunSummary,
+      acceptanceProof: input.acceptanceProof,
+    }),
+    onPullRequestReady: input.onPullRequestReady,
+  });
 }
 
 export interface FinishScopedBlockedHandoffInput {
@@ -701,14 +705,13 @@ export async function finishScopedBlockedHandoff(
       acceptanceProof: input.acceptanceProof,
     }),
   ].filter(Boolean).join('\n');
-  await input.issueAdapter.removeLabels(input.issueNumber, [input.config.github.labels.running.name]);
-  await input.issueAdapter.addLabels(input.issueNumber, [input.config.github.labels.blocked.name]);
-  const issue = input.skipCommentIfIncludes ? await input.issueAdapter.getIssue(input.issueNumber) : undefined;
-  const alreadyPosted = Boolean(input.skipCommentIfIncludes && issue?.comments.some((comment) => comment.body.includes(input.skipCommentIfIncludes ?? '')));
-  if (!alreadyPosted) {
-    await input.issueAdapter.postComment(input.issueNumber, reportComment);
-  }
-  return { reportComment, postedComment: !alreadyPosted };
+  return finishBlockedTerminalOutcome({
+    issueNumber: input.issueNumber,
+    config: input.config,
+    issueAdapter: input.issueAdapter,
+    reportComment,
+    skipCommentIfIncludes: input.skipCommentIfIncludes,
+  });
 }
 
 async function finishPromotionRequested(
@@ -719,9 +722,12 @@ async function finishPromotionRequested(
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
 ): Promise<ScopedAutoCommandResult> {
   const reportComment = buildPromotionRequestReport({ issueNumber: result.issueNumber, report, durableRunSummary });
-  await issueAdapter.removeLabels(result.issueNumber, [config.github.labels.running.name]);
-  await issueAdapter.addLabels(result.issueNumber, [config.github.labels.blocked.name]);
-  await issueAdapter.postComment(result.issueNumber, reportComment);
+  await finishPromotionRequestedTerminalOutcome({
+    issueNumber: result.issueNumber,
+    config,
+    issueAdapter,
+    reportComment,
+  });
   return { ...result, status: 'promotion-requested', reportComment };
 }
 

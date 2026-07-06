@@ -71,13 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.41` (2026-07-03):
-  - Focused live smoke now covers plan-auto tree recovery with a stale parent,
-    recovered closed child evidence, and retryable blocked child rework.
-  - Direct `run --issue` can enter safe plan-auto parent recovery for
-    runner-owned `agent:running` parent issues.
-  - The recovery smoke fixture verifies parent PR evidence, child labels, and
-    resumed attempt logs in the scratch repository.
+- `0.1.42` (2026-07-06):
+  - Review-ready, blocked, and promotion-requested finalization now share a
+    terminal-outcome module.
+  - Scoped runs, recovered scoped runs, parent plan-auto runs, and child
+    handoffs now use one tested mutation ordering contract.
+  - Durable Run Summary evidence, terminal labels, comments, draft PR handoff,
+    and child state cleanup now have focused ordering coverage.
 
 ## Final Response
 

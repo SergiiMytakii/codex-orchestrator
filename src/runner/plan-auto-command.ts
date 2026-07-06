@@ -10,7 +10,6 @@ import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
 import type { GitHubIssue, GitHubIssueAdapter } from '../github/issues.js';
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull-requests.js';
-import { verifyPullRequestRefs } from '../github/pull-requests.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import {
   formatSessionTimestamp,
@@ -68,6 +67,11 @@ import {
 } from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
 import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
+import {
+  finishBlockedTerminalOutcome,
+  finishReviewReadyCommentTerminalOutcome,
+  finishReviewReadyTerminalOutcome,
+} from './terminal-outcome.js';
 
 export interface PlanAutoCommandOptions {
   targetRoot: string;
@@ -583,38 +587,44 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
         childIssues,
       );
     }
-    await git.pushBranch({ worktreePath, branchName });
-    pullRequest = await pullRequestAdapter.createDraftPullRequest({
-      title: renderParentTemplate(config.pullRequests.issueTreeTitle, options.issueNumber),
-      body: buildIssueTreePullRequestBody({
+    const handoff = await finishReviewReadyTerminalOutcome({
+      issueNumber: options.issueNumber,
+      config,
+      branchName,
+      baseBranch: resolvedBase.prBaseBranch,
+      worktreePath,
+      git,
+      pullRequestAdapter,
+      issueAdapter,
+      pullRequest: {
+        title: renderParentTemplate(config.pullRequests.issueTreeTitle, options.issueNumber),
+        body: buildIssueTreePullRequestBody({
+          parentIssueNumber: options.issueNumber,
+          childIssues,
+          childResults: executionResults,
+          finalValidation,
+          sizeRisk: report.sizeRisk,
+          parentReviewHandoff: report.parentReviewHandoff,
+          riskRoutingWarnings,
+        }),
+      },
+      findExistingPullRequest: false,
+      reportComment: (verifiedPullRequest) => buildIssueTreeReviewReport({
         parentIssueNumber: options.issueNumber,
-        childIssues,
+        pullRequest: verifiedPullRequest,
+        batches: batches.batches,
         childResults: executionResults,
         finalValidation,
         sizeRisk: report.sizeRisk,
         parentReviewHandoff: report.parentReviewHandoff,
         riskRoutingWarnings,
       }),
-      headBranch: branchName,
-      baseBranch: resolvedBase.prBaseBranch,
+      onPullRequestReady: (verifiedPullRequest) => {
+        pullRequest = verifiedPullRequest;
+      },
+      beforeIssueMutation: () => markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults),
+      afterComment: () => store.removeRun(options.issueNumber),
     });
-    pullRequest = await verifyPullRequestRefs(pullRequestAdapter, pullRequest, branchName, resolvedBase.prBaseBranch);
-
-    const reportComment = buildIssueTreeReviewReport({
-      parentIssueNumber: options.issueNumber,
-      pullRequest,
-      batches: batches.batches,
-      childResults: executionResults,
-      finalValidation,
-      sizeRisk: report.sizeRisk,
-      parentReviewHandoff: report.parentReviewHandoff,
-      riskRoutingWarnings,
-    });
-    await markCompletedChildrenReviewReady(issueAdapter, config, store, options.issueNumber, executionResults);
-    await issueAdapter.removeLabels(options.issueNumber, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(options.issueNumber, [config.github.labels.review.name]);
-    await issueAdapter.postComment(options.issueNumber, reportComment);
-    await store.removeRun(options.issueNumber);
     await safeAppendEvent(events, {
       issueNumber: options.issueNumber,
       mode: 'plan-parent',
@@ -624,15 +634,15 @@ export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promi
       summary: 'Issue-tree execution completed draft PR handoff.',
       artifacts: [
         ...sessionArtifacts(promptPath, reportPath, logPath, parentSnapshotPath),
-        { kind: 'pr', url: pullRequest.url, description: 'Draft pull request' },
+        { kind: 'pr', url: handoff.pullRequest.url, description: 'Draft pull request' },
       ],
     });
 
     return {
       ...buildBase(),
       status: 'review-ready',
-      pullRequest,
-      reportComment,
+      pullRequest: handoff.pullRequest,
+      reportComment: handoff.reportComment,
       riskRoutingWarnings,
     };
   } catch (error) {
@@ -991,11 +1001,11 @@ async function blockFailedBatch(
     if (!failure.child) {
       continue;
     }
-    await issueAdapter.removeLabels(failure.child.issue.number, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(failure.child.issue.number, [config.github.labels.blocked.name]);
-    await issueAdapter.postComment(
-      failure.child.issue.number,
-      buildChildBlockedReport({
+    await finishBlockedTerminalOutcome({
+      issueNumber: failure.child.issue.number,
+      config,
+      issueAdapter,
+      reportComment: buildChildBlockedReport({
         parentIssueNumber,
         childIssueNumber: failure.child.issue.number,
         reasons: [failure.message],
@@ -1005,14 +1015,14 @@ async function blockFailedBatch(
         reworkAttempts: failure.reworkAttempts,
         acceptanceProof: failure.acceptanceProof,
       }),
-    );
+    });
   }
   for (const result of successfulUnmerged) {
-    await issueAdapter.removeLabels(result.child.issue.number, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
-    await issueAdapter.postComment(
-      result.child.issue.number,
-      buildChildBlockedReport({
+    await finishBlockedTerminalOutcome({
+      issueNumber: result.child.issue.number,
+      config,
+      issueAdapter,
+      reportComment: buildChildBlockedReport({
         parentIssueNumber,
         childIssueNumber: result.child.issue.number,
         reasons: ['A sibling child failed before the batch merge; this child branch was not merged.'],
@@ -1021,7 +1031,7 @@ async function blockFailedBatch(
         durableRunSummary: result.durableRunSummary,
         acceptanceProof: result.acceptanceProof,
       }),
-    );
+    });
   }
 }
 
@@ -1041,11 +1051,11 @@ async function handleMergeConflict(
     abortMessage = abortError instanceof Error ? abortError.message : 'merge abort failed';
   }
   for (const result of batchResults) {
-    await issueAdapter.removeLabels(result.child.issue.number, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
-    await issueAdapter.postComment(
-      result.child.issue.number,
-      buildChildBlockedReport({
+    await finishBlockedTerminalOutcome({
+      issueNumber: result.child.issue.number,
+      config,
+      issueAdapter,
+      reportComment: buildChildBlockedReport({
         parentIssueNumber,
         childIssueNumber: result.child.issue.number,
         reasons: [
@@ -1067,7 +1077,7 @@ async function handleMergeConflict(
         durableRunSummary: result.durableRunSummary,
         acceptanceProof: result.acceptanceProof,
       }),
-    );
+    });
   }
 }
 
@@ -1083,13 +1093,13 @@ async function markCompletedChildrenReviewReady(
       await store.removeRun(childResult.child.issue.number);
       continue;
     }
-    await issueAdapter.removeLabels(childResult.child.issue.number, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(childResult.child.issue.number, [config.github.labels.review.name]);
-    await issueAdapter.postComment(
-      childResult.child.issue.number,
-      buildChildReviewReport({ parentIssueNumber, result: childResult }),
-    );
-    await store.removeRun(childResult.child.issue.number);
+    await finishReviewReadyCommentTerminalOutcome({
+      issueNumber: childResult.child.issue.number,
+      config,
+      issueAdapter,
+      reportComment: buildChildReviewReport({ parentIssueNumber, result: childResult }),
+      afterTerminalMutation: () => store.removeRun(childResult.child.issue.number),
+    });
   }
 }
 
@@ -1106,11 +1116,11 @@ async function blockCompletedChildren(
     if (result.recovered) {
       continue;
     }
-    await issueAdapter.removeLabels(result.child.issue.number, [config.github.labels.running.name]);
-    await issueAdapter.addLabels(result.child.issue.number, [config.github.labels.blocked.name]);
-    await issueAdapter.postComment(
-      result.child.issue.number,
-      buildChildBlockedReport({
+    await finishBlockedTerminalOutcome({
+      issueNumber: result.child.issue.number,
+      config,
+      issueAdapter,
+      reportComment: buildChildBlockedReport({
         parentIssueNumber,
         childIssueNumber: result.child.issue.number,
         reasons: [reason],
@@ -1121,8 +1131,8 @@ async function blockCompletedChildren(
         durableRunSummary: result.durableRunSummary,
         acceptanceProof: result.acceptanceProof,
       }),
-    );
-    await store.removeRun(result.child.issue.number);
+      afterTerminalMutation: () => store.removeRun(result.child.issue.number),
+    });
   }
 }
 
@@ -1142,12 +1152,13 @@ async function finishPlanBlocked(
     mutatedChildren,
   });
   const reportComment = commentMarker ? `<!-- codex-orchestrator:${commentMarker} -->\n${reportBody}` : reportBody;
-  await issueAdapter.removeLabels(result.parentIssueNumber, [config.github.labels.running.name]);
-  await issueAdapter.addLabels(result.parentIssueNumber, [config.github.labels.blocked.name]);
-  const currentIssue = commentMarker ? await issueAdapter.getIssue(result.parentIssueNumber) : undefined;
-  if (!commentMarker || !currentIssue?.comments.some((comment) => comment.body.includes(commentMarker))) {
-    await issueAdapter.postComment(result.parentIssueNumber, reportComment);
-  }
+  await finishBlockedTerminalOutcome({
+    issueNumber: result.parentIssueNumber,
+    config,
+    issueAdapter,
+    reportComment,
+    skipCommentIfIncludes: commentMarker,
+  });
   await safeAppendEvent(events, {
     issueNumber: result.parentIssueNumber,
     mode: 'plan-parent',

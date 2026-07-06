@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-07-06
+
+### Changed
+- Runner terminal handoff now uses one shared outcome module for review-ready,
+  blocked, and promotion-requested finalization across scoped, recovered, parent,
+  and child paths.
+- Draft PR handoff, terminal labels, comments, Durable Run Summary evidence, and
+  child state cleanup now share focused ordering tests instead of relying on
+  repeated per-path mutation sequences.
+
 ## [0.1.41] - 2026-07-03
 
 ### Added
