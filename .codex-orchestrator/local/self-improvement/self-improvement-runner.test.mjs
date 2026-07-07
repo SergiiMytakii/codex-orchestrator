@@ -433,12 +433,33 @@ test('implement command builds then runs targeted issue and never calls daemon',
   }
 });
 
-test('daily runs live smoke only after successful targeted implementation and still reviews on failure', async () => {
+test('implement treats blocked handoff output as blocked even when the CLI exits zero', async () => {
+  const exec = makeExecStub({
+    [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
+    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '123'])]: {
+      code: 0,
+      stdout: 'codex-orchestrator blocked scoped execution for #123\n- outcome: blocked\n',
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const result = await runner.implement({ issue: 123 });
+    assert.equal(result.status, 'blocked');
+    assert.equal(result.issueNumber, 123);
+    assert.match(result.reason, /blocked scoped execution/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('daily implements one code issue and never runs review backlog follow-up publication', async () => {
   const exec = makeExecStub({
     gh: ({ args }) => {
       if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
       if (args[0] === 'auth') return { code: 0, stdout: '' };
       if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) return { code: 0, stdout: '[]' };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement source-date:2026-05-20 in:body')) return { code: 0, stdout: '[]' };
       if (args[0] === 'issue' && args[1] === 'list' && args.some((arg) => String(arg).startsWith('source-candidate-fingerprint:'))) return { code: 0, stdout: JSON.stringify([{ number: 222, title: 'existing' }]) };
       if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]' };
       return { code: 0, stdout: '' };
@@ -455,7 +476,9 @@ test('daily runs live smoke only after successful targeted implementation and st
   try {
     const result = await runner.daily();
     assert.equal(result.phases.find((phase) => phase.name === 'live-smoke').status, 'passed');
+    assert.equal(result.phases.find((phase) => phase.name === 'review-backlog').status, 'skipped');
     assert.equal(exec.calls.some((call) => call.command === 'npm' && call.args.join(' ') === 'run smoke:live'), true);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'view'), false);
     const smokeIndex = exec.calls.findIndex((call) => call.command === 'npm' && call.args.join(' ') === 'run smoke:live');
     const implIndex = exec.calls.findIndex((call) => call.command === 'node' && call.args.includes('--issue'));
     assert.ok(smokeIndex > implIndex);
@@ -468,6 +491,8 @@ test('daily runs live smoke only after successful targeted implementation and st
       if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
       if (args[0] === 'auth') return { code: 0, stdout: '' };
       if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) return { code: 0, stdout: '[]' };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement source-date:2026-05-20 in:body')) return { code: 0, stdout: '[]' };
       if (args[0] === 'issue' && args[1] === 'list' && args.some((arg) => String(arg).startsWith('source-candidate-fingerprint:'))) return { code: 0, stdout: JSON.stringify([{ number: 223, title: 'existing' }]) };
       if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]' };
       return { code: 0, stdout: '' };
@@ -483,10 +508,95 @@ test('daily runs live smoke only after successful targeted implementation and st
   try {
     const result = await second.runner.daily();
     assert.equal(result.phases.find((phase) => phase.name === 'live-smoke').status, 'skipped');
-    assert.equal(result.phases.find((phase) => phase.name === 'review').status, 'completed');
+    assert.equal(result.phases.find((phase) => phase.name === 'review-backlog').status, 'skipped');
     assert.equal(failingExec.calls.some((call) => call.command === 'npm' && call.args.join(' ') === 'run smoke:live'), false);
+    assert.equal(failingExec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'view'), false);
   } finally {
     await second.cleanup();
+  }
+});
+
+test('daily reuses an open auto self-improvement issue instead of discovering another one', async () => {
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
+      if (args[0] === 'auth') return { code: 0, stdout: '' };
+      if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) {
+        return { code: 0, stdout: JSON.stringify([
+          { number: 310, title: 'active', state: 'OPEN', labels: [{ name: 'agent:auto' }, { name: 'self-improvement' }] },
+        ]) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+    [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
+    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '310'])]: { code: 0, stdout: 'review-ready' },
+    [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const result = await runner.daily();
+    assert.equal(result.phases.find((phase) => phase.name === 'select').issueNumber, 310);
+    assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
+    assert.equal(exec.calls.some((call) => call.command === '/Applications/Codex.app/Contents/Resources/codex'), false);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('daily enforces one created self-improvement issue per day', async () => {
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
+      if (args[0] === 'auth') return { code: 0, stdout: '' };
+      if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) return { code: 0, stdout: '[]' };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement source-date:2026-05-20 in:body')) {
+        return { code: 0, stdout: JSON.stringify([
+          { number: 311, title: 'today', state: 'CLOSED', labels: [{ name: 'agent:auto' }, { name: 'self-improvement' }] },
+        ]) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const result = await runner.daily();
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.phases.find((phase) => phase.name === 'select').status, 'daily-limit');
+    assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
+    assert.equal(exec.calls.some((call) => call.command === '/Applications/Codex.app/Contents/Resources/codex'), false);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('daily reports an existing blocked self-improvement issue as blocked instead of creating another one', async () => {
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
+      if (args[0] === 'auth') return { code: 0, stdout: '' };
+      if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) {
+        return { code: 0, stdout: JSON.stringify([
+          { number: 312, title: 'blocked', state: 'OPEN', labels: [{ name: 'agent:auto' }, { name: 'agent:blocked' }, { name: 'self-improvement' }] },
+        ]) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const result = await runner.daily();
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.phases.find((phase) => phase.name === 'select').issueNumber, 312);
+    assert.equal(result.phases.find((phase) => phase.name === 'implement').status, 'blocked');
+    assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
+  } finally {
+    await cleanup();
   }
 });
 

@@ -211,6 +211,20 @@ function isReviewEligible(issue) {
   return false;
 }
 
+function isSelfImprovementCodeIssue(issue) {
+  const labels = labelsOf(issue);
+  return labels.includes('self-improvement') && labels.includes('agent:auto');
+}
+
+function hasBlockingWorkflowState(issue) {
+  const labels = labelsOf(issue);
+  return labels.includes('agent:running') || labels.includes('agent:blocked');
+}
+
+function isBlockedWorkflowState(issue) {
+  return labelsOf(issue).includes('agent:blocked');
+}
+
 function renderDiscoveryIssue(candidate, fingerprint, date) {
   return `## Self-improvement candidate
 
@@ -279,7 +293,7 @@ function createDailyPhaseResult(name, result = {}) {
 }
 
 function isDailyPhaseFailure(phase) {
-  return phase?.status === 'failed';
+  return phase?.status === 'failed' || phase?.status === 'blocked';
 }
 
 function dailyPhaseExitCode(phases) {
@@ -488,6 +502,54 @@ export function createRunner(options = {}) {
     return Array.isArray(issues) && issues.length > 0 ? issues[0] : null;
   }
 
+  async function listSelfImprovementIssues({ state = 'open', search } = {}) {
+    const result = await exec('gh', [
+      'issue',
+      'list',
+      '--repo',
+      REPO,
+      '--state',
+      state,
+      '--limit',
+      '100',
+      '--search',
+      search,
+      '--json',
+      'number,title,state,url,labels',
+    ], { cwd });
+    if (result.code !== 0) throw new Error(`self-improvement issue list failed: ${summarizeOutput(result)}`);
+    const issues = parseJson(result.stdout);
+    return Array.isArray(issues) ? issues.slice(0, 100) : [];
+  }
+
+  async function selectDailyIssue() {
+    const activeIssues = await listSelfImprovementIssues({
+      state: 'open',
+      search: `self-improvement-runner-id:${RUNNER_ID} in:body`,
+    });
+    const active = activeIssues.find(isSelfImprovementCodeIssue);
+    if (active) {
+      return { status: 'existing', issueNumber: active.number, issue: active };
+    }
+
+    const date = now().toISOString().slice(0, 10);
+    const todaysIssues = await listSelfImprovementIssues({
+      state: 'all',
+      search: `self-improvement-runner-id:${RUNNER_ID} source-date:${date} in:body`,
+    });
+    const todays = todaysIssues.find(isSelfImprovementCodeIssue);
+    if (todays) {
+      return {
+        status: 'daily-limit',
+        issueNumber: todays.number,
+        issue: todays,
+        reason: `self-improvement issue already created today: #${todays.number}`,
+      };
+    }
+
+    return { status: 'none' };
+  }
+
   async function publishSelfImprovementIssue({
     marker,
     title,
@@ -563,7 +625,11 @@ export function createRunner(options = {}) {
     const build = await exec('npm', ['run', 'build', '--silent'], { cwd });
     if (build.code !== 0) return { status: 'failed', exitCode: build.code, reason: `build failed: ${summarizeOutput(build)}` };
     const result = await exec('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', String(issue)], { cwd });
-    if (result.code === 0) return { status: 'passed', exitCode: 0, summary: summarizeOutput(result), issueNumber: Number(issue) };
+    const summary = summarizeOutput(result);
+    if (result.code === 0 && /blocked scoped execution|outcome:\s*blocked|status:\s*blocked/iu.test(summary)) {
+      return { status: 'blocked', exitCode: 0, reason: summary, issueNumber: Number(issue) };
+    }
+    if (result.code === 0) return { status: 'passed', exitCode: 0, summary, issueNumber: Number(issue) };
     return { status: 'failed', exitCode: result.code, reason: summarizeOutput(result), issueNumber: Number(issue) };
   }
 
@@ -668,20 +734,32 @@ export function createRunner(options = {}) {
       addPhase('preflight', { status: check.ok ? 'passed' : 'failed', reason: check.reason });
       if (!check.ok) return { exitCode: dailyPhase.exitCode(phases), phases };
 
-      const discovery = await discover({ preflight: false });
-      addPhase('discover', discovery);
+      const selection = await selectDailyIssue();
+      if (selection.status !== 'none') addPhase('select', selection);
+
+      let issueNumber = selection.issueNumber;
+      if (selection.status === 'none') {
+        const discovery = await discover({ preflight: false });
+        addPhase('discover', discovery);
+        issueNumber = discovery.issueNumber;
+      }
 
       let implementation = { status: 'skipped', reason: 'discovery did not produce an issue number' };
-      if (discovery.issueNumber) {
-        implementation = await implement({ issue: discovery.issueNumber });
+      if (selection.status === 'daily-limit' && selection.issue?.state !== 'OPEN') {
+        implementation = { status: 'skipped', reason: selection.reason, issueNumber };
+      } else if (selection.issue && isBlockedWorkflowState(selection.issue)) {
+        implementation = { status: 'blocked', reason: `existing issue has blocking workflow state: ${labelsOf(selection.issue).join(', ')}`, issueNumber };
+      } else if (selection.issue && hasBlockingWorkflowState(selection.issue)) {
+        implementation = { status: 'skipped', reason: `existing issue has blocking workflow state: ${labelsOf(selection.issue).join(', ')}`, issueNumber };
+      } else if (issueNumber) {
+        implementation = await implement({ issue: issueNumber });
       }
       addPhase('implement', implementation);
 
       const smoke = await runLiveSmoke({ implementation });
       addPhase('live-smoke', smoke);
 
-      const reviewResult = await review({ preflight: false });
-      addPhase('review', reviewResult);
+      addPhase('review-backlog', { status: 'skipped', reason: 'daily run only creates or implements one self-improvement code issue' });
       return { exitCode: dailyPhase.exitCode(phases), phases };
     } catch (error) {
       addPhase('runner', { status: 'failed', reason: error.message });
@@ -704,6 +782,8 @@ export function createRunner(options = {}) {
     saveState,
     runCodexJson,
     searchIssueByMarker,
+    listSelfImprovementIssues,
+    selectDailyIssue,
     publishSelfImprovementIssue,
     discover,
     implement,
