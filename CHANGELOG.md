@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.45] - 2026-07-07
+
+### Added
+- Added runner support for agent-authored Acceptance Proof plans so scoped
+  implementation handoffs can carry explicit proof-plan artifacts.
+- Added proof-plan report validation coverage across scoped runs, plan-auto
+  children, status output, and handoff decisions.
+
+### Changed
+- Acceptance Proof guidance now documents the proof-plan/report contract more
+  directly in runner docs and scoped workflow prompts.
+
 ## [0.1.44] - 2026-07-07
 
 ### Added

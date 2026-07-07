@@ -71,13 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.44` (2026-07-07):
-  - Typed runner blockers allow bounded repair of safe completion-report and
-    review-handoff evidence failures without weakening publication gates.
-  - Scoped implementation can retry incomplete agent progress after idle timeout
-    when runner evidence proves safe worktree progress.
-  - Scoped review reports are shorter, and daily self-improvement runs limit
-    repeated follow-up issue churn.
+- `0.1.45` (2026-07-07):
+  - Scoped implementation handoffs can carry agent-authored Acceptance Proof
+    plan artifacts.
+  - Proof-plan report validation is covered across scoped runs, plan-auto
+    children, status output, and handoff decisions.
+  - Runner docs and scoped prompts now state the proof-plan/report contract more
+    directly.
 
 ## Final Response
 
