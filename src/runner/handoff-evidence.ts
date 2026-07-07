@@ -60,27 +60,26 @@ export function buildScopedReviewReport(
   input: ScopedHandoffEvidence & { pullRequest?: GitHubPullRequest; pullRequestUrl?: string },
 ): string {
   return [
-    `codex-orchestrator review report for #${input.issueNumber}`,
-    'Pull Request',
-    `- ${input.pullRequestUrl ?? input.pullRequest?.url ?? 'none'}`,
-    'Changes',
-    ...bulletList(input.changedFiles),
-    'Validation',
-    ...renderValidationEvidence(input.validation),
-    'Proof Artifacts',
-    ...renderScopedProofArtifacts(input),
-    ...renderAcceptanceProofEvidence(input.acceptanceProof),
-    ...renderReviewHandoff(input.reviewHandoff),
-    'Log',
-    ...bulletList([input.logPath]),
-    'Local Commits',
-    ...renderCommitEvidence(input.commits),
-    ...renderFreshContextReviewEvidence(input.freshContextReview),
-    ...renderDurableRunSummaryEvidence(input.durableRunSummary),
-    'Skipped Checks',
-    ...bulletList(input.skippedChecks),
-    'Residual Risks',
-    ...bulletList(input.residualRisks),
+    `codex-orchestrator review report for #${input.issueNumber}: review-ready`,
+    'Outcome',
+    `- PR: ${input.pullRequestUrl ?? input.pullRequest?.url ?? 'none'}`,
+    `- Risk: ${input.reviewHandoff?.riskLevel ?? 'unknown'}`,
+    `- Acceptance Proof: ${formatAcceptanceProofDigest(input.acceptanceProof)}`,
+    `- Changed files: ${input.changedFiles.length}`,
+    'What changed',
+    ...renderHumanDigestList(input.reviewHandoff?.implementedContract ?? summarizeChangedFiles(input.changedFiles)),
+    'Proof',
+    ...renderValidationDigest(input.validation),
+    ...renderKeyScopedProofArtifacts(input),
+    ...renderKeyAcceptanceProofArtifacts(input.acceptanceProof),
+    ...renderFreshContextReviewDigest(input.freshContextReview),
+    'Review focus',
+    ...renderHumanDigestList([
+      ...(input.reviewHandoff?.reviewFocus ?? []),
+      ...(input.reviewHandoff?.humanReviewChecklist ?? []),
+    ]),
+    'Audit trail',
+    ...renderAuditTrail(input),
   ].join('\n');
 }
 
@@ -236,6 +235,107 @@ function renderFreshContextReviewPullRequestSection(evidence: FreshContextReview
     ...(evidence.snapshotPath ? [`- snapshot: ${evidence.snapshotPath}`] : []),
     '',
   ];
+}
+
+function formatAcceptanceProofDigest(evidence: AcceptanceProofAttemptEvidence | undefined): string {
+  if (!evidence) {
+    return 'not required or satisfied by validation';
+  }
+  const blockerText = evidence.blockers.length > 0 ? `, ${evidence.blockers.length} blocker(s)` : '';
+  const artifactText = evidence.artifactPaths.length > 0 ? `, ${evidence.artifactPaths.length} artifact(s)` : '';
+  return `${evidence.status}${artifactText}${blockerText}`;
+}
+
+function summarizeChangedFiles(changedFiles: string[]): string[] {
+  if (changedFiles.length === 0) {
+    return [];
+  }
+  return [`Changed ${changedFiles.length} file(s); inspect the PR diff for the full file list.`];
+}
+
+function renderHumanDigestList(items: string[], limit = 5): string[] {
+  if (items.length === 0) {
+    return ['- none'];
+  }
+  const visible = items.slice(0, limit).map((item) => `- ${item}`);
+  const hiddenCount = items.length - visible.length;
+  return hiddenCount > 0 ? [...visible, `- ${hiddenCount} more item(s) in the full run artifacts.`] : visible;
+}
+
+function renderValidationDigest(validation: RunnerValidationLine[]): string[] {
+  if (validation.length === 0) {
+    return ['- Validation: none reported'];
+  }
+  return (['failed', 'passed', 'skipped'] as const)
+    .flatMap((status) => {
+      const commands = validation.filter((line) => line.status === status).map((line) => line.command);
+      return commands.length > 0 ? [`- ${status}: ${formatDigestCommandList(commands)}`] : [];
+    });
+}
+
+function formatDigestCommandList(commands: string[], limit = 5): string {
+  const visible = commands.slice(0, limit).map((command) => truncateInline(command, 96));
+  const hiddenCount = commands.length - visible.length;
+  return hiddenCount > 0 ? `${visible.join(', ')} (${hiddenCount} more)` : visible.join(', ');
+}
+
+function truncateInline(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function renderKeyScopedProofArtifacts(input: {
+  config: CodexOrchestratorConfig;
+  branchName: string;
+  artifacts: ScopedCompletionReport['artifacts'];
+}): string[] {
+  if (input.artifacts.length === 0) {
+    return [];
+  }
+  const rendered = renderScopedProofArtifacts(input);
+  const visible = rendered.slice(0, 5);
+  const hiddenCount = rendered.length - visible.length;
+  return hiddenCount > 0 ? [...visible, `- ${hiddenCount} more proof artifact(s) in the full run artifacts.`] : visible;
+}
+
+function renderKeyAcceptanceProofArtifacts(evidence: AcceptanceProofAttemptEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  const lines = [
+    `- Acceptance proof report: ${evidence.reportPath}`,
+    `- Acceptance proof artifact dir: ${evidence.artifactDir}`,
+    ...evidence.artifactPaths.slice(0, 5).map((path) => `- Acceptance proof artifact: ${path}`),
+  ];
+  const hiddenCount = evidence.artifactPaths.length - Math.min(evidence.artifactPaths.length, 5);
+  return hiddenCount > 0 ? [...lines, `- ${hiddenCount} more acceptance proof artifact(s) in the full report.`] : lines;
+}
+
+function renderFreshContextReviewDigest(evidence: FreshContextReviewEvidence | undefined): string[] {
+  if (!evidence) {
+    return [];
+  }
+  return [
+    `- Fresh-Context Review: ${evidence.status}`,
+    ...evidence.findings.slice(0, 3).map((finding) => `- Fresh-Context finding: ${finding}`),
+  ];
+}
+
+function renderAuditTrail(input: ScopedHandoffEvidence): string[] {
+  const lines = [
+    `- Log: ${input.logPath}`,
+    ...(input.durableRunSummary ? [`- Durable Run Summary: ${input.durableRunSummary.path}`] : []),
+    `- Local Commits: ${formatCommitEvidenceInline(input.commits)}`,
+    ...(input.skippedChecks.length > 0 ? [`- Skipped checks: ${input.skippedChecks.join('; ')}`] : []),
+    ...(input.residualRisks.length > 0 ? [`- Residual risks: ${input.residualRisks.join('; ')}`] : []),
+  ];
+  return lines;
+}
+
+function formatCommitEvidenceInline(commits: CommitEvidence[]): string {
+  if (commits.length === 0) {
+    return 'none';
+  }
+  return commits.map((commit) => `${commit.sha.slice(0, 12)} ${commit.subject}`).join('; ');
 }
 
 function renderReviewHandoff(handoff: ReviewHandoffEvidence | undefined): string[] {

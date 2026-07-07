@@ -80,7 +80,18 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
     branchName: 'codex/issue-155',
     issueNumber: 155,
     changedFiles: ['src/frontend/CampaignList.tsx'],
-    validation: [{ command: 'Playwright screenshots', status: 'passed' as const, summary: '390px viewport passed' }],
+    validation: [
+      { command: 'Playwright screenshots', status: 'passed' as const, summary: '390px viewport passed' },
+      {
+        command: 'npm test -- --runInBand --runTestsByPath src/frontend/CampaignList.test.ts src/frontend/CampaignDetails.test.ts src/frontend/Other.test.ts',
+        status: 'passed' as const,
+        summary: 'focused tests passed',
+      },
+      { command: 'npm run typecheck', status: 'passed' as const, summary: 'typecheck passed' },
+      { command: 'npm run build', status: 'passed' as const, summary: 'build passed' },
+      { command: 'git diff --check', status: 'passed' as const, summary: 'diff clean' },
+      { command: 'inline code-review', status: 'passed' as const, summary: 'no findings' },
+    ],
     artifacts: [{ type: 'screenshot' as const, path: '.codex-orchestrator/proofs/issue-155/390.png', description: '390px layout' }],
     skippedChecks: ['BrowserUse unavailable; runner proof used.'],
     residualRisks: ['None beyond normal review.'],
@@ -102,15 +113,22 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
   });
   const body = buildScopedPullRequestBody(evidence);
 
-  assert.match(report, /codex-orchestrator review report for #155/);
-  assert.match(report, /Pull Request\n- https:\/\/github\.com\/example\/repo\/pull\/155/);
-  assert.match(report, /Playwright screenshots: passed - 390px viewport passed/);
+  assert.match(report, /codex-orchestrator review report for #155: review-ready/);
+  assert.match(report, /Outcome\n- PR: https:\/\/github\.com\/example\/repo\/pull\/155/);
+  assert.match(report, /- Risk: low/);
+  assert.match(report, /- Changed files: 1/);
+  assert.match(report, /Proof\n- passed: Playwright screenshots/);
+  assert.match(report, /\(1 more\)/);
+  assert.doesNotMatch(report, /CampaignDetails\.test\.ts src\/frontend\/Other\.test\.ts/);
   assert.match(report, /!\[screenshot: 390px layout\]\(https:\/\/raw\.githubusercontent\.com\/example\/repo\/codex%2Fissue-155\/\.codex-orchestrator\/proofs\/issue-155\/390\.png\)/);
-  assert.match(report, /Review Handoff/);
-  assert.match(report, /flow: small-task-implementer/);
-  assert.match(report, /risk: low/);
+  assert.match(report, /What changed\n- Campaign rows no longer overlap at 390px\./);
+  assert.match(report, /Review focus/);
   assert.match(report, /Inspect CampaignList row wrapping and copy/);
+  assert.match(report, /Audit trail/);
+  assert.match(report, /- Log: \/tmp\/issue-155\.log/);
   assert.match(report, /1234567890ab Agent checkpoint/);
+  assert.doesNotMatch(report, /Changes\n- src\/frontend\/CampaignList\.tsx/);
+  assert.doesNotMatch(report, /Review Handoff/);
   assert.match(body, /Closes #155/);
   assert.match(body, /Proof artifacts:\n- !\[screenshot: 390px layout\]/);
   assert.match(body, /Review handoff:/);
@@ -1502,7 +1520,7 @@ test('scoped auto command includes advisory fresh-context review evidence before
   assert.doesNotMatch(prompts[1] ?? '', /# Codex Orchestrator Scoped Implementation/);
   assert.match(result.reportComment, /Fresh-Context Review/);
   assert.match(result.reportComment, /advisory medium: Consider adding one more edge-case test\./);
-  assert.match(result.reportComment, /Non-mutating recommendation: review Fresh-Context Review evidence/);
+  assert.match(result.reportComment, /Durable Run Summary/);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Fresh-Context Review/);
 });
 
@@ -1711,7 +1729,7 @@ test('scoped auto command proves configured loop path end to end without live se
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(result.reportComment, /Fresh-Context Review/);
   assert.match(result.reportComment, /Durable Run Summary/);
-  assert.match(result.reportComment, /Non-mutating recommendation/);
+  assert.match(result.reportComment, /Skipped checks: Optional benchmark not run\./);
 });
 
 test('scoped auto command no longer blocks on missing UI visual proof (but can still block on quality gate)', async () => {
@@ -1964,7 +1982,7 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.match(promptText, /touches at least 5 runtime files/);
     assert.match(promptText, /npm run visual-proof -- --issue \$\{issueNumber\}/);
     assert.match(promptText, /CODEX_ORCHESTRATOR_TEST_LOGIN/);
-    assert.match(result.reportComment, /npm run visual-proof -- --issue 155: passed/);
+    assert.match(result.reportComment, /passed: .*npm run visual-proof -- --issue 155/);
     assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
     assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
     assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts:\n- !\[screenshot: runner visual proof 390\.png\]/);
@@ -2034,7 +2052,7 @@ test('scoped auto command includes screenshot proof artifacts in review report',
   });
 
   assert.equal(result.status, 'review-ready');
-  assert.match(result.reportComment, /Proof Artifacts/);
+  assert.match(result.reportComment, /Proof\n/);
   assert.match(result.reportComment, /!\[screenshot: 390px campaign layout\]/);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts/);
 });

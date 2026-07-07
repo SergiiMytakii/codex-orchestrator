@@ -408,6 +408,12 @@ for visual proof, but screenshot existence alone is not sufficient: each require
 criterion must map to high-confidence artifact evidence in the proof report, and
 UI artifacts must satisfy the UI Evidence Contract.
 
+Scoped issue review comments render a concise human digest first: outcome,
+changed-file count, proof status, key artifacts, review focus, and audit links.
+Full validation details, policy suggestions, and proof records remain in the
+durable run summary, proof report, and log artifacts instead of being duplicated
+as a long issue-comment transcript.
+
 Visual proof reporting separates desire from capability. UI-like issue text or
 changed frontend paths can make visual proof desirable, but the runner only emits
 missing-screenshot artifact warnings when a runner-owned provider is configured
