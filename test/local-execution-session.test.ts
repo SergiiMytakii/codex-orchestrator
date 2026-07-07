@@ -97,7 +97,7 @@ test('implementation publishability returns publish-ready evidence and commits o
     commitMessage: 'Codex: implement issue #155',
   });
 
-  assert.equal(result.status, 'publish-ready');
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
   assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], ['README.md']);
   assert.equal(result.status === 'publish-ready' ? result.commits.length : 0, 1);
   assert.match(result.status === 'publish-ready' ? result.commits[0]?.subject ?? '' : '', /Codex: implement issue #155/);
@@ -191,7 +191,7 @@ test('implementation publishability accepts exact idle timeout when a valid comp
     commitMessage: 'Codex: implement issue #155',
   });
 
-  assert.equal(result.status, 'publish-ready');
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
   assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], ['README.md']);
 });
 
@@ -299,7 +299,7 @@ test('implementation publishability repairs a missing completion report once for
     },
   });
 
-  assert.equal(result.status, 'publish-ready');
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
   assert.equal(repairInputs.length, 1);
   assert.equal(repairInputs[0]?.sessionId, 'session-1-completion-report-repair');
   assert.equal(repairInputs[0]?.reportPath, reportPath);
@@ -683,6 +683,8 @@ test('implementation publishability repairs missing review-gate evidence once an
           tdd: { requireTestChange: false },
           cleanupReview: { enabled: false },
         },
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
       },
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
@@ -747,6 +749,8 @@ test('implementation publishability blocks evidence repair that changes completi
           tdd: { requireTestChange: false },
           cleanupReview: { enabled: false },
         },
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
       },
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
@@ -808,6 +812,8 @@ test('implementation publishability blocks evidence repair that mutates existing
           tdd: { requireTestChange: false },
           cleanupReview: { enabled: false },
         },
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
       },
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
@@ -1001,6 +1007,12 @@ test('implementation publishability accepts structured TDD red evidence without 
           },
         },
       ],
+      proofPlan: {
+        mode: 'none',
+        reason: 'Documentation-only fixture has no acceptance proof requirement.',
+        validationCommands: [],
+        requiredArtifacts: [],
+      },
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -1139,6 +1151,8 @@ test('implementation publishability keeps validation evidence when quality gate 
           tdd: { requireTestChange: false },
           cleanupReview: { enabled: false },
         },
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
       },
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
@@ -1184,6 +1198,91 @@ test('implementation publishability does not fail when an npm script check is mi
   assert.match(result.status === 'publish-ready' ? result.validation.map((l) => l.status).join(',') : '', /skipped/);
 });
 
+test('implementation publishability accepts non-visual proof plan from the completion report without runner command proof', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await mkdir(join(repo, 'src', 'runner'), { recursive: true });
+  await writeFile(join(repo, 'src', 'runner', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: ['src/runner/feature.ts'],
+    validation: [
+      {
+        command: 'TDD red-to-green',
+        status: 'passed',
+        summary: 'Focused acceptance-proof behavior test failed before implementation and passed after implementation.',
+      },
+      {
+        command: 'npm test -- acceptance-proof-loop.test.ts',
+        status: 'passed',
+        summary: 'Focused non-visual proof test passed.',
+      },
+      { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+    ],
+    proofPlan: {
+      mode: 'non-visual-smoke',
+      reason: 'Runner behavior is proven by focused tests and review handoff evidence.',
+      validationCommands: ['npm test -- acceptance-proof-loop.test.ts'],
+      requiredArtifacts: [],
+    },
+    reviewHandoff: {
+      flowUsed: 'small-task-implementer',
+      riskLevel: 'low',
+      implementedContract: ['Non-visual proof plans are accepted through report validation.'],
+      proofByAcceptanceCriteria: ['Focused non-visual proof test passed for acceptance criteria.'],
+      reviewFocus: ['Confirm no runner visual command proof was executed.'],
+      humanReviewChecklist: ['Check non-visual proof plan evidence before publication.'],
+    },
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: { tdd: { requireTestChange: false }, cleanupReview: { enabled: false } },
+        acceptanceProof: {
+          proofStrategy: 'non-visual-smoke',
+          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue 1210',
+          issueTextPatterns: ['Acceptance criteria'],
+          changedPathGlobs: ['src/**'],
+          proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
+        },
+        visualProof: {
+          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue 1210',
+          issueTextPatterns: ['Acceptance criteria'],
+          changedPathGlobs: ['app/**'],
+        },
+      } as any,
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({
+      number: 1210,
+      title: 'Stop requiring visual proof for non-visual runner work',
+      body: ['Acceptance criteria:', '- Non-visual proof is accepted from the agent-authored proof plan.'].join('\n'),
+    }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async (command) => {
+      if (command.includes('visual-proof')) {
+        throw new Error(`unexpected runner command proof: ${command}`);
+      }
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+    commitMessage: 'Codex: implement issue #1210',
+  });
+
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
+  assert.equal(
+    result.status === 'publish-ready' ? result.acceptanceProofAttempt?.validation[0]?.command : undefined,
+    'acceptance proof plan report validation',
+  );
+});
+
 test('implementation publishability blocks product-code changes created during acceptance proof', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
@@ -1202,6 +1301,13 @@ test('implementation publishability blocks product-code changes created during a
       },
       { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
     ],
+    proofPlan: {
+      mode: 'browser-visual',
+      reason: 'This fixture intentionally exercises runner command proof side-effect detection.',
+      validationCommands: [],
+      requiredArtifacts: [],
+      visualTarget: 'browser',
+    },
   });
 
   const result = await runImplementationPublishabilityCheck({
@@ -1283,7 +1389,13 @@ test('implementation publishability drops non-applicable runner visual proof ski
   });
 
   const result = await runImplementationPublishabilityCheck({
-    config: config({ checks: {} }),
+    config: config({
+      checks: {},
+      reviewGates: {
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
+      },
+    } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({
       number: 773,
       title: 'Self-improvement: Deepen Acceptance Proof report loading',
@@ -1402,19 +1514,49 @@ async function writeScopedReport(
     changes: string[];
     validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>;
     skippedChecks: string[];
+    proofPlan: {
+      mode: 'none' | 'non-visual-smoke' | 'cli' | 'api' | 'worker' | 'browser-visual' | 'mobile-visual';
+      reason: string;
+      validationCommands: string[];
+      requiredArtifacts: string[];
+      visualTarget?: 'browser' | 'mobile';
+    };
+    reviewHandoff: {
+      flowUsed: 'small-task-implementer' | 'spec-implementer';
+      riskLevel: 'low' | 'medium' | 'high';
+      implementedContract: string[];
+      proofByAcceptanceCriteria: string[];
+      reviewFocus: string[];
+      humanReviewChecklist: string[];
+    };
   }> = {},
 ): Promise<void> {
+  const validation = overrides.validation ?? [{ command: 'tdd', status: 'passed' as const, summary: 'red and green complete' }];
   await mkdir(join(reportPath, '..'), { recursive: true });
   await writeFile(
     reportPath,
     JSON.stringify({
       status: overrides.status ?? 'completed',
       changes: overrides.changes ?? ['README.md'],
-      validation: overrides.validation ?? [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
+      validation,
+      proofPlan: overrides.proofPlan ?? {
+        mode: 'non-visual-smoke',
+        reason: 'Default test report uses focused non-visual validation.',
+        validationCommands: validation.filter((item) => item.status === 'passed').map((item) => item.command),
+        requiredArtifacts: [],
+      },
       artifacts: [],
       skippedChecks: overrides.skippedChecks ?? [],
       residualRisks: [],
       prohibitedActions: [],
+      reviewHandoff: overrides.reviewHandoff ?? {
+        flowUsed: 'small-task-implementer',
+        riskLevel: 'low',
+        implementedContract: ['Default test report implements the requested scoped change.'],
+        proofByAcceptanceCriteria: ['Default test report maps validation to acceptance criteria.'],
+        reviewFocus: ['Confirm scoped report validation remains strict.'],
+        humanReviewChecklist: ['Review validation evidence before publication.'],
+      },
       ...(overrides.status === 'needs-promotion'
         ? {
             promotion: {

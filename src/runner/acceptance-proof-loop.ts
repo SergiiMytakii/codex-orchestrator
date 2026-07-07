@@ -1,7 +1,7 @@
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import { globMatches } from '../path-policy.js';
-import type { ScopedCompletionReport } from './completion-report.js';
+import type { ProofPlan, ProofPlanMode, ScopedCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import {
   buildAcceptanceProofReportOutcome,
@@ -14,7 +14,7 @@ import {
 } from './acceptance-proof.js';
 import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
-export type AcceptanceProofPlanKind = 'skip' | 'adaptive' | 'command';
+export type AcceptanceProofPlanKind = 'skip' | 'adaptive' | 'command' | 'report-validation' | 'blocked';
 export type VisualProofDispatchTarget = 'browser' | 'mobile' | 'none';
 export type ProofRoutingAction = 'skip' | 'dispatch' | 'allow-non-visual' | 'error';
 
@@ -23,6 +23,7 @@ export interface AcceptanceProofPlan {
   applies: boolean;
   reason: string;
   commandTemplate?: string;
+  blocker?: string;
 }
 
 export interface AcceptanceProofPlanInput {
@@ -30,6 +31,7 @@ export interface AcceptanceProofPlanInput {
   issue: GitHubIssue;
   changedFiles: string[];
   adaptiveAdapterAvailable: boolean;
+  implementationReport: ScopedCompletionReport;
 }
 
 export interface AcceptanceProofAdapterResult {
@@ -79,6 +81,7 @@ export interface RunAcceptanceProofLoopAttemptInput {
   worktreePath: string;
   beforeHead: string;
   initialChangedFiles: string[];
+  implementationReport: ScopedCompletionReport;
   adaptiveAdapterAvailable: boolean;
   executeAdaptiveProof?: () => Promise<AcceptanceProofAdapterResult>;
   executeAdaptiveProofRepair?: (input: AcceptanceProofRepairInput) => Promise<AcceptanceProofAdapterResult>;
@@ -97,11 +100,66 @@ export interface ProofRoutingDecision {
   reason: string;
 }
 
+export type ProofPlanValidationResult =
+  | {
+    ok: true;
+    proofPlan: ProofPlan;
+    proofMode: ProofPlanMode;
+    dispatchTarget: VisualProofDispatchTarget;
+    reason: string;
+  }
+  | {
+    ok: false;
+    blocker: string;
+    retryable: boolean;
+  };
+
 export function planAcceptanceProofAttempt(input: AcceptanceProofPlanInput): AcceptanceProofPlan {
   const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  const proofPlanValidation = validateProofPlan(input);
+  if (!proofPlanValidation.ok) {
+    return {
+      kind: 'blocked',
+      applies: true,
+      reason: proofPlanValidation.blocker,
+      blocker: proofPlanValidation.blocker,
+    };
+  }
+  const proofPlan = proofPlanValidation.proofPlan;
   const commandTemplate = runnerVisualProofPolicy(input.config).commandTemplate;
   const desirable = visualProofDesirable(input, proofStrategy);
   const applies = acceptanceProofApplies(input, proofStrategy, desirable);
+
+  if (proofPlan.mode === 'none') {
+    if (!applies || proofStrategy === 'none') {
+      return {
+        kind: 'skip',
+        applies: false,
+        reason: 'proofPlan mode none disables acceptance proof',
+      };
+    }
+    return {
+      kind: 'blocked',
+      applies: true,
+      reason: 'Invalid proofPlan: none cannot satisfy required acceptance proof',
+      blocker: 'Invalid proofPlan: none cannot satisfy required acceptance proof',
+    };
+  }
+
+  if (isNonVisualProofMode(proofPlan.mode)) {
+    if (!input.config.reviewGates.acceptanceProof.enabled) {
+      return {
+        kind: 'skip',
+        applies: false,
+        reason: 'acceptance proof is disabled',
+      };
+    }
+    return {
+      kind: 'report-validation',
+      applies: true,
+      reason: 'agent-authored non-visual proof plan accepted',
+    };
+  }
 
   if (!applies) {
     return {
@@ -137,6 +195,54 @@ export function planAcceptanceProofAttempt(input: AcceptanceProofPlanInput): Acc
   };
 }
 
+export function validateProofPlan(input: {
+  config: CodexOrchestratorConfig;
+  issue: GitHubIssue;
+  changedFiles: string[];
+  implementationReport: ScopedCompletionReport;
+}): ProofPlanValidationResult {
+  const proofPlan = input.implementationReport.proofPlan;
+  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  const dispatchTarget = proofPlanDispatchTarget(proofPlan);
+  const inferredDispatchTarget = proofStrategyDispatchTarget(input, proofStrategy);
+  const changedFilesVisualTarget = changedFilesVisualDispatchTarget(input);
+
+  if (proofStrategy === 'mobile-visual' && proofPlan.mode !== 'mobile-visual') {
+    return { ok: false, blocker: visualStrategyDowngradeBlocker('mobile'), retryable: true };
+  }
+  if (proofStrategy === 'browser-visual' && proofPlan.mode !== 'browser-visual') {
+    return { ok: false, blocker: visualStrategyDowngradeBlocker('browser'), retryable: true };
+  }
+  if (proofStrategy === 'visual' && dispatchTarget === 'none') {
+    return { ok: false, blocker: 'Invalid proofPlan: non-visual proof cannot satisfy visual strategy', retryable: true };
+  }
+  if (proofStrategy === 'non-visual-smoke' && (proofPlan.mode === 'browser-visual' || proofPlan.mode === 'mobile-visual')) {
+    return { ok: false, blocker: 'Invalid proofPlan: visual proof cannot satisfy non-visual proof strategy', retryable: true };
+  }
+  if (
+    isNonVisualProofMode(proofPlan.mode)
+    && (inferredDispatchTarget !== 'none' || changedFilesVisualTarget !== 'none')
+  ) {
+    const visualTarget = inferredDispatchTarget !== 'none' ? inferredDispatchTarget : changedFilesVisualTarget;
+    if (visualTarget === 'none') {
+      throw new Error('Expected visual proof target for non-visual proof plan downgrade.');
+    }
+    return {
+      ok: false,
+      blocker: visualStrategyDowngradeBlocker(visualTarget),
+      retryable: true,
+    };
+  }
+
+  return {
+    ok: true,
+    proofPlan,
+    proofMode: proofPlan.mode,
+    dispatchTarget,
+    reason: `proofPlan mode ${proofPlan.mode} accepted`,
+  };
+}
+
 export async function runAcceptanceProofLoopAttempt(
   input: RunAcceptanceProofLoopAttemptInput,
 ): Promise<AcceptanceProofLoopOutcome> {
@@ -145,6 +251,7 @@ export async function runAcceptanceProofLoopAttempt(
     issue: input.issue,
     changedFiles: input.initialChangedFiles,
     adaptiveAdapterAvailable: input.adaptiveAdapterAvailable,
+    implementationReport: input.implementationReport,
   });
   if (plan.kind === 'skip') {
     return {
@@ -156,6 +263,29 @@ export async function runAcceptanceProofLoopAttempt(
       blockers: [],
       scopeBlockers: [],
     };
+  }
+  if (plan.kind === 'blocked') {
+    const blocker = plan.blocker ?? plan.reason;
+    return {
+      status: 'blocked',
+      changedFiles: input.initialChangedFiles,
+      validation: [{
+        command: 'acceptance proof plan validation',
+        status: 'failed',
+        summary: blocker,
+      }],
+      artifacts: [],
+      residualRisks: [],
+      blockers: [blocker],
+      scopeBlockers: [],
+    };
+  }
+  if (plan.kind === 'report-validation') {
+    return evaluateReportValidationProof({
+      implementationReport: input.implementationReport,
+      proofPlan: input.implementationReport.proofPlan,
+      changedFiles: input.initialChangedFiles,
+    });
   }
 
   const diffCapture = await createAcceptanceProofDiffCapture({
@@ -278,6 +408,75 @@ async function executeSelectedAdapter(
   throw new Error(`Unsupported acceptance proof plan kind: ${plan.kind}`);
 }
 
+function evaluateReportValidationProof(input: {
+  implementationReport: ScopedCompletionReport;
+  proofPlan: ProofPlan;
+  changedFiles: string[];
+}): AcceptanceProofLoopOutcome {
+  const blockers: string[] = [];
+  if (input.proofPlan.validationCommands.length + input.proofPlan.requiredArtifacts.length === 0) {
+    blockers.push('Invalid proofPlan: non-visual proof requires at least one validation command or required artifact.');
+  }
+  for (const command of input.proofPlan.validationCommands) {
+    if (command.trim().length === 0) {
+      blockers.push('Invalid proofPlan: validation command must be non-empty.');
+      continue;
+    }
+    const match = input.implementationReport.validation.find((line) =>
+      line.command.trim().length > 0 && line.command === command && line.status === 'passed',
+    );
+    if (!match) {
+      blockers.push(`Invalid proofPlan: validation command was not reported as passed: ${command}`);
+    }
+  }
+
+  const artifactTargets = new Set(
+    input.implementationReport.artifacts.flatMap((artifact) => [artifact.path, artifact.url].filter(Boolean)),
+  );
+  for (const artifact of input.proofPlan.requiredArtifacts) {
+    if (artifact.trim().length === 0) {
+      blockers.push('Invalid proofPlan: required artifact must be non-empty.');
+      continue;
+    }
+    if (!artifactTargets.has(artifact)) {
+      blockers.push(`Invalid proofPlan: artifact was not reported: ${artifact}`);
+    }
+  }
+
+  if (!input.implementationReport.reviewHandoff?.proofByAcceptanceCriteria.length) {
+    blockers.push('Invalid proofPlan: reviewHandoff.proofByAcceptanceCriteria must map proof to acceptance criteria.');
+  }
+
+  const passed = blockers.length === 0;
+  const validation: RunnerValidationLine[] = [{
+    command: 'acceptance proof plan report validation',
+    status: passed ? 'passed' : 'failed',
+    summary: passed
+      ? `agent-authored ${input.proofPlan.mode} proof plan passed report validation`
+      : blockers.join('; '),
+  }];
+  const artifactPaths = input.implementationReport.artifacts
+    .flatMap((artifact) => [artifact.path, artifact.url].filter((value): value is string => Boolean(value)));
+  return {
+    status: passed ? 'passed' : 'blocked',
+    changedFiles: input.changedFiles,
+    validation,
+    artifacts: input.implementationReport.artifacts,
+    residualRisks: [],
+    blockers,
+    scopeBlockers: [],
+    evidence: {
+      status: passed ? 'passed' : 'blocked',
+      reportPath: 'completion-report:proofPlan',
+      artifactDir: 'completion-report:artifacts',
+      artifactPaths,
+      validation,
+      blockers,
+      residualRisks: [],
+    },
+  };
+}
+
 async function evaluateAdapterReport(input: {
   config: CodexOrchestratorConfig;
   adapterResult: AcceptanceProofAdapterResult;
@@ -359,11 +558,11 @@ export function decideProofRouting(input: {
   const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
   const dispatchTarget = proofStrategyDispatchTarget(input, proofStrategy);
   const desirable = visualProofDesirable(input, proofStrategy);
-  const plan = planAcceptanceProofAttempt({ ...input, adaptiveAdapterAvailable: false });
+  const applies = acceptanceProofApplies(input, proofStrategy, desirable);
 
   if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
     return {
-      applies: plan.applies,
+      applies,
       desirable,
       dispatchTarget,
       proofStrategy,
@@ -374,7 +573,7 @@ export function decideProofRouting(input: {
 
   if (dispatchTarget === 'browser' || dispatchTarget === 'mobile') {
     return {
-      applies: plan.applies,
+      applies,
       desirable,
       dispatchTarget,
       proofStrategy,
@@ -383,7 +582,7 @@ export function decideProofRouting(input: {
     };
   }
 
-  if (plan.applies && !desirable) {
+  if (applies && !desirable) {
     return {
       applies: true,
       desirable,
@@ -394,9 +593,9 @@ export function decideProofRouting(input: {
     };
   }
 
-  if (plan.applies || desirable) {
+  if (applies || desirable) {
     return {
-      applies: plan.applies,
+      applies,
       desirable,
       dispatchTarget,
       proofStrategy,
@@ -456,24 +655,15 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
 } {
   const visualProof = config.reviewGates.visualProof;
   const acceptanceProof = config.reviewGates.acceptanceProof;
-  const preferLegacyVisual = isLegacyVisualProofOverride(acceptanceProof, visualProof);
-  const commandTemplate = preferLegacyVisual
-    ? visualProof.runnerValidationCommand?.trim()
-    : acceptanceProof.runnerValidationCommand?.trim() || visualProof.runnerValidationCommand?.trim();
+  const commandTemplate = acceptanceProof.runnerValidationCommand?.trim();
   return {
     commandTemplate: commandTemplate || undefined,
-    artifactDir: preferLegacyVisual ? visualProof.artifactDir : acceptanceProof.artifactDir,
-    envPassthrough: preferLegacyVisual
-      ? visualProof.envPassthrough ?? acceptanceProof.envPassthrough ?? []
-      : acceptanceProof.envPassthrough?.length
-        ? acceptanceProof.envPassthrough
-        : visualProof.envPassthrough ?? [],
-    timeoutMs: preferLegacyVisual
-      ? visualProof.runnerTimeoutMs ?? acceptanceProof.runnerTimeoutMs
-      : acceptanceProof.runnerTimeoutMs ?? visualProof.runnerTimeoutMs,
+    artifactDir: acceptanceProof.artifactDir,
+    envPassthrough: acceptanceProof.envPassthrough ?? [],
+    timeoutMs: acceptanceProof.runnerTimeoutMs,
     minScreenshotArtifacts: visualProof.minScreenshotArtifacts,
     requireWhenDesirable: visualProof.requireWhenDesirable ?? false,
-    blockOnMissingProof: !preferLegacyVisual,
+    blockOnMissingProof: true,
     browserProof: {
       strictConsoleErrors: acceptanceProof.browserProof?.strictConsoleErrors ?? false,
       strictNetworkFailures: acceptanceProof.browserProof?.strictNetworkFailures ?? false,
@@ -484,7 +674,11 @@ export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
 }
 
 function acceptanceProofApplies(
-  input: AcceptanceProofPlanInput,
+  input: {
+    config: CodexOrchestratorConfig;
+    issue: GitHubIssue;
+    changedFiles: string[];
+  },
   proofStrategy: ReturnType<typeof resolveAcceptanceProofStrategy>['strategy'],
   desirable: boolean,
 ): boolean {
@@ -515,8 +709,6 @@ function proofStrategyDispatchTarget(input: {
   issue: GitHubIssue;
   changedFiles: string[];
 }, proofStrategy: ReturnType<typeof resolveAcceptanceProofStrategy>['strategy']): VisualProofDispatchTarget {
-  const normalizedFiles = input.changedFiles.map((path) => path.replaceAll('\\', '/').replace(/^\.\//u, ''));
-  const issueText = `${input.issue.title}\n${input.issue.body}`;
   if (proofStrategy === 'none' || proofStrategy === 'non-visual-smoke') {
     return 'none';
   }
@@ -526,6 +718,16 @@ function proofStrategyDispatchTarget(input: {
   if (proofStrategy === 'mobile-visual') {
     return 'mobile';
   }
+  return changedFilesVisualDispatchTarget(input);
+}
+
+function changedFilesVisualDispatchTarget(input: {
+  config: CodexOrchestratorConfig;
+  issue: GitHubIssue;
+  changedFiles: string[];
+}): VisualProofDispatchTarget {
+  const normalizedFiles = input.changedFiles.map((path) => path.replaceAll('\\', '/').replace(/^\.\//u, ''));
+  const issueText = `${input.issue.title}\n${input.issue.body}`;
   if (normalizedFiles.some(isMobileProofPath) || normalizedFiles.some((path) => isFlutterEntrypoint(path) && isMobileIssueText(issueText))) {
     return 'mobile';
   }
@@ -533,6 +735,24 @@ function proofStrategyDispatchTarget(input: {
     return 'browser';
   }
   return 'none';
+}
+
+function proofPlanDispatchTarget(proofPlan: ProofPlan): VisualProofDispatchTarget {
+  if (proofPlan.mode === 'browser-visual') {
+    return 'browser';
+  }
+  if (proofPlan.mode === 'mobile-visual') {
+    return 'mobile';
+  }
+  return 'none';
+}
+
+function isNonVisualProofMode(mode: ProofPlanMode): boolean {
+  return mode === 'non-visual-smoke' || mode === 'cli' || mode === 'api' || mode === 'worker';
+}
+
+function visualStrategyDowngradeBlocker(target: Exclude<VisualProofDispatchTarget, 'none'>): string {
+  return `Invalid proofPlan: non-visual proof cannot satisfy ${target} visual strategy`;
 }
 
 function visualProofDesirable(input: {
@@ -572,19 +792,6 @@ function hasAcceptanceProofProfile(config: CodexOrchestratorConfig): boolean {
 function isInternalRunnerProofPath(path: string): boolean {
   return /^src\/runner\/(?:acceptance-proof|visual-proof-runner)\.ts$/u.test(path)
     || /^test\/(?:acceptance-proof|visual-proof-runner)\.test\.ts$/u.test(path);
-}
-
-function isLegacyVisualProofOverride(
-  acceptanceProof: CodexOrchestratorConfig['reviewGates']['acceptanceProof'],
-  visualProof: CodexOrchestratorConfig['reviewGates']['visualProof'],
-): boolean {
-  const defaultMobileCommand = 'codex-orchestrator visual-proof mobile --issue ${issueNumber}';
-  const defaultAutoCommand = 'codex-orchestrator visual-proof auto --issue ${issueNumber}';
-  const acceptanceCommand = acceptanceProof.runnerValidationCommand?.trim() || '';
-  return (acceptanceCommand === defaultMobileCommand || acceptanceCommand === defaultAutoCommand)
-    && Boolean(visualProof.runnerValidationCommand?.trim())
-    && visualProof.runnerValidationCommand?.trim() !== defaultMobileCommand
-    && visualProof.runnerValidationCommand?.trim() !== defaultAutoCommand;
 }
 
 function isMobileProofPath(path: string): boolean {

@@ -391,7 +391,21 @@ use the shared mobile lease described below.
 The proof phase often runs browser automation, such as Playwright, but the same
 contract applies to non-visual proof. A live-smoke proof can exercise an API,
 worker, CLI, or other observable behavior and save the command output as a
-`smoke-output` artifact. The runner provides environment variables for:
+`smoke-output` artifact.
+
+Implementation agents declare the intended proof mode in the scoped completion
+report `proofPlan`. Supported modes are `none`, `non-visual-smoke`, `cli`,
+`api`, `worker`, `browser-visual`, and `mobile-visual`. The runner validates
+that plan against the issue `Proof Strategy`, changed files, and visual/mobile
+routing signals before publication. For accepted non-visual modes, the runner
+validates the completion report itself: declared `validationCommands` must map
+to passed validation lines, declared `requiredArtifacts` must map to report
+artifacts, and `reviewHandoff.proofByAcceptanceCriteria` must explain how the
+evidence satisfies the acceptance criteria. Accepted non-visual proof plans do
+not dispatch browser or mobile visual proof commands.
+
+For browser, mobile, and adaptive proof phases, the runner provides environment
+variables for:
 
 - issue number;
 - artifact directory;
@@ -431,9 +445,10 @@ dispatch uses one shared policy owner: web/frontend paths route to browser
 proof, while Android, iOS, Flutter, and mobile app paths remain device-backed.
 When acceptance proof is required but the changed paths are backend/API/CLI-only
 and visual proof is not desirable, auto proof does not force a browser or mobile
-target; the runner evaluates the prepared machine-readable
-`acceptance-proof-report.json` and its non-visual artifacts instead. Explicit
-legacy proof command overrides are preserved.
+target; the runner validates the child completion report `proofPlan`, validation
+lines, artifacts, and review handoff instead. Acceptance-proof command selection
+uses only the canonical acceptance-proof policy; `visualProof` command settings
+are not treated as Acceptance Proof compatibility input.
 
 For web UI work, `codex-orchestrator visual-proof browser` reads a proof-owned
 browser scenario, drives Playwright Core against an explicit base URL, and

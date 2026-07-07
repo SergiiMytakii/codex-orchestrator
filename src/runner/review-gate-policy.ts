@@ -36,6 +36,14 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
       'Do not create browser/mobile routing markers, placeholder UI files, screenshot scenarios, emulator scripts, or other visual-proof shims.',
     ];
   }
+  if (routing.action === 'allow-non-visual') {
+    return [
+      ...strategyLines,
+      `For acceptance proof, save non-visual smoke, test, log, or machine-readable artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as log, smoke-output, or other artifacts.`,
+      'Do not create browser/mobile routing markers, placeholder UI files, screenshot scenarios, emulator scripts, or other visual-proof shims just to satisfy the configured runner-owned visual proof command.',
+      'Do not claim runner-owned visual proof will run for this non-visual proof route; use proofPlan.validationCommands or proofPlan.requiredArtifacts to identify the concrete non-visual evidence.',
+    ];
+  }
   if (!command) {
     return [
       ...strategyLines,

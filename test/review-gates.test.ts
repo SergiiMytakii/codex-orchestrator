@@ -13,6 +13,7 @@ import type { PlanAutoCompletionReport } from '../src/runner/completion-report.j
 import { classifyVisualProofDispatchTarget, decideProofRouting, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 const defaultReviewHandoff: NonNullable<ReviewGateInput['report']['reviewHandoff']> = {
   flowUsed: 'scoped-implementation',
@@ -32,6 +33,7 @@ const baseRuntimeGateInput: Omit<ReviewGateInput, 'validation'> = {
     status: 'completed',
     changes: ['src/filters.ts', 'test/filters.test.ts'],
     validation: [],
+    proofPlan: defaultProofPlan,
     artifacts: [],
     skippedChecks: [],
     residualRisks: [],
@@ -86,6 +88,7 @@ function scopedRiskInput(overrides: Partial<ReviewGateInput> = {}): ReviewGateIn
       status: 'completed',
       changes: ['src/runner/policy.ts'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -597,6 +600,50 @@ test('proof routing decision centralizes visual, non-visual, and no-target outco
   });
 });
 
+test('proof routing does not treat generic acceptance criteria text as visual proof trigger', () => {
+  assert.deepEqual(decideProofRouting({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          issueTextPatterns: [
+            '\\bUI\\b',
+            'frontend',
+            'responsive',
+            'layout',
+            'visual',
+            'screenshot',
+            '\\bAPI\\b',
+            'worker',
+            '\\bCLI\\b',
+            'скриншот',
+            'скріншот',
+            'viewport',
+            'dark theme',
+            'мобіл',
+            'mobile',
+          ],
+        },
+      },
+    },
+    issue: issueFixture({
+      number: 1210,
+      title: 'Self-improvement: Extract review source selection',
+      body: 'Acceptance criteria:\n- Run focused Node tests.',
+    }),
+    changedFiles: ['.codex-orchestrator/local/self-improvement/runner.mjs'],
+  }), {
+    applies: false,
+    desirable: false,
+    dispatchTarget: 'none',
+    proofStrategy: 'auto',
+    action: 'error',
+    reason: 'proof routing did not match issue text or changed paths',
+  });
+});
+
 test('visual proof policy does not require device screenshots for explicit non-visual Firebase analytics proof', () => {
   assert.equal(shouldApplyVisualProofGate({
     config: validConfig,
@@ -751,6 +798,7 @@ test('review gates accept runner-owned visual proof as UI layout test evidence',
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [{
         type: 'screenshot',
         path: screenshotPath,
@@ -801,6 +849,7 @@ test('review gates warn on failed runner-owned visual proof instead of blocking 
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [{
         type: 'screenshot',
         path: screenshotPath,
@@ -848,6 +897,7 @@ test('review gates warn when no runner-owned visual proof command is configured'
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -894,6 +944,7 @@ test('review gates do not warn about missing screenshot artifacts when proof too
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -940,6 +991,7 @@ test('review gates still warn about missing screenshots when only the proof comm
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -983,6 +1035,7 @@ test('review gates block missing screenshot proof in strict visual proof mode', 
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],

@@ -8,13 +8,16 @@ import { test } from 'node:test';
 import {
   planAcceptanceProofAttempt,
   runAcceptanceProofLoopAttempt,
+  validateProofPlan,
   type AcceptanceProofAdapterResult,
   type AcceptanceProofPlan,
 } from '../src/runner/acceptance-proof-loop.js';
 import type { AcceptanceProofReport } from '../src/runner/acceptance-proof.js';
+import type { ProofPlan, ScopedCompletionReport } from '../src/runner/completion-report.js';
 import { decideProofRouting } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 test('acceptance proof planning chooses adaptive proof when profile is available', () => {
   const plan = planAcceptanceProofAttempt({
@@ -30,6 +33,7 @@ test('acceptance proof planning chooses adaptive proof when profile is available
     issue: issueFixture({ number: 611, title: 'Acceptance proof for CLI', body: 'Needs acceptance proof.' }),
     changedFiles: ['src/cli.ts'],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
   });
 
   assertPlan(plan, {
@@ -59,6 +63,7 @@ test('acceptance proof planning chooses adaptive proof when no runner command is
     issue: issueFixture({ number: 612, title: 'Acceptance proof for API', body: 'Needs acceptance proof.' }),
     changedFiles: ['src/api/routes.ts'],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
   });
 
   assertPlan(plan, {
@@ -84,6 +89,7 @@ test('acceptance proof planning chooses command proof when runner command is con
     issue: issueFixture({ number: 613, title: 'Acceptance proof for backend', body: 'Needs acceptance proof.' }),
     changedFiles: ['src/api/routes.ts'],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
   });
 
   assertPlan(plan, {
@@ -94,12 +100,43 @@ test('acceptance proof planning chooses command proof when runner command is con
   });
 });
 
+test('acceptance proof planning ignores legacy visual proof command fallback', () => {
+  const plan = planAcceptanceProofAttempt({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: undefined,
+          issueTextPatterns: ['acceptance proof'],
+        },
+        visualProof: {
+          ...validConfig.reviewGates.visualProof,
+          runnerValidationCommand: 'npm run legacy-visual-proof',
+        },
+      },
+    },
+    issue: issueFixture({ number: 617, title: 'Acceptance proof for UI', body: 'Needs acceptance proof.' }),
+    changedFiles: ['src/frontend/App.tsx'],
+    adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
+  });
+
+  assertPlan(plan, {
+    kind: 'skip',
+    applies: true,
+    reason: 'acceptance proof applies but no adaptive adapter or runner command is available',
+  });
+});
+
 test('acceptance proof planning skips non-applicable and unavailable proof', () => {
   const nonApplicable = planAcceptanceProofAttempt({
     config: validConfig,
     issue: issueFixture({ number: 614, title: 'Docs cleanup', body: 'Update wording only.' }),
     changedFiles: ['docs/readme.md'],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(noneProofPlan),
   });
   const unavailable = planAcceptanceProofAttempt({
     config: {
@@ -120,6 +157,7 @@ test('acceptance proof planning skips non-applicable and unavailable proof', () 
     issue: issueFixture({ number: 615, title: 'Acceptance proof missing runner', body: 'Needs acceptance proof.' }),
     changedFiles: ['src/api/routes.ts'],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
   });
   const nonVisual = planAcceptanceProofAttempt({
     config: validConfig,
@@ -130,12 +168,13 @@ test('acceptance proof planning skips non-applicable and unavailable proof', () 
     }),
     changedFiles: ['src/api/routes.ts'],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(defaultProofPlan),
   });
 
   assertPlan(nonApplicable, {
     kind: 'skip',
     applies: false,
-    reason: 'acceptance proof does not apply',
+    reason: 'proofPlan mode none disables acceptance proof',
   });
   assertPlan(unavailable, {
     kind: 'skip',
@@ -143,9 +182,95 @@ test('acceptance proof planning skips non-applicable and unavailable proof', () 
     reason: 'acceptance proof applies but no adaptive adapter or runner command is available',
   });
   assertPlan(nonVisual, {
-    kind: 'skip',
-    applies: false,
-    reason: 'proof strategy disables browser/mobile visual proof',
+    kind: 'report-validation',
+    applies: true,
+    reason: 'agent-authored non-visual proof plan accepted',
+  });
+});
+
+test('acceptance proof planning uses report validation for non-visual proof plans without mobile fallback', () => {
+  const plan = planAcceptanceProofAttempt({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+          issueTextPatterns: ['acceptance'],
+        },
+      },
+    },
+    issue: issueFixture({
+      number: 1210,
+      title: 'Self-improvement: Extract review source selection',
+      body: 'Acceptance criteria:\n- Run focused Node tests.',
+    }),
+    changedFiles: [
+      '.codex-orchestrator/local/self-improvement/runner.mjs',
+      '.codex-orchestrator/local/self-improvement/self-improvement-runner.test.mjs',
+    ],
+    adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(defaultProofPlan),
+  });
+
+  assertPlan(plan, {
+    kind: 'report-validation',
+    applies: true,
+    reason: 'agent-authored non-visual proof plan accepted',
+  });
+});
+
+test('proof plan validation rejects visual strategy downgrades', () => {
+  const result = validateProofPlan({
+    config: validConfig,
+    issue: issueFixture({
+      number: 630,
+      title: 'Mobile checkout proof',
+      body: 'Proof Strategy: mobile-visual\nVerify the Android checkout screen.',
+    }),
+    changedFiles: ['android/app/build.gradle'],
+    implementationReport: implementationReport(defaultProofPlan),
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    blocker: 'Invalid proofPlan: non-visual proof cannot satisfy mobile visual strategy',
+    retryable: true,
+  });
+});
+
+test('proof plan validation rejects explicit non-visual strategy for visual changed paths', () => {
+  const frontend = validateProofPlan({
+    config: validConfig,
+    issue: issueFixture({
+      number: 631,
+      title: 'Frontend layout cleanup',
+      body: 'Proof Strategy: non-visual-smoke\nAcceptance criteria: layout stays correct.',
+    }),
+    changedFiles: ['src/frontend/CampaignList.tsx'],
+    implementationReport: implementationReport(defaultProofPlan),
+  });
+  const mobile = validateProofPlan({
+    config: validConfig,
+    issue: issueFixture({
+      number: 632,
+      title: 'Android checkout cleanup',
+      body: 'Proof Strategy: non-visual-smoke\nAcceptance criteria: checkout still renders.',
+    }),
+    changedFiles: ['android/app/build.gradle'],
+    implementationReport: implementationReport(defaultProofPlan),
+  });
+
+  assert.deepEqual(frontend, {
+    ok: false,
+    blocker: 'Invalid proofPlan: non-visual proof cannot satisfy browser visual strategy',
+    retryable: true,
+  });
+  assert.deepEqual(mobile, {
+    ok: false,
+    blocker: 'Invalid proofPlan: non-visual proof cannot satisfy mobile visual strategy',
+    retryable: true,
   });
 });
 
@@ -174,6 +299,126 @@ test('review-gate routing delegates to acceptance proof planning semantics', () 
   });
 });
 
+test('acceptance proof loop validates accepted non-visual proof from the completion report', async () => {
+  const report = implementationReport(defaultProofPlan);
+  const result = await runAcceptanceProofLoopAttempt({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+          issueTextPatterns: ['acceptance'],
+        },
+      },
+    },
+    issue: issueFixture({
+      number: 1210,
+      title: 'Self-improvement: Extract review source selection',
+      body: 'Acceptance criteria:\n- Run focused Node tests.',
+    }),
+    worktreePath: '/unused',
+    beforeHead: 'before',
+    initialChangedFiles: ['.codex-orchestrator/local/self-improvement/runner.mjs'],
+    adaptiveAdapterAvailable: false,
+    implementationReport: report,
+    executeAdaptiveProof: async () => {
+      throw new Error('adaptive proof must not run for accepted non-visual report validation');
+    },
+    executeCommandProof: async () => {
+      throw new Error('mobile command proof must not run for accepted non-visual report validation');
+    },
+    collectChangeSet: async () => {
+      throw new Error('report validation must not collect proof-phase diffs');
+    },
+    evaluateScope: () => ({ blockers: [] }),
+  });
+
+  assert.equal(result.status, 'passed');
+  assert.deepEqual(result.changedFiles, ['.codex-orchestrator/local/self-improvement/runner.mjs']);
+  assert.deepEqual(result.artifacts, report.artifacts);
+  assert.equal(result.validation[0]?.command, 'acceptance proof plan report validation');
+  assert.equal(result.validation[0]?.status, 'passed');
+});
+
+test('acceptance proof loop blocks non-visual proof plans without mapped report evidence', async () => {
+  const report = {
+    ...implementationReport({
+      ...defaultProofPlan,
+      validationCommands: ['node --test missing.test.mjs'],
+      requiredArtifacts: ['missing-smoke-output.txt'],
+    }),
+    reviewHandoff: {
+      ...implementationReport(defaultProofPlan).reviewHandoff!,
+      proofByAcceptanceCriteria: [],
+    },
+  };
+  const result = await runAcceptanceProofLoopAttempt({
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+          issueTextPatterns: ['acceptance'],
+        },
+      },
+    },
+    issue: issueFixture({
+      number: 1211,
+      title: 'Self-improvement: Extract review source selection',
+      body: 'Acceptance criteria:\n- Run focused Node tests.',
+    }),
+    worktreePath: '/unused',
+    beforeHead: 'before',
+    initialChangedFiles: ['.codex-orchestrator/local/self-improvement/runner.mjs'],
+    adaptiveAdapterAvailable: false,
+    implementationReport: report,
+    collectChangeSet: async () => {
+      throw new Error('blocked report validation must not collect proof-phase diffs');
+    },
+    evaluateScope: () => ({ blockers: [] }),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.validation[0]?.command, 'acceptance proof plan report validation');
+  assert.match(result.blockers.join('\n'), /validation command was not reported as passed/);
+  assert.match(result.blockers.join('\n'), /artifact was not reported/);
+  assert.match(result.blockers.join('\n'), /reviewHandoff\.proofByAcceptanceCriteria/);
+});
+
+test('acceptance proof loop blocks blank non-visual proof evidence matches', async () => {
+  const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
+  const result = await runAcceptanceProofLoopAttempt({
+    config: validConfig,
+    issue: issueFixture({
+      number: 622,
+      title: 'API smoke proof',
+      body: 'Proof Strategy: non-visual-smoke\nAcceptance criteria: API smoke passes.',
+    }),
+    worktreePath,
+    beforeHead: 'before',
+    initialChangedFiles: ['src/api/routes.ts'],
+    adaptiveAdapterAvailable: false,
+    implementationReport: {
+      ...implementationReport({
+        ...defaultProofPlan,
+        validationCommands: [''],
+        requiredArtifacts: [' '],
+      }),
+      validation: [{ command: '', status: 'passed', summary: 'blank proof should not count' }],
+    },
+    collectChangeSet: async () => ({ changedPaths: ['src/api/routes.ts'] }),
+    evaluateScope: () => ({ blockers: [] }),
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.blockers.join('\n'), /validation command must be non-empty/);
+  assert.match(result.blockers.join('\n'), /required artifact must be non-empty/);
+});
+
 test('acceptance proof loop passes command proof with a valid proof report', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
   const proof = await proofPaths(worktreePath, 620);
@@ -185,6 +430,7 @@ test('acceptance proof loop passes command proof with a valid proof report', asy
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
       await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
       await writeFile(proof.reportPath, JSON.stringify(passingReport(proof.smokeArtifactPath)), 'utf8');
@@ -218,6 +464,7 @@ test('acceptance proof loop blocks screenshot-only command proof without a repor
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
       await writeFile(join(worktreePath, screenshotPath), 'image\n', 'utf8');
       return commandResult(proof, {
@@ -251,6 +498,7 @@ test('acceptance proof loop keeps command failure blockers when no report is wri
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => commandResult(proof, {
       exitCode: 1,
       outputSummary: 'missing proof script',
@@ -280,6 +528,7 @@ test('acceptance proof loop blocks nonzero command exit despite a passing report
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
       await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
       await writeFile(proof.reportPath, JSON.stringify(passingReport(proof.smokeArtifactPath)), 'utf8');
@@ -316,6 +565,7 @@ test('acceptance proof loop classifies proof-owned and forbidden proof-phase dif
     beforeHead: 'before',
     initialChangedFiles: ['src/feature.ts'],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
       await writeFile(join(worktreePath, 'src/feature.ts'), 'export const feature = "proof changed";\n', 'utf8');
       await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
@@ -350,6 +600,7 @@ test('acceptance proof loop evaluates scope blockers against full final changed 
     beforeHead: 'before',
     initialChangedFiles: ['docs/other.md'],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
       await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
       await writeFile(proof.reportPath, JSON.stringify(passingReport(proof.smokeArtifactPath)), 'utf8');
@@ -384,6 +635,7 @@ test('acceptance proof loop gives adaptive proof the same evidence vocabulary as
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => adaptiveResult(proof),
     collectChangeSet: async () => ({ changedPaths: [], commits: [], hasChanges: false }),
     evaluateScope: () => ({ blockers: [] }),
@@ -401,6 +653,7 @@ test('acceptance proof loop gives adaptive proof the same evidence vocabulary as
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => adaptiveResult(proof),
     collectChangeSet: async () => ({ changedPaths: [], commits: [], hasChanges: false }),
     evaluateScope: () => ({ blockers: [] }),
@@ -433,6 +686,7 @@ test('acceptance proof loop gives adaptive proof the same evidence vocabulary as
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => adaptiveResult(proof, { artifactPaths: [proof.smokeArtifactPath] }),
     collectChangeSet: async () => ({ changedPaths: [proof.smokeArtifactPath], commits: [], hasChanges: true }),
     evaluateScope: () => ({ blockers: [] }),
@@ -451,6 +705,7 @@ test('acceptance proof loop gives adaptive proof the same evidence vocabulary as
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => adaptiveResult(proof, { artifactPaths: [proof.smokeArtifactPath] }),
     collectChangeSet: async () => ({ changedPaths: [proof.smokeArtifactPath], commits: [], hasChanges: true }),
     evaluateScope: () => ({ blockers: [] }),
@@ -473,6 +728,7 @@ test('acceptance proof loop repairs invalid adaptive proof report shape once', a
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => {
       await writeFile(proof.reportPath, JSON.stringify({
         status: 'passed',
@@ -514,6 +770,7 @@ test('acceptance proof loop hard-blocks adaptive proof report shape after one fa
     beforeHead: 'before',
     initialChangedFiles: [],
     adaptiveAdapterAvailable: true,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeAdaptiveProof: async () => {
       await writeFile(proof.reportPath, '{"status":"passed"}', 'utf8');
       return adaptiveResult(proof);
@@ -534,7 +791,7 @@ test('acceptance proof loop hard-blocks adaptive proof report shape after one fa
   assert.match(result.blockers.join('\n'), /criteria must be an array/);
 });
 
-test('acceptance proof loop preserves legacy visual command without expanding proof-owned paths', async () => {
+test('acceptance proof loop blocks command proof product changes outside proof-owned paths', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-proof-loop-'));
   const proof = await proofPaths(worktreePath, 626);
   await mkdir(join(worktreePath, 'src'), { recursive: true });
@@ -547,26 +804,27 @@ test('acceptance proof loop preserves legacy visual command without expanding pr
         ...commandProofConfig().reviewGates,
         acceptanceProof: {
           ...commandProofConfig().reviewGates.acceptanceProof,
-          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue ${issueNumber}',
+          runnerValidationCommand: 'node acceptance-proof.mjs',
           proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
         },
         visualProof: {
           ...commandProofConfig().reviewGates.visualProof,
-          runnerValidationCommand: 'node legacy-visual-proof.mjs',
+          runnerValidationCommand: 'node ignored-visual-proof.mjs',
         },
       },
     },
-    issue: issueFixture({ number: 626, title: 'Acceptance proof legacy visual', body: 'Needs acceptance proof.' }),
+    issue: issueFixture({ number: 626, title: 'Acceptance proof command', body: 'Needs acceptance proof.' }),
     worktreePath,
     beforeHead: 'before',
     initialChangedFiles: ['src/feature.ts'],
     adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport(browserVisualProofPlan),
     executeCommandProof: async () => {
-      await writeFile(join(worktreePath, 'src/feature.ts'), 'export const feature = "legacy proof changed";\n', 'utf8');
+      await writeFile(join(worktreePath, 'src/feature.ts'), 'export const feature = "proof changed";\n', 'utf8');
       await writeFile(join(proof.artifactDir, 'smoke-output.txt'), 'ok\n', 'utf8');
       await writeFile(proof.reportPath, JSON.stringify(passingReport(proof.smokeArtifactPath)), 'utf8');
       return commandResult(proof, {
-        command: 'node legacy-visual-proof.mjs',
+        command: 'node acceptance-proof.mjs',
         artifactPaths: [proof.smokeArtifactPath],
       });
     },
@@ -581,11 +839,51 @@ test('acceptance proof loop preserves legacy visual command without expanding pr
 
   assert.equal(result.status, 'blocked');
   assert.match(result.blockers.join('\n'), /product-code changes during acceptance proof/);
-  assert.match(result.evidence?.validation[0]?.command ?? '', /legacy-visual-proof/);
+  assert.match(result.evidence?.validation[0]?.command ?? '', /acceptance-proof/);
 });
 
 function assertPlan(actual: AcceptanceProofPlan, expected: AcceptanceProofPlan): void {
   assert.deepEqual(actual, expected);
+}
+
+const browserVisualProofPlan: ProofPlan = {
+  mode: 'browser-visual',
+  reason: 'Browser visual proof is required for this acceptance path.',
+  validationCommands: [],
+  requiredArtifacts: [],
+  visualTarget: 'browser',
+};
+
+const noneProofPlan: ProofPlan = {
+  mode: 'none',
+  reason: 'No acceptance proof is required for this docs-only change.',
+  validationCommands: [],
+  requiredArtifacts: [],
+};
+
+function implementationReport(proofPlan: ProofPlan): ScopedCompletionReport {
+  return {
+    status: 'completed',
+    changes: ['src/feature.ts'],
+    validation: [
+      { command: 'npm test', status: 'passed', summary: 'focused validation passed' },
+    ],
+    proofPlan,
+    artifacts: [
+      { type: 'smoke-output', path: 'smoke-output.txt', description: 'focused smoke output' },
+    ],
+    skippedChecks: [],
+    residualRisks: [],
+    prohibitedActions: [],
+    reviewHandoff: {
+      flowUsed: 'scoped-implementation',
+      riskLevel: 'medium',
+      implementedContract: ['Implemented the scoped contract.'],
+      proofByAcceptanceCriteria: ['npm test proves the non-visual behavior.'],
+      reviewFocus: ['Review proof plan routing.'],
+      humanReviewChecklist: ['Check acceptance proof routing result.'],
+    },
+  };
 }
 
 function commandProofConfig() {

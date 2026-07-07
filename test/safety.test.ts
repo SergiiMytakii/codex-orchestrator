@@ -6,6 +6,7 @@ import {
   validateNoAgentOwnedGitPublication,
 } from '../src/runner/safety.js';
 import { validConfig } from './fixtures/config.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 test('safety rejects configured secret and deny glob changes', () => {
   const config = {
@@ -61,6 +62,7 @@ test('safety maps prohibited report actions and changed HEAD', () => {
       status: 'completed',
       changes: [],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],

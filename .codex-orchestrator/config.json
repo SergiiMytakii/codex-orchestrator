@@ -138,9 +138,6 @@
         "layout",
         "visual",
         "screenshot",
-        "acceptance",
-        "proof",
-        "smoke",
         "\\bAPI\\b",
         "worker",
         "\\bCLI\\b",
@@ -161,7 +158,7 @@
       "proofOwnedPathGlobs": [
         ".codex-orchestrator/proofs/**"
       ],
-      "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}",
+      "runnerValidationCommand": "codex-orchestrator visual-proof auto --issue ${issueNumber}",
       "runnerTimeoutMs": 900000,
       "envPassthrough": [],
       "browserProof": {
@@ -210,7 +207,7 @@
       ],
       "minScreenshotArtifacts": 1,
       "requireWhenDesirable": false,
-      "runnerValidationCommand": "codex-orchestrator visual-proof mobile --issue ${issueNumber}",
+      "runnerValidationCommand": "codex-orchestrator visual-proof auto --issue ${issueNumber}",
       "runnerTimeoutMs": 900000,
       "envPassthrough": []
     },

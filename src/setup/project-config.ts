@@ -65,9 +65,6 @@ export function defaultAcceptanceProofConfig(): CodexOrchestratorConfig['reviewG
       'layout',
       'visual',
       'screenshot',
-      'acceptance',
-      'proof',
-      'smoke',
       '\\bAPI\\b',
       'worker',
       '\\bCLI\\b',
@@ -415,7 +412,6 @@ export function mergeExistingProjectConfig(
       acceptanceProof: migrateAcceptanceProofConfig(
         defaults.reviewGates.acceptanceProof,
         existingAcceptanceProof,
-        existingVisualProof,
       ),
       visualProof: migrateVisualProofConfig(defaults.reviewGates.visualProof, existingVisualProof),
       quality: {
@@ -503,7 +499,6 @@ export async function applyTargetPackageConfigDefaults(
       acceptanceProof: migrateAcceptanceProofConfig(
         config.reviewGates.acceptanceProof,
         config.reviewGates.acceptanceProof,
-        config.reviewGates.visualProof,
       ),
       visualProof: migrateVisualProofConfig(config.reviewGates.visualProof, config.reviewGates.visualProof),
     },
@@ -624,16 +619,9 @@ function migrateVisualProofConfig(
 function migrateAcceptanceProofConfig(
   defaults: CodexOrchestratorConfig['reviewGates']['acceptanceProof'],
   existing: Record<string, unknown> | CodexOrchestratorConfig['reviewGates']['acceptanceProof'] | undefined,
-  legacyVisualProof: Record<string, unknown> | CodexOrchestratorConfig['reviewGates']['visualProof'] | undefined,
 ): CodexOrchestratorConfig['reviewGates']['acceptanceProof'] {
-  const visualProof = legacyVisualProof as CodexOrchestratorConfig['reviewGates']['visualProof'] | undefined;
   const acceptanceProof = {
     ...defaults,
-    enabled: visualProof?.enabled ?? defaults.enabled,
-    artifactDir: visualProof?.artifactDir ?? defaults.artifactDir,
-    runnerValidationCommand: visualProof?.runnerValidationCommand ?? defaults.runnerValidationCommand,
-    runnerTimeoutMs: visualProof?.runnerTimeoutMs ?? defaults.runnerTimeoutMs,
-    envPassthrough: visualProof?.envPassthrough ?? defaults.envPassthrough,
     ...existing,
   } as CodexOrchestratorConfig['reviewGates']['acceptanceProof'];
   acceptanceProof.proofStrategy = acceptanceProof.proofStrategy ?? defaults.proofStrategy;

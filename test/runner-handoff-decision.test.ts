@@ -9,6 +9,7 @@ import {
 } from '../src/runner/runner-handoff-decision.js';
 import type { ImplementationPublishabilityResult } from '../src/runner/local-execution-session.js';
 import type { FreshContextReviewEvidence } from '../src/runner/handoff-evidence.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 test('runner handoff decision builds blocked evidence with fresh-context findings', () => {
   const publishability = blockedPublishability({
@@ -201,6 +202,7 @@ function promotionPublishability(
       status: 'needs-promotion',
       changes: [],
       validation: [{ command: 'promotion review', status: 'passed', summary: 'promotion recorded' }],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: ['promotion risk'],
@@ -221,6 +223,7 @@ function publishReady(): Extract<ImplementationPublishabilityResult, { status: '
       status: 'completed',
       changes: ['src/runner/example.ts'],
       validation: [{ command: 'npm test', status: 'passed', summary: 'ok' }],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: ['handoff risk'],

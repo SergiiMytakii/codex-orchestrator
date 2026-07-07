@@ -9,6 +9,7 @@ import { runAutoVisualProofCommand } from '../src/runner/auto-visual-proof-comma
 import { runRunnerVisualProof, type RunnerVisualProofResult } from '../src/runner/visual-proof-runner.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 test('runner visual proof fails screenshot-only output without acceptance proof report', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
@@ -67,6 +68,7 @@ test('runner visual proof fails screenshot-only output without acceptance proof 
         status: 'completed',
         changes: [],
         validation: [],
+        proofPlan: defaultProofPlan,
         artifacts: [],
         skippedChecks: [],
         residualRisks: [],
@@ -91,7 +93,7 @@ test('runner visual proof fails screenshot-only output without acceptance proof 
   }]);
 });
 
-test('runner visual proof ignores preexisting screenshots that the command did not update', async () => {
+test('runner visual proof fails when only stale screenshots exist', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
   const proofDir = join(worktreePath, '.codex-orchestrator', 'proofs', 'issue-155');
   await mkdir(proofDir, { recursive: true });
@@ -117,6 +119,7 @@ test('runner visual proof ignores preexisting screenshots that the command did n
       status: 'completed',
       changes: [],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -125,7 +128,7 @@ test('runner visual proof ignores preexisting screenshots that the command did n
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'skipped');
+  assert.equal(result.validation[0]?.status, 'failed');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });
@@ -169,6 +172,7 @@ test('runner visual proof reports same-size screenshots when file content change
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -185,7 +189,7 @@ test('runner visual proof reports same-size screenshots when file content change
   }]);
 });
 
-test('runner visual proof warns when the command succeeds without producing a screenshot artifact', async () => {
+test('runner visual proof fails when the command succeeds without producing a screenshot artifact', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
   const shellExecutor: ShellCommandExecutor = async () => ({ stdout: 'skipped', stderr: '', exitCode: 0 });
 
@@ -208,6 +212,7 @@ test('runner visual proof warns when the command succeeds without producing a sc
       status: 'completed',
       changes: [],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -216,7 +221,7 @@ test('runner visual proof warns when the command succeeds without producing a sc
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'skipped');
+  assert.equal(result.validation[0]?.status, 'failed');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });
@@ -277,6 +282,7 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
         status: 'completed',
         changes: [],
         validation: [],
+        proofPlan: defaultProofPlan,
         artifacts: [],
         skippedChecks: [],
         residualRisks: [],
@@ -352,6 +358,7 @@ test('runner visual proof evaluates machine-readable acceptance proof reports', 
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -427,6 +434,7 @@ test('runner visual proof exposes needs-rework acceptance proof evidence', async
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -496,6 +504,7 @@ test('runner visual proof accepts backend-only package-owned auto proof with an 
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -566,6 +575,7 @@ test('runner visual proof fails when the command exits nonzero despite a passing
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -631,6 +641,7 @@ test('runner visual proof blocks product-code changes reported by browser proof'
       status: 'completed',
       changes: [],
       validation: [],
+        proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -644,7 +655,7 @@ test('runner visual proof blocks product-code changes reported by browser proof'
   assert.match(result.validation[0]?.summary ?? '', /src\/frontend\/App\.tsx/);
 });
 
-test('runner visual proof ignores screenshots inside runner-owned browser internals', async () => {
+test('runner visual proof fails when only runner-owned browser internals contain screenshots', async () => {
   const worktreePath = await mkdtemp(join(tmpdir(), 'codex-orchestrator-visual-proof-'));
 
   const shellExecutor: ShellCommandExecutor = async (_command, options) => {
@@ -686,6 +697,7 @@ test('runner visual proof ignores screenshots inside runner-owned browser intern
       status: 'completed',
       changes: [],
       validation: [],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -694,7 +706,7 @@ test('runner visual proof ignores screenshots inside runner-owned browser intern
     shellExecutor,
   });
 
-  assert.equal(result.validation[0]?.status, 'skipped');
+  assert.equal(result.validation[0]?.status, 'failed');
   assert.match(result.validation[0]?.summary ?? '', /did not produce a screenshot artifact/);
   assert.deepEqual(result.artifacts, []);
 });
@@ -743,6 +755,7 @@ test('runner visual proof keeps browser runtime directories outside the worktree
         status: 'completed',
         changes: [],
         validation: [],
+        proofPlan: defaultProofPlan,
         artifacts: [],
         skippedChecks: [],
         residualRisks: [],
@@ -804,6 +817,7 @@ test('runner visual proof resolves package-owned CLI before ambient PATH entries
         status: 'completed',
         changes: [],
         validation: [],
+        proofPlan: defaultProofPlan,
         artifacts: [],
         skippedChecks: [],
         residualRisks: [],

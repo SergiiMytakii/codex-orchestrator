@@ -24,6 +24,24 @@ export interface ValidationItem {
 export type ReviewHandoffRisk = 'low' | 'medium' | 'high';
 export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
 export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
+export const proofPlanModes = [
+  'none',
+  'non-visual-smoke',
+  'cli',
+  'api',
+  'worker',
+  'browser-visual',
+  'mobile-visual',
+] as const;
+export type ProofPlanMode = (typeof proofPlanModes)[number];
+export type ProofPlanVisualTarget = 'browser' | 'mobile';
+export interface ProofPlan {
+  mode: ProofPlanMode;
+  reason: string;
+  validationCommands: string[];
+  requiredArtifacts: string[];
+  visualTarget?: ProofPlanVisualTarget;
+}
 export type ProhibitedActionType =
   | 'secret-file-read'
   | 'secret-file-change'
@@ -34,6 +52,7 @@ export interface ScopedCompletionReport {
   status: CompletionStatus;
   changes: string[];
   validation: ValidationItem[];
+  proofPlan: ProofPlan;
   artifacts: Array<{ type: ScopedArtifactType; path?: string; url?: string; description: string }>;
   skippedChecks: string[];
   residualRisks: string[];
@@ -169,6 +188,7 @@ function assertScopedCompletionReport(value: unknown): asserts value is ScopedCo
   }
   assertStringArray(record.changes, 'changes');
   assertValidation(record.validation);
+  assertProofPlan(record.proofPlan);
   assertArtifacts(record.artifacts);
   assertStringArray(record.skippedChecks, 'skippedChecks');
   assertStringArray(record.residualRisks, 'residualRisks');
@@ -178,6 +198,24 @@ function assertScopedCompletionReport(value: unknown): asserts value is ScopedCo
   }
   if (record.status === 'needs-promotion') {
     assertPromotion(record.promotion);
+  }
+}
+
+function assertProofPlan(value: unknown): asserts value is ProofPlan {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid scoped completion report: proofPlan must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.mode !== 'string' || !proofPlanModes.includes(record.mode as ProofPlanMode)) {
+    throw new Error(`Invalid scoped completion report: proofPlan.mode must be one of ${proofPlanModes.join(', ')}`);
+  }
+  if (typeof record.reason !== 'string' || record.reason.trim().length === 0) {
+    throw new Error('Invalid scoped completion report: proofPlan.reason must be a non-empty string');
+  }
+  assertNonEmptyStringArray(record.validationCommands, 'proofPlan.validationCommands');
+  assertNonEmptyStringArray(record.requiredArtifacts, 'proofPlan.requiredArtifacts');
+  if ('visualTarget' in record && record.visualTarget !== 'browser' && record.visualTarget !== 'mobile') {
+    throw new Error('Invalid scoped completion report: proofPlan.visualTarget must be browser or mobile');
   }
 }
 
@@ -317,6 +355,13 @@ function assertStringArray(value: unknown, key: string, prefix = 'Invalid scoped
   }
 }
 
+function assertNonEmptyStringArray(value: unknown, key: string): asserts value is string[] {
+  assertStringArray(value, key);
+  if (value.some((item) => item.trim().length === 0)) {
+    throw new Error(`Invalid scoped completion report: ${key} must contain only non-empty strings`);
+  }
+}
+
 function assertValidation(value: unknown): void {
   if (!Array.isArray(value)) {
     throw new Error('Invalid scoped completion report: validation must be an array');
@@ -326,7 +371,10 @@ function assertValidation(value: unknown): void {
       throw new Error('Invalid scoped completion report: validation item must be an object');
     }
     const record = item as Record<string, unknown>;
-    if (typeof record.command !== 'string' || !['passed', 'failed', 'skipped'].includes(String(record.status)) || typeof record.summary !== 'string') {
+    if (typeof record.command !== 'string'
+      || record.command.trim().length === 0
+      || !['passed', 'failed', 'skipped'].includes(String(record.status))
+      || typeof record.summary !== 'string') {
       throw new Error('Invalid scoped completion report: validation item is malformed');
     }
     if ('evidence' in record) {

@@ -30,6 +30,12 @@ test('status command returns structured result and ordered output without mutati
       status: 'completed',
       changes: ['feature.txt'],
       validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+      proofPlan: {
+        mode: 'none',
+        reason: 'Status fixture does not claim acceptance proof.',
+        validationCommands: [],
+        requiredArtifacts: [],
+      },
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],

@@ -67,6 +67,12 @@ For completed work, include `reviewHandoff` in the runner JSON report:
 
 ## Acceptance Proof
 
+Declare the proof mode in the runner completion report `proofPlan`. Choose the
+narrowest mode that proves the issue: `none`, `non-visual-smoke`, `cli`, `api`,
+`worker`, `browser-visual`, or `mobile-visual`. Do not choose non-visual modes
+for UI or mobile behavior, and do not choose `none` when acceptance criteria need
+observable proof. The runner validates `proofPlan` before publication.
+
 Prepare runner-owned acceptance proof artifacts when configured. For visual work,
 screenshots must be tied back to the acceptance criteria; for non-visual work,
 use smoke outputs, logs, or other observable artifacts. Let the runner execute

@@ -19,6 +19,7 @@ import {
 } from '../src/runner/review-gate-policy.js';
 import { validConfig } from './fixtures/config.js';
 import { commentFixture, issueFixture } from './fixtures/issues.js';
+import { defaultProofPlan } from './fixtures/reports.js';
 
 test('prompt builder includes issue context, workflow, publication, safety, and report contract', () => {
   const prompt = buildScopedImplementationPrompt({
@@ -128,6 +129,28 @@ test('prompt builder exposes explicit issue proof strategy to the child agent', 
   assert.doesNotMatch(prompt, /codex-orchestrator visual-proof auto/);
 });
 
+test('prompt builder uses non-visual proof guidance for API acceptance proof routes', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 161,
+      labels: ['agent:auto'],
+      title: 'Update API retry behavior',
+      body: 'Acceptance criteria: API retry smoke output proves the new behavior.',
+    }),
+    config: validConfig,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-161',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /save non-visual smoke, test, log, or machine-readable artifacts/);
+  assert.match(prompt, /proofPlan\.validationCommands or proofPlan\.requiredArtifacts/);
+  assert.doesNotMatch(prompt, /runner will execute this visual proof command/);
+  assert.doesNotMatch(prompt, /primary visual proof path/);
+});
+
 test('prompt builder keeps shell-like issue text inert and literal', () => {
   const maliciousText = '$(touch /tmp/owned) `touch /tmp/owned` ${reportPath}; gh pr create';
   const prompt = buildScopedImplementationPrompt({
@@ -163,8 +186,8 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
       ...validConfig,
       reviewGates: {
         ...validConfig.reviewGates,
-        visualProof: {
-          ...validConfig.reviewGates.visualProof,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
           runnerValidationCommand: 'node .codex-orchestrator/proofs/issue-${issueNumber}/visual-proof.mjs',
           envPassthrough: ['CODEX_ORCHESTRATOR_LOGIN_EMAIL', 'CODEX_ORCHESTRATOR_LOGIN_PASSWORD'],
         },
@@ -416,6 +439,50 @@ test('issue-tree child prompt includes parent, child, dependencies, workflow, sa
   assert.match(prompt, /\/report\.json/);
 });
 
+test('scoped and issue-tree prompts require agent-authored proof plans', () => {
+  const scoped = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 160,
+      labels: ['agent:auto'],
+      title: 'Extract runner review source selection',
+      body: 'Acceptance criteria:\n- Run focused Node tests.',
+    }),
+    config: validConfig,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-160',
+    worktreePath: '/worktree',
+  });
+  const child = buildIssueTreeChildPrompt({
+    parentIssue: issueFixture({ number: 151, labels: ['agent:plan-auto'], body: 'Parent feature' }),
+    childIssue: issueFixture({ number: 157, labels: ['agent:child'], body: 'Implement child' }),
+    config: validConfig,
+    workflowPromptText: 'Issue tree workflow',
+    childMetadata: {
+      stableId: 'child-execution',
+      afkHitl: 'afk',
+      dependsOn: [],
+      ownershipScope: ['src/runner/policy.ts'],
+      verification: ['npm test'],
+    },
+    dependencyIssues: [],
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/tree-151-issue-157',
+    worktreePath: '/worktree',
+  });
+
+  for (const prompt of [scoped, child]) {
+    assert.match(prompt, /proofPlan/);
+    assert.match(prompt, /"mode": "none" \| "non-visual-smoke" \| "cli" \| "api" \| "worker" \| "browser-visual" \| "mobile-visual"/);
+    assert.match(prompt, /Choose the narrowest proofPlan mode that proves the issue/);
+    assert.match(prompt, /Do not choose non-visual proof modes for UI or mobile behavior/);
+    assert.match(prompt, /Do not choose "none" when acceptance criteria need observable proof/);
+    assert.match(prompt, /The runner validates proofPlan and may reject it before publication/);
+  }
+});
+
 test('durable prompt and completion report helpers validate report shape', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-prompt-'));
   const promptPath = await writeDurablePrompt({
@@ -437,6 +504,7 @@ test('durable prompt and completion report helpers validate report shape', async
       status: 'needs-promotion',
       changes: [],
       validation: [],
+      proofPlan: defaultProofPlan,
       skippedChecks: [],
       residualRisks: [],
       prohibitedActions: [],

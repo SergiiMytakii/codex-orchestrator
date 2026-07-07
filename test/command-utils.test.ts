@@ -58,6 +58,41 @@ test('runner config reader backfills package-owned proof command and drops unsup
   assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
 });
 
+test('runner config reader does not migrate legacy visual proof command into acceptance proof', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-config-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, 'package.json'),
+    JSON.stringify({
+      scripts: {
+        test: 'node --test',
+      },
+    }),
+    'utf8',
+  );
+  const staleConfig = buildProjectConfig({
+    owner: 'SergiiMytakii',
+    repo: 'IntelleReach',
+    prepareLabels: 'report-only',
+    workflows: fallbackWorkflows,
+  });
+  staleConfig.reviewGates.visualProof.runnerValidationCommand = 'npm run legacy-visual-proof';
+  delete staleConfig.reviewGates.acceptanceProof.runnerValidationCommand;
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator', 'config.json'),
+    JSON.stringify(staleConfig),
+    'utf8',
+  );
+
+  const config = await readRunnerConfig(targetRoot);
+
+  assert.equal(config.reviewGates.visualProof.runnerValidationCommand, 'npm run legacy-visual-proof');
+  assert.equal(
+    config.reviewGates.acceptanceProof.runnerValidationCommand,
+    'codex-orchestrator visual-proof auto --issue ${issueNumber}',
+  );
+});
+
 test('configured checks still run during parent integration when scoped to parent phase', async () => {
   const config = buildProjectConfig({
     owner: 'SergiiMytakii',

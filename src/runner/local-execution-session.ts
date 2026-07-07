@@ -331,6 +331,7 @@ export async function runImplementationPublishabilityCheck(
     worktreePath: input.worktreePath,
     beforeHead: input.beforeHead,
     initialChangedFiles: changedFiles,
+    implementationReport: report,
     adaptiveAdapterAvailable: Boolean(input.acceptanceProof),
     executeAdaptiveProof: input.acceptanceProof
       ? async () => {

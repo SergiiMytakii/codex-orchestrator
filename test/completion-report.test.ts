@@ -4,10 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  type ProofPlan,
   readPlanAutoCompletionReport,
   readScopedCompletionReport,
   readScopedCompletionReportDetailed,
 } from '../src/runner/completion-report.js';
+
+const defaultProofPlan: ProofPlan = {
+  mode: 'non-visual-smoke',
+  reason: 'Unit tests and smoke output prove the non-visual acceptance criteria.',
+  validationCommands: ['npm test -- warmup'],
+  requiredArtifacts: [],
+};
 
 test('scoped completion report validation names missing required fields', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
@@ -69,6 +77,7 @@ test('scoped completion report accepts structured review handoff for human revie
       status: 'completed',
       changes: ['Updated sender disable recovery path.'],
       validation: [{ command: 'npm test -- warmup', status: 'passed', summary: 'red -> green proof passed' }],
+      proofPlan: defaultProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: ['No live provider smoke in local env.'],
@@ -119,6 +128,12 @@ test('scoped completion report accepts structured TDD red-green validation evide
           },
         },
       }],
+      proofPlan: {
+        mode: 'cli',
+        reason: 'Focused CLI behavior proof is sufficient.',
+        validationCommands: ['focused behavior proof'],
+        requiredArtifacts: [],
+      },
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -140,6 +155,7 @@ test('scoped completion report rejects malformed structured TDD evidence', async
   const baseReport = {
     status: 'completed',
     changes: ['src/filters.ts'],
+    proofPlan: defaultProofPlan,
     artifacts: [],
     skippedChecks: [],
     residualRisks: [],
@@ -188,6 +204,130 @@ test('scoped completion report rejects malformed structured TDD evidence', async
   await assert.rejects(
     readScopedCompletionReport(reportPath),
     /Invalid scoped completion report: validation evidence green status must be passed/,
+  );
+});
+
+test('scoped completion report accepts supported proof plan modes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  for (const mode of ['none', 'non-visual-smoke', 'cli', 'api', 'worker', 'browser-visual', 'mobile-visual'] as const) {
+    await writeFile(
+      reportPath,
+      JSON.stringify({
+        status: 'completed',
+        changes: ['src/feature.ts'],
+        validation: [{ command: 'npm test', status: 'passed', summary: 'passed' }],
+        proofPlan: {
+          mode,
+          reason: `${mode} proof is appropriate for this issue.`,
+          validationCommands: mode === 'none' ? [] : ['npm test'],
+          requiredArtifacts: [],
+          ...(mode === 'browser-visual' ? { visualTarget: 'browser' } : {}),
+          ...(mode === 'mobile-visual' ? { visualTarget: 'mobile' } : {}),
+        },
+        artifacts: [],
+        skippedChecks: [],
+        residualRisks: [],
+        prohibitedActions: [],
+      }),
+      'utf8',
+    );
+
+    const result = await readScopedCompletionReport(reportPath);
+    assert.equal(result.kind, 'valid');
+    if (result.kind === 'valid') {
+      assert.equal(result.report.proofPlan.mode, mode);
+    }
+  }
+});
+
+test('scoped completion report rejects missing or malformed proof plan', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  const baseReport = {
+    status: 'completed',
+    changes: ['src/feature.ts'],
+    validation: [{ command: 'npm test', status: 'passed', summary: 'passed' }],
+    artifacts: [],
+    skippedChecks: [],
+    residualRisks: [],
+    prohibitedActions: [],
+  };
+
+  await writeFile(reportPath, JSON.stringify(baseReport), 'utf8');
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan must be an object/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, mode: 'analytics' } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.mode must be one of/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, reason: '' } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.reason must be a non-empty string/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, validationCommands: 'npm test' } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.validationCommands must be a string array/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, validationCommands: ['npm test', ' '] } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.validationCommands must contain only non-empty strings/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, requiredArtifacts: 'smoke.log' } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.requiredArtifacts must be a string array/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, requiredArtifacts: ['smoke.log', ''] } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.requiredArtifacts must contain only non-empty strings/,
+  );
+
+  await writeFile(
+    reportPath,
+    JSON.stringify({ ...baseReport, proofPlan: { ...defaultProofPlan, visualTarget: 'desktop' } }),
+    'utf8',
+  );
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: proofPlan\.visualTarget must be browser or mobile/,
   );
 });
 

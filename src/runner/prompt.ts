@@ -114,10 +114,11 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
     ...buildVisualProofPromptLines(input.config, input.issue),
+    ...proofPlanPromptLines(),
     '## Review Handoff Contract',
     'Include reviewHandoff for completed work so a maintainer can review quickly without reverse-engineering the diff.',
     'reviewHandoff must name the flow used, risk level, implemented contract, proof by acceptance criterion, review focus, and human review checklist.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    scopedCompletionReportSchemaLine(),
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
@@ -220,13 +221,29 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
     'Use status "needs-promotion" only when the child cannot complete safely within its ownership scope. Do not request promotion merely because a runner-owned proof command was not executed in-session; for explicit non-visual proof, report the non-visual artifacts and skipped runner-owned visual command as normal completed evidence.',
     ...buildVisualProofPromptLines(input.config, input.childIssue),
+    ...proofPlanPromptLines(),
     '## Review Handoff Contract',
     'Include reviewHandoff for completed child work so the parent report can show risk, proof, and human review focus per child.',
-    'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.',
+    scopedCompletionReportSchemaLine(),
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
     `Worktree: ${input.worktreePath}`,
   ].join('\n\n');
+}
+
+function proofPlanPromptLines(): string[] {
+  return [
+    '## Proof Plan Contract',
+    'Include proofPlan in the completion report. Choose the narrowest proofPlan mode that proves the issue.',
+    'Supported proofPlan modes are "none", "non-visual-smoke", "cli", "api", "worker", "browser-visual", and "mobile-visual".',
+    'Do not choose non-visual proof modes for UI or mobile behavior. Do not choose "none" when acceptance criteria need observable proof.',
+    'Map proofPlan.validationCommands to passed validation[].command values, and map proofPlan.requiredArtifacts to artifact path or url values.',
+    'The runner validates proofPlan and may reject it before publication.',
+  ];
+}
+
+function scopedCompletionReportSchemaLine(): string {
+  return 'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "proofPlan": { "mode": "none" | "non-visual-smoke" | "cli" | "api" | "worker" | "browser-visual" | "mobile-visual", "reason": string, "validationCommands": string[], "requiredArtifacts": string[], "visualTarget"?: "browser" | "mobile" }, "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.';
 }
 
 function localCommitPublicationLine(config: CodexOrchestratorConfig, child: boolean): string {

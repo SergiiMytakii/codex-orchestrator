@@ -105,7 +105,20 @@ async function writeCompletedReport(path: string): Promise<void> {
     JSON.stringify({
       status: 'completed',
       changes: ['feature.txt'],
-      validation: [{ command: 'fake', status: 'passed', summary: 'ok' }],
+      validation: [
+        {
+          command: 'TDD red-to-green',
+          status: 'passed',
+          summary: 'Focused behavior test failed before implementation and passed after implementation.',
+        },
+        { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+      ],
+      proofPlan: {
+        mode: 'none',
+        reason: 'Recovery fixture does not claim acceptance proof.',
+        validationCommands: [],
+        requiredArtifacts: [],
+      },
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
