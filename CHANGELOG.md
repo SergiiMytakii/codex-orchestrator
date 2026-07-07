@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-07-07
+
+### Added
+- Added typed runner blocker evidence and bounded report/evidence repair so
+  safe completion-report or review-handoff failures can be repaired without
+  weakening publication gates.
+- Added focused live-smoke and unit coverage for incomplete progress retry,
+  typed blocker repair, and daily self-improvement issue limits.
+
+### Changed
+- Scoped review reports now keep handoff output shorter while preserving the
+  evidence the runner needs for publication decisions.
+- Daily self-improvement runs now limit issue churn so repeated runs produce
+  fewer redundant follow-up issues.
+
+### Fixed
+- Scoped implementation runs can retry incomplete agent progress after an idle
+  timeout when the runner can prove safe progress in the worktree.
+
 ## [0.1.43] - 2026-07-06
 
 ### Added
