@@ -395,14 +395,29 @@ worker, CLI, or other observable behavior and save the command output as a
 
 Implementation agents declare the intended proof mode in the scoped completion
 report `proofPlan`. Supported modes are `none`, `non-visual-smoke`, `cli`,
-`api`, `worker`, `browser-visual`, and `mobile-visual`. The runner validates
-that plan against the issue `Proof Strategy`, changed files, and visual/mobile
-routing signals before publication. For accepted non-visual modes, the runner
-validates the completion report itself: declared `validationCommands` must map
-to passed validation lines, declared `requiredArtifacts` must map to report
-artifacts, and `reviewHandoff.proofByAcceptanceCriteria` must explain how the
-evidence satisfies the acceptance criteria. Accepted non-visual proof plans do
-not dispatch browser or mobile visual proof commands.
+`api`, `worker`, `browser-visual`, and `mobile-visual`. The child agent must
+choose the narrowest mode that proves the issue; this is an implementation
+intent signal, not proof by itself. The runner remains the authority and
+validates that plan against the issue `Proof Strategy`, changed files, and
+visual/mobile routing signals before publication.
+
+For accepted non-visual modes, the runner uses a report-validation proof path
+instead of dispatching browser or mobile proof. Report validation checks the
+completion report itself:
+
+- `proofPlan.validationCommands` must contain non-empty command strings, and
+  each command must exactly match a passed `validation[].command`;
+- `proofPlan.requiredArtifacts` must contain non-empty artifact targets, and
+  each target must exactly match a reported artifact `path` or `url`;
+- `reviewHandoff.proofByAcceptanceCriteria` must map the evidence to the
+  acceptance criteria.
+
+If those checks pass, the acceptance proof evidence records
+`completion-report:proofPlan` and `completion-report:artifacts` as the proof
+source. If they fail, publication blocks and the next implementation attempt must
+repair the report or provide real evidence. A non-visual `proofPlan` cannot
+downgrade explicit or inferred browser/mobile work: visual/mobile issue strategy
+or changed visual/mobile paths still require visual proof.
 
 For browser, mobile, and adaptive proof phases, the runner provides environment
 variables for:
