@@ -24,6 +24,7 @@ const scenarioDefinitions = new Map([
   ['commit-policy', runCommitPolicyScenario],
   ['run-scoped', runDirectScopedScenario],
   ['loop-policy', runLoopPolicyScenario],
+  ['incomplete-progress-rework', runIncompleteProgressReworkScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runBrowserProofScenario],
   ['acceptance-proof-positive', runAcceptanceProofPositiveScenario],
@@ -61,6 +62,7 @@ const scenarioProfiles = new Map([
   ['extended-policy', [
     'remote-base-branch',
     'loop-policy',
+    'incomplete-progress-rework',
     'acceptance-proof-rework',
     'acceptance-proof-negative',
     'plan-auto-blocking',
@@ -678,6 +680,51 @@ async function runLoopPolicyScenario(context) {
   );
   await runDaemonOnce(context, parent.number, 'plan-parent');
   await assertPlanAutoSuccess(context, parent.number, { expectLoopPolicyEvidence: true });
+}
+
+async function runIncompleteProgressReworkScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    loopPolicy: {
+      rework: {
+        maxAttempts: 1,
+        retryableBlockers: [
+          'missing-completion-report',
+          'incomplete-after-progress',
+          'invalid-completion-report',
+          'no-changed-files',
+          'failed-configured-checks',
+          'missing-quality-gate-evidence',
+          'failed-acceptance-proof',
+          'optional-figma-mcp-failure',
+        ],
+      },
+      durableRunSummaries: {
+        enabled: true,
+      },
+    },
+  });
+  const issue = await createIssue(
+    context,
+    'incomplete-progress-rework',
+    ['agent:auto'],
+    'Fake Codex writes safe local progress, exits with exact idle timeout, omits the completion report, then finishes on the bounded rework attempt.',
+  );
+  await runDaemonOnce(context, issue.number, 'scoped-issue');
+  await assertScopedSuccess(context, issue.number, { expectLocalCommit: false });
+
+  const pullRequest = await findPullRequestByBranch(context, `codex/issue-${issue.number}`);
+  assert(pullRequest, `expected draft PR for codex/issue-${issue.number}`);
+  const body = await getPullRequestBody(context, pullRequest.number);
+  assertIncludes(body, 'rework attempts: 1', 'incomplete-progress PR should include bounded rework evidence');
+  const summaryPath = body.match(/Durable Run Summary:\n- ([^\n]+\.json)/)?.[1];
+  assert(summaryPath, 'incomplete-progress PR should link a durable run summary JSON file');
+  const summary = JSON.parse(await readFile(summaryPath, 'utf8'));
+  assert(
+    JSON.stringify(summary.reworkAttempts ?? []).includes('Codex idle timed out after safe local progress'),
+    'durable summary should preserve the incomplete-progress sentinel reason',
+  );
+  await appendReport(context, `Incomplete-progress rework issue #${issue.number} reached review after one retry.\n\n`);
 }
 
 async function runDiagnosticsScenario(context) {
@@ -2541,6 +2588,20 @@ if (prompt.includes('# Fresh-Context Review')) {
       undefined,
       ['policy suggestion smoke evidence after bounded rework'],
     );
+    break;
+  case 'incomplete-progress-rework':
+    if (!prompt.includes('automatic rework attempt (#1)')) {
+      mkdirSync('src/live-smoke', { recursive: true });
+      writeFileSync(
+        join('src', 'live-smoke', 'issue-' + issueNumber + '.ts'),
+        'export const liveSmokeIncompleteProgressIssue' + issueNumber + ' = ' + JSON.stringify({ issue: issueNumber, run: runId, kind: 'incomplete-progress-rework' }) + ';\n',
+        'utf8',
+      );
+      console.error('Command idle timed out after 300000ms.');
+      process.exit(124);
+    }
+    writeCodeChange(issueNumber, runId, 'incomplete-progress-rework');
+    writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
   case 'browser-proof':
     writeBrowserProofChange(issueNumber, runId);

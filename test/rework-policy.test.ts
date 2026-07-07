@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   decideImplementationRework,
+  INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
 } from '../src/runner/rework-policy.js';
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
@@ -195,6 +196,58 @@ test('missing report is retryable and unknown codex exits hard-block', () => {
     attempt: 0,
     blockerKeys: ['unknown'],
     reasons: ['Codex exited with code 1: failed for an unknown reason'],
+  });
+});
+
+test('incomplete progress sentinel retries only from runner-owned reason', () => {
+  const config = withReworkConfig({
+    maxAttempts: 1,
+    retryableBlockers: [
+      ...validConfig.loopPolicy.rework.retryableBlockers,
+      'incomplete-after-progress',
+    ],
+  });
+
+  assert.deepEqual(decideImplementationRework({
+    reasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+    config,
+    attempt: 0,
+  }), {
+    kind: 'retry',
+    attempt: 0,
+    nextAttempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['incomplete-after-progress'],
+    reasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+    rework: {
+      attempt: 1,
+      blockedReasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+      disableOptionalFigmaMcp: false,
+    },
+  });
+
+  assert.deepEqual(decideImplementationRework({
+    reasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+    config,
+    attempt: 1,
+  }), {
+    kind: 'exhausted',
+    attempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['incomplete-after-progress'],
+    reasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+  });
+
+  const rawIdleTimeout = 'Codex exited with code 124: Command idle timed out after 300000ms.';
+  assert.deepEqual(decideImplementationRework({
+    reasons: [rawIdleTimeout],
+    config,
+    attempt: 0,
+  }), {
+    kind: 'hard-block',
+    attempt: 0,
+    blockerKeys: ['unknown'],
+    reasons: [rawIdleTimeout],
   });
 });
 

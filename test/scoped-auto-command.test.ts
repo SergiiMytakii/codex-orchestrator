@@ -18,6 +18,7 @@ import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
 import { runStatusCommand } from '../src/runner/status-command.js';
 import { sessionCodexHomePath } from '../src/runner/session-home.js';
+import { INCOMPLETE_AFTER_PROGRESS_REASON } from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
@@ -1227,6 +1228,71 @@ test('scoped auto command retries once on retryable blockers and can recover to 
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
 });
 
+test('scoped auto command retries incomplete progress from current worktree and can recover to review-ready', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const promptTexts: string[] = [];
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      promptTexts.push(input.promptText);
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), `export const attempt = ${runCount};\n`, 'utf8');
+      if (runCount === 1) {
+        return {
+          stdout: '',
+          stderr: 'Command idle timed out after 300000ms.',
+          exitCode: 124,
+        };
+      }
+
+      await mkdir(join(input.worktreePath, 'test'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'test', 'feature.test.ts'), 'assert.equal(1, 1);\n', 'utf8');
+      await writeFile(
+        input.reportPath,
+        JSON.stringify({
+          status: 'completed',
+          changes: ['src/feature.ts', 'test/feature.test.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+          artifacts: [],
+          skippedChecks: [],
+          residualRisks: [],
+          prohibitedActions: [],
+        }),
+        'utf8',
+      );
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(runCount, 2);
+  assert.equal(result.status, 'review-ready');
+  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
+  assert.match(promptTexts[1] ?? '', /Continue from the current worktree state; do not start over\./);
+  assert.match(promptTexts[1] ?? '', new RegExp(INCOMPLETE_AFTER_PROGRESS_REASON.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u'));
+  assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
+});
+
 test('scoped auto command retries optional figma mcp failure with optional figma disabled', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
@@ -1449,6 +1515,60 @@ test('scoped auto command respects zero configured rework attempts', async () =>
   assert.equal(runCount, 1);
   assert.equal(result.status, 'blocked');
   assert.match(result.reportComment, /Codex completed without file changes/);
+});
+
+test('scoped auto command preserves changed files when incomplete progress retry budget is exhausted', async () => {
+  const repo = await tempGitProject((config) => ({
+    ...config,
+    loopPolicy: {
+      ...config.loopPolicy,
+      rework: {
+        ...config.loopPolicy.rework,
+        maxAttempts: 0,
+      },
+    },
+  }));
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      await mkdir(join(input.worktreePath, 'src'), { recursive: true });
+      await writeFile(join(input.worktreePath, 'src', 'feature.ts'), 'export const partial = true;\n', 'utf8');
+      return {
+        stdout: '',
+        stderr: 'Command idle timed out after 300000ms.',
+        exitCode: 124,
+      };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(runCount, 1);
+  assert.equal(result.status, 'blocked');
+  assert.match(result.reportComment, /src\/feature\.ts/);
+  assert.match(result.reportComment, /Codex idle timed out after safe local progress/);
+  const terminalReportName = basename(result.reportPath, '.json');
+  const terminalSessionId = terminalReportName.replace(/^issue-155-/u, '');
+  const summary = JSON.parse(
+    await readFile(
+      join(repo, validConfig.runner.stateDir, 'summaries', `issue-155-${terminalSessionId}.json`),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  assert.deepEqual(summary.changedFiles, ['src/feature.ts']);
+  assert.match(JSON.stringify(summary.reworkAttempts), /incomplete-after-progress|safe local progress/);
 });
 
 test('scoped auto command includes advisory fresh-context review evidence before handoff', async () => {

@@ -100,6 +100,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
     'commit-policy',
     'run-scoped',
     'loop-policy',
+    'incomplete-progress-rework',
     'diagnostics',
     'browser-proof',
     'acceptance-proof-positive',
@@ -146,8 +147,10 @@ test('live smoke rejects unknown profiles before running smoke setup', async () 
 test('live smoke extended policy profile includes tree-child recovery scenario', async () => {
   const source = await liveSmokeScriptSource();
 
+  assert.match(source, /'extended-policy'[\s\S]*'incomplete-progress-rework'/);
   assert.match(source, /'extended-policy'[\s\S]*'tree-child-quality-rework'/);
   assert.match(source, /'extended-policy'[\s\S]*'plan-auto-tree-recovery'/);
+  assert.match(source, /runIncompleteProgressReworkScenario/);
   assert.match(source, /runTreeChildQualityReworkScenario/);
   assert.match(source, /runPlanAutoTreeRecoveryScenario/);
   assert.doesNotMatch(source, /\['plan-auto-tree-recovery', runTreeChildQualityReworkScenario\]/);
@@ -199,6 +202,53 @@ test('live smoke fake agent supports tree-child quality rework markers', async (
   assert.match(source, /plan-child-quality-rework/);
   assert.match(source, /automatic rework attempt \(#1\)/);
   assert.match(source, /tree-child quality rework structured TDD/);
+});
+
+test('live smoke fake agent simulates incomplete progress before completing rework', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-incomplete-progress-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-155-scoped.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Live smoke scoped incomplete progress.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260707123000',
+    'LIVE_SMOKE_SCENARIO: incomplete-progress-rework',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const first = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(first.status, 124);
+  assert.match(first.stderr, /Command idle timed out after 300000ms\./);
+  assert.match(await readFile(join(root, 'src/live-smoke/issue-155.ts'), 'utf8'), /incomplete-progress-rework/);
+  await assert.rejects(readFile(reportPath, 'utf8'), /ENOENT/);
+
+  await writeFile(promptPath, [
+    'Live smoke scoped incomplete progress.',
+    '',
+    'This is an automatic rework attempt (#1). Continue from the current worktree state; do not start over.',
+    'Codex idle timed out after safe local progress; runner will retry completion from existing worktree.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260707123000',
+    'LIVE_SMOKE_SCENARIO: incomplete-progress-rework',
+  ].join('\n'), 'utf8');
+
+  const second = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(second.status, 0, second.stderr);
+  const report = JSON.parse(await readFile(reportPath, 'utf8'));
+  assert.deepEqual(report.changes, [
+    'src/live-smoke/issue-155.ts',
+    'test/live-smoke/issue-155.test.ts',
+  ]);
+  assert.match(JSON.stringify(report.validation), /code-review live smoke/);
 });
 
 test('live smoke fake agent uses the child scenario marker for tree-child prompts', async () => {

@@ -3,6 +3,9 @@ import type { CodexOrchestratorConfig } from '../config/schema.js';
 export const MISSING_COMPLETION_REPORT_REASON =
   'Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE; runner cannot prove safety contract.';
 
+export const INCOMPLETE_AFTER_PROGRESS_REASON =
+  'Codex idle timed out after safe local progress; runner will retry completion from existing worktree.';
+
 export const OPTIONAL_FIGMA_MCP_FAILURE_REASON =
   'Optional Figma MCP failed before completion; retry without optional Figma MCP.';
 
@@ -11,6 +14,7 @@ export const REQUIRED_FIGMA_MCP_FAILURE_REASON =
 
 export type ReworkBlockerKey =
   | 'missing-completion-report'
+  | 'incomplete-after-progress'
   | 'invalid-completion-report'
   | 'no-changed-files'
   | 'failed-configured-checks'
@@ -60,6 +64,7 @@ export type ReworkDecision =
     };
 
 const missingCompletionReportPattern = new RegExp(escapeRegex(MISSING_COMPLETION_REPORT_REASON), 'iu');
+const incompleteAfterProgressPattern = new RegExp(escapeRegex(INCOMPLETE_AFTER_PROGRESS_REASON), 'iu');
 const optionalFigmaPattern = new RegExp(escapeRegex(OPTIONAL_FIGMA_MCP_FAILURE_REASON), 'iu');
 const requiredFigmaPattern = new RegExp(escapeRegex(REQUIRED_FIGMA_MCP_FAILURE_REASON), 'iu');
 
@@ -75,6 +80,7 @@ const blockerPatterns: Array<[ReworkBlockerKey, RegExp]> = [
   ['failed-acceptance-proof', /Acceptance proof/iu],
   ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],
+  ['incomplete-after-progress', incompleteAfterProgressPattern],
   ['missing-completion-report', missingCompletionReportPattern],
   ['no-changed-files', /Codex completed without file changes/iu],
 ];

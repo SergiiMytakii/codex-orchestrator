@@ -426,6 +426,16 @@ test('setup migrates existing config defaults without overwriting project policy
     'priority:normal',
   ]);
   assert.equal(result.config.loopPolicy.rework.maxAttempts, 2);
+  assert.deepEqual(result.config.loopPolicy.rework.retryableBlockers, [
+    'missing-completion-report',
+    'incomplete-after-progress',
+    'invalid-completion-report',
+    'no-changed-files',
+    'failed-configured-checks',
+    'missing-quality-gate-evidence',
+    'failed-acceptance-proof',
+    'optional-figma-mcp-failure',
+  ]);
   assert.equal(result.config.loopPolicy.freshContextReview.enabled, false);
   assert.equal(result.config.loopPolicy.policySuggestions.maxSuggestions, 5);
   assert.equal(validateConfig(result.config).ok, true);

@@ -480,11 +480,35 @@ It includes:
 - non-mutating Policy Suggestions.
 
 Bounded rework is limited to machine-checkable blockers such as missing or
-invalid completion reports, no changed files, failed configured checks, or
-missing quality-gate evidence. `ReworkDecision` classifies each blocked attempt
-as `retry`, `exhausted`, or `hard-block` from one source of truth in the runner
-policy. Retry uses zero-based attempts: attempt `0` is the original run, and
-retry continues only while `attempt < maxAttempts`.
+invalid completion reports, incomplete progress after an exact idle timeout, no
+changed files, failed configured checks, or missing quality-gate evidence.
+`ReworkDecision` classifies each blocked attempt as `retry`, `exhausted`, or
+`hard-block` from one source of truth in the runner policy. Retry uses zero-based
+attempts: attempt `0` is the original run, and retry continues only while
+`attempt < maxAttempts`.
+
+`incomplete-after-progress` is a runner-classified blocker, not a raw Codex exit
+string. The runner emits it only when all of these are true:
+
+- Codex exits with code `124` and stdout or stderr contains an exact line
+  `Command idle timed out after <positive integer>ms.`;
+- the scoped completion report is missing;
+- the collected change set from the existing worktree has at least one changed
+  file;
+- runner-owned publication has not been violated;
+- changed paths do not match denied path policy;
+- scope isolation has no blockers.
+
+If the same idle timeout produced a valid completion report, publishability
+continues through the normal report-based path. If the report is invalid, if
+there are no changed files, if paths are denied or out of scope, if publication
+was violated, or if the exit is a generic command timeout or arbitrary exit code
+`124`, the runner keeps the existing blocker instead of emitting
+`incomplete-after-progress`. The blocker is retried only when
+`loopPolicy.rework.retryableBlockers` includes `incomplete-after-progress` and
+the bounded rework budget has not been exhausted. Terminal blocked or exhausted
+evidence preserves the collected `changedFiles` when a change set was available,
+so maintainers can see what partial work the retry decision was based on.
 
 Hard blockers always stop publication. These include denied paths,
 runner-owned publication violations, destructive database/cache actions,

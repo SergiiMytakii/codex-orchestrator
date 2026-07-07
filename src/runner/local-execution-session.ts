@@ -23,6 +23,7 @@ import {
 } from './acceptance-proof-runner.js';
 import { runAcceptanceProofLoopAttempt } from './acceptance-proof-loop.js';
 import {
+  INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
   OPTIONAL_FIGMA_MCP_FAILURE_REASON,
   REQUIRED_FIGMA_MCP_FAILURE_REASON,
@@ -147,20 +148,83 @@ export async function runImplementationPublishabilityCheck(
     return blocked(publicationViolations.map((violation) => violation.message));
   }
 
-  if (input.codexResult.exitCode !== 0) {
-    return blocked([formatCodexExitReason(input.codexResult)]);
-  }
-
   let report: ScopedCompletionReport;
-  try {
-    const reportResult = await readScopedCompletionReport(input.reportPath);
-    if (reportResult.kind === 'missing') {
-      return blocked([MISSING_COMPLETION_REPORT_REASON]);
+  if (input.codexResult.exitCode !== 0) {
+    const figmaReason = formatFigmaMcpFailureReason(input.codexResult);
+    if (figmaReason) {
+      return blocked([figmaReason]);
     }
-    report = reportResult.report;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Invalid scoped completion report';
-    return blocked([message]);
+
+    if (!isIdleTimeoutResult(input.codexResult)) {
+      return blocked([formatCodexExitReason(input.codexResult)]);
+    }
+
+    try {
+      const reportResult = await readScopedCompletionReport(input.reportPath);
+      if (reportResult.kind === 'missing') {
+        const changeSet = await input.git.collectSessionChangeSet({
+          worktreePath: input.worktreePath,
+          baseHead: input.beforeHead,
+        });
+        const changedFiles = changeSet.changedPaths;
+        if (changedFiles.length === 0) {
+          return blocked(['Codex completed without file changes']);
+        }
+
+        const changedPathViolations = validateChangedPaths(changedFiles, input.config);
+        if (changedPathViolations.length > 0) {
+          return {
+            status: 'blocked',
+            reasons: changedPathViolations.map((violation) => violation.message),
+            changedFiles,
+            skippedChecks: [],
+            residualRisks: [],
+            commits: changeSet.commits,
+          };
+        }
+
+        const scopeIsolation = evaluateScopeIsolation({
+          config: input.config,
+          issue: input.issue,
+          changedFiles,
+        });
+        if (scopeIsolation.blockers.length > 0) {
+          return {
+            status: 'blocked',
+            reasons: scopeIsolation.blockers,
+            changedFiles,
+            skippedChecks: [],
+            residualRisks: [],
+            commits: changeSet.commits,
+          };
+        }
+
+        return {
+          status: 'blocked',
+          reasons: [INCOMPLETE_AFTER_PROGRESS_REASON],
+          changedFiles,
+          validation: [],
+          skippedChecks: [],
+          residualRisks: [],
+          commits: changeSet.commits,
+        };
+      }
+      report = reportResult.report;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid scoped completion report';
+      return blocked([message]);
+    }
+  } else {
+    try {
+      const reportResult = await readScopedCompletionReport(input.reportPath);
+      if (reportResult.kind === 'missing') {
+        return blocked([MISSING_COMPLETION_REPORT_REASON]);
+      }
+      report = reportResult.report;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid scoped completion report';
+      return blocked([message]);
+    }
   }
 
   if (report.status === 'needs-promotion') {
@@ -516,6 +580,16 @@ function formatCodexExitReason(result: CodexCommandRunResult): string {
   return detail
     ? `Codex exited with code ${result.exitCode}: ${truncate(detail, 600)}`
     : `Codex exited with code ${result.exitCode}`;
+}
+
+function isIdleTimeoutResult(result: CodexCommandRunResult): boolean {
+  if (result.exitCode !== 124) {
+    return false;
+  }
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .some((line) => /^Command idle timed out after [1-9][0-9]*ms\.$/u.test(line));
 }
 
 function formatFigmaMcpFailureReason(result: CodexCommandRunResult): string | undefined {

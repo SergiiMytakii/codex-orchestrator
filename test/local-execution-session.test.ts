@@ -11,6 +11,10 @@ import {
   runImplementationPublishabilityCheck,
   runLocalExecutionSession,
 } from '../src/runner/local-execution-session.js';
+import {
+  INCOMPLETE_AFTER_PROGRESS_REASON,
+  REQUIRED_FIGMA_MCP_FAILURE_REASON,
+} from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { fallbackWorkflows } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -123,6 +127,260 @@ test('implementation publishability blocks failed configured checks before publi
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /One or more configured checks failed/);
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /test failed/);
   assert.equal(await git.isWorktreeClean(repo), false);
+});
+
+test('implementation publishability retries exact idle timeout after safe local progress without report', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nsafe progress\n', 'utf8');
+  await execFileAsync('git', ['-C', repo, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Agent progress']);
+  const afterHead = await git.getHead(repo);
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      runner: { allowAgentLocalCommits: true } as Partial<CodexOrchestratorConfig['runner']> as CodexOrchestratorConfig['runner'],
+      checks: {},
+      reviewGates: {
+        acceptanceProof: { enabled: false },
+        visualProof: { enabled: false },
+        quality: { enabled: false },
+      } as Partial<CodexOrchestratorConfig['reviewGates']> as CodexOrchestratorConfig['reviewGates'],
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead,
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
+  assert.deepEqual(result.status === 'blocked' ? result.changedFiles : [], ['README.md']);
+  assert.equal(result.status === 'blocked' ? result.commits.length : 0, 1);
+});
+
+test('implementation publishability accepts exact idle timeout when a valid completion report exists', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\ncompleted despite idle\n', 'utf8');
+  await writeScopedReport(reportPath);
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'Command idle timed out after 300000ms.', stderr: '', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], ['README.md']);
+});
+
+test('implementation publishability does not retry generic command timeout or arbitrary exit 124', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nunsafe timeout\n', 'utf8');
+
+  const genericTimeout = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: '', stderr: 'Command timed out after 300000ms.', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+  const arbitraryExit124 = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'work stopped', stderr: '', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.deepEqual(genericTimeout.status === 'blocked' ? genericTimeout.reasons : [], [
+    'Codex exited with code 124: Command timed out after 300000ms.',
+  ]);
+  assert.notDeepEqual(arbitraryExit124.status === 'blocked' ? arbitraryExit124.reasons : [], [
+    INCOMPLETE_AFTER_PROGRESS_REASON,
+  ]);
+});
+
+test('implementation publishability keeps invalid completion report blocker for exact idle timeout', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\ninvalid report\n', 'utf8');
+  await mkdir(join(reportPath, '..'), { recursive: true });
+  await writeFile(reportPath, '{ invalid json', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /Invalid scoped completion report/);
+  assert.notDeepEqual(result.status === 'blocked' ? result.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
+});
+
+test('implementation publishability preserves hard blockers for exact idle timeout before sentinel', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+
+  await mkdir(join(repo, 'forbidden'), { recursive: true });
+  await writeFile(join(repo, 'forbidden', 'file.txt'), 'not allowed\n', 'utf8');
+  const deniedPath = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      deny: {
+        secretFiles: ['.env', '.env.*'],
+        destructiveDbOrCache: true,
+        productionDeployOrRelease: true,
+        additionalPathGlobs: ['forbidden/**'],
+      },
+    }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(deniedPath.status, 'blocked');
+  assert.match(deniedPath.status === 'blocked' ? deniedPath.reasons.join('\n') : '', /matches denied pattern/);
+  assert.deepEqual(deniedPath.status === 'blocked' ? deniedPath.changedFiles : [], ['forbidden/file.txt']);
+  assert.notDeepEqual(deniedPath.status === 'blocked' ? deniedPath.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
+
+  const scopedRepo = await tempGitProject();
+  const scopedGit = new GitWorktreeManager();
+  const scopedBeforeHead = await scopedGit.getHead(scopedRepo);
+  await mkdir(join(scopedRepo, 'docs', 'other'), { recursive: true });
+  await writeFile(join(scopedRepo, 'docs', 'other', 'feature.md'), 'out of scope\n', 'utf8');
+  const scopeBlocked = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({
+      number: 155,
+      title: 'Update owned feature',
+      body: [
+        'Implement scoped work.',
+        '',
+        '## codex-orchestrator metadata',
+        'Ownership:',
+        '- docs/owned/**',
+      ].join('\n'),
+    }),
+    worktreePath: scopedRepo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead: scopedBeforeHead,
+    afterHead: scopedBeforeHead,
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git: scopedGit,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(scopeBlocked.status, 'blocked');
+  assert.match(scopeBlocked.status === 'blocked' ? scopeBlocked.reasons.join('\n') : '', /outside issue ownership scope/);
+  assert.deepEqual(scopeBlocked.status === 'blocked' ? scopeBlocked.changedFiles : [], ['docs/other/feature.md']);
+  assert.notDeepEqual(scopeBlocked.status === 'blocked' ? scopeBlocked.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
+
+  const publishedRepo = await tempGitProject();
+  const publishedGit = new GitWorktreeManager();
+  const publishedBeforeHead = await publishedGit.getHead(publishedRepo);
+  await writeFile(join(publishedRepo, 'README.md'), '# fixture\nagent commit\n', 'utf8');
+  await execFileAsync('git', ['-C', publishedRepo, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', publishedRepo, 'commit', '-m', 'Agent commit']);
+  const publicationViolation = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: publishedRepo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead: publishedBeforeHead,
+    afterHead: await publishedGit.getHead(publishedRepo),
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git: publishedGit,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(publicationViolation.status, 'blocked');
+  assert.match(publicationViolation.status === 'blocked' ? publicationViolation.reasons.join('\n') : '', /runner-owned publication was violated/);
+  assert.deepEqual(publicationViolation.status === 'blocked' ? publicationViolation.changedFiles : [], []);
+});
+
+test('implementation publishability keeps required Figma MCP failure stronger than exact idle retry', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nfigma unavailable\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Figma implementation', body: 'Requires Figma design access.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: {
+      stdout: '',
+      stderr: 'Figma MCP server timed out.\nCommand idle timed out after 300000ms.',
+      exitCode: 124,
+      figmaMcp: { enabled: true, requirement: 'required' },
+    },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [REQUIRED_FIGMA_MCP_FAILURE_REASON]);
 });
 
 test('implementation publishability accepts structured TDD red evidence without treating it as a failed check', async () => {

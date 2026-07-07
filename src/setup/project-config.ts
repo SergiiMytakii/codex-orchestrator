@@ -277,6 +277,7 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
         maxAttempts: 1,
         retryableBlockers: [
           'missing-completion-report',
+          'incomplete-after-progress',
           'invalid-completion-report',
           'no-changed-files',
           'failed-configured-checks',
