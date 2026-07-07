@@ -702,6 +702,53 @@ test('review skips running and blocked sources and reuses duplicate finding fing
   }
 });
 
+test('selectReviewSources loads at most five eligible sources and skips running or blocked summaries before view', async () => {
+  const summaries = [
+    { number: 101, title: 'running', labels: [{ name: 'agent:running' }, { name: 'self-improvement' }] },
+    { number: 102, title: 'blocked', labels: [{ name: 'agent:blocked' }, { name: 'self-improvement' }] },
+    { number: 103, title: 'review 1', labels: [{ name: 'agent:review' }, { name: 'self-improvement' }] },
+    { number: 104, title: 'review 2', labels: [{ name: 'agent:review' }, { name: 'self-improvement' }] },
+    { number: 105, title: 'closed with pr', labels: [{ name: 'self-improvement' }] },
+    { number: 106, title: 'review 3', labels: [{ name: 'agent:review' }, { name: 'self-improvement' }] },
+    { number: 107, title: 'review 4', labels: [{ name: 'agent:review' }, { name: 'self-improvement' }] },
+    { number: 108, title: 'extra eligible', labels: [{ name: 'agent:review' }, { name: 'self-improvement' }] },
+  ];
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) {
+        return { code: 0, stdout: JSON.stringify(summaries) };
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        const number = Number(args[2]);
+        return { code: 0, stdout: JSON.stringify({
+          number,
+          title: `source ${number}`,
+          body: 'self-improvement-runner-id:codex-orchestrator-local-self-improvement',
+          state: number === 105 ? 'CLOSED' : 'OPEN',
+          url: `https://example.test/${number}`,
+          labels: number === 105
+            ? [{ name: 'self-improvement' }]
+            : [{ name: 'agent:review' }, { name: 'self-improvement' }],
+          comments: [],
+          closedByPullRequestsReferences: number === 105 ? [{ number: 205 }] : [],
+        }) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const sources = await runner.selectReviewSources();
+    assert.deepEqual(sources.map((source) => source.number), [103, 104, 105, 106, 107]);
+    assert.deepEqual(
+      exec.calls.filter((call) => call.args[0] === 'issue' && call.args[1] === 'view').map((call) => Number(call.args[2])),
+      [103, 104, 105, 106, 107],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test('shared preflight failure stops daily mutation phases', async () => {
   const exec = makeExecStub({
     [commandKey('gh', ['repo', 'view', 'SergiiMytakii/codex-orchestrator', '--json', 'nameWithOwner'])]: {

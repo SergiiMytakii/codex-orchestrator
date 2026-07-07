@@ -677,19 +677,24 @@ export function createRunner(options = {}) {
     return parseJson(result.stdout);
   }
 
+  async function selectReviewSources({ limit = 5 } = {}) {
+    const sourceSummaries = await listReviewSources();
+    const eligible = [];
+    for (const summary of sourceSummaries) {
+      if (eligible.length >= limit) break;
+      if (labelsOf(summary).includes('agent:running') || labelsOf(summary).includes('agent:blocked')) continue;
+      const issue = await viewIssue(summary.number);
+      if (isReviewEligible(issue)) eligible.push(issue);
+    }
+    return eligible;
+  }
+
   async function review({ preflight: runPreflight = true } = {}) {
     if (runPreflight) {
       const check = await preflight();
       if (!check.ok) return { status: 'failed', reason: check.reason, created: [], reused: [] };
     }
-    const sourceSummaries = await listReviewSources();
-    const eligible = [];
-    for (const summary of sourceSummaries) {
-      if (eligible.length >= 5) break;
-      if (labelsOf(summary).includes('agent:running') || labelsOf(summary).includes('agent:blocked')) continue;
-      const issue = await viewIssue(summary.number);
-      if (isReviewEligible(issue)) eligible.push(issue);
-    }
+    const eligible = await selectReviewSources();
     const created = [];
     const reused = [];
     for (const issue of eligible) {
@@ -788,6 +793,7 @@ export function createRunner(options = {}) {
     discover,
     implement,
     runLiveSmoke,
+    selectReviewSources,
     review,
     daily,
     printSummary,
