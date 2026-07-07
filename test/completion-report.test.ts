@@ -3,7 +3,11 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { readPlanAutoCompletionReport, readScopedCompletionReport } from '../src/runner/completion-report.js';
+import {
+  readPlanAutoCompletionReport,
+  readScopedCompletionReport,
+  readScopedCompletionReportDetailed,
+} from '../src/runner/completion-report.js';
 
 test('scoped completion report validation names missing required fields', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
@@ -25,6 +29,35 @@ test('completion report validation rejects invalid JSON clearly', async () => {
     readScopedCompletionReport(reportPath),
     /Invalid scoped completion report: report must be valid JSON/,
   );
+});
+
+test('detailed scoped completion report read returns structured invalid JSON evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(reportPath, '{not-json', 'utf8');
+
+  const result = await readScopedCompletionReportDetailed(reportPath);
+
+  assert.equal(result.kind, 'invalid');
+  if (result.kind === 'invalid') {
+    assert.match(result.message, /Invalid scoped completion report: report must be valid JSON/);
+    assert.deepEqual(result.errors, ['Invalid scoped completion report: report must be valid JSON']);
+    assert.equal(result.rawContent, '{not-json');
+  }
+});
+
+test('detailed scoped completion report read truncates invalid raw content deterministically', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(reportPath, 'x'.repeat(9000), 'utf8');
+
+  const result = await readScopedCompletionReportDetailed(reportPath);
+
+  assert.equal(result.kind, 'invalid');
+  if (result.kind === 'invalid') {
+    assert.equal(result.rawContent?.length, 8000);
+    assert.equal(result.rawContent, 'x'.repeat(8000));
+  }
 });
 
 test('scoped completion report accepts structured review handoff for human review', async () => {

@@ -52,6 +52,7 @@ npm run smoke:live -- --scenario acceptance-proof-positive
 npm run smoke:live -- --scenario acceptance-proof-negative
 npm run smoke:live -- --scenario diagnostics
 npm run smoke:live -- --scenario incomplete-progress-rework
+npm run smoke:live -- --scenario report-repair
 npm run smoke:live -- --scenario risk-routing
 npm run smoke:live -- --scenario plan-auto-blocking
 npm run smoke:live -- --scenario tree-child-quality-rework --cleanup
@@ -90,6 +91,9 @@ alternate scratch repository; do not point routine smoke runs at the source repo
 - `incomplete-progress-rework` - exact idle timeout after safe local progress
   without a completion report becomes bounded scoped rework from the existing
   worktree, then publishes after the rework attempt writes a valid report.
+- `report-repair` - missing/invalid scoped evidence gaps are repaired through
+  bounded report-only Codex sessions: one missing completion report repair and
+  one missing quality evidence repair, with normal gates rerun before draft PR.
 - `diagnostics` - packaged CLI proof for `doctor`, `status --json`,
   phase-specific profile selection, lifecycle event evidence, and context
   snapshot artifact references.

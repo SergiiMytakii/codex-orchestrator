@@ -39,6 +39,47 @@ test('runner handoff decision builds blocked evidence with fresh-context finding
   assert.equal(evidence.acceptanceProof, publishability.acceptanceProofAttempt);
 });
 
+test('runner handoff decision preserves blocker keys and repair attempts alongside reasons', () => {
+  const publishability = {
+    ...blockedPublishability({
+      reasons: ['Quality gate requires TDD red-to-green proof in validation.'],
+      residualRisks: [],
+    }),
+    blockers: [{
+      key: 'missing-quality-gate-evidence' as const,
+      reason: 'Quality gate requires TDD red-to-green proof in validation.',
+      source: 'review-gate' as const,
+      repair: 'evidence' as const,
+    }],
+    repairAttempts: [{
+      kind: 'evidence' as const,
+      status: 'blocked' as const,
+      reason: 'Evidence repair did not satisfy review gates.',
+      sessionId: 'issue-155-session-evidence-repair',
+      promptPath: '/tmp/evidence-prompt.md',
+      reportPath: '/tmp/report.json',
+      logPath: '/tmp/evidence.log',
+      blockers: [{
+        key: 'missing-quality-gate-evidence' as const,
+        reason: 'Quality gate requires TDD red-to-green proof in validation.',
+        source: 'review-gate' as const,
+        repair: 'none' as const,
+      }],
+    }],
+  };
+
+  const evidence = buildBlockedHandoffEvidence({
+    publishability,
+    nextAction: 'Repair evidence before draft PR handoff.',
+  });
+
+  assert.deepEqual(evidence.blockers, [
+    'Quality gate requires TDD red-to-green proof in validation.',
+    'Blocker keys: missing-quality-gate-evidence',
+  ]);
+  assert.deepEqual(evidence.repairAttempts?.map((attempt) => attempt.kind), ['evidence']);
+});
+
 test('runner handoff decision keeps scoped promotion distinct from promotion-as-blocked', () => {
   const publishability = promotionPublishability('Touches multiple ownership scopes.');
 
@@ -83,6 +124,28 @@ test('runner handoff decision builds review-ready evidence without publication s
   assert.deepEqual(evidence.suggestionEvidence, freshContextReview.findings);
   assert.equal(evidence.nextAction, 'Review the draft pull request before merge.');
   assert.equal('pullRequest' in evidence, false);
+});
+
+test('runner handoff decision includes successful repair attempts in review-ready evidence', () => {
+  const publishability = {
+    ...publishReady(),
+    repairAttempts: [{
+      kind: 'completion-report' as const,
+      status: 'passed' as const,
+      reason: 'Completion report repair wrote a valid scoped report.',
+      sessionId: 'issue-155-session-completion-report-repair',
+      promptPath: '/tmp/report-repair-prompt.md',
+      reportPath: '/tmp/report.json',
+      logPath: '/tmp/report-repair.log',
+    }],
+  };
+
+  const evidence = buildReviewReadyHandoffEvidence({
+    publishability,
+    nextAction: 'Review the draft pull request before merge.',
+  });
+
+  assert.deepEqual(evidence.repairAttempts?.map((attempt) => attempt.kind), ['completion-report']);
 });
 
 test('runner handoff decision drops skipped checks contradicted by passed runner validation', () => {

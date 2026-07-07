@@ -77,11 +77,20 @@ export type ScopedCompletionReportReadResult =
   | { kind: 'missing' }
   | { kind: 'valid'; report: ScopedCompletionReport };
 
+export type ScopedCompletionReportDetailedReadResult =
+  | { kind: 'missing' }
+  | { kind: 'invalid'; message: string; errors: string[]; rawContent?: string }
+  | { kind: 'valid'; report: ScopedCompletionReport };
+
 export type PlanAutoCompletionReportReadResult =
   | { kind: 'missing' }
   | { kind: 'valid'; report: PlanAutoCompletionReport };
 
-export async function readScopedCompletionReport(reportPath: string): Promise<ScopedCompletionReportReadResult> {
+const invalidReportRawContentLimit = 8000;
+
+export async function readScopedCompletionReportDetailed(
+  reportPath: string,
+): Promise<ScopedCompletionReportDetailedReadResult> {
   let content: string;
   try {
     content = await readFile(reportPath, 'utf8');
@@ -96,13 +105,28 @@ export async function readScopedCompletionReport(reportPath: string): Promise<Sc
   try {
     parsed = JSON.parse(content) as unknown;
   } catch {
-    throw new Error('Invalid scoped completion report: report must be valid JSON');
+    return invalidScopedReport('Invalid scoped completion report: report must be valid JSON', content);
   }
   if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && !('artifacts' in parsed)) {
     (parsed as Record<string, unknown>).artifacts = [];
   }
-  assertScopedCompletionReport(parsed);
+  try {
+    assertScopedCompletionReport(parsed);
+  } catch (error) {
+    if (error instanceof Error) {
+      return invalidScopedReport(error.message, content);
+    }
+    return invalidScopedReport('Invalid scoped completion report', content);
+  }
   return { kind: 'valid', report: parsed };
+}
+
+export async function readScopedCompletionReport(reportPath: string): Promise<ScopedCompletionReportReadResult> {
+  const result = await readScopedCompletionReportDetailed(reportPath);
+  if (result.kind === 'invalid') {
+    throw new Error(result.message);
+  }
+  return result;
 }
 
 export async function readPlanAutoCompletionReport(reportPath: string): Promise<PlanAutoCompletionReportReadResult> {
@@ -124,6 +148,15 @@ export async function readPlanAutoCompletionReport(reportPath: string): Promise<
   }
   assertPlanAutoCompletionReport(parsed);
   return { kind: 'valid', report: parsed };
+}
+
+function invalidScopedReport(message: string, rawContent: string): ScopedCompletionReportDetailedReadResult {
+  return {
+    kind: 'invalid',
+    message,
+    errors: [message],
+    rawContent: rawContent.slice(0, invalidReportRawContentLimit),
+  };
 }
 
 function assertScopedCompletionReport(value: unknown): asserts value is ScopedCompletionReport {

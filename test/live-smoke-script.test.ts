@@ -101,6 +101,7 @@ test('live smoke help lists publish-gate coverage scenarios', async () => {
     'run-scoped',
     'loop-policy',
     'incomplete-progress-rework',
+    'report-repair',
     'diagnostics',
     'browser-proof',
     'acceptance-proof-positive',

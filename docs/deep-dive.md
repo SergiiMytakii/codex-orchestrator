@@ -145,12 +145,13 @@ For an `agent:auto` issue, the runner follows this lifecycle:
 10. Run configured validation checks.
 11. Run acceptance proof when required.
 12. Evaluate quality gates and deny rules.
-13. Optionally run bounded rework for machine-checkable blockers.
-14. Optionally run Fresh-Context Review.
-15. Write durable run evidence.
-16. Push the branch.
-17. Open a draft pull request.
-18. Post the review report and move the issue to review.
+13. Optionally run one report/evidence repair for safe runner-owned evidence gaps.
+14. Optionally run bounded rework for machine-checkable blockers.
+15. Optionally run Fresh-Context Review.
+16. Write durable run evidence.
+17. Push the branch.
+18. Open a draft pull request.
+19. Post the review report and move the issue to review.
 
 If a blocking condition is found, the runner does not publish the result. It
 marks the issue blocked, preserves useful local evidence, and reports the
@@ -483,9 +484,30 @@ Bounded rework is limited to machine-checkable blockers such as missing or
 invalid completion reports, incomplete progress after an exact idle timeout, no
 changed files, failed configured checks, or missing quality-gate evidence.
 `ReworkDecision` classifies each blocked attempt as `retry`, `exhausted`, or
-`hard-block` from one source of truth in the runner policy. Retry uses zero-based
+`hard-block` from typed `RunnerBlocker` evidence. Legacy reason strings still go
+through one compatibility adapter, but runner-owned gates should emit typed
+blockers so wording changes do not change retry behavior. Retry uses zero-based
 attempts: attempt `0` is the original run, and retry continues only while
 `attempt < maxAttempts`.
+
+Before implementation rework, publishability may run bounded evidence repair:
+
+- Missing or invalid completion reports can be repaired once after the runner has
+  proven non-empty safe changed files, deny policy, scope isolation, and
+  publication boundaries.
+- Missing review-gate evidence such as TDD, cleanup/code-review, or scoped
+  `reviewHandoff` can be repaired once after changed files, configured checks,
+  and acceptance proof have already passed.
+- Repair sessions write only the original completion report path. They cannot
+  edit product files, create commits, mutate GitHub, weaken deny/scope gates, or
+  bypass configured checks, acceptance proof, or review gates.
+- The runner captures `HEAD` and a content fingerprint of the protected worktree
+  changes before and after repair. If `HEAD` changes, or protected content
+  changes, repair terminal-blocks. When the report path is inside the worktree,
+  only that exact normalized path is excluded from the protected fingerprint.
+- Completion-report and evidence repair attempts are recorded in durable
+  summaries, blocked reports, and review-ready handoff evidence with prompt,
+  report, log, status, and blocker keys.
 
 `incomplete-after-progress` is a runner-classified blocker, not a raw Codex exit
 string. The runner emits it only when all of these are true:

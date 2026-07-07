@@ -29,6 +29,7 @@ import type { ScopedCompletionReport } from './completion-report.js';
 import {
   type ImplementationPublishabilityResult,
   type LocalExecutionPhaseExecutor,
+  type PublishabilityRepairAttempt,
 } from './local-execution-session.js';
 import { RunnerStateStore } from './local-state.js';
 import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
@@ -320,6 +321,7 @@ async function runScopedAutoCommandInternal(
         reportPath,
         acceptanceProof: evidence.acceptanceProof,
         reworkAttempts,
+        repairAttempts: evidence.repairAttempts,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -342,6 +344,7 @@ async function runScopedAutoCommandInternal(
         durableRunSummary,
         reworkAttempts,
         evidence.acceptanceProof,
+        evidence.repairAttempts,
       );
     }
 
@@ -378,6 +381,7 @@ async function runScopedAutoCommandInternal(
         reportPath,
         acceptanceProof: evidence.acceptanceProof,
         reworkAttempts,
+        repairAttempts: evidence.repairAttempts,
       });
       await safeAppendEvent(events, {
         issueNumber: options.issueNumber,
@@ -400,6 +404,7 @@ async function runScopedAutoCommandInternal(
         durableRunSummary,
         reworkAttempts,
         evidence.acceptanceProof,
+        evidence.repairAttempts,
       );
     }
 
@@ -425,6 +430,7 @@ async function runScopedAutoCommandInternal(
       reportPath,
       acceptanceProof: evidence.acceptanceProof,
       reworkAttempts,
+      repairAttempts: evidence.repairAttempts,
     });
     const handoff = await finishScopedReviewReadyHandoff({
       issueNumber: options.issueNumber,
@@ -582,6 +588,7 @@ async function finishBlocked(
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>,
   reworkAttempts?: ReworkAttemptEvidence[],
   acceptanceProof?: AcceptanceProofAttemptEvidence,
+  repairAttempts?: PublishabilityRepairAttempt[],
 ): Promise<ScopedAutoCommandResult> {
   const handoff = await finishScopedBlockedHandoff({
     issueNumber: result.issueNumber,
@@ -596,6 +603,7 @@ async function finishBlocked(
     durableRunSummary,
     reworkAttempts,
     acceptanceProof,
+    repairAttempts,
   });
   return { ...result, status: 'blocked', reportComment: handoff.reportComment };
 }
@@ -635,6 +643,7 @@ export async function finishScopedReviewReadyHandoff(
     freshContextReview: input.freshContextReview,
     durableRunSummary: input.durableRunSummary,
     acceptanceProof: input.acceptanceProof,
+    repairAttempts: input.publishability.repairAttempts,
   });
   return finishReviewReadyTerminalOutcome({
     issueNumber: input.issueNumber,
@@ -665,6 +674,7 @@ export async function finishScopedReviewReadyHandoff(
       freshContextReview: input.freshContextReview,
       durableRunSummary: input.durableRunSummary,
       acceptanceProof: input.acceptanceProof,
+      repairAttempts: input.publishability.repairAttempts,
     }),
     onPullRequestReady: input.onPullRequestReady,
   });
@@ -682,6 +692,7 @@ export interface FinishScopedBlockedHandoffInput {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: Awaited<ReturnType<typeof writeDurableRunSummary>>;
   reworkAttempts?: ReworkAttemptEvidence[];
+  repairAttempts?: PublishabilityRepairAttempt[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
   commentPrefix?: string;
   skipCommentIfIncludes?: string;
@@ -702,6 +713,7 @@ export async function finishScopedBlockedHandoff(
       freshContextReview: input.freshContextReview,
       durableRunSummary: input.durableRunSummary,
       reworkAttempts: input.reworkAttempts,
+      repairAttempts: input.repairAttempts,
       acceptanceProof: input.acceptanceProof,
     }),
   ].filter(Boolean).join('\n');

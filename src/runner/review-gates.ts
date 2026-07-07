@@ -12,6 +12,7 @@ import {
 import type { ScopedCompletionReport } from './completion-report.js';
 import type { PlanAutoCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+import type { RunnerBlocker } from './rework-policy.js';
 import {
   hasPassedTddValidation,
   hasPassedValidation,
@@ -38,6 +39,7 @@ export interface ReviewGateResult {
   ok: boolean;
   reasons: string[];
   warnings: string[];
+  blockers?: RunnerBlocker[];
 }
 
 export { shouldApplyVisualProofGate } from './review-gate-policy.js';
@@ -56,13 +58,23 @@ export function evaluateParentRiskRoutingGate(input: {
 export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
   const reasons: string[] = [];
   const warnings: string[] = [];
-  reasons.push(...evaluateQualityGate(input));
-  applyRiskRoutingFindings(evaluateScopedRiskRoutingGate(input), input.config, reasons, warnings);
+  const blockers: RunnerBlocker[] = [];
+  const qualityGate = evaluateQualityGate(input);
+  reasons.push(...qualityGate.reasons);
+  blockers.push(...qualityGate.blockers);
+  const riskRoutingFindings = evaluateScopedRiskRoutingGate(input);
+  applyRiskRoutingFindings(riskRoutingFindings, input.config, reasons, warnings);
+  if (input.config.reviewGates.riskRouting.mode === 'block') {
+    blockers.push(...riskRoutingFindings.map((finding) => runnerBlocker(
+      'risk-routing-policy',
+      `Risk routing gate requires: ${finding}.`,
+    )));
+  }
 
   const visualProofDesirable = isVisualProofDesirable(input);
   const visualProofGateApplies = shouldApplyVisualProofGate(input);
   if (!visualProofDesirable && !visualProofGateApplies) {
-    return { ok: reasons.length === 0, reasons, warnings };
+    return reviewGateResult(reasons, warnings, blockers);
   }
 
   const visualProof = input.config.reviewGates.visualProof;
@@ -131,7 +143,7 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
     (strictVisualProofRequired ? reasons : warnings).push(message);
   }
 
-  return { ok: reasons.length === 0, reasons, warnings };
+  return reviewGateResult(reasons, warnings, blockers);
 }
 
 function evaluateScopedRiskRoutingGate(input: ReviewGateInput): string[] {
@@ -301,10 +313,10 @@ function isVisualProofCapabilityUnavailable(line: RunnerValidationLine): boolean
     .test(line.summary);
 }
 
-function evaluateQualityGate(input: ReviewGateInput): string[] {
+function evaluateQualityGate(input: ReviewGateInput): { reasons: string[]; blockers: RunnerBlocker[] } {
   const quality = input.config.reviewGates.quality;
   if (!quality.enabled) {
-    return [];
+    return { reasons: [], blockers: [] };
   }
 
   const { runtimeFiles, testFiles } = classifyChangedPaths(input.changedFiles, {
@@ -312,37 +324,76 @@ function evaluateQualityGate(input: ReviewGateInput): string[] {
     testChangedPathGlobs: quality.testChangedPathGlobs,
   });
   if (runtimeFiles.length === 0) {
-    return [];
+    return { reasons: [], blockers: [] };
   }
 
   const reasons: string[] = [];
+  const blockers: RunnerBlocker[] = [];
 
   if (quality.tdd.enabled) {
     const hasTddValidation = hasPassedTddValidation(input.validation, quality.tdd.requiredValidationPatterns);
     const hasRunnerVisualProofEvidence = hasPassedRunnerVisualProofEvidence(input);
     if (quality.tdd.requireTestChange && testFiles.length === 0 && !hasRunnerVisualProofEvidence) {
-      reasons.push('Quality gate requires TDD test file change for runtime changes.');
+      const reason = 'Quality gate requires TDD test file change for runtime changes.';
+      reasons.push(reason);
+      blockers.push(runnerBlocker('missing-quality-gate-evidence', reason));
     }
     if (!hasTddValidation && !hasRunnerVisualProofEvidence) {
-      reasons.push('Quality gate requires TDD red-to-green proof in validation.');
+      const reason = 'Quality gate requires TDD red-to-green proof in validation.';
+      reasons.push(reason);
+      blockers.push(runnerBlocker('missing-quality-gate-evidence', reason));
     }
   }
 
   if (quality.cleanupReview.enabled && runtimeFiles.length >= quality.cleanupReview.runtimeFileThreshold) {
     const hasCleanupReview = hasPassedValidation(input.validation, quality.cleanupReview.requiredValidationPatterns);
     if (!hasCleanupReview) {
-      reasons.push('Quality gate requires passed cleanup-review validation for medium or large runtime changes.');
+      const reason = 'Quality gate requires passed cleanup-review validation for medium or large runtime changes.';
+      reasons.push(reason);
+      blockers.push(runnerBlocker('missing-quality-gate-evidence', reason));
     }
   }
 
   if (quality.codeReview.enabled) {
     const hasCodeReview = hasPassedValidation(input.validation, quality.codeReview.requiredValidationPatterns);
     if (!hasCodeReview) {
-      reasons.push('Quality gate requires passed code-review validation for runtime changes.');
+      const reason = 'Quality gate requires passed code-review validation for runtime changes.';
+      reasons.push(reason);
+      blockers.push(runnerBlocker('missing-quality-gate-evidence', reason));
     }
   }
 
-  return reasons;
+  return { reasons, blockers };
+}
+
+function reviewGateResult(
+  reasons: string[],
+  warnings: string[],
+  blockers: RunnerBlocker[],
+): ReviewGateResult {
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    warnings,
+    ...(blockers.length > 0 ? { blockers: uniqueBlockers(blockers) } : {}),
+  };
+}
+
+function runnerBlocker(key: RunnerBlocker['key'], reason: string): RunnerBlocker {
+  return { key, reason, source: 'review-gate', repair: 'evidence' };
+}
+
+function uniqueBlockers(blockers: RunnerBlocker[]): RunnerBlocker[] {
+  const seen = new Set<string>();
+  const unique: RunnerBlocker[] = [];
+  for (const blocker of blockers) {
+    const key = `${blocker.key}\n${blocker.reason}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(blocker);
+    }
+  }
+  return unique;
 }
 
 function hasPassedRunnerVisualProofEvidence(input: ReviewGateInput): boolean {

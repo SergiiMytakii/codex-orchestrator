@@ -1,6 +1,6 @@
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import type { FreshContextReviewEvidence, RunnerValidationLine } from './handoff-evidence.js';
-import type { ImplementationPublishabilityResult } from './local-execution-session.js';
+import type { ImplementationPublishabilityResult, PublishabilityRepairAttempt } from './local-execution-session.js';
 
 export interface RunnerHandoffEvidence {
   outcome: 'review-ready' | 'blocked' | 'promotion-requested';
@@ -12,6 +12,7 @@ export interface RunnerHandoffEvidence {
   nextAction: string;
   suggestionEvidence?: string[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
+  repairAttempts?: PublishabilityRepairAttempt[];
 }
 
 type BlockablePublishability =
@@ -26,7 +27,10 @@ export function buildBlockedHandoffEvidence(input: {
   const blockers = input.freshContextReview?.status === 'blocked'
     ? ['Fresh-Context Review blocked publication', ...input.freshContextReview.findings]
     : input.publishability.status === 'blocked'
-      ? input.publishability.reasons
+      ? [
+          ...input.publishability.reasons,
+          ...formatBlockerKeys(input.publishability.blockers?.map((blocker) => blocker.key) ?? []),
+        ]
       : [];
   const validation = input.publishability.validation ?? [];
   return {
@@ -42,6 +46,7 @@ export function buildBlockedHandoffEvidence(input: {
     nextAction: input.nextAction,
     suggestionEvidence: input.freshContextReview?.findings,
     acceptanceProof: input.publishability.acceptanceProofAttempt,
+    repairAttempts: input.publishability.repairAttempts,
   };
 }
 
@@ -89,7 +94,13 @@ export function buildReviewReadyHandoffEvidence(input: {
     nextAction: input.nextAction,
     suggestionEvidence: input.freshContextReview?.findings,
     acceptanceProof: input.publishability.acceptanceProofAttempt,
+    repairAttempts: input.publishability.repairAttempts,
   };
+}
+
+function formatBlockerKeys(keys: string[]): string[] {
+  const unique = [...new Set(keys)];
+  return unique.length > 0 ? [`Blocker keys: ${unique.join(', ')}`] : [];
 }
 
 function promotionHandoffEvidence(input: {

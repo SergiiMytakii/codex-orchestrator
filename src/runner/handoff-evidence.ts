@@ -6,6 +6,7 @@ import type { AutonomousChildNode } from './issue-tree.js';
 import type { PlanAutoCompletionReport, ScopedCompletionReport, ValidationItem } from './completion-report.js';
 import type { DurableRunSummaryEvidence, ReworkAttemptEvidence } from './durable-run-summary.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
+import type { PublishabilityRepairAttempt } from './local-execution-session.js';
 
 export type RunnerValidationLine = ValidationItem;
 
@@ -37,6 +38,7 @@ export interface ScopedHandoffEvidence {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
+  repairAttempts?: PublishabilityRepairAttempt[];
 }
 
 export interface ChildHandoffEvidence {
@@ -53,6 +55,7 @@ export interface ChildHandoffEvidence {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   acceptanceProof?: AcceptanceProofAttemptEvidence;
+  repairAttempts?: PublishabilityRepairAttempt[];
   recovered?: boolean;
 }
 
@@ -71,6 +74,7 @@ export function buildScopedReviewReport(
     'Proof',
     ...renderValidationDigest(input.validation),
     ...renderKeyScopedProofArtifacts(input),
+    ...renderRepairAttemptDigest(input.repairAttempts),
     ...renderKeyAcceptanceProofArtifacts(input.acceptanceProof),
     ...renderFreshContextReviewDigest(input.freshContextReview),
     'Review focus',
@@ -95,6 +99,7 @@ export function buildScopedPullRequestBody(input: ScopedHandoffEvidence): string
     '',
     'Proof artifacts:',
     ...renderScopedProofArtifacts(input),
+    ...renderRepairAttemptEvidence(input.repairAttempts),
     ...renderAcceptanceProofEvidence(input.acceptanceProof),
     '',
     'Log:',
@@ -124,6 +129,7 @@ export function buildScopedBlockedReport(input: {
   freshContextReview?: FreshContextReviewEvidence;
   durableRunSummary?: DurableRunSummaryEvidence;
   reworkAttempts?: ReworkAttemptEvidence[];
+  repairAttempts?: PublishabilityRepairAttempt[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): string {
   return [
@@ -135,6 +141,7 @@ export function buildScopedBlockedReport(input: {
     'Log',
     ...bulletList([input.logPath]),
     ...renderFreshContextReviewEvidence(input.freshContextReview),
+    ...renderRepairAttemptEvidence(input.repairAttempts),
     ...renderReworkAttemptEvidence(input.reworkAttempts),
     ...renderDurableRunSummaryEvidence(input.durableRunSummary),
     ...renderAcceptanceProofEvidence(input.acceptanceProof),
@@ -172,6 +179,24 @@ function renderReworkAttemptEvidence(attempts: ReworkAttemptEvidence[] | undefin
       `  log: ${attempt.logPath}`,
       ...(attempt.snapshotPath ? [`  snapshot: ${attempt.snapshotPath}`] : []),
       ...attempt.reasons.map((reason) => `  reason: ${reason}`),
+    ].join('\n')),
+  ];
+}
+
+function renderRepairAttemptEvidence(attempts: PublishabilityRepairAttempt[] | undefined): string[] {
+  if (!attempts || attempts.length === 0) {
+    return [];
+  }
+  return [
+    'Repair Attempts',
+    ...attempts.map((attempt) => [
+      `- ${attempt.kind}: ${attempt.status} - ${attempt.reason}`,
+      `  prompt: ${attempt.promptPath}`,
+      `  report: ${attempt.reportPath}`,
+      `  log: ${attempt.logPath}`,
+      ...(attempt.blockers && attempt.blockers.length > 0
+        ? [`  blocker keys: ${[...new Set(attempt.blockers.map((blocker) => blocker.key))].join(', ')}`]
+        : []),
     ].join('\n')),
   ];
 }
@@ -320,9 +345,19 @@ function renderFreshContextReviewDigest(evidence: FreshContextReviewEvidence | u
   ];
 }
 
+function renderRepairAttemptDigest(attempts: PublishabilityRepairAttempt[] | undefined): string[] {
+  if (!attempts || attempts.length === 0) {
+    return [];
+  }
+  return attempts.map((attempt) => `- Repair ${attempt.kind}: ${attempt.status} (${attempt.reportPath})`);
+}
+
 function renderAuditTrail(input: ScopedHandoffEvidence): string[] {
   const lines = [
     `- Log: ${input.logPath}`,
+    ...(input.repairAttempts && input.repairAttempts.length > 0
+      ? [`- Repair attempts: ${input.repairAttempts.map((attempt) => `${attempt.kind}:${attempt.status}`).join('; ')}`]
+      : []),
     ...(input.durableRunSummary ? [`- Durable Run Summary: ${input.durableRunSummary.path}`] : []),
     `- Local Commits: ${formatCommitEvidenceInline(input.commits)}`,
     ...(input.skippedChecks.length > 0 ? [`- Skipped checks: ${input.skippedChecks.join('; ')}`] : []),

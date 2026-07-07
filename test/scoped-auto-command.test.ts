@@ -820,7 +820,8 @@ test('scoped auto command blocks when completion report is missing before PR pub
     ),
   ) as Record<string, unknown>;
   assert.equal(summary.outcome, 'blocked');
-  assert.equal((summary.reworkAttempts as unknown[]).length, 2);
+  assert.equal((summary.reworkAttempts as unknown[]).length, 1);
+  assert.equal((summary.repairAttempts as unknown[]).length, 1);
   assert.match(String((summary.blockers as string[])[0]), /CODEX_ORCHESTRATOR_REPORT_FILE/);
   assert.match(String((summary.policySuggestions as string[])[0]), /Non-mutating recommendation/);
   assert.match(result.reportComment, /policy suggestions: Non-mutating recommendation/);
@@ -1172,15 +1173,40 @@ test('scoped auto command blocks medium runtime changes without cleanup-review p
   assert.match(result.reportComment, /Quality gate requires passed cleanup-review validation/);
 });
 
-test('scoped auto command retries once on retryable blockers and can recover to review-ready', async () => {
+test('scoped auto command repairs missing quality evidence and can recover to review-ready', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
   let runCount = 0;
+  let repairCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      if (input.env?.CODEX_ORCHESTRATOR_REPAIR_MODE === 'evidence') {
+        repairCount += 1;
+        await writeFile(
+          input.reportPath,
+          JSON.stringify({
+            status: 'completed',
+            changes: ['src/feature.ts', 'test/feature.test.ts'],
+            validation: [
+              {
+                command: 'TDD red-to-green',
+                status: 'passed',
+                summary: 'Focused behavior test failed before implementation and passed after implementation.',
+              },
+              { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+            ],
+            artifacts: [],
+            skippedChecks: [],
+            residualRisks: [],
+            prohibitedActions: [],
+          }),
+          'utf8',
+        );
+        return { stdout: 'ok', stderr: '', exitCode: 0 };
+      }
       runCount += 1;
       await mkdir(join(input.worktreePath, 'src'), { recursive: true });
       await mkdir(join(input.worktreePath, 'test'), { recursive: true });
@@ -1222,8 +1248,10 @@ test('scoped auto command retries once on retryable blockers and can recover to 
     now,
   });
 
-  assert.equal(runCount, 2);
+  assert.equal(runCount, 1);
+  assert.equal(repairCount, 1);
   assert.equal(result.status, 'review-ready');
+  assert.match(result.reportComment, /Repair evidence: passed|Repair evidence/i);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.deepEqual(issueAdapter.addedLabels.at(-1), { issueNumber: 155, labels: [labels.review.name] });
 });

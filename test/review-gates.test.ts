@@ -159,6 +159,24 @@ test('quality gate rejects malformed structured TDD evidence', () => {
   assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
 });
 
+test('quality gate exposes typed evidence-repair blockers without changing reasons', () => {
+  const result = evaluateReviewGates({
+    ...baseRuntimeGateInput,
+    validation: [],
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join('\n'), /Quality gate requires TDD red-to-green proof/);
+  assert.deepEqual(result.blockers?.map((blocker) => ({
+    key: blocker.key,
+    source: blocker.source,
+    repair: blocker.repair,
+  })), [
+    { key: 'missing-quality-gate-evidence', source: 'review-gate', repair: 'evidence' },
+    { key: 'missing-quality-gate-evidence', source: 'review-gate', repair: 'evidence' },
+  ]);
+});
+
 test('risk routing warns when scoped review handoff is missing in warn mode', () => {
   const result = evaluateReviewGates(scopedRiskInput({
     report: {
@@ -258,6 +276,13 @@ test('risk routing blocks scoped findings in block mode without warning-mode wea
   assert.equal(result.ok, false);
   assert.deepEqual(result.warnings, []);
   assert.match(result.reasons.join('\n'), /Risk routing gate requires: scoped review handoff is required/);
+  assert.deepEqual(result.blockers?.map((blocker) => ({
+    key: blocker.key,
+    source: blocker.source,
+    repair: blocker.repair,
+  })), [
+    { key: 'risk-routing-policy', source: 'review-gate', repair: 'evidence' },
+  ]);
 });
 
 test('parent risk routing warns about missing duplicate and unknown size-risk ids in warn mode', () => {

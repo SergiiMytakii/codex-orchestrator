@@ -29,8 +29,32 @@ export type ReworkBlockerKey =
   | 'destructive-or-production-action'
   | 'unknown';
 
+export type RunnerBlockerSource =
+  | 'publishability'
+  | 'completion-report'
+  | 'configured-check'
+  | 'review-gate'
+  | 'acceptance-proof'
+  | 'safety'
+  | 'codex'
+  | 'recovery';
+
+export type RunnerBlockerRepair =
+  | 'implementation-rework'
+  | 'completion-report'
+  | 'evidence'
+  | 'none';
+
+export interface RunnerBlocker {
+  key: ReworkBlockerKey;
+  reason: string;
+  source: RunnerBlockerSource;
+  repair?: RunnerBlockerRepair;
+}
+
 export interface ReworkDecisionInput {
   reasons: string[];
+  blockers?: RunnerBlocker[];
   config: CodexOrchestratorConfig;
   attempt: number;
 }
@@ -95,8 +119,13 @@ const hardBlockerKeys = new Set<ReworkBlockerKey>([
 ]);
 
 export function decideImplementationRework(input: ReworkDecisionInput): ReworkDecision {
-  const blockerKeys = classifyBlockerKeys(input.reasons);
-  const hardBlockers = blockerKeys.filter((key) => hardBlockerKeys.has(key));
+  const blockers = input.blockers ?? blockersFromReasons(input.reasons);
+  const blockerKeys = uniqueBlockerKeys(blockers);
+  const repairDisabledBlockerKeys = blockers
+    .filter((blocker) => blocker.repair === 'none')
+    .map((blocker) => blocker.key);
+  const hardBlockers = blockerKeys.filter((key) =>
+    hardBlockerKeys.has(key) || repairDisabledBlockerKeys.includes(key));
   if (hardBlockers.length > 0) {
     return {
       kind: 'hard-block',
@@ -143,24 +172,34 @@ export function decideImplementationRework(input: ReworkDecisionInput): ReworkDe
   };
 }
 
-function classifyBlockerKeys(reasons: string[]): ReworkBlockerKey[] {
-  const keys: ReworkBlockerKey[] = [];
+export function blockersFromReasons(reasons: string[]): RunnerBlocker[] {
+  const blockers: RunnerBlocker[] = [];
   for (const reason of reasons) {
     const matched = blockerPatterns
       .filter(([, pattern]) => pattern.test(reason))
       .map(([key]) => key);
     if (matched.length === 0) {
-      pushUnique(keys, 'unknown');
+      pushUniqueBlocker(blockers, {
+        key: 'unknown',
+        reason,
+        source: 'publishability',
+        repair: 'none',
+      });
       continue;
     }
     const effectiveMatched = matched.includes('invalid-acceptance-proof-report')
       ? matched.filter((key) => key !== 'failed-acceptance-proof')
       : matched;
     for (const key of effectiveMatched) {
-      pushUnique(keys, key);
+      pushUniqueBlocker(blockers, {
+        key,
+        reason,
+        source: sourceForLegacyKey(key),
+        repair: repairForLegacyKey(key),
+      });
     }
   }
-  return keys;
+  return blockers;
 }
 
 function maxAttemptsForBlockerKeys(blockerKeys: ReworkBlockerKey[], config: CodexOrchestratorConfig): number {
@@ -168,6 +207,32 @@ function maxAttemptsForBlockerKeys(blockerKeys: ReworkBlockerKey[], config: Code
     return Math.max(0, config.reviewGates.acceptanceProof.maxIterations - 1);
   }
   return config.loopPolicy.rework.maxAttempts;
+}
+
+function uniqueBlockerKeys(blockers: RunnerBlocker[]): ReworkBlockerKey[] {
+  const keys: ReworkBlockerKey[] = [];
+  for (const blocker of blockers) {
+    pushUnique(keys, blocker.key);
+  }
+  return keys;
+}
+
+function sourceForLegacyKey(key: ReworkBlockerKey): RunnerBlockerSource {
+  void key;
+  return 'publishability';
+}
+
+function repairForLegacyKey(key: ReworkBlockerKey): RunnerBlockerRepair {
+  if (hardBlockerKeys.has(key)) {
+    return 'none';
+  }
+  return 'implementation-rework';
+}
+
+function pushUniqueBlocker(items: RunnerBlocker[], item: RunnerBlocker): void {
+  if (!items.some((existing) => existing.key === item.key && existing.reason === item.reason)) {
+    items.push(item);
+  }
 }
 
 function pushUnique<T>(items: T[], item: T): void {

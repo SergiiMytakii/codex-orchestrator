@@ -226,6 +226,13 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
       commitMessage: input.commitMessage,
       localPhases: input.localPhases,
       localPhaseExecutor: input.localPhaseExecutor,
+      reportRepair: {
+        targetRoot: input.targetRoot,
+        sessionId,
+        branchName: input.branchName,
+        workflowPromptText: promptText,
+        codexAdapter: input.codexAdapter,
+      },
       acceptanceProof: input.acceptanceProof
         ? {
             ...input.acceptanceProof,
@@ -255,6 +262,7 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
     if (publishability.status === 'blocked') {
       const reworkDecision = decideImplementationRework({
         reasons: publishability.reasons,
+        blockers: publishability.blockers,
         config: input.config,
         attempt,
       });
@@ -263,6 +271,8 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
         maxAttempts: 'maxAttempts' in reworkDecision ? reworkDecision.maxAttempts : undefined,
         decisionKind: reworkDecision.kind,
         reasons: publishability.reasons,
+        blockerKeys: 'blockerKeys' in reworkDecision ? reworkDecision.blockerKeys : undefined,
+        repairAttempts: publishability.repairAttempts,
         promptPath,
         reportPath,
         logPath,

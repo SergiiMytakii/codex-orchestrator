@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
+import type { PublishabilityRepairAttempt } from './local-execution-session.js';
 
 export interface DurableRunSummary {
   issueNumber: number;
@@ -22,6 +23,7 @@ export interface DurableRunSummary {
     reportPath: string;
   };
   reworkAttempts?: ReworkAttemptEvidence[];
+  repairAttempts?: PublishabilityRepairAttempt[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }
 
@@ -35,6 +37,8 @@ export interface ReworkAttemptEvidence {
   maxAttempts?: number;
   decisionKind: 'retry' | 'exhausted' | 'hard-block';
   reasons: string[];
+  blockerKeys?: string[];
+  repairAttempts?: PublishabilityRepairAttempt[];
   promptPath: string;
   reportPath: string;
   logPath: string;
@@ -109,6 +113,7 @@ export async function writeDurableRunSummary(input: {
   logPath: string;
   reportPath: string;
   reworkAttempts?: ReworkAttemptEvidence[];
+  repairAttempts?: PublishabilityRepairAttempt[];
   acceptanceProof?: AcceptanceProofAttemptEvidence;
 }): Promise<DurableRunSummaryEvidence | undefined> {
   if (!input.config.loopPolicy.durableRunSummaries.enabled) {
@@ -132,6 +137,7 @@ export async function writeDurableRunSummary(input: {
       reportPath: input.reportPath,
     },
     reworkAttempts: input.reworkAttempts && input.reworkAttempts.length > 0 ? input.reworkAttempts : undefined,
+    repairAttempts: input.repairAttempts && input.repairAttempts.length > 0 ? input.repairAttempts : undefined,
     acceptanceProof: input.acceptanceProof,
   };
   const path = join(
@@ -151,6 +157,7 @@ export async function writeDurableRunSummary(input: {
       `confirmed facts: ${summary.confirmedFacts.length === 0 ? 'none' : summary.confirmedFacts.join('; ')}`,
       `residual risks: ${summary.residualRisks.length === 0 ? 'none' : summary.residualRisks.join('; ')}`,
       `rework attempts: ${summary.reworkAttempts?.length ?? 0}`,
+      `repair attempts: ${summary.repairAttempts?.length ?? 0}`,
       `acceptance proof: ${formatAcceptanceProofStatus(summary)}`,
       `policy suggestions: ${summary.policySuggestions.length === 0 ? 'none' : summary.policySuggestions.join('; ')}`,
     ],
@@ -244,6 +251,30 @@ function assertDurableRunSummary(value: unknown): asserts value is DurableRunSum
   }
   if (typeof evidence.reportPath !== 'string' || evidence.reportPath.length === 0) {
     throw new Error('durable run summary evidence.reportPath must be a non-empty string');
+  }
+  if ('repairAttempts' in record) {
+    assertRepairAttempts(record.repairAttempts);
+  }
+}
+
+function assertRepairAttempts(value: unknown): asserts value is PublishabilityRepairAttempt[] {
+  if (!Array.isArray(value)) {
+    throw new Error('durable run summary repairAttempts must be an array');
+  }
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error('durable run summary repairAttempts item must be an object');
+    }
+    const record = item as Record<string, unknown>;
+    if ((record.kind !== 'completion-report' && record.kind !== 'evidence')
+      || (record.status !== 'passed' && record.status !== 'blocked')
+      || typeof record.reason !== 'string'
+      || typeof record.sessionId !== 'string'
+      || typeof record.promptPath !== 'string'
+      || typeof record.reportPath !== 'string'
+      || typeof record.logPath !== 'string') {
+      throw new Error('durable run summary repairAttempts item is malformed');
+    }
   }
 }
 

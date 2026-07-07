@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
+import type { CodexCommandRunInput, CodexCommandRunResult } from '../src/codex/command-adapter.js';
 import { GitWorktreeManager } from '../src/git/worktree.js';
 import {
   runImplementationPublishabilityCheck,
@@ -13,6 +14,7 @@ import {
 } from '../src/runner/local-execution-session.js';
 import {
   INCOMPLETE_AFTER_PROGRESS_REASON,
+  MISSING_COMPLETION_REPORT_REASON,
   REQUIRED_FIGMA_MCP_FAILURE_REASON,
 } from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
@@ -260,6 +262,589 @@ test('implementation publishability keeps invalid completion report blocker for 
   assert.equal(result.status, 'blocked');
   assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /Invalid scoped completion report/);
   assert.notDeepEqual(result.status === 'blocked' ? result.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
+});
+
+test('implementation publishability repairs a missing completion report once for safe changed files', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  const repairInputs: CodexCommandRunInput[] = [];
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nsafe repair\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-1',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        repairInputs.push(input);
+        await writeScopedReport(input.reportPath, { changes: ['README.md'] });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.equal(repairInputs.length, 1);
+  assert.equal(repairInputs[0]?.sessionId, 'session-1-completion-report-repair');
+  assert.equal(repairInputs[0]?.reportPath, reportPath);
+  assert.match(repairInputs[0]?.promptPath ?? '', /issue-155-session-1-completion-report-repair\.md$/);
+  assert.match(repairInputs[0]?.logPath ?? '', /issue-155-session-1-completion-report-repair\.log$/);
+  assert.match(repairInputs[0]?.promptText ?? '', /repair only the completion report JSON/i);
+  assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], ['README.md']);
+  assert.deepEqual(result.status === 'publish-ready' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['completion-report']);
+});
+
+test('implementation publishability repairs invalid completion report JSON for safe changed files', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  const prompts: string[] = [];
+
+  await writeFile(join(repo, 'README.md'), '# fixture\ninvalid repaired\n', 'utf8');
+  await mkdir(join(reportPath, '..'), { recursive: true });
+  await writeFile(reportPath, '{ invalid json', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-2',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        prompts.push(input.promptText);
+        await writeScopedReport(input.reportPath, { changes: ['README.md'] });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.match(prompts[0] ?? '', /report must be valid JSON/);
+  assert.match(prompts[0] ?? '', /\{ invalid json/);
+});
+
+test('implementation publishability preserves completion report repair evidence when rerun gates block', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nrepair then check failure\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: { tests: 'npm test' } }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: '', stderr: 'test failed after repair', exitCode: 1 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-rerun-block',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeScopedReport(input.reportPath, { changes: ['README.md'] });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /One or more configured checks failed/);
+  assert.deepEqual(result.status === 'blocked' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['completion-report']);
+});
+
+test('implementation publishability does not repair missing report when no files changed', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  let repairCalls = 0;
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-3',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async () => {
+        repairCalls += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(repairCalls, 0);
+  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [MISSING_COMPLETION_REPORT_REASON]);
+});
+
+test('implementation publishability does not run completion report repair for hard safety blockers', async () => {
+  const deniedRepo = await tempGitProject();
+  const deniedGit = new GitWorktreeManager();
+  const deniedBeforeHead = await deniedGit.getHead(deniedRepo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  let repairCalls = 0;
+
+  await mkdir(join(deniedRepo, 'forbidden'), { recursive: true });
+  await writeFile(join(deniedRepo, 'forbidden', 'file.txt'), 'not allowed\n', 'utf8');
+
+  const denied = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      deny: {
+        secretFiles: ['.env', '.env.*'],
+        destructiveDbOrCache: true,
+        productionDeployOrRelease: true,
+        additionalPathGlobs: ['forbidden/**'],
+      },
+    }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: deniedRepo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead: deniedBeforeHead,
+    afterHead: deniedBeforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git: deniedGit,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-hard',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async () => {
+        repairCalls += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(denied.status, 'blocked');
+  assert.match(denied.status === 'blocked' ? denied.reasons.join('\n') : '', /matches denied pattern/);
+
+  const publishedRepo = await tempGitProject();
+  const publishedGit = new GitWorktreeManager();
+  const publishedBeforeHead = await publishedGit.getHead(publishedRepo);
+  await writeFile(join(publishedRepo, 'README.md'), '# fixture\nagent commit\n', 'utf8');
+  await execFileAsync('git', ['-C', publishedRepo, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', publishedRepo, 'commit', '-m', 'Agent commit']);
+  const published = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: publishedRepo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead: publishedBeforeHead,
+    afterHead: await publishedGit.getHead(publishedRepo),
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git: publishedGit,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-hard-published',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async () => {
+        repairCalls += 1;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(published.status, 'blocked');
+  assert.match(published.status === 'blocked' ? published.reasons.join('\n') : '', /runner-owned publication was violated/);
+  assert.equal(repairCalls, 0);
+});
+
+test('implementation publishability allows completion report repair to write only exact in-worktree report path', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  const reportPath = join(repo, '.codex-orchestrator', 'reports', 'issue-155-session.json');
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nsafe repair\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-in-worktree-report',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeScopedReport(input.reportPath, { changes: ['README.md'] });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], [
+    '.codex-orchestrator/reports/issue-155-session.json',
+    'README.md',
+  ]);
+});
+
+test('implementation publishability terminal-blocks completion report repair failure', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await writeFile(join(repo, 'README.md'), '# fixture\nrepair failure\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-4',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async () => ({ stdout: '', stderr: 'repair failed', exitCode: 1 })),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /Completion report repair failed/);
+  assert.deepEqual(result.status === 'blocked' ? (result.blockers ?? []).map((blocker) => blocker.key) : [], ['invalid-completion-report']);
+});
+
+test('implementation publishability blocks completion report repair that mutates existing product changes', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "implementation";\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-5',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "repair mutation";\n', 'utf8');
+        await writeScopedReport(input.reportPath, { changes: ['src/feature.ts'] });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /repair changed protected worktree content/i);
+  assert.match(await readFile(join(repo, 'src', 'feature.ts'), 'utf8'), /repair mutation/);
+});
+
+test('implementation publishability blocks completion report repair that creates a local commit', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await writeFile(join(repo, 'README.md'), '# fixture\ncommit during repair\n', 'utf8');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      runner: { allowAgentLocalCommits: true } as Partial<CodexOrchestratorConfig['runner']> as CodexOrchestratorConfig['runner'],
+      checks: {},
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath: join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json'),
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-6',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeScopedReport(input.reportPath, { changes: ['README.md'] });
+        await execFileAsync('git', ['-C', repo, 'add', 'README.md']);
+        await execFileAsync('git', ['-C', repo, 'commit', '-m', 'Repair commit']);
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /repair created or moved HEAD/i);
+});
+
+test('implementation publishability repairs missing review-gate evidence once and reruns review gates', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+  const repairInputs: CodexCommandRunInput[] = [];
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: ['src/feature.ts'],
+    validation: [],
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: {
+          tdd: { requireTestChange: false },
+          cleanupReview: { enabled: false },
+        },
+      },
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-evidence',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        repairInputs.push(input);
+        await writeScopedReport(input.reportPath, {
+          changes: ['src/feature.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+        });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'publish-ready');
+  assert.equal(repairInputs.length, 1);
+  assert.equal(repairInputs[0]?.sessionId, 'session-evidence-evidence-repair');
+  assert.match(repairInputs[0]?.promptText ?? '', /repair only missing review-gate evidence/i);
+  assert.deepEqual(result.status === 'publish-ready' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['evidence']);
+});
+
+test('implementation publishability blocks evidence repair that changes completion status', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: ['src/feature.ts'],
+    validation: [],
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: {
+          tdd: { requireTestChange: false },
+          cleanupReview: { enabled: false },
+        },
+      },
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-evidence-status',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeScopedReport(input.reportPath, {
+          status: 'needs-promotion',
+          changes: ['src/feature.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+        });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /changed completion report status/i);
+});
+
+test('implementation publishability blocks evidence repair that mutates existing product changes', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
+
+  await mkdir(join(repo, 'src'), { recursive: true });
+  await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await writeScopedReport(reportPath, {
+    changes: ['src/feature.ts'],
+    validation: [],
+  });
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({
+      checks: {},
+      reviewGates: {
+        quality: {
+          tdd: { requireTestChange: false },
+          cleanupReview: { enabled: false },
+        },
+      },
+    } as Partial<CodexOrchestratorConfig>),
+    issue: issueFixture({ number: 155, title: 'Fix runtime behavior', body: 'Runtime behavior fix.' }),
+    targetRoot,
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: 'ok', stderr: '', exitCode: 0 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+    reportRepair: {
+      targetRoot,
+      sessionId: 'session-evidence-mutates',
+      branchName: 'codex/issue-155',
+      workflowPromptText: 'Implement issue.',
+      codexAdapter: repairAdapter(async (input) => {
+        await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "evidence repair mutation";\n', 'utf8');
+        await writeScopedReport(input.reportPath, {
+          changes: ['src/feature.ts'],
+          validation: [
+            {
+              command: 'TDD red-to-green',
+              status: 'passed',
+              summary: 'Focused behavior test failed before implementation and passed after implementation.',
+            },
+            { command: '$code-review', status: 'passed', summary: 'No blocking findings.' },
+          ],
+        });
+        return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /evidence repair changed protected worktree content/i);
 });
 
 test('implementation publishability preserves hard blockers for exact idle timeout before sentinel', async () => {
@@ -813,6 +1398,7 @@ function config(overrides: Partial<CodexOrchestratorConfig> = {}): CodexOrchestr
 async function writeScopedReport(
   reportPath: string,
   overrides: Partial<{
+    status: 'completed' | 'needs-promotion';
     changes: string[];
     validation: Array<{ command: string; status: 'passed' | 'failed' | 'skipped'; summary: string }>;
     skippedChecks: string[];
@@ -822,14 +1408,29 @@ async function writeScopedReport(
   await writeFile(
     reportPath,
     JSON.stringify({
-      status: 'completed',
+      status: overrides.status ?? 'completed',
       changes: overrides.changes ?? ['README.md'],
       validation: overrides.validation ?? [{ command: 'tdd', status: 'passed', summary: 'red and green complete' }],
       artifacts: [],
       skippedChecks: overrides.skippedChecks ?? [],
       residualRisks: [],
       prohibitedActions: [],
+      ...(overrides.status === 'needs-promotion'
+        ? {
+            promotion: {
+              reason: 'Needs human promotion after repair.',
+              criteria: ['Human approval is required.'],
+              evidence: ['Repair attempted to change status.'],
+            },
+          }
+        : {}),
     }),
     'utf8',
   );
+}
+
+function repairAdapter(
+  run: (input: CodexCommandRunInput) => Promise<CodexCommandRunResult>,
+): { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> } {
+  return { run };
 }

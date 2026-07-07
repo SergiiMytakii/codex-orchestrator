@@ -25,6 +25,7 @@ const scenarioDefinitions = new Map([
   ['run-scoped', runDirectScopedScenario],
   ['loop-policy', runLoopPolicyScenario],
   ['incomplete-progress-rework', runIncompleteProgressReworkScenario],
+  ['report-repair', runReportRepairScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runBrowserProofScenario],
   ['acceptance-proof-positive', runAcceptanceProofPositiveScenario],
@@ -63,6 +64,7 @@ const scenarioProfiles = new Map([
     'remote-base-branch',
     'loop-policy',
     'incomplete-progress-rework',
+    'report-repair',
     'acceptance-proof-rework',
     'acceptance-proof-negative',
     'plan-auto-blocking',
@@ -727,6 +729,46 @@ async function runIncompleteProgressReworkScenario(context) {
   await appendReport(context, `Incomplete-progress rework issue #${issue.number} reached review after one retry.\n\n`);
 }
 
+async function runReportRepairScenario(context) {
+  await configureTarget(context, {
+    allowAgentLocalCommits: true,
+    loopPolicy: {
+      durableRunSummaries: {
+        enabled: true,
+      },
+    },
+  });
+
+  const missingReport = await createIssue(
+    context,
+    'completion-report-repair',
+    ['agent:auto'],
+    'Fake Codex writes safe code and omits the completion report; runner should repair only CODEX_ORCHESTRATOR_REPORT_FILE and publish after normal gates rerun.',
+  );
+  await runDaemonOnce(context, missingReport.number, 'scoped-issue');
+  await assertScopedSuccess(context, missingReport.number, {
+    expectLocalCommit: false,
+    expectRepairAttemptKind: 'completion-report',
+  });
+
+  const missingEvidence = await createIssue(
+    context,
+    'evidence-repair',
+    ['agent:auto'],
+    'Fake Codex writes a valid report with missing code-review evidence; runner should repair only report evidence and publish after review gates rerun.',
+  );
+  await runDaemonOnce(context, missingEvidence.number, 'scoped-issue');
+  await assertScopedSuccess(context, missingEvidence.number, {
+    expectLocalCommit: false,
+    expectRepairAttemptKind: 'evidence',
+  });
+
+  await appendReport(
+    context,
+    `Report repair issues #${missingReport.number} and #${missingEvidence.number} reached review with repair attempt evidence.\n\n`,
+  );
+}
+
 async function runDiagnosticsScenario(context) {
   await configureTarget(context, {
     allowAgentLocalCommits: true,
@@ -1343,6 +1385,7 @@ async function assertScopedSuccess(
     expectBrowserProof = false,
     expectNonVisualSmokeProof = false,
     forbidRunnerAcceptanceProof = false,
+    expectRepairAttemptKind,
   },
 ) {
   const issue = await getIssue(context, issueNumber);
@@ -1376,6 +1419,11 @@ async function assertScopedSuccess(
     assertIncludes(body, 'Fresh-Context Review:', 'PR body should include Fresh-Context Review evidence');
     assertIncludes(body, 'Durable Run Summary:', 'PR body should include Durable Run Summary evidence');
     assertIncludes(body, 'policy suggestions: Non-mutating recommendation', 'PR body should include non-mutating Policy Suggestions');
+  }
+  if (expectRepairAttemptKind) {
+    assertIncludes(body, 'Repair Attempts', 'PR body should include repair attempt evidence');
+    assertIncludes(body, `- ${expectRepairAttemptKind}: passed`, `PR body should include ${expectRepairAttemptKind} repair status`);
+    assertIssueHasComment(issue, `Repair ${expectRepairAttemptKind}: passed`);
   }
   if (expectLocalCommit) {
     assertIncludes(body.toLowerCase(), 'local commits', 'PR body should include local commit summary');
@@ -2546,6 +2594,7 @@ const scenario = inferredScenario === 'plan-child'
   ? readLastMarker(prompt, 'LIVE_SMOKE_SCENARIO') ?? inferredScenario
   : readMarker(prompt, 'LIVE_SMOKE_SCENARIO') ?? inferredScenario;
 const runId = readMarker(prompt, 'LIVE_SMOKE_RUN_ID') ?? 'unknown';
+const repairMode = process.env.CODEX_ORCHESTRATOR_REPAIR_MODE ?? '';
 
 console.log(JSON.stringify({ type: 'live-smoke', message: 'starting ' + scenario + ' for #' + issueNumber }));
 console.error('live-smoke fake stderr for #' + issueNumber + '\n');
@@ -2602,6 +2651,64 @@ if (prompt.includes('# Fresh-Context Review')) {
     }
     writeCodeChange(issueNumber, runId, 'incomplete-progress-rework');
     writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
+    break;
+  case 'completion-report-repair':
+    if (repairMode === 'completion-report') {
+      writeScopedReport(
+        reportPath,
+        ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+        [
+          {
+            command: 'completion-report repair TDD',
+            status: 'passed',
+            summary: 'Focused smoke failed before implementation and passed after implementation.',
+            evidence: {
+              kind: 'tdd-red-green',
+              red: { command: 'node --test', status: 'failed', summary: 'failed before implementation' },
+              green: { command: 'node --test', status: 'passed', summary: 'passed after implementation' },
+            },
+          },
+          { command: '$code-review', status: 'passed', summary: 'No blocking findings after completion report repair.' },
+        ],
+      );
+      break;
+    }
+    writeCodeChange(issueNumber, runId, 'completion-report-repair');
+    break;
+  case 'evidence-repair':
+    if (repairMode !== 'evidence') {
+      writeCodeChange(issueNumber, runId, 'evidence-repair');
+    }
+    writeScopedReport(
+      reportPath,
+      ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts'],
+      repairMode === 'evidence'
+        ? [
+          {
+            command: 'evidence repair TDD',
+            status: 'passed',
+            summary: 'Focused smoke failed before implementation and passed after implementation.',
+            evidence: {
+              kind: 'tdd-red-green',
+              red: { command: 'node --test', status: 'failed', summary: 'failed before implementation' },
+              green: { command: 'node --test', status: 'passed', summary: 'passed after implementation' },
+            },
+          },
+          { command: '$code-review', status: 'passed', summary: 'No blocking findings after evidence repair.' },
+        ]
+        : [
+          {
+            command: 'evidence repair TDD',
+            status: 'passed',
+            summary: 'Focused smoke failed before implementation and passed after implementation.',
+            evidence: {
+              kind: 'tdd-red-green',
+              red: { command: 'node --test', status: 'failed', summary: 'failed before implementation' },
+              green: { command: 'node --test', status: 'passed', summary: 'passed after implementation' },
+            },
+          },
+        ],
+    );
     break;
   case 'browser-proof':
     writeBrowserProofChange(issueNumber, runId);

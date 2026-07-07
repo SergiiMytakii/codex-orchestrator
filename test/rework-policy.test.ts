@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  blockersFromReasons,
   decideImplementationRework,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
+  type RunnerBlocker,
 } from '../src/runner/rework-policy.js';
 import type { CodexOrchestratorConfig } from '../src/config/schema.js';
 import { validConfig } from './fixtures/config.js';
@@ -62,6 +64,87 @@ test('quality gate blockers retry then exhaust by zero-based attempt budget', ()
   });
 });
 
+test('typed blockers drive retry decisions without depending on reason wording', () => {
+  const config = withReworkConfig({ maxAttempts: 1 });
+  const blockers: RunnerBlocker[] = [
+    {
+      key: 'missing-quality-gate-evidence',
+      reason: 'Reviewer wording changed, but the key is stable.',
+      source: 'review-gate',
+      repair: 'implementation-rework',
+    },
+    {
+      key: 'failed-configured-checks',
+      reason: 'Tool-specific failure wording.',
+      source: 'configured-check',
+      repair: 'implementation-rework',
+    },
+    {
+      key: 'incomplete-after-progress',
+      reason: 'Safe progress was observed.',
+      source: 'recovery',
+      repair: 'implementation-rework',
+    },
+  ];
+  const reasons = blockers.map((blocker) => blocker.reason);
+
+  assert.deepEqual(decideImplementationRework({ blockers, reasons, config, attempt: 0 }), {
+    kind: 'retry',
+    attempt: 0,
+    nextAttempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['missing-quality-gate-evidence', 'failed-configured-checks', 'incomplete-after-progress'],
+    reasons,
+    rework: {
+      attempt: 1,
+      blockedReasons: reasons,
+      disableOptionalFigmaMcp: false,
+    },
+  });
+});
+
+test('hard typed blockers override retryable typed blockers', () => {
+  const reasons = ['quality evidence missing', 'secret path changed'];
+  const blockers: RunnerBlocker[] = [
+    {
+      key: 'missing-quality-gate-evidence',
+      reason: reasons[0]!,
+      source: 'review-gate',
+      repair: 'implementation-rework',
+    },
+    {
+      key: 'denied-path',
+      reason: reasons[1]!,
+      source: 'safety',
+      repair: 'none',
+    },
+  ];
+
+  assert.deepEqual(decideImplementationRework({ blockers, reasons, config: withReworkConfig(), attempt: 0 }), {
+    kind: 'hard-block',
+    attempt: 0,
+    blockerKeys: ['missing-quality-gate-evidence', 'denied-path'],
+    reasons,
+  });
+});
+
+test('typed repair-none blockers hard-block even when their key is retryable', () => {
+  const reasons = ['Completion report repair did not write CODEX_ORCHESTRATOR_REPORT_FILE.'];
+  const blockers: RunnerBlocker[] = [{
+    key: 'missing-completion-report',
+    reason: reasons[0]!,
+    source: 'completion-report',
+    repair: 'none',
+  }];
+
+  assert.deepEqual(decideImplementationRework({ blockers, reasons, config: withReworkConfig(), attempt: 0 }), {
+    kind: 'hard-block',
+    attempt: 0,
+    blockerKeys: ['missing-completion-report'],
+    reasons,
+  });
+});
+
 test('hard blockers take precedence over retryable reasons', () => {
   const reasons = [
     'Quality gate requires TDD red-to-green proof in validation.',
@@ -89,6 +172,26 @@ test('acceptance proof blockers use proof iteration budget', () => {
 
   assert.equal(decideImplementationRework({ reasons, config, attempt: 3 }).kind, 'retry');
   assert.deepEqual(decideImplementationRework({ reasons, config, attempt: 4 }), {
+    kind: 'exhausted',
+    attempt: 4,
+    maxAttempts: 4,
+    blockerKeys: ['failed-acceptance-proof'],
+    reasons,
+  });
+});
+
+test('typed acceptance proof blockers use proof iteration budget', () => {
+  const config = withReworkConfig({ maxAttempts: 1, acceptanceProofMaxIterations: 5 });
+  const reasons = ['Acceptance proof wording changed.'];
+  const blockers: RunnerBlocker[] = [{
+    key: 'failed-acceptance-proof',
+    reason: reasons[0]!,
+    source: 'acceptance-proof',
+    repair: 'implementation-rework',
+  }];
+
+  assert.equal(decideImplementationRework({ blockers, reasons, config, attempt: 3 }).kind, 'retry');
+  assert.deepEqual(decideImplementationRework({ blockers, reasons, config, attempt: 4 }), {
     kind: 'exhausted',
     attempt: 4,
     maxAttempts: 4,
@@ -249,6 +352,26 @@ test('incomplete progress sentinel retries only from runner-owned reason', () =>
     blockerKeys: ['unknown'],
     reasons: [rawIdleTimeout],
   });
+});
+
+test('legacy reason adapter keeps unknown fallback isolated', () => {
+  assert.deepEqual(blockersFromReasons([
+    'Quality gate requires TDD red-to-green proof in validation.',
+    'unclassified blocker text',
+  ]), [
+    {
+      key: 'missing-quality-gate-evidence',
+      reason: 'Quality gate requires TDD red-to-green proof in validation.',
+      source: 'publishability',
+      repair: 'implementation-rework',
+    },
+    {
+      key: 'unknown',
+      reason: 'unclassified blocker text',
+      source: 'publishability',
+      repair: 'none',
+    },
+  ]);
 });
 
 test('old rework helper exports are unavailable', async () => {
