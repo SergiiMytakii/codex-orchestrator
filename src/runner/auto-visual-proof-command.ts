@@ -2,7 +2,7 @@ import type { GitHubIssue } from '../github/issues.js';
 import {
   decideProofRouting,
   type VisualProofDispatchTarget,
-} from './review-gate-policy.js';
+} from './proof-routing.js';
 import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand, type BrowserVisualProofCommandInput } from './browser-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand, type MobileVisualProofCommandInput } from './mobile-visual-proof-command.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';

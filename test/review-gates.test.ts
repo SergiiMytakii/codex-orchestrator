@@ -10,7 +10,7 @@ import {
   type ReviewGateInput,
 } from '../src/runner/review-gates.js';
 import type { PlanAutoCompletionReport } from '../src/runner/completion-report.js';
-import { classifyVisualProofDispatchTarget, decideProofRouting, shouldApplyVisualProofGate } from '../src/runner/review-gate-policy.js';
+import { classifyVisualProofDispatchTarget, decideProofRouting, shouldApplyVisualProofGate } from '../src/runner/proof-routing.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 import { defaultProofPlan } from './fixtures/reports.js';
@@ -721,6 +721,7 @@ test('visual proof policy does not treat internal Acceptance Proof module work a
     }),
     changedFiles: [
       'src/runner/acceptance-proof.ts',
+      'src/runner/proof-routing.ts',
       'src/runner/visual-proof-runner.ts',
       'test/acceptance-proof.test.ts',
       'test/visual-proof-runner.test.ts',

@@ -2,14 +2,11 @@ import type { CodexOrchestratorConfig } from '../config/schema.js';
 import type { GitHubIssue } from '../github/issues.js';
 import { uiEvidenceFailureDimensions } from './acceptance-proof.js';
 import {
-  classifyVisualProofDispatchTarget as planVisualProofDispatchTarget,
-  decideProofRouting as planProofRouting,
-  isVisualProofDesirable as planVisualProofDesirable,
-  runnerVisualProofPolicy as planRunnerVisualProofPolicy,
-  shouldApplyVisualProofGate as planShouldApplyVisualProofGate,
-  type ProofRoutingDecision,
-  type VisualProofDispatchTarget,
-} from './acceptance-proof-loop.js';
+  decideProofRouting,
+  isVisualProofDesirable,
+  runnerVisualProofPolicy,
+  shouldApplyVisualProofGate,
+} from './proof-routing.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
 
@@ -153,39 +150,16 @@ export function buildQualityGatePromptLines(config: CodexOrchestratorConfig): st
   ];
 }
 
-export function shouldApplyVisualProofGate(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}): boolean {
-  return planShouldApplyVisualProofGate(input);
-}
-
-export type { ProofRoutingAction, ProofRoutingDecision, VisualProofDispatchTarget } from './acceptance-proof-loop.js';
-
-export function decideProofRouting(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}): ProofRoutingDecision {
-  return planProofRouting(input);
-}
-
-export function classifyVisualProofDispatchTarget(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}): VisualProofDispatchTarget {
-  return planVisualProofDispatchTarget(input);
-}
-
-export function isVisualProofDesirable(input: {
-  config: CodexOrchestratorConfig;
-  issue: GitHubIssue;
-  changedFiles: string[];
-}): boolean {
-  return planVisualProofDesirable(input);
-}
+export {
+  classifyVisualProofDispatchTarget,
+  decideProofRouting,
+  isVisualProofDesirable,
+  runnerVisualProofPolicy,
+  shouldApplyVisualProofGate,
+  type ProofRoutingAction,
+  type ProofRoutingDecision,
+  type VisualProofDispatchTarget,
+} from './proof-routing.js';
 
 export function hasPassedValidation(validation: RunnerValidationLine[], patterns: string[]): boolean {
   return validation.some((line) =>
@@ -240,24 +214,6 @@ export function isRunnerVisualValidation(line: RunnerValidationLine): boolean {
 
 export function regexMatches(pattern: string, text: string): boolean {
   return new RegExp(pattern, 'iu').test(text);
-}
-
-export function runnerVisualProofPolicy(config: CodexOrchestratorConfig): {
-  commandTemplate?: string;
-  artifactDir: string;
-  envPassthrough: string[];
-  timeoutMs?: number;
-  minScreenshotArtifacts: number;
-  requireWhenDesirable: boolean;
-  blockOnMissingProof: boolean;
-  browserProof: {
-    scenarioPath?: string;
-    baseUrl?: string;
-    strictConsoleErrors: boolean;
-    strictNetworkFailures: boolean;
-  };
-} {
-  return planRunnerVisualProofPolicy(config);
 }
 
 function hasTddRedEvidence(text: string): boolean {
