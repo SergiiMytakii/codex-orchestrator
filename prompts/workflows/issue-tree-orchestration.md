@@ -88,7 +88,7 @@ For each issue in the active wave, assign one worker with a narrow ownership sco
 - required preconditions and verification commands;
 - stop conditions;
 - required final report: changed files, proof per acceptance criterion, tests run, skipped checks, risks, blockers, and unresolved acceptance criteria.
-- required `reviewHandoff`: flow used, risk level, implemented contract, proof by acceptance criterion, review focus, and human review checklist.
+- required `reviewHandoff`: flow used, risk level, implemented contract, proof by acceptance criterion, review focus, agent-verified checks, and maintainer-only checks with reasons the agent could not verify them.
 
 While workers run, the integrator should do non-overlapping work: read docs, inspect ownership, map integration points, and prepare validation. Do not duplicate a worker's implementation.
 

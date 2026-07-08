@@ -102,7 +102,11 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
       implementedContract: ['Campaign rows no longer overlap at 390px.'],
       proofByAcceptanceCriteria: ['AC1: Playwright screenshot covers 390px viewport.'],
       reviewFocus: ['Inspect CampaignList row wrapping and copy.'],
-      humanReviewChecklist: ['Open the screenshot artifact before reading the diff.'],
+      agentVerifiedChecks: ['Playwright screenshot and focused tests passed before handoff.'],
+      maintainerOnlyChecks: [{
+        check: 'Approve whether the campaign copy matches product tone.',
+        reasonAgentCouldNotVerify: 'Requires product decision outside repository evidence.',
+      }],
     },
     logPath: '/tmp/issue-155.log',
     commits: [{ sha: '1234567890abcdef', subject: 'Agent checkpoint' }],
@@ -125,6 +129,8 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
   assert.match(report, /What changed\n- Campaign rows no longer overlap at 390px\./);
   assert.match(report, /Review focus/);
   assert.match(report, /Inspect CampaignList row wrapping and copy/);
+  assert.match(report, /Agent verified\n- Playwright screenshot and focused tests passed before handoff\./);
+  assert.match(report, /Maintainer-only\n- Approve whether the campaign copy matches product tone\. \(Requires product decision outside repository evidence\.\)/);
   assert.match(report, /Audit trail/);
   assert.match(report, /- Log: \/tmp\/issue-155\.log/);
   assert.match(report, /1234567890ab Agent checkpoint/);
@@ -133,7 +139,9 @@ test('scoped handoff evidence renders review report and PR body proof artifacts'
   assert.match(body, /Closes #155/);
   assert.match(body, /Proof artifacts:\n- !\[screenshot: 390px layout\]/);
   assert.match(body, /Review handoff:/);
-  assert.match(body, /Open the screenshot artifact before reading the diff/);
+  assert.match(body, /agent verified: Playwright screenshot and focused tests passed before handoff/);
+  assert.match(body, /maintainer-only: Approve whether the campaign copy matches product tone\. \(Requires product decision outside repository evidence\.\)/);
+  assert.doesNotMatch(body, /human check:/);
 });
 
 test('scoped auto command creates worktree, runner commit, draft PR, review report, and cleans state', async () => {
@@ -170,7 +178,8 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
             implementedContract: ['Feature file is created by the scoped run.'],
             proofByAcceptanceCriteria: ['Runner commit and draft PR prove the file exists.'],
             reviewFocus: ['Check runner-owned publication evidence.'],
-            humanReviewChecklist: ['Confirm the draft PR and review report were created.'],
+            agentVerifiedChecks: ['Runner created the draft PR and review report.'],
+            maintainerOnlyChecks: [],
           },
         }),
         'utf8',

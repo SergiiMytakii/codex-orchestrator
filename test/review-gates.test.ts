@@ -21,7 +21,11 @@ const defaultReviewHandoff: NonNullable<ReviewGateInput['report']['reviewHandoff
   implementedContract: ['Focused scoped change completed.'],
   proofByAcceptanceCriteria: ['Focused validation covers the acceptance criteria.'],
   reviewFocus: ['Review changed behavior and validation evidence.'],
-  humanReviewChecklist: ['Confirm the scoped contract is satisfied.'],
+  agentVerifiedChecks: ['Focused validation command passed.'],
+  maintainerOnlyChecks: [{
+    check: 'Approve whether the behavior matches product intent.',
+    reasonAgentCouldNotVerify: 'Requires product decision outside repository evidence.',
+  }],
 };
 
 const browserVisualProofPlan: ProofPlan = {
@@ -211,7 +215,8 @@ test('risk routing warns when scoped review handoff evidence arrays are empty in
         implementedContract: [],
         proofByAcceptanceCriteria: [],
         reviewFocus: [],
-        humanReviewChecklist: [],
+        agentVerifiedChecks: [],
+        maintainerOnlyChecks: [],
       },
     },
   });
@@ -221,7 +226,32 @@ test('risk routing warns when scoped review handoff evidence arrays are empty in
   assert.match(result.warnings.join('\n'), /implementedContract must describe the delivered contract/);
   assert.match(result.warnings.join('\n'), /proofByAcceptanceCriteria must map proof to acceptance criteria/);
   assert.match(result.warnings.join('\n'), /reviewFocus must identify review targets/);
-  assert.match(result.warnings.join('\n'), /humanReviewChecklist must identify human review checks/);
+  assert.match(result.warnings.join('\n'), /agentVerifiedChecks must identify checks completed by the agent/);
+});
+
+test('risk routing warns when maintainer-only checks contain agent-verifiable commands', () => {
+  const input = scopedRiskInput();
+  const result = evaluateReviewGates({
+    ...input,
+    report: {
+      ...input.report,
+      reviewHandoff: {
+        flowUsed: 'scoped-implementation',
+        riskLevel: 'medium',
+        implementedContract: ['Contract.'],
+        proofByAcceptanceCriteria: ['Proof.'],
+        reviewFocus: ['Focus.'],
+        agentVerifiedChecks: ['npm run typecheck passed.'],
+        maintainerOnlyChecks: [{
+          check: 'Run npm run typecheck.',
+          reasonAgentCouldNotVerify: 'Requires product decision outside repository evidence.',
+        }],
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.warnings.join('\n'), /maintainerOnlyChecks\[0\] looks agent-verifiable/);
 });
 
 test('risk routing warns when low-risk scoped metadata uses a disallowed flow or configured risky path', () => {
@@ -240,7 +270,8 @@ test('risk routing warns when low-risk scoped metadata uses a disallowed flow or
         implementedContract: ['Low-risk contract claim.'],
         proofByAcceptanceCriteria: ['Proof.'],
         reviewFocus: ['Focus.'],
-        humanReviewChecklist: ['Checklist.'],
+        agentVerifiedChecks: ['Focused proof passed.'],
+        maintainerOnlyChecks: [],
       },
     },
   });
@@ -263,7 +294,8 @@ test('risk routing warns when high-risk scoped work lacks code-review proof in w
         implementedContract: ['High-risk policy change.'],
         proofByAcceptanceCriteria: ['Proof.'],
         reviewFocus: ['Focus.'],
-        humanReviewChecklist: ['Checklist.'],
+        agentVerifiedChecks: ['Focused proof passed.'],
+        maintainerOnlyChecks: [],
       },
     },
   });

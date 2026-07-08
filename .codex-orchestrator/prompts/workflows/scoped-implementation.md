@@ -63,7 +63,8 @@ For completed work, include `reviewHandoff` in the runner JSON report:
 - `implementedContract`: what behavior or invariant changed;
 - `proofByAcceptanceCriteria`: acceptance criteria mapped to test/smoke/artifact evidence;
 - `reviewFocus`: the exact files, states, contracts, or edge cases a human should inspect;
-- `humanReviewChecklist`: the shortest useful manual review path.
+- `agentVerifiedChecks`: checks, commands, code searches, import/path confirmations, or fallback-path confirmations the agent completed before handoff;
+- `maintainerOnlyChecks`: objects with `check` and `reasonAgentCouldNotVerify`, only for actions the agent cannot honestly complete itself, such as product decisions, approvals, credentials, external access, deploy/release decisions, or stakeholder judgment. Do not put runnable commands, code-search checks, import checks, or generic "confirm" tasks here.
 
 ## Acceptance Proof
 

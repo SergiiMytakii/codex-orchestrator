@@ -117,7 +117,8 @@ export function buildScopedImplementationPrompt(input: ScopedPromptInput): strin
     ...proofPlanPromptLines(),
     '## Review Handoff Contract',
     'Include reviewHandoff for completed work so a maintainer can review quickly without reverse-engineering the diff.',
-    'reviewHandoff must name the flow used, risk level, implemented contract, proof by acceptance criterion, review focus, and human review checklist.',
+    'reviewHandoff must name the flow used, risk level, implemented contract, proof by acceptance criterion, review focus, agent-verified checks, and maintainer-only checks.',
+    'Put commands, tests, code searches, import/path checks, and fallback-path confirmations in validation, proofByAcceptanceCriteria, or agentVerifiedChecks. Put only genuinely human-only actions in maintainerOnlyChecks, each with reasonAgentCouldNotVerify.',
     scopedCompletionReportSchemaLine(),
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -224,6 +225,8 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     ...proofPlanPromptLines(),
     '## Review Handoff Contract',
     'Include reviewHandoff for completed child work so the parent report can show risk, proof, and human review focus per child.',
+    'reviewHandoff must name the flow used, risk level, implemented contract, proof by acceptance criterion, review focus, agent-verified checks, and maintainer-only checks.',
+    'Put commands, tests, code searches, import/path checks, and fallback-path confirmations in validation, proofByAcceptanceCriteria, or agentVerifiedChecks. Put only genuinely human-only actions in maintainerOnlyChecks, each with reasonAgentCouldNotVerify.',
     scopedCompletionReportSchemaLine(),
     `Prompt file: ${input.promptPath}`,
     `Branch: ${input.branchName}`,
@@ -243,7 +246,7 @@ function proofPlanPromptLines(): string[] {
 }
 
 function scopedCompletionReportSchemaLine(): string {
-  return 'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "proofPlan": { "mode": "none" | "non-visual-smoke" | "cli" | "api" | "worker" | "browser-visual" | "mobile-visual", "reason": string, "validationCommands": string[], "requiredArtifacts": string[], "visualTarget"?: "browser" | "mobile" }, "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "humanReviewChecklist": string[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.';
+  return 'Schema: { "status": "completed" | "needs-promotion", "changes": string[], "validation": { "command": string, "status": "passed" | "failed" | "skipped", "summary": string, "evidence"?: { "kind": "tdd-red-green", "red": { "command": string, "status": "failed", "summary": string }, "green": { "command": string, "status": "passed", "summary": string } } }[], "proofPlan": { "mode": "none" | "non-visual-smoke" | "cli" | "api" | "worker" | "browser-visual" | "mobile-visual", "reason": string, "validationCommands": string[], "requiredArtifacts": string[], "visualTarget"?: "browser" | "mobile" }, "artifacts": { "type": "screenshot" | "ui-dump" | "log" | "smoke-output" | "other", "path"?: string, "url"?: string, "description": string }[], "skippedChecks": string[], "residualRisks": string[], "prohibitedActions": { "type": "secret-file-read" | "secret-file-change" | "destructive-db-or-cache" | "production-deploy-or-release", "description": string }[], "reviewHandoff"?: { "flowUsed": "small-task-implementer" | "scoped-implementation" | "spec-implementer" | "issue-tree-child" | "other", "riskLevel": "low" | "medium" | "high", "implementedContract": string[], "proofByAcceptanceCriteria": string[], "reviewFocus": string[], "agentVerifiedChecks": string[], "maintainerOnlyChecks": { "check": string, "reasonAgentCouldNotVerify": string }[] }, "promotion"?: { "reason": string, "criteria": string[], "evidence": string[] } }.';
 }
 
 function localCommitPublicationLine(config: CodexOrchestratorConfig, child: boolean): string {

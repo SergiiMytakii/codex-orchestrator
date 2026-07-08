@@ -950,7 +950,8 @@ function implementationReport(proofPlan: ProofPlan): ScopedCompletionReport {
       implementedContract: ['Implemented the scoped contract.'],
       proofByAcceptanceCriteria: ['npm test proves the non-visual behavior.'],
       reviewFocus: ['Review proof plan routing.'],
-      humanReviewChecklist: ['Check acceptance proof routing result.'],
+      agentVerifiedChecks: ['Acceptance proof routing result was checked by the proof-loop validation.'],
+      maintainerOnlyChecks: [],
     },
   };
 }

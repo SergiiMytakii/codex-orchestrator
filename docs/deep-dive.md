@@ -263,6 +263,10 @@ repositories surface findings without unexpected publication blocks. In
 For scoped runs, risk routing checks the completion report `reviewHandoff`:
 
 - required handoff fields must be present and non-empty;
+- `agentVerifiedChecks` must identify checks the agent completed before handoff;
+- `maintainerOnlyChecks` may be empty, but every listed item must include
+  `reasonAgentCouldNotVerify`, and runnable commands or code-inspection checks
+  belong in validation/proof evidence instead of maintainer-only work;
 - low-risk claims must use an allowed low-risk flow;
 - configured `riskyChangedPathGlobs` can flag low-risk claims that changed
   risky paths;

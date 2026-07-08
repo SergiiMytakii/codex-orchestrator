@@ -78,10 +78,13 @@ export function buildScopedReviewReport(
     ...renderKeyAcceptanceProofArtifacts(input.acceptanceProof),
     ...renderFreshContextReviewDigest(input.freshContextReview),
     'Review focus',
-    ...renderHumanDigestList([
-      ...(input.reviewHandoff?.reviewFocus ?? []),
-      ...(input.reviewHandoff?.humanReviewChecklist ?? []),
-    ]),
+    ...renderHumanDigestList(input.reviewHandoff?.reviewFocus ?? []),
+    'Agent verified',
+    ...renderHumanDigestList(input.reviewHandoff?.agentVerifiedChecks ?? []),
+    'Maintainer-only',
+    ...renderHumanDigestList(input.reviewHandoff?.maintainerOnlyChecks?.map((item) =>
+      `${item.check} (${item.reasonAgentCouldNotVerify})`,
+    ) ?? []),
     'Audit trail',
     ...renderAuditTrail(input),
   ].join('\n');
@@ -377,7 +380,7 @@ function renderReviewHandoff(handoff: ReviewHandoffEvidence | undefined): string
   if (!handoff) {
     return [];
   }
-  return [
+  const lines = [
     'Review Handoff',
     `- flow: ${handoff.flowUsed}`,
     `- risk: ${handoff.riskLevel}`,
@@ -387,9 +390,14 @@ function renderReviewHandoff(handoff: ReviewHandoffEvidence | undefined): string
     ...bulletList(handoff.proofByAcceptanceCriteria),
     'Review Focus',
     ...bulletList(handoff.reviewFocus),
-    'Human Review Checklist',
-    ...bulletList(handoff.humanReviewChecklist),
+    'Agent Verified Checks',
+    ...bulletList(handoff.agentVerifiedChecks ?? []),
+    'Maintainer-Only Checks',
+    ...bulletList((handoff.maintainerOnlyChecks ?? []).map((item) =>
+      `${item.check} (${item.reasonAgentCouldNotVerify})`,
+    )),
   ];
+  return lines;
 }
 
 function renderReviewHandoffPullRequestSection(handoff: ReviewHandoffEvidence | undefined): string[] {
@@ -401,7 +409,10 @@ function renderReviewHandoffPullRequestSection(handoff: ReviewHandoffEvidence | 
     `- flow: ${handoff.flowUsed}`,
     `- risk: ${handoff.riskLevel}`,
     ...handoff.reviewFocus.map((item) => `- review focus: ${item}`),
-    ...handoff.humanReviewChecklist.map((item) => `- human check: ${item}`),
+    ...(handoff.agentVerifiedChecks ?? []).map((item) => `- agent verified: ${item}`),
+    ...(handoff.maintainerOnlyChecks ?? []).map((item) =>
+      `- maintainer-only: ${item.check} (${item.reasonAgentCouldNotVerify})`,
+    ),
     '',
   ];
 }

@@ -1233,7 +1233,8 @@ test('implementation publishability accepts non-visual proof plan from the compl
       implementedContract: ['Non-visual proof plans are accepted through report validation.'],
       proofByAcceptanceCriteria: ['Focused non-visual proof test passed for acceptance criteria.'],
       reviewFocus: ['Confirm no runner visual command proof was executed.'],
-      humanReviewChecklist: ['Check non-visual proof plan evidence before publication.'],
+      agentVerifiedChecks: ['Focused non-visual proof test passed before publication.'],
+      maintainerOnlyChecks: [],
     },
   });
 
@@ -1528,7 +1529,8 @@ async function writeScopedReport(
       implementedContract: string[];
       proofByAcceptanceCriteria: string[];
       reviewFocus: string[];
-      humanReviewChecklist: string[];
+      agentVerifiedChecks: string[];
+      maintainerOnlyChecks: { check: string; reasonAgentCouldNotVerify: string }[];
     };
   }> = {},
 ): Promise<void> {
@@ -1556,7 +1558,8 @@ async function writeScopedReport(
         implementedContract: ['Default test report implements the requested scoped change.'],
         proofByAcceptanceCriteria: ['Default test report maps validation to acceptance criteria.'],
         reviewFocus: ['Confirm scoped report validation remains strict.'],
-        humanReviewChecklist: ['Review validation evidence before publication.'],
+        agentVerifiedChecks: ['Default validation evidence passed before publication.'],
+        maintainerOnlyChecks: [],
       },
       ...(overrides.status === 'needs-promotion'
         ? {

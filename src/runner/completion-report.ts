@@ -22,6 +22,10 @@ export interface ValidationItem {
   evidence?: ValidationEvidence;
 }
 export type ReviewHandoffRisk = 'low' | 'medium' | 'high';
+export interface MaintainerOnlyCheck {
+  check: string;
+  reasonAgentCouldNotVerify: string;
+}
 export const scopedArtifactTypes = ['screenshot', 'ui-dump', 'log', 'smoke-output', 'other'] as const;
 export type ScopedArtifactType = (typeof scopedArtifactTypes)[number];
 export const proofPlanModes = [
@@ -63,7 +67,8 @@ export interface ScopedCompletionReport {
     implementedContract: string[];
     proofByAcceptanceCriteria: string[];
     reviewFocus: string[];
-    humanReviewChecklist: string[];
+    agentVerifiedChecks?: string[];
+    maintainerOnlyChecks?: MaintainerOnlyCheck[];
   };
   promotion?: {
     reason: string;
@@ -235,7 +240,33 @@ function assertReviewHandoff(value: unknown): void {
   assertStringArray(record.implementedContract, 'reviewHandoff.implementedContract');
   assertStringArray(record.proofByAcceptanceCriteria, 'reviewHandoff.proofByAcceptanceCriteria');
   assertStringArray(record.reviewFocus, 'reviewHandoff.reviewFocus');
-  assertStringArray(record.humanReviewChecklist, 'reviewHandoff.humanReviewChecklist');
+  if ('agentVerifiedChecks' in record) {
+    assertStringArray(record.agentVerifiedChecks, 'reviewHandoff.agentVerifiedChecks');
+  }
+  if ('maintainerOnlyChecks' in record) {
+    assertMaintainerOnlyChecks(record.maintainerOnlyChecks);
+  }
+  if ('humanReviewChecklist' in record) {
+    throw new Error('Invalid scoped completion report: reviewHandoff.humanReviewChecklist is not supported; use agentVerifiedChecks and maintainerOnlyChecks');
+  }
+}
+
+function assertMaintainerOnlyChecks(value: unknown): asserts value is MaintainerOnlyCheck[] {
+  if (!Array.isArray(value)) {
+    throw new Error('Invalid scoped completion report: reviewHandoff.maintainerOnlyChecks must be an array');
+  }
+  value.forEach((item, index) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error(`Invalid scoped completion report: reviewHandoff.maintainerOnlyChecks[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    if (typeof record.check !== 'string' || record.check.trim().length === 0) {
+      throw new Error(`Invalid scoped completion report: reviewHandoff.maintainerOnlyChecks[${index}].check must be a non-empty string`);
+    }
+    if (typeof record.reasonAgentCouldNotVerify !== 'string' || record.reasonAgentCouldNotVerify.trim().length === 0) {
+      throw new Error(`Invalid scoped completion report: reviewHandoff.maintainerOnlyChecks[${index}].reasonAgentCouldNotVerify must be a non-empty string`);
+    }
+  });
 }
 
 function assertPlanAutoCompletionReport(value: unknown): asserts value is PlanAutoCompletionReport {

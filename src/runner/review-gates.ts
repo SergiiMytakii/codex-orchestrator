@@ -185,9 +185,10 @@ function evaluateScopedRiskRoutingGate(input: ReviewGateInput): string[] {
     );
     requireNonEmptyEvidence(
       findings,
-      reviewHandoff.humanReviewChecklist,
-      'humanReviewChecklist must identify human review checks',
+      reviewHandoff.agentVerifiedChecks ?? [],
+      'agentVerifiedChecks must identify checks completed by the agent',
     );
+    findings.push(...evaluateMaintainerOnlyChecks(reviewHandoff));
   }
 
   if (reviewHandoff.riskLevel === 'low') {
@@ -212,6 +213,53 @@ function evaluateScopedRiskRoutingGate(input: ReviewGateInput): string[] {
   }
 
   return findings;
+}
+
+function evaluateMaintainerOnlyChecks(
+  reviewHandoff: NonNullable<ScopedCompletionReport['reviewHandoff']>,
+): string[] {
+  const findings: string[] = [];
+  (reviewHandoff.maintainerOnlyChecks ?? []).forEach((item, index) => {
+    if (item.check.trim().length === 0) {
+      findings.push(`maintainerOnlyChecks[${index}].check must be non-empty`);
+    }
+    if (item.reasonAgentCouldNotVerify.trim().length === 0) {
+      findings.push(`maintainerOnlyChecks[${index}].reasonAgentCouldNotVerify must explain the human-only blocker`);
+    }
+    if (looksAgentVerifiableMaintainerCheck(item.check, item.reasonAgentCouldNotVerify)) {
+      findings.push(`maintainerOnlyChecks[${index}] looks agent-verifiable; put commands, code searches, import checks, and fallback-path confirmations in validation, proofByAcceptanceCriteria, or agentVerifiedChecks`);
+    }
+  });
+  return findings;
+}
+
+function looksAgentVerifiableMaintainerCheck(check: string, reason: string): boolean {
+  const normalizedCheck = normalizeEvidenceText(check);
+  const normalizedReason = normalizeEvidenceText(reason);
+  const commandLike = /(?:^|\b)(?:run|rerun|execute)\s+(?:npm|pnpm|yarn|node|npx|jest|vitest|tsc|typecheck|rg|grep|git|curl)\b/u
+    .test(normalizedCheck)
+    || /\b(?:npm|pnpm|yarn|node|npx|jest|vitest|typecheck|rg|grep|git diff|git status)\b/u.test(normalizedCheck);
+  if (commandLike) {
+    return true;
+  }
+
+  const sourceInspectionLike = /^(?:confirm|check|verify|inspect)\b.*\b(?:import|imports|path|paths|fallback|only|code|client|test|spec|typecheck|appears)\b/u
+    .test(normalizedCheck);
+  if (!sourceInspectionLike) {
+    return false;
+  }
+
+  return !hasConcreteHumanOnlyReason(normalizedReason);
+}
+
+function hasConcreteHumanOnlyReason(reason: string): boolean {
+  return /\b(?:product|business|legal|security policy|approval|credential|credentials|secret|external|account|permission|production|deploy|release|live provider|inaccessible|no access|manual device|customer|stakeholder|ux judgment)\b/u
+    .test(reason)
+    || /outside repository evidence/u.test(reason);
+}
+
+function normalizeEvidenceText(value: string): string {
+  return value.toLowerCase().replace(/\s+/gu, ' ').trim();
 }
 
 function evaluateParentRiskRoutingFindings(input: {

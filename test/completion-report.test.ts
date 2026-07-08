@@ -68,7 +68,7 @@ test('detailed scoped completion report read truncates invalid raw content deter
   }
 });
 
-test('scoped completion report accepts structured review handoff for human review', async () => {
+test('scoped completion report accepts review handoff with maintainer-only reasons', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
   const reportPath = join(root, 'report.json');
   await writeFile(
@@ -88,7 +88,11 @@ test('scoped completion report accepts structured review handoff for human revie
         implementedContract: ['Disable event schedules warmup recovery once.'],
         proofByAcceptanceCriteria: ['AC1: unit test covers disabled sender warmup outcome.'],
         reviewFocus: ['Check notification signature and warmup state naming.'],
-        humanReviewChecklist: ['Read src/warmup/recovery.ts and test/warmup/recovery.test.ts.'],
+        agentVerifiedChecks: ['npm test -- warmup passed.'],
+        maintainerOnlyChecks: [{
+          check: 'Approve whether the notification wording matches product tone.',
+          reasonAgentCouldNotVerify: 'Requires product judgment outside repository evidence.',
+        }],
       },
     }),
     'utf8',
@@ -99,7 +103,82 @@ test('scoped completion report accepts structured review handoff for human revie
   if (result.kind === 'valid') {
     assert.equal(result.report.reviewHandoff?.flowUsed, 'small-task-implementer');
     assert.deepEqual(result.report.reviewHandoff?.reviewFocus, ['Check notification signature and warmup state naming.']);
+    assert.deepEqual(result.report.reviewHandoff?.agentVerifiedChecks, ['npm test -- warmup passed.']);
+    assert.deepEqual(result.report.reviewHandoff?.maintainerOnlyChecks, [{
+      check: 'Approve whether the notification wording matches product tone.',
+      reasonAgentCouldNotVerify: 'Requires product judgment outside repository evidence.',
+    }]);
   }
+});
+
+test('scoped completion report rejects maintainer-only checks without agent-verification reason', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['Updated sender disable recovery path.'],
+      validation: [{ command: 'npm test -- warmup', status: 'passed', summary: 'red -> green proof passed' }],
+      proofPlan: defaultProofPlan,
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+      reviewHandoff: {
+        flowUsed: 'small-task-implementer',
+        riskLevel: 'low',
+        implementedContract: ['Disable event schedules warmup recovery once.'],
+        proofByAcceptanceCriteria: ['AC1: unit test covers disabled sender warmup outcome.'],
+        reviewFocus: ['Check notification signature and warmup state naming.'],
+        agentVerifiedChecks: ['npm test -- warmup passed.'],
+        maintainerOnlyChecks: [{
+          check: 'Approve whether the notification wording matches product tone.',
+          reasonAgentCouldNotVerify: '',
+        }],
+      },
+    }),
+    'utf8',
+  );
+
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: reviewHandoff\.maintainerOnlyChecks\[0\]\.reasonAgentCouldNotVerify must be a non-empty string/,
+  );
+});
+
+test('scoped completion report rejects legacy humanReviewChecklist', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-completion-'));
+  const reportPath = join(root, 'report.json');
+  await writeFile(
+    reportPath,
+    JSON.stringify({
+      status: 'completed',
+      changes: ['Updated sender disable recovery path.'],
+      validation: [{ command: 'npm test -- warmup', status: 'passed', summary: 'red -> green proof passed' }],
+      proofPlan: defaultProofPlan,
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+      reviewHandoff: {
+        flowUsed: 'small-task-implementer',
+        riskLevel: 'low',
+        implementedContract: ['Disable event schedules warmup recovery once.'],
+        proofByAcceptanceCriteria: ['AC1: unit test covers disabled sender warmup outcome.'],
+        reviewFocus: ['Check notification signature and warmup state naming.'],
+        agentVerifiedChecks: ['npm test -- warmup passed.'],
+        maintainerOnlyChecks: [],
+        humanReviewChecklist: ['Run npm run typecheck.'],
+      },
+    }),
+    'utf8',
+  );
+
+  await assert.rejects(
+    readScopedCompletionReport(reportPath),
+    /Invalid scoped completion report: reviewHandoff\.humanReviewChecklist is not supported/,
+  );
 });
 
 test('scoped completion report accepts structured TDD red-green validation evidence', async () => {
