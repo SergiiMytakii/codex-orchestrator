@@ -14,7 +14,7 @@ import {
 } from '../src/runner/acceptance-proof-loop.js';
 import type { AcceptanceProofReport } from '../src/runner/acceptance-proof.js';
 import type { ProofPlan, ScopedCompletionReport } from '../src/runner/completion-report.js';
-import { decideProofRouting } from '../src/runner/review-gate-policy.js';
+import { decideProofRouting } from '../src/runner/proof-routing.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
 import { defaultProofPlan } from './fixtures/reports.js';

@@ -19,7 +19,7 @@ import {
 } from './acceptance-proof.js';
 import type { AcceptanceProofAdapterResult } from './acceptance-proof-loop.js';
 import { browserProofRuntimeEnv } from './browser-proof-contract.js';
-import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './review-gate-policy.js';
+import { runnerVisualProofPolicy, shouldApplyVisualProofGate } from './proof-routing.js';
 
 interface ScreenshotArtifactSnapshot {
   path: string;
