@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  classifyIssueWorkflow,
   createRunner,
   dailyPhase,
   fingerprintCandidate,
@@ -72,6 +73,29 @@ const validFinding = {
 
 test('local boundary expects runner exports before implementation', () => {
   assert.equal(typeof createRunner, 'function');
+});
+
+test('issue workflow classification centralizes code, blocking, and review eligibility rules', () => {
+  const classify = (issue) => classifyIssueWorkflow(issue);
+
+  assert.deepEqual(classify({ labels: [{ name: 'self-improvement' }, { name: 'agent:auto' }] }), {
+    labels: ['self-improvement', 'agent:auto'],
+    isSelfImprovement: true,
+    isCodeIssue: true,
+    hasBlockingWorkflowState: false,
+    isBlockedWorkflowState: false,
+    isReviewEligible: false,
+  });
+
+  assert.equal(classify({ labels: ['self-improvement', 'agent:review'] }).isReviewEligible, true);
+  assert.equal(classify({
+    labels: ['self-improvement'],
+    state: 'OPEN',
+    closedByPullRequestsReferences: [{ number: 22 }],
+  }).isReviewEligible, true);
+  assert.equal(classify({ labels: ['self-improvement', 'agent:running', 'agent:review'] }).isReviewEligible, false);
+  assert.equal(classify({ labels: ['self-improvement', 'agent:blocked', 'agent:auto'] }).isBlockedWorkflowState, true);
+  assert.equal(classify({ labels: ['agent:auto'] }).isCodeIssue, false);
 });
 
 test('daily phase helper classifies failures and renders summary details', () => {

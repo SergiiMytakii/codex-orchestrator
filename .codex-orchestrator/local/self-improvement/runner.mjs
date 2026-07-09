@@ -201,28 +201,23 @@ function labelsOf(issue) {
   return (issue.labels ?? []).map((label) => typeof label === 'string' ? label : label.name).filter(Boolean);
 }
 
-function isReviewEligible(issue) {
+export function classifyIssueWorkflow(issue) {
   const labels = labelsOf(issue);
-  if (!labels.includes('self-improvement')) return false;
-  if (labels.includes('agent:running') || labels.includes('agent:blocked')) return false;
-  if (labels.includes('agent:review')) return true;
-  if (issue.state === 'CLOSED' && Array.isArray(issue.closedByPullRequestsReferences) && issue.closedByPullRequestsReferences.length > 0) return true;
-  if (Array.isArray(issue.closedByPullRequestsReferences) && issue.closedByPullRequestsReferences.length > 0) return true;
-  return false;
-}
-
-function isSelfImprovementCodeIssue(issue) {
-  const labels = labelsOf(issue);
-  return labels.includes('self-improvement') && labels.includes('agent:auto');
-}
-
-function hasBlockingWorkflowState(issue) {
-  const labels = labelsOf(issue);
-  return labels.includes('agent:running') || labels.includes('agent:blocked');
-}
-
-function isBlockedWorkflowState(issue) {
-  return labelsOf(issue).includes('agent:blocked');
+  const isSelfImprovement = labels.includes('self-improvement');
+  const hasBlockingWorkflowState = labels.includes('agent:running') || labels.includes('agent:blocked');
+  const closedByPullRequestsReferences = Array.isArray(issue.closedByPullRequestsReferences)
+    ? issue.closedByPullRequestsReferences
+    : [];
+  return {
+    labels,
+    isSelfImprovement,
+    isCodeIssue: isSelfImprovement && labels.includes('agent:auto'),
+    hasBlockingWorkflowState,
+    isBlockedWorkflowState: labels.includes('agent:blocked'),
+    isReviewEligible: isSelfImprovement
+      && !hasBlockingWorkflowState
+      && (labels.includes('agent:review') || closedByPullRequestsReferences.length > 0),
+  };
 }
 
 function renderDiscoveryIssue(candidate, fingerprint, date) {
@@ -527,9 +522,9 @@ export function createRunner(options = {}) {
       state: 'open',
       search: `self-improvement-runner-id:${RUNNER_ID} in:body`,
     });
-    const active = activeIssues.find(isSelfImprovementCodeIssue);
+    const active = activeIssues.find((issue) => classifyIssueWorkflow(issue).isCodeIssue);
     if (active) {
-      return { status: 'existing', issueNumber: active.number, issue: active };
+      return { status: 'existing', issueNumber: active.number, issue: active, classification: classifyIssueWorkflow(active) };
     }
 
     const date = now().toISOString().slice(0, 10);
@@ -537,12 +532,13 @@ export function createRunner(options = {}) {
       state: 'all',
       search: `self-improvement-runner-id:${RUNNER_ID} source-date:${date} in:body`,
     });
-    const todays = todaysIssues.find(isSelfImprovementCodeIssue);
+    const todays = todaysIssues.find((issue) => classifyIssueWorkflow(issue).isCodeIssue);
     if (todays) {
       return {
         status: 'daily-limit',
         issueNumber: todays.number,
         issue: todays,
+        classification: classifyIssueWorkflow(todays),
         reason: `self-improvement issue already created today: #${todays.number}`,
       };
     }
@@ -682,9 +678,9 @@ export function createRunner(options = {}) {
     const eligible = [];
     for (const summary of sourceSummaries) {
       if (eligible.length >= limit) break;
-      if (labelsOf(summary).includes('agent:running') || labelsOf(summary).includes('agent:blocked')) continue;
+      if (classifyIssueWorkflow(summary).hasBlockingWorkflowState) continue;
       const issue = await viewIssue(summary.number);
-      if (isReviewEligible(issue)) eligible.push(issue);
+      if (classifyIssueWorkflow(issue).isReviewEligible) eligible.push(issue);
     }
     return eligible;
   }
@@ -750,12 +746,13 @@ export function createRunner(options = {}) {
       }
 
       let implementation = { status: 'skipped', reason: 'discovery did not produce an issue number' };
+      const selectionClassification = selection.classification ?? (selection.issue ? classifyIssueWorkflow(selection.issue) : null);
       if (selection.status === 'daily-limit' && selection.issue?.state !== 'OPEN') {
         implementation = { status: 'skipped', reason: selection.reason, issueNumber };
-      } else if (selection.issue && isBlockedWorkflowState(selection.issue)) {
-        implementation = { status: 'blocked', reason: `existing issue has blocking workflow state: ${labelsOf(selection.issue).join(', ')}`, issueNumber };
-      } else if (selection.issue && hasBlockingWorkflowState(selection.issue)) {
-        implementation = { status: 'skipped', reason: `existing issue has blocking workflow state: ${labelsOf(selection.issue).join(', ')}`, issueNumber };
+      } else if (selectionClassification?.isBlockedWorkflowState) {
+        implementation = { status: 'blocked', reason: `existing issue has blocking workflow state: ${selectionClassification.labels.join(', ')}`, issueNumber };
+      } else if (selectionClassification?.hasBlockingWorkflowState) {
+        implementation = { status: 'skipped', reason: `existing issue has blocking workflow state: ${selectionClassification.labels.join(', ')}`, issueNumber };
       } else if (issueNumber) {
         implementation = await implement({ issue: issueNumber });
       }
