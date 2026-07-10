@@ -641,22 +641,10 @@ export function createRunner(options = {}) {
   }
 
   async function listReviewSources() {
-    const result = await exec('gh', [
-      'issue',
-      'list',
-      '--repo',
-      REPO,
-      '--state',
-      'all',
-      '--limit',
-      '100',
-      '--search',
-      `self-improvement-runner-id:${RUNNER_ID} in:body`,
-      '--json',
-      'number,title,state,url,labels',
-    ], { cwd });
-    if (result.code !== 0) throw new Error(`review source list failed: ${summarizeOutput(result)}`);
-    return parseJson(result.stdout).slice(0, 100);
+    return listSelfImprovementIssues({
+      state: 'all',
+      search: `self-improvement-runner-id:${RUNNER_ID} in:body`,
+    });
   }
 
   async function viewIssue(number) {
