@@ -773,6 +773,24 @@ test('selectReviewSources loads at most five eligible sources and skips running 
   }
 });
 
+test('selectReviewSources reuses shared self-improvement issue lookup parsing', async () => {
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) {
+        return { code: 0, stdout: JSON.stringify({ items: [] }) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    assert.deepEqual(await runner.selectReviewSources(), []);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'view'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('shared preflight failure stops daily mutation phases', async () => {
   const exec = makeExecStub({
     [commandKey('gh', ['repo', 'view', 'SergiiMytakii/codex-orchestrator', '--json', 'nameWithOwner'])]: {
