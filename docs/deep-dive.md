@@ -227,6 +227,14 @@ For repositories with existing lint debt, `checksPolicy.lintBaseline.mode` can
 be set to `touched-only`. In that mode, a repo-wide lint failure can be
 downgraded when a separate touched-files lint command passes.
 
+In scoped child publishability, failed configured checks are recorded as
+residual-risk warnings instead of blocking publication when the completion
+report already carries the agent's focused validation and proof evidence. This
+keeps unrelated repo-wide baseline failures visible without making small scoped
+work brittle. Failed validation that the agent reports as its own proof still
+blocks publication, and parent integration configured checks can still block the
+parent handoff.
+
 ## Review Gates
 
 Review gates are runner-enforced checks that decide whether a result can be
@@ -529,7 +537,8 @@ It includes:
 
 Bounded rework is limited to machine-checkable blockers such as missing or
 invalid completion reports, incomplete progress after an exact idle timeout, no
-changed files, failed configured checks, or missing quality-gate evidence.
+changed files, parent integration configured-check failures, or missing
+quality-gate evidence.
 `ReworkDecision` classifies each blocked attempt as `retry`, `exhausted`, or
 `hard-block` from typed `RunnerBlocker` evidence. Legacy reason strings still go
 through one compatibility adapter, but runner-owned gates should emit typed

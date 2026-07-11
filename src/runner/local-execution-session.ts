@@ -426,14 +426,18 @@ export async function runImplementationPublishabilityCheck(
     }
   }
 
-  const failedValidation = validation.filter((line) => line.status === 'failed' && !isStructuredTddRedEvidence(line));
-  if (failedValidation.length > 0) {
-    residualRisks.push('One or more configured checks failed.');
+  const isFailedValidation = (line: RunnerValidationLine) =>
+    line.status === 'failed' && !isStructuredTddRedEvidence(line);
+  const failedReportValidation = validation
+    .slice(0, validationBeforeChecks)
+    .filter(isFailedValidation);
+  if (failedReportValidation.length > 0) {
+    residualRisks.push('One or more reported validation checks failed.');
     return {
       status: 'blocked',
       reasons: [
-        'One or more configured checks failed.',
-        ...failedValidation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
+        'One or more reported validation checks failed.',
+        ...failedReportValidation.map((line) => `${line.command}: ${line.status} - ${line.summary}`),
       ],
       changedFiles,
       validation,
@@ -442,6 +446,17 @@ export async function runImplementationPublishabilityCheck(
       commits: changeSet.commits,
       acceptanceProofAttempt,
       ...repairAttemptsField(repairAttempts),
+    };
+  }
+  const failedConfiguredCheckWarnings = validation
+    .slice(validationBeforeChecks)
+    .filter(isFailedValidation)
+    .map((line) => `Configured check warning: ${line.command} - ${line.summary}`);
+  if (failedConfiguredCheckWarnings.length > 0) {
+    residualRisks.push(...failedConfiguredCheckWarnings);
+    report = {
+      ...report,
+      residualRisks: [...report.residualRisks, ...failedConfiguredCheckWarnings],
     };
   }
 

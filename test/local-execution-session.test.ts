@@ -103,7 +103,7 @@ test('implementation publishability returns publish-ready evidence and commits o
   assert.match(result.status === 'publish-ready' ? result.commits[0]?.subject ?? '' : '', /Codex: implement issue #155/);
 });
 
-test('implementation publishability blocks failed configured checks before publication', async () => {
+test('implementation publishability records failed configured checks as warnings before publication', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
   const beforeHead = await git.getHead(repo);
@@ -125,10 +125,10 @@ test('implementation publishability blocks failed configured checks before publi
     commitMessage: 'Codex: implement issue #155',
   });
 
-  assert.equal(result.status, 'blocked');
-  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /One or more configured checks failed/);
-  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /test failed/);
-  assert.equal(await git.isWorktreeClean(repo), false);
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\n') : '', /Configured check warning/i);
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\n') : '', /test failed/);
+  assert.equal(await git.isWorktreeClean(repo), true);
 });
 
 test('implementation publishability retries exact idle timeout after safe local progress without report', async () => {
@@ -352,7 +352,7 @@ test('implementation publishability repairs invalid completion report JSON for s
   assert.match(prompts[0] ?? '', /\{ invalid json/);
 });
 
-test('implementation publishability preserves completion report repair evidence when rerun gates block', async () => {
+test('implementation publishability preserves completion report repair evidence when rerun checks warn', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
   const beforeHead = await git.getHead(repo);
@@ -385,9 +385,10 @@ test('implementation publishability preserves completion report repair evidence 
     },
   });
 
-  assert.equal(result.status, 'blocked');
-  assert.match(result.status === 'blocked' ? result.reasons.join('\n') : '', /One or more configured checks failed/);
-  assert.deepEqual(result.status === 'blocked' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['completion-report']);
+  assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\n') : '', /Configured check warning/);
+  assert.match(result.status === 'publish-ready' ? result.residualRisks.join('\n') : '', /test failed after repair/);
+  assert.deepEqual(result.status === 'publish-ready' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['completion-report']);
 });
 
 test('implementation publishability does not repair missing report when no files changed', async () => {
