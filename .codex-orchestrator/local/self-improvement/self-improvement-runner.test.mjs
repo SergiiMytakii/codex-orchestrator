@@ -409,6 +409,36 @@ test('publication helper owns marker reuse, body files, labels, and result shape
   }
 });
 
+test('self-improvement issue lookup owns runner-id body searches and list shape', async () => {
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ number: 45 }]) };
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const issues = await runner.listSelfImprovementIssues({ state: 'all', bodyTerms: ['source-date:2026-05-20'] });
+    assert.deepEqual(issues, [{ number: 45 }]);
+    assert.deepEqual(exec.calls[0].args, [
+      'issue',
+      'list',
+      '--repo',
+      'SergiiMytakii/codex-orchestrator',
+      '--state',
+      'all',
+      '--limit',
+      '100',
+      '--search',
+      'self-improvement-runner-id:codex-orchestrator-local-self-improvement source-date:2026-05-20 in:body',
+      '--json',
+      'number,title,state,url,labels',
+    ]);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('discovery reuses existing marker match and does not create a duplicate issue', async () => {
   const exec = makeExecStub({
     '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
