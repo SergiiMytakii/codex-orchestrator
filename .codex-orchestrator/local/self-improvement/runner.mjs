@@ -18,6 +18,9 @@ const RUNNER_ID = 'codex-orchestrator-local-self-improvement';
 const DEFAULT_CWD = '/Users/serhiimytakii/Projects/codex-orchestrator';
 const CODEX_COMMAND = '/Applications/Codex.app/Contents/Resources/codex';
 const STALE_LOCK_MS = 12 * 60 * 60 * 1000;
+const ISSUE_LIST_LIMIT = 100;
+const ISSUE_LIST_JSON_FIELDS = 'number,title,state,url,labels';
+const RUNNER_ID_MARKER = `self-improvement-runner-id:${RUNNER_ID}`;
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -477,27 +480,7 @@ export function createRunner(options = {}) {
     }
   }
 
-  async function searchIssueByMarker(marker) {
-    const result = await exec('gh', [
-      'issue',
-      'list',
-      '--repo',
-      REPO,
-      '--state',
-      'all',
-      '--limit',
-      '100',
-      '--search',
-      `${marker} in:body`,
-      '--json',
-      'number,title,state,url,labels',
-    ], { cwd });
-    if (result.code !== 0) throw new Error(`marker search failed: ${summarizeOutput(result)}`);
-    const issues = parseJson(result.stdout);
-    return Array.isArray(issues) && issues.length > 0 ? issues[0] : null;
-  }
-
-  async function listSelfImprovementIssues({ state = 'open', search } = {}) {
+  async function listIssuesByBodySearch({ state = 'open', search, errorPrefix = 'issue list' } = {}) {
     const result = await exec('gh', [
       'issue',
       'list',
@@ -506,21 +489,41 @@ export function createRunner(options = {}) {
       '--state',
       state,
       '--limit',
-      '100',
+      String(ISSUE_LIST_LIMIT),
       '--search',
       search,
       '--json',
-      'number,title,state,url,labels',
+      ISSUE_LIST_JSON_FIELDS,
     ], { cwd });
-    if (result.code !== 0) throw new Error(`self-improvement issue list failed: ${summarizeOutput(result)}`);
+    if (result.code !== 0) throw new Error(`${errorPrefix} failed: ${summarizeOutput(result)}`);
     const issues = parseJson(result.stdout);
-    return Array.isArray(issues) ? issues.slice(0, 100) : [];
+    return Array.isArray(issues) ? issues.slice(0, ISSUE_LIST_LIMIT) : [];
+  }
+
+  function selfImprovementBodySearch(bodyTerms = []) {
+    return [RUNNER_ID_MARKER, ...bodyTerms].filter(Boolean).join(' ').trim() + ' in:body';
+  }
+
+  async function searchIssueByMarker(marker) {
+    const issues = await listIssuesByBodySearch({
+      state: 'all',
+      search: `${marker} in:body`,
+      errorPrefix: 'marker search',
+    });
+    return issues.length > 0 ? issues[0] : null;
+  }
+
+  async function listSelfImprovementIssues({ state = 'open', bodyTerms = [] } = {}) {
+    return listIssuesByBodySearch({
+      state,
+      search: selfImprovementBodySearch(bodyTerms),
+      errorPrefix: 'self-improvement issue list',
+    });
   }
 
   async function selectDailyIssue() {
     const activeIssues = await listSelfImprovementIssues({
       state: 'open',
-      search: `self-improvement-runner-id:${RUNNER_ID} in:body`,
     });
     const active = activeIssues.find((issue) => classifyIssueWorkflow(issue).isCodeIssue);
     if (active) {
@@ -530,7 +533,7 @@ export function createRunner(options = {}) {
     const date = now().toISOString().slice(0, 10);
     const todaysIssues = await listSelfImprovementIssues({
       state: 'all',
-      search: `self-improvement-runner-id:${RUNNER_ID} source-date:${date} in:body`,
+      bodyTerms: [`source-date:${date}`],
     });
     const todays = todaysIssues.find((issue) => classifyIssueWorkflow(issue).isCodeIssue);
     if (todays) {
@@ -643,7 +646,6 @@ export function createRunner(options = {}) {
   async function listReviewSources() {
     return listSelfImprovementIssues({
       state: 'all',
-      search: `self-improvement-runner-id:${RUNNER_ID} in:body`,
     });
   }
 
