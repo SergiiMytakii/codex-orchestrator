@@ -71,13 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.45` (2026-07-07):
-  - Scoped implementation handoffs can carry agent-authored Acceptance Proof
-    plan artifacts.
-  - Proof-plan report validation is covered across scoped runs, plan-auto
-    children, status output, and handoff decisions.
-  - Runner docs and scoped prompts now state the proof-plan/report contract more
-    directly.
+- `0.1.46` (2026-07-13):
+  - Automatic proof routing no longer turns frontend file paths into mandatory
+    browser proof for non-visual refactors.
+  - Validated proof plans remain authoritative through command dispatch and
+    final strict visual review gates.
+  - Self-improvement issues declare an explicit proof strategy based on
+    observable behavior.
 
 ## Final Response
 

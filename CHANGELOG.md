@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.46] - 2026-07-13
+
+### Changed
+- Automatic Acceptance Proof routing now treats issue text and changed paths as
+  applicability hints while the validated proof plan remains authoritative.
+- Self-improvement discovery now emits an explicit proof strategy selected from
+  observable behavior instead of relying on file-location inference.
+
+### Fixed
+- Non-visual frontend refactors no longer require browser screenshots merely
+  because they touch frontend paths.
+- Runner command dispatch and strict legacy visual gates no longer override an
+  accepted non-visual proof plan.
+
 ## [0.1.45] - 2026-07-07
 
 ### Added
