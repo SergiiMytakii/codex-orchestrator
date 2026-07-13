@@ -12,7 +12,7 @@ Codex Orchestrator will support always-adaptive **Acceptance Proof** as a runner
 
 The proof phase becomes an evidence-producing agent workflow, not just a command runner. Proof agents may use full proof-phase shell access and may perform limited Proof Script Repair in allowlisted proof-owned paths, but product code changes must become a Proof Rework Request that the Runner routes back through implementation. If a proof agent changes product code, the Runner blocks that proof result instead of treating it as validation.
 
-The Proof Report must map each relevant acceptance criterion to a status, confidence, reasoning summary, and linked artifacts; a screenshot or smoke output without high-confidence analysis is not sufficient. Non-visual acceptance checks use the same adaptive proof model through Live Smoke Proof, where the agent can create and run a live smoke check and return observable evidence.
+The Proof Report must map each relevant acceptance criterion to a status, confidence, reasoning summary, and linked artifacts; a screenshot or smoke output without high-confidence analysis is not sufficient. Visual plans use runner-owned browser, mobile, or adaptive proof. Accepted non-visual plans use completion-report validation, where passed CLI/API/worker/smoke commands and artifacts must map back to each acceptance criterion without dispatching browser or device proof.
 
 UI proof must satisfy a UI Evidence Contract inside the Proof Report. Screenshot or UI-dump evidence has to identify the exact user workflow, relevant viewport coverage, current artifact freshness, visual layout review, and user-facing copy review; screenshot-only command success is rejected rather than treated as a compatibility pass.
 

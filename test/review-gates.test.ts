@@ -9,7 +9,7 @@ import {
   evaluateReviewGates,
   type ReviewGateInput,
 } from '../src/runner/review-gates.js';
-import type { PlanAutoCompletionReport } from '../src/runner/completion-report.js';
+import type { PlanAutoCompletionReport, ProofPlan } from '../src/runner/completion-report.js';
 import { classifyVisualProofDispatchTarget, decideProofRouting, shouldApplyVisualProofGate } from '../src/runner/proof-routing.js';
 import { validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -22,6 +22,12 @@ const defaultReviewHandoff: NonNullable<ReviewGateInput['report']['reviewHandoff
   proofByAcceptanceCriteria: ['Focused validation covers the acceptance criteria.'],
   reviewFocus: ['Review changed behavior and validation evidence.'],
   humanReviewChecklist: ['Confirm the scoped contract is satisfied.'],
+};
+
+const browserVisualProofPlan: ProofPlan = {
+  ...defaultProofPlan,
+  mode: 'browser-visual',
+  visualTarget: 'browser',
 };
 
 const baseRuntimeGateInput: Omit<ReviewGateInput, 'validation'> = {
@@ -799,7 +805,7 @@ test('review gates accept runner-owned visual proof as UI layout test evidence',
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [{
         type: 'screenshot',
         path: screenshotPath,
@@ -850,7 +856,7 @@ test('review gates warn on failed runner-owned visual proof instead of blocking 
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [{
         type: 'screenshot',
         path: screenshotPath,
@@ -898,7 +904,7 @@ test('review gates warn when no runner-owned visual proof command is configured'
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -945,7 +951,7 @@ test('review gates do not warn about missing screenshot artifacts when proof too
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -992,7 +998,7 @@ test('review gates still warn about missing screenshots when only the proof comm
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -1036,7 +1042,7 @@ test('review gates block missing screenshot proof in strict visual proof mode', 
       status: 'completed',
       changes: ['src/frontend/CampaignList.tsx'],
       validation: [],
-      proofPlan: defaultProofPlan,
+      proofPlan: browserVisualProofPlan,
       artifacts: [],
       skippedChecks: [],
       residualRisks: [],
@@ -1047,4 +1053,40 @@ test('review gates block missing screenshot proof in strict visual proof mode', 
   assert.equal(result.ok, false);
   assert.match(result.reasons.join('\n'), /strict visual proof/i);
   assert.match(result.reasons.join('\n'), /expected at least .* screenshot artifact/i);
+});
+
+test('review gates do not reintroduce strict visual proof after a non-visual plan is accepted', () => {
+  const config = {
+    ...validConfig,
+    reviewGates: {
+      ...validConfig.reviewGates,
+      quality: { ...validConfig.reviewGates.quality, enabled: false },
+      visualProof: {
+        ...validConfig.reviewGates.visualProof,
+        requireWhenDesirable: true,
+      },
+    },
+  };
+
+  const result = evaluateReviewGates({
+    config,
+    issue: issueFixture({ number: 225, title: 'Refactor frontend formatter', body: 'Rendered behavior is unchanged.' }),
+    changedFiles: ['src/frontend/lib/formatter.ts'],
+    validation: [{ command: '$code-review', status: 'passed', summary: 'No blocking findings.' }],
+    skippedChecks: [],
+    report: {
+      status: 'completed',
+      changes: ['src/frontend/lib/formatter.ts'],
+      validation: [],
+      proofPlan: defaultProofPlan,
+      artifacts: [],
+      skippedChecks: [],
+      residualRisks: [],
+      prohibitedActions: [],
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.reasons, []);
+  assert.doesNotMatch(result.warnings.join('\n'), /screenshot|visual proof/iu);
 });

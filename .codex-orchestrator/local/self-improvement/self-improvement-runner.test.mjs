@@ -58,6 +58,7 @@ const validCandidate = {
   solution: 'Move summary construction behind a small helper.',
   benefits: ['Improves locality and testability.'],
   verification: ['node --test test/example.test.ts'],
+  proofStrategy: 'non-visual-smoke',
   risk: 'none',
   adrConflict: 'none',
 };
@@ -219,8 +220,10 @@ test('lock acquisition is exclusive and stale recovery requires same-host dead p
 test('candidate and finding fingerprints are stable sha256 values', () => {
   const first = fingerprintCandidate(validCandidate);
   const second = fingerprintCandidate({ ...validCandidate, benefits: [...validCandidate.benefits] });
+  const reclassified = fingerprintCandidate({ ...validCandidate, proofStrategy: 'browser-visual' });
   assert.match(first, /^[a-f0-9]{64}$/);
   assert.equal(first, second);
+  assert.equal(first, reclassified);
   assert.match(fingerprintFinding(validFinding), /^[a-f0-9]{64}$/);
 });
 
@@ -307,8 +310,10 @@ test('codex JSON invocation fails on nonzero exit without parsing mutation outpu
 });
 
 test('discovery creates exactly one agent:auto self-improvement issue for the first valid candidate', async () => {
+  let discoveryStdin = '';
   const exec = makeExecStub({
     '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+      discoveryStdin = options.stdin;
       await writeFile(options.reportPath, JSON.stringify({
         status: 'completed',
         candidates: [validCandidate, { ...validCandidate, title: 'Second candidate' }],
@@ -327,6 +332,8 @@ test('discovery creates exactly one agent:auto self-improvement issue for the fi
     const result = await runner.discover({ preflight: false });
     assert.equal(result.status, 'created');
     assert.equal(result.issueNumber, 77);
+    assert.match(discoveryStdin, /Each candidate must include proofStrategy with exactly one explicit value/);
+    assert.match(discoveryStdin, /Choose the strategy from observable behavior, not from file location/);
     const createCalls = exec.calls.filter((call) => call.args[0] === 'issue' && call.args[1] === 'create');
     assert.equal(createCalls.length, 1);
     assert.deepEqual(createCalls[0].args.filter((arg) => arg === '--label' || arg === 'agent:auto' || arg === 'self-improvement'), [
@@ -337,6 +344,7 @@ test('discovery creates exactly one agent:auto self-improvement issue for the fi
     ]);
     const bodyPath = createCalls[0].args.at(createCalls[0].args.indexOf('--body-file') + 1);
     const body = await readFile(bodyPath, 'utf8');
+    assert.match(body, /Proof Strategy: non-visual-smoke/);
     assert.match(body, /self-improvement-runner-id:codex-orchestrator-local-self-improvement/);
     assert.match(body, /source-candidate-fingerprint:/);
     assert.match(body, /## codex-orchestrator metadata/);
@@ -464,8 +472,16 @@ test('discovery reuses existing marker match and does not create a duplicate iss
 });
 
 test('invalid discovery report creates no issue', () => {
-  const result = validateDiscoveryReport({ status: 'completed', candidates: [{ ...validCandidate, verification: [] }] });
-  assert.equal(result.ok, false);
+  const invalidCandidates = [
+    { ...validCandidate, verification: [] },
+    { ...validCandidate, proofStrategy: undefined },
+    { ...validCandidate, proofStrategy: 'auto' },
+  ];
+
+  for (const candidate of invalidCandidates) {
+    const result = validateDiscoveryReport({ status: 'completed', candidates: [candidate] });
+    assert.equal(result.ok, false);
+  }
 });
 
 test('implement command builds then runs targeted issue and never calls daemon', async () => {

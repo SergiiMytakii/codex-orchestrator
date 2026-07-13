@@ -89,6 +89,7 @@ export async function runRunnerVisualProofAdapter(
       [browserProofRuntimeEnv.playwrightProfileDir]: playwrightProfileDir,
       CODEX_ORCHESTRATOR_WORKTREE_PATH: input.worktreePath,
       CODEX_ORCHESTRATOR_CHANGED_FILES: input.changedFiles.join('\n'),
+      CODEX_ORCHESTRATOR_PROOF_MODE: input.report.proofPlan.mode,
       [browserProofRuntimeEnv.playwrightBrowsersPath]: playwrightBrowsersDir,
       [browserProofRuntimeEnv.browserCacheDir]: playwrightBrowsersDir,
       CODEX_ORCHESTRATOR_ISSUE_TITLE: input.issue.title,

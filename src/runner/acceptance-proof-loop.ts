@@ -11,13 +11,11 @@ import {
   readAcceptanceProofReport,
   type AcceptanceProofAttemptEvidence,
 } from './acceptance-proof.js';
-import { resolveAcceptanceProofStrategy } from './proof-strategy.js';
+import { resolveAcceptanceProofRequirement, resolveAcceptanceProofStrategy } from './proof-strategy.js';
 import {
   acceptanceProofApplies,
-  changedFilesVisualDispatchTarget,
   isNonVisualProofMode,
   proofPlanDispatchTarget,
-  proofStrategyDispatchTarget,
   runnerVisualProofPolicy,
   visualProofDesirable,
   visualStrategyDowngradeBlocker,
@@ -201,38 +199,34 @@ export function validateProofPlan(input: {
   implementationReport: ScopedCompletionReport;
 }): ProofPlanValidationResult {
   const proofPlan = input.implementationReport.proofPlan;
-  const proofStrategy = resolveAcceptanceProofStrategy({ config: input.config, issue: input.issue }).strategy;
+  const proofRequirement = resolveAcceptanceProofRequirement({ config: input.config, issue: input.issue }).mode;
   const dispatchTarget = proofPlanDispatchTarget(proofPlan);
-  const inferredDispatchTarget = proofStrategyDispatchTarget(input, proofStrategy);
-  const changedFilesVisualTarget = changedFilesVisualDispatchTarget(input);
 
-  if (proofStrategy === 'mobile-visual' && proofPlan.mode !== 'mobile-visual') {
-    return { ok: false, blocker: visualStrategyDowngradeBlocker('mobile'), retryable: true };
-  }
-  if (proofStrategy === 'browser-visual' && proofPlan.mode !== 'browser-visual') {
-    return { ok: false, blocker: visualStrategyDowngradeBlocker('browser'), retryable: true };
-  }
-  if (proofStrategy === 'visual' && dispatchTarget === 'none') {
-    return { ok: false, blocker: 'Invalid proofPlan: non-visual proof cannot satisfy visual strategy', retryable: true };
-  }
-  if (proofStrategy === 'non-visual-smoke' && (proofPlan.mode === 'browser-visual' || proofPlan.mode === 'mobile-visual')) {
-    return { ok: false, blocker: 'Invalid proofPlan: visual proof cannot satisfy non-visual proof strategy', retryable: true };
-  }
-  if (
-    isNonVisualProofMode(proofPlan.mode)
-    && (inferredDispatchTarget !== 'none' || changedFilesVisualTarget !== 'none')
-  ) {
-    const visualTarget = inferredDispatchTarget !== 'none' ? inferredDispatchTarget : changedFilesVisualTarget;
-    if (visualTarget === 'none') {
-      throw new Error('Expected visual proof target for non-visual proof plan downgrade.');
-    }
+  if (proofRequirement === 'none' && proofPlan.mode !== 'none') {
     return {
       ok: false,
-      blocker: visualStrategyDowngradeBlocker(visualTarget),
+      blocker: 'Invalid proofPlan: proof strategy none requires proofPlan mode none',
       retryable: true,
     };
   }
-
+  if (proofRequirement === 'non-visual-smoke' && !isNonVisualProofMode(proofPlan.mode)) {
+    return {
+      ok: false,
+      blocker: proofPlan.mode === 'none'
+        ? 'Invalid proofPlan: proof strategy non-visual-smoke requires non-visual proof evidence'
+        : 'Invalid proofPlan: visual proof cannot satisfy non-visual proof strategy',
+      retryable: true,
+    };
+  }
+  if (proofRequirement === 'mobile-visual' && proofPlan.mode !== 'mobile-visual') {
+    return { ok: false, blocker: visualStrategyDowngradeBlocker('mobile'), retryable: true };
+  }
+  if (proofRequirement === 'browser-visual' && proofPlan.mode !== 'browser-visual') {
+    return { ok: false, blocker: visualStrategyDowngradeBlocker('browser'), retryable: true };
+  }
+  if (proofRequirement === 'visual' && dispatchTarget === 'none') {
+    return { ok: false, blocker: 'Invalid proofPlan: non-visual proof cannot satisfy visual strategy', retryable: true };
+  }
   return {
     ok: true,
     proofPlan,

@@ -18,6 +18,35 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
   const routing = decideProofRouting({ config, issue, changedFiles: [] });
   const issueNumber = issue.number;
   const strategyLines = proofStrategyPromptLines(proofStrategy);
+  if (proofStrategy.strategy === 'auto') {
+    const autoLines = [
+      ...strategyLines,
+      'Path and issue-text matches make Acceptance Proof applicable but do not select its proof mode.',
+      'Choose the narrowest proofPlan mode from the acceptance behavior: use browser/mobile visual proof only for rendered or device-visible behavior, and use CLI/API/worker/non-visual smoke evidence for non-visual behavior.',
+      `Save any proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and map proofPlan.validationCommands or proofPlan.requiredArtifacts to the concrete evidence.`,
+      'Do not create browser/mobile routing markers, placeholder UI files, screenshot scenarios, or visual-proof shims merely because changed files live in a frontend or mobile directory.',
+    ];
+    if (!command) {
+      return [
+        ...autoLines,
+        'If proofPlan selects browser-visual or mobile-visual, prepare the corresponding Proof Report uiEvidence contract and runner-owned browser or device proof inputs.',
+        'For browser visual proof, prefer a Playwright-based proof script; for mobile visual proof, use runner-owned device-backed proof.',
+        ...androidMobileProofPromptLines(),
+        ...iosMobileProofPromptLines(),
+      ];
+    }
+    return [
+      ...autoLines,
+      ...runnerOwnedVisualProofCommandPromptLines({
+        acceptanceProof,
+        artifactDir: policy.artifactDir,
+        command,
+        envNames: policy.envPassthrough,
+        issueNumber,
+        conditional: true,
+      }),
+    ];
+  }
   if (routing.proofStrategy === 'non-visual-smoke') {
     return [
       ...strategyLines,
@@ -54,17 +83,41 @@ export function buildVisualProofPromptLines(config: CodexOrchestratorConfig, iss
     ];
   }
 
-  const envNames = policy.envPassthrough;
-  const loginEnvLine = envNames.length > 0
-    ? `The runner acceptance proof command will receive these project environment variables when they exist: ${envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
+  return [
+    ...strategyLines,
+    ...runnerOwnedVisualProofCommandPromptLines({
+      acceptanceProof,
+      artifactDir: policy.artifactDir,
+      command,
+      envNames: policy.envPassthrough,
+      issueNumber,
+      conditional: false,
+    }),
+  ];
+}
+
+function runnerOwnedVisualProofCommandPromptLines(input: {
+  acceptanceProof: CodexOrchestratorConfig['reviewGates']['acceptanceProof'];
+  artifactDir: string;
+  command: string;
+  envNames: string[];
+  issueNumber: number;
+  conditional: boolean;
+}): string[] {
+  const executionLine = input.conditional
+    ? `If proofPlan selects browser-visual or mobile-visual, the runner will execute this configured acceptance proof command outside the child Codex sandbox: ${input.command}.`
+    : `After your run, the runner will execute this visual proof command outside the child Codex sandbox as the configured acceptance proof command: ${input.command}.`;
+  const loginEnvLine = input.envNames.length > 0
+    ? `The runner acceptance proof command will receive these project environment variables when they exist: ${input.envNames.join(', ')}. Use them for login if authentication is required; never hardcode credentials.`
     : 'If authentication is required, make the acceptance proof script read credentials from environment variables configured in reviewGates.acceptanceProof.envPassthrough; never hardcode credentials.';
 
   return [
-    ...strategyLines,
-    `For acceptance proof, prepare proof artifacts under ${policy.artifactDir}/issue-${issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts when you create them.`,
-    `After your run, the runner will execute this visual proof command outside the child Codex sandbox as the configured acceptance proof command: ${command}.`,
-    'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
-    `Proof script repair is allowed only in these proof-owned paths: ${acceptanceProof.proofOwnedPathGlobs.join(', ')}.`,
+    `For acceptance proof, prepare proof artifacts under ${input.artifactDir}/issue-${input.issueNumber}/ and include them as screenshot, ui-dump, log, smoke-output, or other artifacts when you create them.`,
+    executionLine,
+    input.conditional
+      ? 'Prepare runner-owned browser or mobile proof inputs only when the selected proofPlan is visual; otherwise map concrete non-visual evidence in the completion report.'
+      : 'Prepare any project files this command needs, but do not execute this runner-owned command yourself or start long-lived browser/dev-server proof loops from child Codex.',
+    `Proof script repair is allowed only in these proof-owned paths: ${input.acceptanceProof.proofOwnedPathGlobs.join(', ')}.`,
     'Product-code changes made during the proof phase are blockers; route missing behavior back through implementation instead.',
     'Every required acceptance criterion must map to high-confidence artifact evidence before Draft PR Handoff.',
     'For visual/UI work, screenshots and UI dumps require a Proof Report uiEvidence contract with workflowScope, viewportCoverage, artifactFreshness, layoutReview, copyReview, and sourceInputs.',

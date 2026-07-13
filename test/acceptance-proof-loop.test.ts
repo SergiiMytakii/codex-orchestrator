@@ -221,6 +221,39 @@ test('acceptance proof planning uses report validation for non-visual proof plan
   });
 });
 
+test('auto proof strategy accepts CLI evidence for a non-visual frontend refactor', () => {
+  const plan = planAcceptanceProofAttempt({
+    config: validConfig,
+    issue: issueFixture({
+      number: 225,
+      title: 'Centralize announcement API error formatting',
+      body: [
+        'Three frontend modules duplicate error-envelope parsing.',
+        'Acceptance criteria:',
+        '- Move the parser into the announcement API module without changing rendered behavior.',
+        '- Run focused formatter tests and architecture checks.',
+      ].join('\n'),
+    }),
+    changedFiles: [
+      'src/frontend/lib/announcements-api.ts',
+      'src/frontend/lib/announcements-api.spec.ts',
+      'src/frontend/components/announcements/ActiveAnnouncementModal.tsx',
+    ],
+    adaptiveAdapterAvailable: false,
+    implementationReport: implementationReport({
+      ...defaultProofPlan,
+      mode: 'cli',
+      reason: 'Focused formatter tests prove behavior parity without a rendered UI change.',
+    }),
+  });
+
+  assertPlan(plan, {
+    kind: 'report-validation',
+    applies: true,
+    reason: 'agent-authored non-visual proof plan accepted',
+  });
+});
+
 test('proof plan validation rejects visual strategy downgrades', () => {
   const result = validateProofPlan({
     config: validConfig,
@@ -240,7 +273,44 @@ test('proof plan validation rejects visual strategy downgrades', () => {
   });
 });
 
-test('proof plan validation rejects explicit non-visual strategy for visual changed paths', () => {
+test('explicit proof requirements enforce the complete mode matrix', () => {
+  const cases: Array<{
+    requirement: 'none' | 'non-visual-smoke' | 'visual' | 'browser-visual' | 'mobile-visual';
+    mode: ProofPlan['mode'];
+    ok: boolean;
+  }> = [
+    { requirement: 'none', mode: 'none', ok: true },
+    { requirement: 'none', mode: 'cli', ok: false },
+    { requirement: 'non-visual-smoke', mode: 'cli', ok: true },
+    { requirement: 'non-visual-smoke', mode: 'none', ok: false },
+    { requirement: 'non-visual-smoke', mode: 'browser-visual', ok: false },
+    { requirement: 'visual', mode: 'browser-visual', ok: true },
+    { requirement: 'visual', mode: 'mobile-visual', ok: true },
+    { requirement: 'visual', mode: 'worker', ok: false },
+    { requirement: 'browser-visual', mode: 'browser-visual', ok: true },
+    { requirement: 'browser-visual', mode: 'mobile-visual', ok: false },
+    { requirement: 'mobile-visual', mode: 'mobile-visual', ok: true },
+    { requirement: 'mobile-visual', mode: 'api', ok: false },
+  ];
+
+  for (const [index, testCase] of cases.entries()) {
+    const proofPlan: ProofPlan = {
+      ...defaultProofPlan,
+      mode: testCase.mode,
+      validationCommands: testCase.mode === 'none' ? [] : defaultProofPlan.validationCommands,
+    };
+    const result = validateProofPlan({
+      config: validConfig,
+      issue: issueFixture({ number: 700 + index, body: `Proof Strategy: ${testCase.requirement}` }),
+      changedFiles: ['src/backend/service.ts'],
+      implementationReport: implementationReport(proofPlan),
+    });
+
+    assert.equal(result.ok, testCase.ok, `${testCase.requirement} with ${testCase.mode}`);
+  }
+});
+
+test('explicit non-visual proof requirement overrides visual changed-path hints', () => {
   const frontend = validateProofPlan({
     config: validConfig,
     issue: issueFixture({
@@ -262,16 +332,15 @@ test('proof plan validation rejects explicit non-visual strategy for visual chan
     implementationReport: implementationReport(defaultProofPlan),
   });
 
-  assert.deepEqual(frontend, {
-    ok: false,
-    blocker: 'Invalid proofPlan: non-visual proof cannot satisfy browser visual strategy',
-    retryable: true,
-  });
-  assert.deepEqual(mobile, {
-    ok: false,
-    blocker: 'Invalid proofPlan: non-visual proof cannot satisfy mobile visual strategy',
-    retryable: true,
-  });
+  for (const result of [frontend, mobile]) {
+    assert.deepEqual(result, {
+      ok: true,
+      proofPlan: defaultProofPlan,
+      proofMode: 'non-visual-smoke',
+      dispatchTarget: 'none',
+      reason: 'proofPlan mode non-visual-smoke accepted',
+    });
+  }
 });
 
 test('review-gate routing delegates to acceptance proof planning semantics', () => {

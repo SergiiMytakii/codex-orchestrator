@@ -1204,10 +1204,10 @@ test('implementation publishability accepts non-visual proof plan from the compl
   const beforeHead = await git.getHead(repo);
   const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
 
-  await mkdir(join(repo, 'src', 'runner'), { recursive: true });
-  await writeFile(join(repo, 'src', 'runner', 'feature.ts'), 'export const feature = true;\n', 'utf8');
+  await mkdir(join(repo, 'src', 'frontend', 'lib'), { recursive: true });
+  await writeFile(join(repo, 'src', 'frontend', 'lib', 'feature.ts'), 'export const feature = true;\n', 'utf8');
   await writeScopedReport(reportPath, {
-    changes: ['src/runner/feature.ts'],
+    changes: ['src/frontend/lib/feature.ts'],
     validation: [
       {
         command: 'TDD red-to-green',
@@ -1243,23 +1243,24 @@ test('implementation publishability accepts non-visual proof plan from the compl
       reviewGates: {
         quality: { tdd: { requireTestChange: false }, cleanupReview: { enabled: false } },
         acceptanceProof: {
-          proofStrategy: 'non-visual-smoke',
-          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue 1210',
+          proofStrategy: 'auto',
+          runnerValidationCommand: 'codex-orchestrator visual-proof auto --issue 225',
           issueTextPatterns: ['Acceptance criteria'],
           changedPathGlobs: ['src/**'],
           proofOwnedPathGlobs: ['.codex-orchestrator/proofs/**'],
         },
         visualProof: {
-          runnerValidationCommand: 'codex-orchestrator visual-proof mobile --issue 1210',
+          runnerValidationCommand: 'codex-orchestrator visual-proof auto --issue 225',
           issueTextPatterns: ['Acceptance criteria'],
-          changedPathGlobs: ['app/**'],
+          changedPathGlobs: ['src/frontend/**'],
+          requireWhenDesirable: true,
         },
       } as any,
     } as Partial<CodexOrchestratorConfig>),
     issue: issueFixture({
-      number: 1210,
-      title: 'Stop requiring visual proof for non-visual runner work',
-      body: ['Acceptance criteria:', '- Non-visual proof is accepted from the agent-authored proof plan.'].join('\n'),
+      number: 225,
+      title: 'Centralize frontend formatter behavior',
+      body: ['Acceptance criteria:', '- Refactor formatting without changing rendered behavior.'].join('\n'),
     }),
     worktreePath: repo,
     reportPath,
@@ -1273,7 +1274,7 @@ test('implementation publishability accepts non-visual proof plan from the compl
       }
       return { stdout: 'ok', stderr: '', exitCode: 0 };
     },
-    commitMessage: 'Codex: implement issue #1210',
+    commitMessage: 'Codex: implement issue #225',
   });
 
   assert.equal(result.status, 'publish-ready', result.status === 'blocked' ? result.reasons.join('\n') : undefined);
