@@ -7,6 +7,15 @@ small, evidence-backed, and scoped to a repeatable package pattern.
 
 ## Active Lessons
 
+## 2026-07-10 - Use compiled `dist/test` commands for targeted package tests
+
+Scope: tests
+Evidence: `docs/plans/2026-07-03/1219-plan-auto-tree-recovery-resume.md` still suggests targeted commands like `npm test -- test/plan-auto-command.test.ts`, while `.codex-orchestrator/state/summaries/issue-1215-issue-1215-20260708060355.json` records that source `.ts` paths passed to `npm test -- ...` failed with `ERR_MODULE_NOT_FOUND` and the compiled `npm run build --silent && node --test dist/test/...` equivalent passed.
+Lesson: When you need a focused package test in this repo, do not assume `npm test -- test/<name>.test.ts` will work. The package test flow runs built `dist/test/*.js` files, so targeted verification should usually use the compiled `node --test dist/test/<name>.test.js` form after a build, while `npm test` remains the safe full-suite command.
+Use when: A plan, prompt, or local debugging step asks for one or a few targeted package tests under `test/`.
+Do not use when: The task is the full suite, local self-improvement `.mjs` tests under `.codex-orchestrator/local/`, or a command already proven against the current package test script.
+Review after: 2026-08-10
+
 ## 2026-07-03 - Separate tracked self-improvement sources from ignored local outputs
 
 Scope: agent workflow
