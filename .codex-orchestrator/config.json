@@ -54,7 +54,7 @@
   },
   "codex": {
     "adapter": "codex-cli",
-    "command": "/Applications/Codex.app/Contents/Resources/codex",
+    "command": "codex",
     "args": [
       "exec",
       "--cd",

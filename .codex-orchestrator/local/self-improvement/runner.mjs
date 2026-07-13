@@ -16,7 +16,7 @@ import process from 'node:process';
 const REPO = 'SergiiMytakii/codex-orchestrator';
 const RUNNER_ID = 'codex-orchestrator-local-self-improvement';
 const DEFAULT_CWD = '/Users/serhiimytakii/Projects/codex-orchestrator';
-const CODEX_COMMAND = '/Applications/Codex.app/Contents/Resources/codex';
+const CODEX_COMMAND = 'codex';
 const STALE_LOCK_MS = 12 * 60 * 60 * 1000;
 const ISSUE_LIST_LIMIT = 100;
 const ISSUE_LIST_JSON_FIELDS = 'number,title,state,url,labels';

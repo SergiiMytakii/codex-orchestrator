@@ -252,7 +252,7 @@ test('report contracts centralize item limits and residual risk normalization', 
 
 test('codex JSON invocation uses exact command shape and rejects invalid JSON before mutation', async () => {
   const exec = makeExecStub({
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, 'not json');
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -268,7 +268,7 @@ test('codex JSON invocation uses exact command shape and rejects invalid JSON be
     assert.equal(result.ok, false);
     assert.match(result.reason, /invalid json/i);
     const call = exec.calls[0];
-    assert.equal(call.command, '/Applications/Codex.app/Contents/Resources/codex');
+    assert.equal(call.command, 'codex');
     assert.deepEqual(call.args.slice(0, 12), [
       'exec',
       '--cd',
@@ -292,7 +292,7 @@ test('codex JSON invocation uses exact command shape and rejects invalid JSON be
 
 test('codex JSON invocation fails on nonzero exit without parsing mutation output', async () => {
   const exec = makeExecStub({
-    '/Applications/Codex.app/Contents/Resources/codex': { code: 2, stdout: '', stderr: 'failed' },
+    'codex': { code: 2, stdout: '', stderr: 'failed' },
   });
   const { runner, cleanup } = await makeRunner({ exec });
   try {
@@ -312,7 +312,7 @@ test('codex JSON invocation fails on nonzero exit without parsing mutation outpu
 test('discovery creates exactly one agent:auto self-improvement issue for the first valid candidate', async () => {
   let discoveryStdin = '';
   const exec = makeExecStub({
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       discoveryStdin = options.stdin;
       await writeFile(options.reportPath, JSON.stringify({
         status: 'completed',
@@ -449,7 +449,7 @@ test('self-improvement issue lookup owns runner-id body searches and list shape'
 
 test('discovery reuses existing marker match and does not create a duplicate issue', async () => {
   const exec = makeExecStub({
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, JSON.stringify({ status: 'completed', candidates: [validCandidate], residualRisks: [] }));
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -534,7 +534,7 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]' };
       return { code: 0, stdout: '' };
     },
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, JSON.stringify({ status: 'completed', candidates: [validCandidate], residualRisks: [] }));
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -567,7 +567,7 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       if (args[0] === 'issue' && args[1] === 'list') return { code: 0, stdout: '[]' };
       return { code: 0, stdout: '' };
     },
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, JSON.stringify({ status: 'completed', candidates: [validCandidate], residualRisks: [] }));
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -608,7 +608,7 @@ test('daily reuses an open auto self-improvement issue instead of discovering an
     const result = await runner.daily();
     assert.equal(result.phases.find((phase) => phase.name === 'select').issueNumber, 310);
     assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
-    assert.equal(exec.calls.some((call) => call.command === '/Applications/Codex.app/Contents/Resources/codex'), false);
+    assert.equal(exec.calls.some((call) => call.command === 'codex'), false);
     assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
   } finally {
     await cleanup();
@@ -636,7 +636,7 @@ test('daily enforces one created self-improvement issue per day', async () => {
     assert.equal(result.exitCode, 0);
     assert.equal(result.phases.find((phase) => phase.name === 'select').status, 'daily-limit');
     assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
-    assert.equal(exec.calls.some((call) => call.command === '/Applications/Codex.app/Contents/Resources/codex'), false);
+    assert.equal(exec.calls.some((call) => call.command === 'codex'), false);
     assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
   } finally {
     await cleanup();
@@ -692,7 +692,7 @@ test('review creates or reuses only agent:manual self-improvement follow-ups', a
       if (args[0] === 'issue' && args[1] === 'create') return { code: 0, stdout: 'https://github.com/SergiiMytakii/codex-orchestrator/issues/88' };
       return { code: 0, stdout: '' };
     },
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, JSON.stringify({ status: 'completed', findings: [validFinding], residualRisks: [] }));
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -750,7 +750,7 @@ test('review skips running and blocked sources and reuses duplicate finding fing
       }
       throw new Error(`unexpected gh call ${args.join(' ')}`);
     },
-    '/Applications/Codex.app/Contents/Resources/codex': async ({ options }) => {
+    'codex': async ({ options }) => {
       await writeFile(options.reportPath, JSON.stringify({ status: 'completed', findings: [validFinding], residualRisks: [] }));
       return { code: 0, stdout: '', stderr: '' };
     },
