@@ -6,6 +6,20 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-07-13
+
+### Changed
+- Scoped review handoffs now distinguish genuinely maintainer-only checks from
+  checks that an implementation agent can run before handoff.
+- Failed configured checks are preserved as explicit residual-risk warnings
+  after the agent's own validation succeeds instead of blocking publication.
+- The repo-local self-improvement workflow now resolves `codex` through `PATH`
+  rather than depending on a macOS application-bundle path.
+
+### Fixed
+- Review evidence validation now rejects maintainer-only claims that omit a
+  concrete reason or merely defer agent-verifiable work.
+
 ## [0.1.46] - 2026-07-13
 
 ### Changed

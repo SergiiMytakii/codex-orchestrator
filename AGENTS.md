@@ -71,13 +71,13 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.46` (2026-07-13):
-  - Automatic proof routing no longer turns frontend file paths into mandatory
-    browser proof for non-visual refactors.
-  - Validated proof plans remain authoritative through command dispatch and
-    final strict visual review gates.
-  - Self-improvement issues declare an explicit proof strategy based on
-    observable behavior.
+- `0.1.47` (2026-07-13):
+  - Scoped review handoffs validate concrete reasons for maintainer-only checks
+    and reject deferred agent-verifiable work.
+  - Configured check failures remain visible as residual-risk warnings after
+    successful agent-authored validation instead of blocking publication.
+  - Repo-local self-improvement resolves `codex` through `PATH` instead of a
+    fixed macOS application path.
 
 ## Final Response
 
