@@ -398,8 +398,10 @@ report `proofPlan`. Supported modes are `none`, `non-visual-smoke`, `cli`,
 `api`, `worker`, `browser-visual`, and `mobile-visual`. The child agent must
 choose the narrowest mode that proves the issue; this is an implementation
 intent signal, not proof by itself. The runner remains the authority and
-validates that plan against the issue `Proof Strategy`, changed files, and
-visual/mobile routing signals before publication.
+validates that plan against the issue `Proof Strategy` before publication.
+Changed files and issue-text patterns decide whether Acceptance Proof applies;
+under `Proof Strategy: auto`, they are routing hints rather than proof-mode
+requirements.
 
 For accepted non-visual modes, the runner uses a report-validation proof path
 instead of dispatching browser or mobile proof. Report validation checks the
@@ -416,8 +418,14 @@ If those checks pass, the acceptance proof evidence records
 `completion-report:proofPlan` and `completion-report:artifacts` as the proof
 source. If they fail, publication blocks and the next implementation attempt must
 repair the report or provide real evidence. A non-visual `proofPlan` cannot
-downgrade explicit or inferred browser/mobile work: visual/mobile issue strategy
-or changed visual/mobile paths still require visual proof.
+downgrade an explicit `visual`, `browser-visual`, or `mobile-visual` issue
+strategy. Under `auto`, however, frontend or mobile paths do not independently
+create a visual requirement: a non-visual refactor with mapped CLI, API, worker,
+or smoke evidence remains on report validation. Issue generators should emit an
+explicit non-`auto` strategy when acceptance criteria actually require browser
+or device behavior. Once a non-visual plan is accepted, the legacy visual review
+gate cannot re-infer a screenshot requirement from changed paths, including when
+`visualProof.requireWhenDesirable` is enabled.
 
 For browser, mobile, and adaptive proof phases, the runner provides environment
 variables for:
@@ -456,8 +464,13 @@ review-ready publication until proof is produced can set
 
 Setup now uses the package-owned
 `codex-orchestrator visual-proof auto --issue ${issueNumber}` command. Auto
-dispatch uses one shared policy owner: web/frontend paths route to browser
-proof, while Android, iOS, Flutter, and mobile app paths remain device-backed.
+dispatch uses one shared policy owner after a visual proof plan has been selected:
+web/frontend paths route to browser proof, while Android, iOS, Flutter, and
+mobile app paths remain device-backed. Those path matches do not convert an
+accepted non-visual plan into visual proof. For runner-owned command proof, the
+validated `proofPlan.mode` is passed to `visual-proof auto` and is authoritative;
+path inference remains only a fallback for direct command use without a validated
+plan.
 When acceptance proof is required but the changed paths are backend/API/CLI-only
 and visual proof is not desirable, auto proof does not force a browser or mobile
 target; the runner validates the child completion report `proofPlan`, validation

@@ -219,7 +219,7 @@ export function buildIssueTreeChildPrompt(input: IssueTreeChildPromptInput): str
     '## Completion Report Contract',
     `The Codex CLI will save your final response to ${input.reportPath}; do not try to write this file yourself.`,
     'Your final response must be only raw valid JSON, with no markdown fence or explanatory prose.',
-    'Use status "needs-promotion" only when the child cannot complete safely within its ownership scope. Do not request promotion merely because a runner-owned proof command was not executed in-session; for explicit non-visual proof, report the non-visual artifacts and skipped runner-owned visual command as normal completed evidence.',
+    'Use status "needs-promotion" only when the child cannot complete safely within its ownership scope. Do not request promotion merely because a runner-owned proof command was not executed in-session; for explicit non-visual proof, report the concrete non-visual evidence and let the runner keep visual dispatch disabled.',
     ...buildVisualProofPromptLines(input.config, input.childIssue),
     ...proofPlanPromptLines(),
     '## Review Handoff Contract',

@@ -2166,7 +2166,12 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
   const previousLoginEnv = process.env.CODEX_ORCHESTRATOR_TEST_LOGIN;
   process.env.CODEX_ORCHESTRATOR_TEST_LOGIN = 'login-fixture';
   const issueAdapter = new InMemoryGitHubIssueAdapter([
-    issueFixture({ number: 155, labels: [labels.auto.name], title: '[UI] Fix campaign layout', body: 'Requires responsive screenshots.' }),
+    issueFixture({
+      number: 155,
+      labels: [labels.auto.name],
+      title: '[UI] Fix campaign layout',
+      body: ['Requires responsive screenshots.', 'Proof Strategy: browser-visual'].join('\n'),
+    }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
   let promptText = '';
@@ -2216,6 +2221,7 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     assert.equal(options?.cwd, join(repo, '.codex-orchestrator', 'workspaces', 'issue-155'));
     const proofDir = options?.env?.CODEX_ORCHESTRATOR_PROOF_DIR;
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_ISSUE_NUMBER, '155');
+    assert.equal(options?.env?.CODEX_ORCHESTRATOR_PROOF_MODE, 'browser-visual');
     assert.equal(options?.env?.CODEX_ORCHESTRATOR_TEST_LOGIN, 'login-fixture');
     assert.equal(options?.timeoutMs, 1_234);
     assert.ok(proofDir);

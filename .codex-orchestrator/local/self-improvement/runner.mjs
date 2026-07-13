@@ -21,6 +21,14 @@ const STALE_LOCK_MS = 12 * 60 * 60 * 1000;
 const ISSUE_LIST_LIMIT = 100;
 const ISSUE_LIST_JSON_FIELDS = 'number,title,state,url,labels';
 const RUNNER_ID_MARKER = `self-improvement-runner-id:${RUNNER_ID}`;
+const SELF_IMPROVEMENT_PROOF_STRATEGIES = Object.freeze([
+  'visual',
+  'browser-visual',
+  'mobile-visual',
+  'non-visual-smoke',
+  'none',
+]);
+const SELF_IMPROVEMENT_PROOF_STRATEGY_SET = new Set(SELF_IMPROVEMENT_PROOF_STRATEGIES);
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -106,6 +114,7 @@ const discoveryCandidateFields = Object.freeze({
   solution: nonEmptyString,
   benefits: nonEmptyStringArray,
   verification: nonEmptyStringArray,
+  proofStrategy: (value) => SELF_IMPROVEMENT_PROOF_STRATEGY_SET.has(value),
   risk: nonEmptyString,
   adrConflict: nonEmptyString,
 });
@@ -240,6 +249,8 @@ ${candidate.benefits.map((benefit) => `- ${benefit}`).join('\n')}
 
 Verification:
 ${candidate.verification.map((item) => `- ${item}`).join('\n')}
+
+Proof Strategy: ${candidate.proofStrategy}
 
 Risk:
 ${candidate.risk}
@@ -591,7 +602,12 @@ export function createRunner(options = {}) {
     const codex = await runCodexJson({
       phase: 'discover',
       promptPath: path.join(paths.prompts, 'discovery.md'),
-      contextText: 'Find one local self-improvement candidate for codex-orchestrator.',
+      contextText: [
+        'Find one local self-improvement candidate for codex-orchestrator.',
+        'Each candidate must include proofStrategy with exactly one explicit value:',
+        `${SELF_IMPROVEMENT_PROOF_STRATEGIES.slice(0, -1).join(', ')}, or ${SELF_IMPROVEMENT_PROOF_STRATEGIES.at(-1)}.`,
+        'Choose the strategy from observable behavior, not from file location.',
+      ].join(' '),
       reportPath: path.join(paths.reports, 'discovery.json'),
     });
     if (!codex.ok) return { status: 'failed', reason: codex.reason };

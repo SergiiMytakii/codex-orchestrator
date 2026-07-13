@@ -13,6 +13,7 @@ import type { ScopedCompletionReport } from './completion-report.js';
 import type { PlanAutoCompletionReport } from './completion-report.js';
 import type { RunnerValidationLine } from './handoff-evidence.js';
 import type { RunnerBlocker } from './rework-policy.js';
+import { isNonVisualProofMode } from './proof-routing.js';
 import {
   hasPassedTddValidation,
   hasPassedValidation,
@@ -69,6 +70,11 @@ export function evaluateReviewGates(input: ReviewGateInput): ReviewGateResult {
       'risk-routing-policy',
       `Risk routing gate requires: ${finding}.`,
     )));
+  }
+
+  const proofMode = input.report.proofPlan.mode;
+  if (proofMode === 'none' || isNonVisualProofMode(proofMode)) {
+    return reviewGateResult(reasons, warnings, blockers);
   }
 
   const visualProofDesirable = isVisualProofDesirable(input);

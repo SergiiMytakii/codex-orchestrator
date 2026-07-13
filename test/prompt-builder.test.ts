@@ -129,13 +129,69 @@ test('prompt builder exposes explicit issue proof strategy to the child agent', 
   assert.doesNotMatch(prompt, /codex-orchestrator visual-proof auto/);
 });
 
+test('auto proof strategy does not predeclare browser proof for a non-visual frontend refactor', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 225,
+      labels: ['agent:auto'],
+      title: 'Centralize announcement API error formatting',
+      body: 'Move duplicated parsing out of three UI modules without changing rendered behavior.',
+    }),
+    config: validConfig,
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-225',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /Resolved proof strategy: auto \(config default\)/);
+  assert.match(prompt, /Path and issue-text matches make Acceptance Proof applicable but do not select its proof mode/);
+  assert.doesNotMatch(prompt, /After your run, the runner will execute this visual proof command/);
+  assert.doesNotMatch(prompt, /Prepare browser visual proof artifacts/);
+});
+
+test('auto proof strategy keeps runner visual guidance conditional on the selected proof plan', () => {
+  const prompt = buildScopedImplementationPrompt({
+    issue: issueFixture({
+      number: 225,
+      labels: ['agent:auto'],
+      title: 'Refactor frontend announcement behavior',
+      body: 'Choose proof from the observable behavior.',
+    }),
+    config: {
+      ...validConfig,
+      reviewGates: {
+        ...validConfig.reviewGates,
+        acceptanceProof: {
+          ...validConfig.reviewGates.acceptanceProof,
+          runnerValidationCommand: 'npm run visual-proof -- --issue ${issueNumber}',
+        },
+      },
+    },
+    workflowPromptText: 'Workflow text',
+    promptPath: '/prompt.md',
+    reportPath: '/report.json',
+    branchName: 'codex/issue-225',
+    worktreePath: '/worktree',
+  });
+
+  assert.match(prompt, /If proofPlan selects browser-visual or mobile-visual, the runner will execute/);
+  assert.match(prompt, /npm run visual-proof -- --issue \$\{issueNumber\}/);
+  assert.match(prompt, /Proof Report uiEvidence contract/);
+  assert.doesNotMatch(prompt, /After your run, the runner will execute this visual proof command/);
+});
+
 test('prompt builder uses non-visual proof guidance for API acceptance proof routes', () => {
   const prompt = buildScopedImplementationPrompt({
     issue: issueFixture({
       number: 161,
       labels: ['agent:auto'],
       title: 'Update API retry behavior',
-      body: 'Acceptance criteria: API retry smoke output proves the new behavior.',
+      body: [
+        'Acceptance criteria: API retry smoke output proves the new behavior.',
+        'Proof Strategy: non-visual-smoke',
+      ].join('\n'),
     }),
     config: validConfig,
     workflowPromptText: 'Workflow text',
@@ -146,7 +202,7 @@ test('prompt builder uses non-visual proof guidance for API acceptance proof rou
   });
 
   assert.match(prompt, /save non-visual smoke, test, log, or machine-readable artifacts/);
-  assert.match(prompt, /proofPlan\.validationCommands or proofPlan\.requiredArtifacts/);
+  assert.match(prompt, /Map proofPlan\.validationCommands.*proofPlan\.requiredArtifacts/);
   assert.doesNotMatch(prompt, /runner will execute this visual proof command/);
   assert.doesNotMatch(prompt, /primary visual proof path/);
 });
@@ -180,7 +236,7 @@ test('prompt builder tells child Codex to prepare runner-owned visual proof with
     issue: issueFixture({
       number: 155,
       labels: ['agent:auto'],
-      body: 'Fix UI overlap',
+      body: ['Fix UI overlap', 'Proof Strategy: browser-visual'].join('\n'),
     }),
     config: {
       ...validConfig,
@@ -218,7 +274,10 @@ test('prompt builder directs Android mobile proof to Test Android Apps with non-
       number: 155,
       labels: ['agent:auto'],
       title: 'Validate Android checkout screen',
-      body: 'Fix the mobile app checkout UI and verify it on Android.',
+      body: [
+        'Fix the mobile app checkout UI and verify it on Android.',
+        'Proof Strategy: mobile-visual',
+      ].join('\n'),
     }),
     config: {
       ...validConfig,
@@ -268,7 +327,10 @@ test('prompt builder gives native iOS proof a separate Xcode path', () => {
       number: 156,
       labels: ['agent:auto'],
       title: 'Validate iOS checkout screen',
-      body: 'Fix the native iOS checkout UI and verify it on a simulator.',
+      body: [
+        'Fix the native iOS checkout UI and verify it on a simulator.',
+        'Proof Strategy: mobile-visual',
+      ].join('\n'),
     }),
     config: {
       ...validConfig,

@@ -42,6 +42,28 @@ test('visual-proof auto dispatches mobile changes to device-backed proof', async
   assert.equal(mobileIssue, 887);
 });
 
+test('visual-proof auto uses the validated proof plan mode instead of changed-path inference', async () => {
+  let browserRuns = 0;
+  const result = await runAutoVisualProofCommand({
+    args: ['--issue', '887', '--target', '/tmp/mixed', '--scenario', '/tmp/scenario.json'],
+    config: validConfig,
+    env: {
+      CODEX_ORCHESTRATOR_PROOF_MODE: 'browser-visual',
+      CODEX_ORCHESTRATOR_CHANGED_FILES: 'android/app/build.gradle',
+      CODEX_ORCHESTRATOR_ISSUE_TITLE: 'Browser proof selected by the validated plan',
+    },
+    browserRunner: async () => {
+      browserRuns += 1;
+    },
+    mobileRunner: async () => {
+      throw new Error('changed-path inference must not override the validated browser proof plan');
+    },
+  });
+
+  assert.equal(result.target, 'browser');
+  assert.equal(browserRuns, 1);
+});
+
 test('visual-proof auto treats Flutter lib changes as mobile when issue asks for mobile proof', async () => {
   let mobileIssue = 0;
   const result = await runAutoVisualProofCommand({

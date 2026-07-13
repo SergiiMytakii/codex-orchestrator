@@ -6,6 +6,7 @@ import {
 import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand, type BrowserVisualProofCommandInput } from './browser-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand, type MobileVisualProofCommandInput } from './mobile-visual-proof-command.js';
 import type { CodexOrchestratorConfig } from '../config/schema.js';
+import { proofPlanModes } from './completion-report.js';
 
 export interface AutoVisualProofCommandInput {
   args: string[];
@@ -22,7 +23,13 @@ export async function runAutoVisualProofCommand(input: AutoVisualProofCommandInp
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
-  const routing = decideProofRouting({ config: input.config, issue, changedFiles });
+  const plannedTarget = validatedProofPlanTarget(env);
+  const routing = plannedTarget !== undefined
+    ? {
+        action: plannedTarget === 'none' ? 'allow-non-visual' as const : 'dispatch' as const,
+        dispatchTarget: plannedTarget,
+      }
+    : decideProofRouting({ config: input.config, issue, changedFiles });
   const target = routing.dispatchTarget;
 
   if (routing.action === 'dispatch' && target === 'browser') {
@@ -43,6 +50,15 @@ export async function runAutoVisualProofCommand(input: AutoVisualProofCommandInp
   }
 
   throw new Error('visual-proof auto could not select browser or mobile proof from changed files. Provide web/mobile changed paths or use visual-proof browser/mobile explicitly.');
+}
+
+function validatedProofPlanTarget(env: NodeJS.ProcessEnv): VisualProofDispatchTarget | undefined {
+  const mode = env.CODEX_ORCHESTRATOR_PROOF_MODE;
+  if (!mode) return undefined;
+  if (mode === 'browser-visual') return 'browser';
+  if (mode === 'mobile-visual') return 'mobile';
+  if (proofPlanModes.includes(mode as (typeof proofPlanModes)[number])) return 'none';
+  throw new Error(`visual-proof auto received unsupported validated proof mode: ${mode}`);
 }
 
 function autoIssueFromEnv(env: NodeJS.ProcessEnv): GitHubIssue {

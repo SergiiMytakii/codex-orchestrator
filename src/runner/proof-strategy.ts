@@ -6,6 +6,13 @@ export interface ResolvedProofStrategy {
   source: 'issue contract' | 'config default';
 }
 
+export type AcceptanceProofRequirement = Exclude<AcceptanceProofStrategy, 'auto'>;
+
+export interface ResolvedAcceptanceProofRequirement {
+  mode: AcceptanceProofRequirement | null;
+  source: ResolvedProofStrategy['source'];
+}
+
 export function resolveAcceptanceProofStrategy(input: {
   config: CodexOrchestratorConfig;
   issue: GitHubIssue;
@@ -17,6 +24,17 @@ export function resolveAcceptanceProofStrategy(input: {
   return {
     strategy: input.config.reviewGates.acceptanceProof.proofStrategy,
     source: 'config default',
+  };
+}
+
+export function resolveAcceptanceProofRequirement(input: {
+  config: CodexOrchestratorConfig;
+  issue: GitHubIssue;
+}): ResolvedAcceptanceProofRequirement {
+  const resolved = resolveAcceptanceProofStrategy(input);
+  return {
+    mode: resolved.strategy === 'auto' ? null : resolved.strategy,
+    source: resolved.source,
   };
 }
 
