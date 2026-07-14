@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-07-14
+
+### Added
+- Added the Resolution Mission safety core with capability-fenced execution,
+  deterministic evaluation, audited quarantine output, and bounded scope
+  expansion.
+- Added a restart-safe Resolution Mission loop that drives recoverable blockers
+  through diagnosis, authorization, execution, reconciliation, and reevaluation
+  without turning internal retry conditions into user blockers.
+- Added indexed resumable Mission scheduling, fenced daemon claims, durable
+  process ownership, cancellation reconciliation, and terminal retention.
+- Added typed durable Plan Parent aggregates with deterministic dependency waves,
+  immutable child descriptors, serial integration checkpoints, recovery Missions,
+  and atomic final Publication linkage.
+
 ### Fixed
 - Exact runner idle timeouts before the first safe file change now keep a
   dedicated typed blocker and receive one bounded recovery retry instead of

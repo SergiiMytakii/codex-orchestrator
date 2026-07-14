@@ -71,13 +71,16 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.47` (2026-07-13):
-  - Scoped review handoffs validate concrete reasons for maintainer-only checks
-    and reject deferred agent-verifiable work.
-  - Configured check failures remain visible as residual-risk warnings after
-    successful agent-authored validation instead of blocking publication.
-  - Repo-local self-improvement resolves `codex` through `PATH` instead of a
-    fixed macOS application path.
+- `0.1.48` (2026-07-14):
+  - Resolution Missions autonomously diagnose, authorize, execute, reconcile,
+    and reevaluate recoverable blockers without emitting an internal blocked
+    result.
+  - Indexed scheduler claims, process ownership, cancellation, and apply
+    reconciliation survive daemon restarts without duplicating work.
+  - Durable Plan Parents pin dependency waves, child descriptors, integration
+    checkpoints, and deterministic recovery Missions in one atomic store.
+  - Exact idle timeouts before the first safe file change receive one bounded
+    recovery retry instead of being reported as normal completion.
 
 ## Final Response
 
