@@ -148,6 +148,10 @@ export interface CodexOrchestratorConfig {
     worktreeCleanup?: {
       enabled: boolean;
     };
+    resolutionMission?: {
+      mode: 'off' | 'shadow';
+      markerLabel: string;
+    };
   };
   codex: {
     adapter: 'codex-cli';
@@ -326,6 +330,7 @@ export function validateConfig(input: unknown): ConfigValidationResult {
     expectString(runner, 'runner.stateDir', errors);
     expectBoolean(runner, 'runner.allowAgentLocalCommits', errors);
     validateWorktreeCleanup(runner, errors);
+    validateResolutionMission(runner, errors);
   }
 
   if (codex) {
@@ -931,6 +936,22 @@ function validateWorktreeCleanup(parent: ObjectRecord, errors: string[]): void {
   }
 
   expectBoolean(worktreeCleanup, 'runner.worktreeCleanup.enabled', errors);
+}
+
+function validateResolutionMission(parent: ObjectRecord, errors: string[]): void {
+  const resolutionMission = expectOptionalObject(parent, 'runner.resolutionMission', errors);
+  if (!resolutionMission) {
+    return;
+  }
+
+  const mode = readPath(resolutionMission, 'runner.resolutionMission.mode');
+  if (mode !== 'off' && mode !== 'shadow') {
+    errors.push('runner.resolutionMission.mode must be off or shadow until Mission activation is available');
+  }
+  const markerLabel = expectString(resolutionMission, 'runner.resolutionMission.markerLabel', errors);
+  if (markerLabel !== undefined && markerLabel.trim().length === 0) {
+    errors.push('runner.resolutionMission.markerLabel must contain non-whitespace characters');
+  }
 }
 
 function expectOptionalString(parent: ObjectRecord, path: string, errors: string[]): string | undefined {

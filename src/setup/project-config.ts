@@ -127,6 +127,10 @@ export function buildProjectConfig(input: BuildProjectConfigInput): CodexOrchest
       worktreeCleanup: {
         enabled: true,
       },
+      resolutionMission: {
+        mode: 'off',
+        markerLabel: 'agent:mission',
+      },
     },
     codex: {
       adapter: 'codex-cli',

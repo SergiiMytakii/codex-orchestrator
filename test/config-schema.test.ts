@@ -101,6 +101,56 @@ test('accepts the expanded valid config contract', () => {
   }
 });
 
+test('resolution mission activation is gated to off or shadow', () => {
+  for (const mode of ['off', 'shadow'] as const) {
+    const result = validateConfig({
+      ...validConfig,
+      runner: {
+        ...validConfig.runner,
+        resolutionMission: {
+          mode,
+          markerLabel: 'agent:mission',
+        },
+      },
+    });
+    assert.equal(result.ok, true, mode);
+  }
+
+  const enabled = validateConfig({
+    ...validConfig,
+    runner: {
+      ...validConfig.runner,
+      resolutionMission: {
+        mode: 'enabled',
+        markerLabel: 'agent:mission',
+      },
+    },
+  });
+  assert.equal(enabled.ok, false);
+  if (!enabled.ok) {
+    assert.deepEqual(enabled.errors, [
+      'runner.resolutionMission.mode must be off or shadow until Mission activation is available',
+    ]);
+  }
+
+  const blankMarker = validateConfig({
+    ...validConfig,
+    runner: {
+      ...validConfig.runner,
+      resolutionMission: {
+        mode: 'shadow',
+        markerLabel: '   ',
+      },
+    },
+  });
+  assert.equal(blankMarker.ok, false);
+  if (!blankMarker.ok) {
+    assert.deepEqual(blankMarker.errors, [
+      'runner.resolutionMission.markerLabel must contain non-whitespace characters',
+    ]);
+  }
+});
+
 test('accepts runner-classified idle recovery states as retryable rework blockers', () => {
   const result = validateConfig({
     ...validConfig,
