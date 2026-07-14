@@ -1,13 +1,31 @@
 import type { MissionCapability } from './mission-capability-kernel.js';
+import {
+  missionScopeRelationshipKinds,
+  type MissionScopeExpansionProposal,
+} from './mission-scope-expansion.js';
 
 export interface MissionDiagnosisInput {
   missionId: string;
   snapshotId: string;
   findingIds: string[];
   allowedCapabilities: MissionCapability[];
+  allowedRunnerActions?: string[];
+  repository?: string;
+  evidenceIds?: string[];
 }
 
 export type MissionAgentProposal =
+  | {
+      version: 1;
+      kind: 'runner-action';
+      executorId: string;
+      findingIds: string[];
+      rationale: string;
+    }
+  | (MissionScopeExpansionProposal & {
+      kind: 'scope-expansion';
+      rationale: string;
+    })
   | {
       version: 1;
       kind: 'observe';
@@ -46,11 +64,12 @@ export class MissionAgentBroker {
   public async diagnose(input: MissionDiagnosisInput): Promise<MissionAgentProposal> {
     assertDiagnosisInput(input);
     const raw = await this.transport.diagnose(structuredClone(input));
-    return parseProposal(raw, new Set(input.allowedCapabilities));
+    return parseProposal(raw, input);
   }
 }
 
-function parseProposal(raw: string, allowed: ReadonlySet<MissionCapability>): MissionAgentProposal {
+function parseProposal(raw: string, input: MissionDiagnosisInput): MissionAgentProposal {
+  const allowed = new Set(input.allowedCapabilities);
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -94,6 +113,48 @@ function parseProposal(raw: string, allowed: ReadonlySet<MissionCapability>): Mi
       rationale: assertText(record.rationale, 'rationale'),
     };
   }
+  if (record.kind === 'runner-action') {
+    assertExact(record, ['version', 'kind', 'executorId', 'findingIds', 'rationale']);
+    const executorId = assertText(record.executorId, 'executorId');
+    if (!(input.allowedRunnerActions ?? []).includes(executorId)) {
+      return invalid('runner action is not allowed for this diagnosis');
+    }
+    const findingIds = assertTextArray(record.findingIds, 'findingIds');
+    if (findingIds.some((id) => !input.findingIds.includes(id))) {
+      return invalid('runner action references an unknown finding');
+    }
+    return {
+      version: 1,
+      kind: 'runner-action',
+      executorId,
+      findingIds,
+      rationale: assertText(record.rationale, 'rationale'),
+    };
+  }
+  if (record.kind === 'scope-expansion') {
+    assertExact(record, [
+      'version', 'kind', 'repository', 'paths', 'evidenceIds', 'relationship', 'rationale',
+    ]);
+    const repository = assertText(record.repository, 'repository');
+    if (!input.repository || repository !== input.repository) {
+      return invalid('scope expansion repository does not match the pinned repository');
+    }
+    const evidenceIds = assertTextArray(record.evidenceIds, 'evidenceIds');
+    const knownEvidence = new Set([...input.findingIds, ...(input.evidenceIds ?? [])]);
+    if (evidenceIds.some((id) => !knownEvidence.has(id))) {
+      return invalid('scope expansion references unknown evidence');
+    }
+    const relationship = parseRelationship(record.relationship);
+    return {
+      version: 1,
+      kind: 'scope-expansion',
+      repository,
+      paths: assertSafePaths(record.paths),
+      evidenceIds,
+      relationship,
+      rationale: assertText(record.rationale, 'rationale'),
+    };
+  }
   if (record.kind === 'external-input') {
     assertExact(record, ['version', 'kind', 'evidence', 'resumePredicate']);
     return {
@@ -119,9 +180,32 @@ function assertDiagnosisInput(input: MissionDiagnosisInput): void {
   assertText(input.missionId, 'missionId');
   assertText(input.snapshotId, 'snapshotId');
   assertTextArray(input.findingIds, 'findingIds');
-  if (input.allowedCapabilities.length === 0) {
+  if (input.allowedCapabilities.length === 0 && (input.allowedRunnerActions?.length ?? 0) === 0) {
     invalid('at least one allowed capability is required');
   }
+}
+
+function parseRelationship(value: unknown): MissionScopeExpansionProposal['relationship'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return invalid('relationship must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(['kind', 'from', 'generatorId']);
+  if (Object.keys(record).some((key) => !allowed.has(key))
+    || !('kind' in record) || !('from' in record)) {
+    return invalid('relationship fields are invalid');
+  }
+  if (typeof record.kind !== 'string'
+    || !missionScopeRelationshipKinds.includes(record.kind as MissionScopeExpansionProposal['relationship']['kind'])) {
+    return invalid('relationship kind is invalid');
+  }
+  const generatorId = record.generatorId === undefined
+    ? undefined : assertText(record.generatorId, 'generatorId');
+  return {
+    kind: record.kind as MissionScopeExpansionProposal['relationship']['kind'],
+    from: assertSafePaths([record.from])[0]!,
+    ...(generatorId ? { generatorId } : {}),
+  };
 }
 
 function assertSafePaths(value: unknown): string[] {

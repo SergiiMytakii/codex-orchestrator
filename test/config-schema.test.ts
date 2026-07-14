@@ -101,8 +101,8 @@ test('accepts the expanded valid config contract', () => {
   }
 });
 
-test('resolution mission activation is gated to off or shadow', () => {
-  for (const mode of ['off', 'shadow'] as const) {
+test('resolution mission accepts enabled mode after the compatibility gate', () => {
+  for (const mode of ['off', 'shadow', 'enabled'] as const) {
     const result = validateConfig({
       ...validConfig,
       runner: {
@@ -114,23 +114,6 @@ test('resolution mission activation is gated to off or shadow', () => {
       },
     });
     assert.equal(result.ok, true, mode);
-  }
-
-  const enabled = validateConfig({
-    ...validConfig,
-    runner: {
-      ...validConfig.runner,
-      resolutionMission: {
-        mode: 'enabled',
-        markerLabel: 'agent:mission',
-      },
-    },
-  });
-  assert.equal(enabled.ok, false);
-  if (!enabled.ok) {
-    assert.deepEqual(enabled.errors, [
-      'runner.resolutionMission.mode must be off or shadow until Mission activation is available',
-    ]);
   }
 
   const blankMarker = validateConfig({

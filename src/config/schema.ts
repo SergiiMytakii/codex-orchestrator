@@ -149,7 +149,7 @@ export interface CodexOrchestratorConfig {
       enabled: boolean;
     };
     resolutionMission?: {
-      mode: 'off' | 'shadow';
+      mode: 'off' | 'shadow' | 'enabled';
       markerLabel: string;
     };
   };
@@ -945,8 +945,8 @@ function validateResolutionMission(parent: ObjectRecord, errors: string[]): void
   }
 
   const mode = readPath(resolutionMission, 'runner.resolutionMission.mode');
-  if (mode !== 'off' && mode !== 'shadow') {
-    errors.push('runner.resolutionMission.mode must be off or shadow until Mission activation is available');
+  if (mode !== 'off' && mode !== 'shadow' && mode !== 'enabled') {
+    errors.push('runner.resolutionMission.mode must be off, shadow, or enabled');
   }
   const markerLabel = expectString(resolutionMission, 'runner.resolutionMission.markerLabel', errors);
   if (markerLabel !== undefined && markerLabel.trim().length === 0) {

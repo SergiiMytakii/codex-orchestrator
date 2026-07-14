@@ -433,7 +433,7 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 | Recoverable internal findings continue to diagnosis while residual-only snapshots become candidate-ready | Internal blocker budget becomes a user blocker | `mission-state-machine.test.ts: evaluation dispositions route without blocked outcome` | green |
 | Transient execution and pre-ref crashes resume through valid authorization | Expired permit or old ref leaves Mission stuck forever | `mission-state-machine.test.ts: execution and apply recovery use safe resume states` | green |
 | Unsupported state/event pairs are rejected without mutation | Hidden fallback bypasses Runner authority | `mission-state-machine.test.ts: transition table rejects undefined pairs` | green |
-| Slice 1 accepts only `off` and `shadow` without changing current run behavior | Mission mode activates before store/scope recovery exists | `config-schema.test.ts: resolution mission activation is gated` plus existing run tests | green |
+| Slice 1 kept `enabled` unavailable until the Slice 6 compatibility gate | Mission mode activates before store/scope recovery exists | Historical Slice 1 config gate; superseded only after Slice 6 scope and loop contracts turned green | green |
 
 ## Slice 2 — Atomic authoritative Mission State Store
 
@@ -457,7 +457,7 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 - [x] Implement the exact canonical protected deployment-record contract, stable record hash, remote runtime-owner Git ref compare-and-swap, compatibility epoch, operator-mediated transfer preconditions, and a fresh fence before remote mutation.
 - [x] Add token-fenced local coordinator ownership with host/boot nonce/process identity, conservative same-host stale-owner proof, expected-generation reservations, lease expiry, and overlap rejection.
 - [x] Add two-deployment initial-owner race, forbidden automatic takeover, exact `takeoverNotBefore`, credential-generation transfer, old/new daemon activation matrix, lost successful push-response reconciliation, overlapping/disjoint scope, and stale-owner mutation tests.
-- [x] Pass typecheck/build and all 38 focused Mission contract tests. Runtime activation remains gated: public config still rejects `enabled` until Slice 6.
+- [x] Pass typecheck/build and all 38 focused Mission contract tests. Runtime activation remains fenced; public `enabled` config is introduced only after the Slice 6 compatibility gate.
 
 ### Slice 3 Contract Test Ledger
 
@@ -509,10 +509,24 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 
 ## Slice 6 — Issue 227 end-to-end Resolution Mission
 
-- Route the original blocker family through diagnosis, authorization, safe execution, reconciliation, and pure reevaluation.
-- Add machine-checkable relationship-based local scope expansion.
-- Convert relevant report/evidence/proof/check repairs into safe Runner executors.
-- Verify rejected-recoverable alternatives, transient idempotent replay, strategy stagnation, external proof, safety proof, and no internal blocked outcome.
+- [x] Route the exact issue 227 configured-check blocker through diagnosis, Runner authorization, sandboxed execution, reconciliation, and pure reevaluation to `candidate-ready`.
+- [x] Add finite, pinned-tree, evidence-backed relationship scope expansion with deny precedence and deterministic-generator gating.
+- [x] Register and execute report/evidence/proof/check repairs as exact argv, network-denied, capability-probed safe executors with fresh-quarantine output audit.
+- [x] Prove rejected-recoverable alternatives, same-action transient replay, deterministic stagnation suppression, Runner-verified external/safety boundaries, stale-resume rejection, and no internal blocked result.
+- [x] Enable `runner.resolutionMission.mode: enabled` in the public config only after the compatibility contracts pass; runtime ownership activation remains independently fenced.
+- [x] Pass correctness review, `git diff --check`, typecheck, 54 focused Slice 6/config contracts, and the complete 631-test suite. Cleanup remains deferred to the single final cleanup gate per user instruction.
+
+### Slice 6 Contract Test Ledger
+
+| Contract | Failure prevented | Test / evidence | Status |
+|---|---|---|---|
+| Issue 227 reaches `candidate-ready` through the complete resolution loop | A broken repo-level check script becomes a terminal task outcome despite valid targeted proof | `mission-resolution-loop.test.ts: issue 227 configured-check blocker reaches candidate-ready` | green |
+| Rejected and stagnant strategies return to diagnosis with alternatives and suppression evidence | One exhausted strategy is mistaken for an exhausted Mission | `mission-resolution-loop.test.ts` rejected-recoverable and stagnation cases | green |
+| Transient execution reuses the exact action key without strategy penalty | Lost response or worker restart consumes strategy budget or duplicates work | `mission-resolution-loop.test.ts: transient execution resumes and replays` | green |
+| Agent terminal proposals require Runner authorization | The model can declare its own external or safety stop | `mission-resolution-loop.test.ts: Agent cannot unilaterally prove a boundary` | green |
+| Scope expansion is finite, relationship-backed, and deny-first | Promotion widens to unrelated, secret, external-repository, or non-pinned paths | `mission-scope-expansion.test.ts` | green |
+| Safe repair executors pin exact argv and audit fresh quarantine outputs | Legacy shell, credentialed network, canonical writes, or undeclared artifacts bypass the safety kernel | `mission-safe-executor.test.ts`, `mission-agent-broker.test.ts` | green |
+| Full local suite preserves legacy behavior | Resolution Mission compatibility changes regress existing run/publication flows | `npm test` (631/631) | green |
 
 ## Slice 7 — Resumable scheduler and cancellation
 
