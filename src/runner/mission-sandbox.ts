@@ -27,7 +27,10 @@ export function buildMissionSandboxInvocation(input: MissionSandboxInput): Missi
   if (input.backend === 'macos-sandbox') {
     const deniedUserRoots = [...new Set([
       '/Users', homedir(), tmpdir(), '/private/tmp', '/tmp', '/Volumes',
-    ].map(canonicalExistingPath))];
+    ].flatMap((path) => {
+      const canonical = canonicalPathIfPresent(path);
+      return canonical === undefined ? [] : [canonical];
+    }))];
     const profile = [
       '(version 1)',
       '(deny default)',
@@ -77,6 +80,18 @@ function canonicalExistingPath(value: string): string {
     return realpathSync.native(value);
   } catch (error) {
     throw new Error(`Mission sandbox path must resolve to an existing canonical path: ${value}.`, {
+      cause: error,
+    });
+  }
+}
+
+function canonicalPathIfPresent(value: string): string | undefined {
+  try {
+    return realpathSync.native(value);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
+    throw new Error(`Mission sandbox system path could not be canonicalized: ${value}.`, {
       cause: error,
     });
   }
