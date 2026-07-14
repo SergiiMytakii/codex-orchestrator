@@ -38,16 +38,24 @@ test('Git input snapshot verifier rejects malformed, dirty, and moved workspaces
   await assert.rejects(verifier.verify(`tree:${tree}`), /no longer matches/);
 });
 
-test('Git input snapshot verifier uses bounded credential-free no-lock commands', async () => {
+test('Git input snapshot verifier uses bounded credential-free no-lock commands', async (context) => {
+  if (process.platform === 'win32') {
+    context.skip('Mission executor capability probe rejects Windows in v1.');
+    return;
+  }
   const tree = 'a'.repeat(40);
   const calls: MissionProcessInput[] = [];
   const root = await mkdtemp(join(tmpdir(), 'mission-input-snapshot-bounded-'));
   const quarantine = await mkdtemp(join(tmpdir(), 'mission-input-snapshot-bounded-q-'));
+  const backend = process.platform === 'darwin' ? 'macos-sandbox' : 'linux-bwrap';
+  const gitExecutable = process.platform === 'darwin'
+    ? (await execFileAsync('/usr/bin/xcrun', ['--find', 'git'], { encoding: 'utf8' })).stdout.trim()
+    : '/usr/bin/git';
   const verifier = new MissionGitInputSnapshotVerifier({
     workspaceRoot: root,
     quarantineRoot: quarantine,
-    backend: 'macos-sandbox',
-    gitExecutable: '/Applications/Xcode.app/Contents/Developer/usr/bin/git',
+    backend,
+    gitExecutable,
   }, async (input) => {
     calls.push(input);
     return {
@@ -67,8 +75,13 @@ test('Git input snapshot verifier uses bounded credential-free no-lock commands'
     assert.deepEqual(call.allowedEnvKeys, ['PATH']);
     assert.deepEqual(Object.keys(call.sourceEnv), ['PATH']);
     assert.equal(call.args.includes('--no-optional-locks'), true);
-    assert.equal(call.file, '/usr/bin/sandbox-exec');
-    assert.match(call.args[1] ?? '', /deny network/);
+    if (backend === 'macos-sandbox') {
+      assert.equal(call.file, '/usr/bin/sandbox-exec');
+      assert.match(call.args[1] ?? '', /deny network/);
+    } else {
+      assert.equal(call.file, '/usr/bin/bwrap');
+      assert.equal(call.args.includes('--unshare-net'), true);
+    }
   }
 });
 

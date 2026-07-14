@@ -105,9 +105,8 @@ export function runMissionProcess(
             reject(terminationError ?? inputError
               ?? new Error('Mission process did not terminate after SIGKILL reconciliation.'));
           }, 500);
-          settlementTimeout.unref();
         }
-      }, 250).unref();
+      }, 250);
     }
     child.on('error', (error) => {
       if (settled) return;
