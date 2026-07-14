@@ -100,6 +100,7 @@ function withRuntimeConfigDefaults(value: unknown): unknown {
               ...rework,
               retryableBlockers: Array.from(new Set([
                 ...retryableBlockers,
+                'idle-timeout-before-change',
                 'failed-acceptance-proof',
                 'optional-figma-mcp-failure',
               ])),

@@ -18,7 +18,10 @@ import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
 import { runStatusCommand } from '../src/runner/status-command.js';
 import { sessionCodexHomePath } from '../src/runner/session-home.js';
-import { INCOMPLETE_AFTER_PROGRESS_REASON } from '../src/runner/rework-policy.js';
+import {
+  IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
+  INCOMPLETE_AFTER_PROGRESS_REASON,
+} from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
@@ -1619,6 +1622,44 @@ test('scoped auto command uses configured rework limit and includes exact blocke
   assert.match(promptTexts[1] ?? '', /- Codex completed without file changes/);
   assert.match(promptTexts[2] ?? '', /This is an automatic rework attempt \(#2\)/);
   assert.match(promptTexts[2] ?? '', /- Codex completed without file changes/);
+});
+
+test('scoped auto command retries idle timeout before change once with the typed reason', async () => {
+  const repo = await tempGitProject();
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
+  ]);
+  const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
+  const promptTexts: string[] = [];
+  let runCount = 0;
+  const codexAdapter = {
+    async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
+      runCount += 1;
+      promptTexts.push(input.promptText);
+      return {
+        stdout: '',
+        stderr: 'Command idle timed out after 300000ms.',
+        exitCode: 124,
+      };
+    },
+  };
+
+  const result = await runScopedAutoCommand({
+    targetRoot: repo,
+    issueNumber: 155,
+    issueAdapter,
+    pullRequestAdapter,
+    codexAdapter,
+    now,
+  });
+
+  assert.equal(runCount, 2);
+  assert.equal(result.status, 'blocked');
+  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
+  assert.match(promptTexts[1] ?? '', new RegExp(IDLE_TIMEOUT_BEFORE_CHANGE_REASON, 'u'));
+  assert.doesNotMatch(promptTexts[1] ?? '', /Codex completed without file changes/);
+  assert.match(result.reportComment, /idle timed out before creating a safe local change/);
+  assert.match(result.reportComment, /idle-timeout-before-change/);
 });
 
 test('scoped auto command respects zero configured rework attempts', async () => {

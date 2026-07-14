@@ -692,6 +692,7 @@ async function runIncompleteProgressReworkScenario(context) {
         maxAttempts: 1,
         retryableBlockers: [
           'missing-completion-report',
+          'idle-timeout-before-change',
           'incomplete-after-progress',
           'invalid-completion-report',
           'no-changed-files',

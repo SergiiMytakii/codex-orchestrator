@@ -30,7 +30,11 @@ test('runner config reader backfills package-owned proof command and drops unsup
   delete (staleConfig.reviewGates.acceptanceProof as Partial<typeof staleConfig.reviewGates.acceptanceProof>).proofStrategy;
   delete (staleConfig.reviewGates as Partial<typeof staleConfig.reviewGates>).riskRouting;
   staleConfig.loopPolicy.rework.retryableBlockers = staleConfig.loopPolicy.rework.retryableBlockers
-    .filter((blocker) => blocker !== 'failed-acceptance-proof');
+    .filter((blocker) => ![
+      'idle-timeout-before-change',
+      'failed-acceptance-proof',
+      'optional-figma-mcp-failure',
+    ].includes(blocker));
   await writeFile(
     join(targetRoot, '.codex-orchestrator', 'config.json'),
     JSON.stringify(staleConfig),
@@ -55,7 +59,9 @@ test('runner config reader backfills package-owned proof command and drops unsup
     highRiskRequiresCodeReview: true,
     allowedLowRiskFlows: ['small-task-implementer', 'scoped-implementation'],
   });
+  assert.equal(config.loopPolicy.rework.retryableBlockers.includes('idle-timeout-before-change'), true);
   assert.equal(config.loopPolicy.rework.retryableBlockers.includes('failed-acceptance-proof'), true);
+  assert.equal(config.loopPolicy.rework.retryableBlockers.includes('optional-figma-mcp-failure'), true);
 });
 
 test('runner config reader does not migrate legacy visual proof command into acceptance proof', async () => {

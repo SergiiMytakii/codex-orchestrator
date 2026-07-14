@@ -428,6 +428,7 @@ test('setup migrates existing config defaults without overwriting project policy
   assert.equal(result.config.loopPolicy.rework.maxAttempts, 2);
   assert.deepEqual(result.config.loopPolicy.rework.retryableBlockers, [
     'missing-completion-report',
+    'idle-timeout-before-change',
     'incomplete-after-progress',
     'invalid-completion-report',
     'no-changed-files',

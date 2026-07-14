@@ -565,28 +565,37 @@ Before implementation rework, publishability may run bounded evidence repair:
   summaries, blocked reports, and review-ready handoff evidence with prompt,
   report, log, status, and blocker keys.
 
-`incomplete-after-progress` is a runner-classified blocker, not a raw Codex exit
-string. The runner emits it only when all of these are true:
+Exact idle timeouts use runner-classified blockers, not raw Codex exit strings.
+The runner emits one only when all of these are true:
 
 - Codex exits with code `124` and stdout or stderr contains an exact line
   `Command idle timed out after <positive integer>ms.`;
 - the scoped completion report is missing;
-- the collected change set from the existing worktree has at least one changed
-  file;
-- runner-owned publication has not been violated;
-- changed paths do not match denied path policy;
-- scope isolation has no blockers.
+- runner-owned publication has not been violated.
+
+When the collected change set is empty, the blocker is
+`idle-timeout-before-change`. Its default retry starts once from the clean
+worktree and preserves that reason in the rework prompt and terminal evidence.
+This is distinct from `no-changed-files`, which means Codex produced a normal
+completion report but did not implement a change.
+
+When the change set contains files, the runner additionally requires that
+changed paths do not match denied path policy and scope isolation has no
+blockers. A safe non-empty change set becomes `incomplete-after-progress`, and
+the retry continues from the existing worktree.
 
 If the same idle timeout produced a valid completion report, publishability
-continues through the normal report-based path. If the report is invalid, if
-there are no changed files, if paths are denied or out of scope, if publication
-was violated, or if the exit is a generic command timeout or arbitrary exit code
-`124`, the runner keeps the existing blocker instead of emitting
-`incomplete-after-progress`. The blocker is retried only when
-`loopPolicy.rework.retryableBlockers` includes `incomplete-after-progress` and
-the bounded rework budget has not been exhausted. Terminal blocked or exhausted
-evidence preserves the collected `changedFiles` when a change set was available,
-so maintainers can see what partial work the retry decision was based on.
+continues through the normal report-based path. If the report is invalid, paths
+are denied or out of scope, publication was violated, or the exit is a generic
+command timeout or arbitrary exit code `124`, the runner keeps the existing
+hard blocker. Idle recovery runs only when `loopPolicy.rework.retryableBlockers`
+includes the corresponding typed key and the bounded rework budget has not been
+exhausted. Terminal blocked or exhausted evidence preserves the collected
+`changedFiles` when a change set was available, so
+maintainers can see what partial work the retry decision was based on.
+Runtime config loading backfills `idle-timeout-before-change` so existing target
+configs receive this package-owned recovery policy without requiring a setup
+rewrite.
 
 Hard blockers always stop publication. These include denied paths,
 runner-owned publication violations, destructive database/cache actions,

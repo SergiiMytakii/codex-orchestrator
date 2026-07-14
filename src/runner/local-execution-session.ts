@@ -31,6 +31,7 @@ import {
 } from './acceptance-proof-runner.js';
 import { runAcceptanceProofLoopAttempt } from './acceptance-proof-loop.js';
 import {
+  IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
   OPTIONAL_FIGMA_MCP_FAILURE_REASON,
@@ -585,7 +586,15 @@ async function resolveInitialReportRead(
     if (changedFiles.length === 0) {
       return {
         kind: 'blocked',
-        result: blocked(['Codex completed without file changes'], { repairAttempts: state.repairAttempts }),
+        result: blocked([IDLE_TIMEOUT_BEFORE_CHANGE_REASON], {
+          blockers: [runnerBlocker(
+            'idle-timeout-before-change',
+            IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
+            'recovery',
+            'implementation-rework',
+          )],
+          repairAttempts: state.repairAttempts,
+        }),
       };
     }
 

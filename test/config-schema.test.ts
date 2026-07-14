@@ -66,6 +66,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.loopPolicy.rework.maxAttempts, 1);
     assert.deepEqual(result.value.loopPolicy.rework.retryableBlockers, [
       'missing-completion-report',
+      'idle-timeout-before-change',
       'incomplete-after-progress',
       'invalid-completion-report',
       'no-changed-files',
@@ -100,7 +101,7 @@ test('accepts the expanded valid config contract', () => {
   }
 });
 
-test('accepts incomplete progress as a retryable rework blocker', () => {
+test('accepts runner-classified idle recovery states as retryable rework blockers', () => {
   const result = validateConfig({
     ...validConfig,
     loopPolicy: {
@@ -109,6 +110,7 @@ test('accepts incomplete progress as a retryable rework blocker', () => {
         ...validConfig.loopPolicy.rework,
         retryableBlockers: [
           'missing-completion-report',
+          'idle-timeout-before-change',
           'incomplete-after-progress',
         ],
       },
@@ -225,7 +227,7 @@ test('rejects invalid scoped configured-check phase', () => {
   ]);
 });
 
-test('retryable blocker validation message includes incomplete progress', () => {
+test('retryable blocker validation message includes runner-classified idle recovery states', () => {
   const result = validateConfig({
     ...validConfig,
     loopPolicy: {
@@ -239,7 +241,7 @@ test('retryable blocker validation message includes incomplete progress', () => 
 
   assert.equal(result.ok, false);
   assert.deepEqual(result.ok ? [] : result.errors, [
-    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, incomplete-after-progress, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy, optional-figma-mcp-failure',
+    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, idle-timeout-before-change, incomplete-after-progress, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy, optional-figma-mcp-failure',
   ]);
 });
 
@@ -588,7 +590,7 @@ test('rejects invalid loop policy config', () => {
     'loopPolicy.issueSelection.priorityLabels must be an array of non-empty strings',
     'loopPolicy.issueSelection.tieBreaker must be one of issue-number-asc',
     'loopPolicy.rework.maxAttempts must be a non-negative integer',
-    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, incomplete-after-progress, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy, optional-figma-mcp-failure',
+    'loopPolicy.rework.retryableBlockers must contain only missing-completion-report, idle-timeout-before-change, incomplete-after-progress, invalid-completion-report, no-changed-files, failed-configured-checks, missing-quality-gate-evidence, failed-acceptance-proof, risk-routing-policy, optional-figma-mcp-failure',
     'loopPolicy.freshContextReview.enabled must be a boolean',
     'loopPolicy.freshContextReview.mode must be one of advisory',
     'loopPolicy.freshContextReview.blockOnHighConfidencePolicyViolations must be a boolean',

@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Exact runner idle timeouts before the first safe file change now keep a
+  dedicated typed blocker and receive one bounded recovery retry instead of
+  being reported as normal completion without changes.
+
 ## [0.1.47] - 2026-07-13
 
 ### Changed

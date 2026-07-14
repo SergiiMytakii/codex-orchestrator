@@ -6,6 +6,9 @@ export const MISSING_COMPLETION_REPORT_REASON =
 export const INCOMPLETE_AFTER_PROGRESS_REASON =
   'Codex idle timed out after safe local progress; runner will retry completion from existing worktree.';
 
+export const IDLE_TIMEOUT_BEFORE_CHANGE_REASON =
+  'Codex idle timed out before creating a safe local change; runner will retry from the clean worktree.';
+
 export const OPTIONAL_FIGMA_MCP_FAILURE_REASON =
   'Optional Figma MCP failed before completion; retry without optional Figma MCP.';
 
@@ -14,6 +17,7 @@ export const REQUIRED_FIGMA_MCP_FAILURE_REASON =
 
 export type ReworkBlockerKey =
   | 'missing-completion-report'
+  | 'idle-timeout-before-change'
   | 'incomplete-after-progress'
   | 'invalid-completion-report'
   | 'no-changed-files'
@@ -88,6 +92,7 @@ export type ReworkDecision =
     };
 
 const missingCompletionReportPattern = new RegExp(escapeRegex(MISSING_COMPLETION_REPORT_REASON), 'iu');
+const idleTimeoutBeforeChangePattern = new RegExp(escapeRegex(IDLE_TIMEOUT_BEFORE_CHANGE_REASON), 'iu');
 const incompleteAfterProgressPattern = new RegExp(escapeRegex(INCOMPLETE_AFTER_PROGRESS_REASON), 'iu');
 const optionalFigmaPattern = new RegExp(escapeRegex(OPTIONAL_FIGMA_MCP_FAILURE_REASON), 'iu');
 const requiredFigmaPattern = new RegExp(escapeRegex(REQUIRED_FIGMA_MCP_FAILURE_REASON), 'iu');
@@ -104,6 +109,7 @@ const blockerPatterns: Array<[ReworkBlockerKey, RegExp]> = [
   ['failed-acceptance-proof', /Acceptance proof/iu],
   ['risk-routing-policy', /Risk routing gate requires/iu],
   ['invalid-completion-report', /Invalid scoped completion report/iu],
+  ['idle-timeout-before-change', idleTimeoutBeforeChangePattern],
   ['incomplete-after-progress', incompleteAfterProgressPattern],
   ['missing-completion-report', missingCompletionReportPattern],
   ['no-changed-files', /Codex completed without file changes/iu],

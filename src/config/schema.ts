@@ -15,6 +15,7 @@ export type ClarificationGate = 'block-and-comment';
 export type IssueSelectionTieBreaker = 'issue-number-asc';
 export type RetryableReworkBlocker =
   | 'missing-completion-report'
+  | 'idle-timeout-before-change'
   | 'incomplete-after-progress'
   | 'invalid-completion-report'
   | 'no-changed-files'
@@ -972,6 +973,7 @@ function expectNonNegativeInteger(parent: ObjectRecord, path: string, errors: st
 function expectRetryableBlockers(parent: ObjectRecord, errors: string[]): RetryableReworkBlocker[] | undefined {
   const validBlockers = [
     'missing-completion-report',
+    'idle-timeout-before-change',
     'incomplete-after-progress',
     'invalid-completion-report',
     'no-changed-files',

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   blockersFromReasons,
   decideImplementationRework,
+  IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
   type RunnerBlocker,
@@ -351,6 +352,38 @@ test('incomplete progress sentinel retries only from runner-owned reason', () =>
     attempt: 0,
     blockerKeys: ['unknown'],
     reasons: [rawIdleTimeout],
+  });
+});
+
+test('idle timeout before change sentinel has one bounded retry by default', () => {
+  assert.deepEqual(decideImplementationRework({
+    reasons: [IDLE_TIMEOUT_BEFORE_CHANGE_REASON],
+    config: validConfig,
+    attempt: 0,
+  }), {
+    kind: 'retry',
+    attempt: 0,
+    nextAttempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['idle-timeout-before-change'],
+    reasons: [IDLE_TIMEOUT_BEFORE_CHANGE_REASON],
+    rework: {
+      attempt: 1,
+      blockedReasons: [IDLE_TIMEOUT_BEFORE_CHANGE_REASON],
+      disableOptionalFigmaMcp: false,
+    },
+  });
+
+  assert.deepEqual(decideImplementationRework({
+    reasons: [IDLE_TIMEOUT_BEFORE_CHANGE_REASON],
+    config: validConfig,
+    attempt: 1,
+  }), {
+    kind: 'exhausted',
+    attempt: 1,
+    maxAttempts: 1,
+    blockerKeys: ['idle-timeout-before-change'],
+    reasons: [IDLE_TIMEOUT_BEFORE_CHANGE_REASON],
   });
 });
 

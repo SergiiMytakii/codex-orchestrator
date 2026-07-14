@@ -13,6 +13,7 @@ import {
   runLocalExecutionSession,
 } from '../src/runner/local-execution-session.js';
 import {
+  IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
   REQUIRED_FIGMA_MCP_FAILURE_REASON,
@@ -167,6 +168,36 @@ test('implementation publishability retries exact idle timeout after safe local 
   assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
   assert.deepEqual(result.status === 'blocked' ? result.changedFiles : [], ['README.md']);
   assert.equal(result.status === 'blocked' ? result.commits.length : 0, 1);
+});
+
+test('implementation publishability preserves exact idle timeout before any local change', async () => {
+  const repo = await tempGitProject();
+  const git = new GitWorktreeManager();
+  const beforeHead = await git.getHead(repo);
+  const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'missing-report.json');
+
+  const result = await runImplementationPublishabilityCheck({
+    config: config({ checks: {} }),
+    issue: issueFixture({ number: 155, title: 'Update docs', body: 'Documentation update.' }),
+    worktreePath: repo,
+    reportPath,
+    beforeHead,
+    afterHead: beforeHead,
+    codexResult: { stdout: '', stderr: 'Command idle timed out after 300000ms.', exitCode: 124 },
+    git,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commitMessage: 'Codex: implement issue #155',
+  });
+
+  assert.equal(result.status, 'blocked');
+  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [IDLE_TIMEOUT_BEFORE_CHANGE_REASON]);
+  assert.deepEqual(result.status === 'blocked' ? result.changedFiles : [], []);
+  assert.deepEqual(result.status === 'blocked' ? result.blockers : [], [{
+    key: 'idle-timeout-before-change',
+    reason: IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
+    source: 'recovery',
+    repair: 'implementation-rework',
+  }]);
 });
 
 test('implementation publishability accepts exact idle timeout when a valid completion report exists', async () => {
