@@ -27,6 +27,47 @@ test('mission process receives no credential canary from its environment', async
   assert.doesNotMatch(result.stdout, /credential-canary/);
 });
 
+test('mission process cancellation terminates the owned process group', async () => {
+  const controller = new AbortController();
+  const result = await runMissionProcess({
+    file: '/bin/sh',
+    args: ['-c', 'sleep 30'],
+    timeoutMs: 30_000,
+    sourceEnv: { PATH: process.env.PATH },
+    allowedEnvKeys: ['PATH'],
+    signal: controller.signal,
+    onSpawn: () => controller.abort(),
+  });
+
+  assert.equal(result.termination, 'cancelled');
+  assert.equal(result.exitCode, 130);
+  assert.equal(result.timedOut, false);
+});
+
+test('pre-cancelled mission process does not spawn', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let spawned = false;
+  const result = await runMissionProcess({
+    file: '/bin/sh',
+    args: ['-c', 'exit 99'],
+    timeoutMs: 30_000,
+    sourceEnv: {},
+    allowedEnvKeys: [],
+    signal: controller.signal,
+    onSpawn: () => { spawned = true; },
+  });
+
+  assert.equal(spawned, false);
+  assert.deepEqual(result, {
+    stdout: '',
+    stderr: '',
+    exitCode: 130,
+    timedOut: false,
+    termination: 'cancelled',
+  });
+});
+
 test('mission process timeout terminates its inherited process-group child', async (context) => {
   if (process.platform === 'win32') {
     context.skip('Mission executor capability probe rejects Windows in v1.');

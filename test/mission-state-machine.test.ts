@@ -186,6 +186,7 @@ test('declared mission transition table is executable', () => {
     { state: 'publication-prepared', event: { type: 'publication-cancelled' }, expected: 'cancelled' },
     { state: 'integration-ready', event: { type: 'integration-accepted' }, expected: 'completed' },
     { state: 'cancelling', event: { type: 'cancellation-reconciled' }, expected: 'cancelled' },
+    { state: 'cancelling', event: { type: 'apply-reconciled-third-identity' }, expected: 'safety-stop' },
   ];
 
   for (const [index, item] of cases.entries()) {
@@ -306,6 +307,7 @@ const expectedSuccessfulMissionPairs = [
   'integration-ready::integration-accepted',
   'resumable::resume-eligible',
   'cancelling::cancellation-reconciled',
+  'cancelling::apply-reconciled-third-identity',
   'created::cancel-requested',
   'claiming::cancel-requested',
   'evaluating::cancel-requested',

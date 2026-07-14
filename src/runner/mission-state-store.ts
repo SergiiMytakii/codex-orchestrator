@@ -18,6 +18,7 @@ import {
 import {
   missionStates,
   safeResumeTargets,
+  terminalMissionStates,
   type MissionRecord,
 } from './mission-state-machine.js';
 
@@ -573,6 +574,15 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
   }
   for (const [id, nextEligibleAt] of Object.entries(record.nextEligibleAt as Record<string, unknown>)) {
     assertNonEmptyString(nextEligibleAt, `nextEligibleAt.${id}`);
+    const mission = (record.missions as Record<string, MissionRecord>)[id];
+    if (!mission) invalid(`nextEligibleAt.${id} references a missing mission`);
+    if (mission.state === 'resumable') {
+      if (mission.nextEligibleAt !== nextEligibleAt || mission.claim !== undefined) {
+        invalid(`nextEligibleAt.${id} does not match resumable mission state`);
+      }
+    } else if (!mission.claim || mission.claim.leaseUntil !== nextEligibleAt) {
+      invalid(`nextEligibleAt.${id} does not match an active claim lease`);
+    }
   }
   for (const [id, tombstone] of Object.entries(record.tombstones as Record<string, unknown>)) {
     assertTombstone(tombstone, `tombstones.${id}`);
@@ -581,6 +591,20 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
     assertBlobReference(blob, `blobs.${hash}`, hash);
   }
   for (const [id, mission] of Object.entries(record.missions as Record<string, MissionRecord>)) {
+    if (mission.state === 'resumable') {
+      if (!mission.resumeTarget || !mission.nextEligibleAt || !mission.resumableReason
+        || !mission.requiredPredicate
+        || (record.nextEligibleAt as Record<string, unknown>)[id] !== mission.nextEligibleAt) {
+        invalid(`missions.${id} resumable state requires complete indexed scheduling metadata`);
+      }
+    }
+    if (mission.claim
+      && (record.nextEligibleAt as Record<string, unknown>)[id] !== mission.claim.leaseUntil) {
+      invalid(`missions.${id}.claim requires matching nextEligibleAt index`);
+    }
+    if (mission.claim && terminalMissionState(mission.state)) {
+      invalid(`missions.${id}.claim is forbidden in terminal state`);
+    }
     for (const [actionKey, execution] of Object.entries(mission.actionExecutions ?? {})) {
       if (execution.status === 'completed'
         && !(record.blobs as Record<string, unknown>)[execution.receiptSha256!]) {
@@ -603,6 +627,8 @@ function assertMissionRecord(value: unknown, path: string): asserts value is Mis
     'residualFindingIds',
     'resumeTarget',
     'nextEligibleAt',
+    'resumableReason',
+    'requiredPredicate',
     'actionKey',
     'inputSnapshot',
     'fencingEpoch',
@@ -612,6 +638,8 @@ function assertMissionRecord(value: unknown, path: string): asserts value is Mis
     'applyIntent',
     'applyReceipt',
     'applyHistory',
+    'claim',
+    'cancellation',
   ]);
   assertNonEmptyString(record.id, `${path}.id`);
   assertNonNegativeInteger(record.revision, `${path}.revision`);
@@ -625,6 +653,11 @@ function assertMissionRecord(value: unknown, path: string): asserts value is Mis
     invalid(`${path}.resumeTarget must be a safe resume target`);
   }
   assertOptionalNonEmptyString(record.nextEligibleAt, `${path}.nextEligibleAt`);
+  assertOptionalNonEmptyString(record.resumableReason, `${path}.resumableReason`);
+  assertOptionalNonEmptyString(record.requiredPredicate, `${path}.requiredPredicate`);
+  if (record.nextEligibleAt !== undefined) {
+    assertExactTimestamp(record.nextEligibleAt, `${path}.nextEligibleAt`);
+  }
   assertOptionalNonEmptyString(record.actionKey, `${path}.actionKey`);
   assertOptionalNonEmptyString(record.inputSnapshot, `${path}.inputSnapshot`);
   if (record.fencingEpoch !== undefined) {
@@ -702,6 +735,19 @@ function assertMissionRecord(value: unknown, path: string): asserts value is Mis
       }
     }
   }
+  if (record.claim !== undefined) {
+    assertMissionClaim(record.claim, `${path}.claim`);
+  }
+  if (record.cancellation !== undefined) {
+    const cancellation = assertObject(record.cancellation, `${path}.cancellation`);
+    assertExactFields(cancellation, `${path}.cancellation`, ['requestedAt', 'requestedBy']);
+    assertExactTimestamp(cancellation.requestedAt, `${path}.cancellation.requestedAt`);
+    assertNonEmptyString(cancellation.requestedBy, `${path}.cancellation.requestedBy`);
+    if (record.state !== 'cancelling' && record.state !== 'cancelled'
+      && record.state !== 'safety-stop') {
+      invalid(`${path}.cancellation is allowed only while cancelling, cancelled, or safety-stop`);
+    }
+  }
   const hasPermit = record.applyPermit !== undefined;
   const hasIntent = record.applyIntent !== undefined;
   const hasReceipt = record.applyReceipt !== undefined;
@@ -718,6 +764,44 @@ function assertMissionRecord(value: unknown, path: string): asserts value is Mis
     && (!hasPermit || !hasIntent || !hasReceipt)) {
     invalid(`${path} apply reconciliation requires permit, intent, and receipt together`);
   }
+}
+
+function assertMissionClaim(value: unknown, path: string): void {
+  const record = assertObject(value, path);
+  assertExactFields(record, path, [
+    'version', 'token', 'daemonId', 'hostId', 'bootNonce', 'fencingEpoch',
+    'claimedAt', 'leaseUntil', 'processes',
+  ]);
+  if (record.version !== 1) invalid(`${path}.version must be 1`);
+  assertNonEmptyString(record.token, `${path}.token`);
+  assertNonEmptyString(record.daemonId, `${path}.daemonId`);
+  assertNonEmptyString(record.hostId, `${path}.hostId`);
+  assertNonEmptyString(record.bootNonce, `${path}.bootNonce`);
+  assertPositiveInteger(record.fencingEpoch, `${path}.fencingEpoch`);
+  assertExactTimestamp(record.claimedAt, `${path}.claimedAt`);
+  assertExactTimestamp(record.leaseUntil, `${path}.leaseUntil`);
+  if ((record.leaseUntil as string) <= (record.claimedAt as string)) {
+    invalid(`${path}.leaseUntil must be after claimedAt`);
+  }
+  if (!Array.isArray(record.processes)) invalid(`${path}.processes must be an array`);
+  const identities = new Set<string>();
+  record.processes.forEach((value, index) => {
+    const process = assertObject(value, `${path}.processes[${index}]`);
+    assertExactFields(process, `${path}.processes[${index}]`, [
+      'actionKey', 'pid', 'hostId', 'bootNonce', 'startedAt',
+    ]);
+    assertNonEmptyString(process.actionKey, `${path}.processes[${index}].actionKey`);
+    assertPositiveInteger(process.pid, `${path}.processes[${index}].pid`);
+    assertNonEmptyString(process.hostId, `${path}.processes[${index}].hostId`);
+    assertNonEmptyString(process.bootNonce, `${path}.processes[${index}].bootNonce`);
+    assertExactTimestamp(process.startedAt, `${path}.processes[${index}].startedAt`);
+    if (process.hostId !== record.hostId || process.bootNonce !== record.bootNonce) {
+      invalid(`${path}.processes[${index}] must match claim host and boot identity`);
+    }
+    const identity = `${process.hostId}:${process.bootNonce}:${process.pid}:${process.actionKey}`;
+    if (identities.has(identity)) invalid(`${path}.processes contains duplicate ${identity}`);
+    identities.add(identity);
+  });
 }
 
 function assertAuthorizedPermit(value: unknown, path: string): void {
@@ -831,6 +915,18 @@ function assertOptionalNonEmptyString(value: unknown, path: string): void {
   if (value !== undefined) {
     assertNonEmptyString(value, path);
   }
+}
+
+function assertExactTimestamp(value: unknown, path: string): asserts value is string {
+  assertNonEmptyString(value, path);
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) {
+    invalid(`${path} must be an exact UTC ISO timestamp`);
+  }
+}
+
+function terminalMissionState(value: MissionRecord['state']): boolean {
+  return terminalMissionStates.has(value);
 }
 
 function assertOptionalStringArray(value: unknown, path: string): void {

@@ -530,15 +530,29 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 
 ## Slice 7 — Resumable scheduler and cancellation
 
-- Add indexed `nextEligibleAt`, expected-generation daemon claims, resume targets, action-key replay, cancellation revocation, and process termination.
-- Failure-inject every state and validate restart, backoff, no blocked labels, retention, and scale targets.
+- [x] Add atomic indexed `nextEligibleAt`, expected-generation/revision daemon claims, exact resume targets, and action-key replay.
+- [x] Fence durable process registration/completion by claim token and host/boot/process identity; terminate owned process groups on cancellation.
+- [x] Make cancellation restart-safe across process termination and old/new/third apply-ref reconciliation, preserving applied receipts and using only resumable or Runner-owned terminal outcomes.
+- [x] Prove every transient resume target, every nonterminal expired-claim state, stale generation/revision races, same-host reboot recovery, no internal blocked outcome, 100 eligible Missions with 10,000 tombstones, and terminal compaction.
+- [x] Pass correctness review, `git diff --check`, typecheck, 40 focused Slice 7 contracts, and the complete 646-test suite. Cleanup remains deferred to the single final cleanup gate per user instruction.
+
+### Slice 7 Contract Test Ledger
+
+| Contract | Failure prevented | Test / evidence | Status |
+|---|---|---|---|
+| Scheduler index and claim mutate in one expected generation/revision | Two daemons run the same successor or a full Mission scan is required | `mission-scheduler.test.ts` atomic race and 100-of-10,000 index cases | green |
+| Every retry records exact target, action key, reason, predicate, and eligibility | A transient failure becomes an unowned blocker or resumes at an unsafe phase | `mission-scheduler.test.ts: scheduler indexes every transient resume target` | green |
+| Claim process handles are token-, host-, boot-, PID-, and action-fenced | Cancellation kills a reused PID or a stale daemon registers/completes another claim's process | `mission-scheduler.test.ts`, `mission-cancellation.test.ts` | green |
+| Cancellation reconciles process groups and durable apply identity before terminal state | Cancel loops forever after an apply intent or silently loses an already-applied receipt | `mission-cancellation.test.ts` transient/restart, new-identity receipt, and third-identity cases | green |
+| Process executor observes pre-spawn and in-flight cancellation | Cancelled work starts anyway or descendants survive the Mission | `mission-process-executor.test.ts` cancellation cases | green |
+| Full local suite preserves legacy behavior | Scheduler/cancellation plumbing regresses existing runner workflows | `npm test` (646/646) | green |
 
 ## Slice 8 — Durable Plan Parent and wave checkpoints
 
 - Persist graph/waves/children/labels/integration intents and immutable descriptors in the atomic snapshot.
 - Branch each wave from the prior checkpoint; integrate serially with the deterministic tree/ref transaction.
 - Prove dependency visibility, sibling preservation, deterministic child linkage, and restart after every merge/validation/checkpoint/creation step.
-- Run cleanup and code-review gates.
+- Run the Slice correctness review; cleanup remains deferred to the single final overall gate.
 
 ## Slice 9 — Publication saga
 

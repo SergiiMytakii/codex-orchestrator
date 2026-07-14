@@ -11,6 +11,8 @@ export interface MissionProcessInput {
   allowedEnvKeys: string[];
   stdin?: string;
   maxOutputBytes?: number;
+  signal?: AbortSignal;
+  onSpawn?: (pid: number | undefined) => void;
 }
 
 export interface MissionProcessResult {
@@ -18,7 +20,7 @@ export interface MissionProcessResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
-  termination: 'exited' | 'timeout' | 'output-limit' | 'stdin-error';
+  termination: 'exited' | 'timeout' | 'output-limit' | 'stdin-error' | 'cancelled';
 }
 
 export interface MissionProcessDependencies {
@@ -40,10 +42,19 @@ export function runMissionProcess(
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
     throw new Error('Mission process maxOutputBytes must be a positive integer.');
   }
+  if (input.signal?.aborted) {
+    return Promise.resolve({
+      stdout: '',
+      stderr: '',
+      exitCode: 130,
+      timedOut: false,
+      termination: 'cancelled',
+    });
+  }
   return new Promise((resolve, reject) => {
     let stdout = '';
     let stderr = '';
-    let termination: 'timeout' | 'output-limit' | 'stdin-error' | undefined;
+    let termination: 'timeout' | 'output-limit' | 'stdin-error' | 'cancelled' | undefined;
     let outputBytes = 0;
     let settled = false;
     let terminationError: Error | undefined;
@@ -58,6 +69,8 @@ export function runMissionProcess(
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const onAbort = () => beginTermination('cancelled');
+    input.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => { collectOutput('stdout', chunk); });
     child.stderr.on('data', (chunk: Buffer) => { collectOutput('stderr', chunk); });
     const timeout = setTimeout(() => {
@@ -65,7 +78,15 @@ export function runMissionProcess(
     }, input.timeoutMs);
     timeout.unref();
 
-    function beginTermination(reason: 'timeout' | 'output-limit' | 'stdin-error'): void {
+    try {
+      input.onSpawn?.(child.pid);
+    } catch (error) {
+      inputError = error instanceof Error ? error : new Error(String(error));
+      beginTermination('stdin-error');
+    }
+    if (input.signal?.aborted) beginTermination('cancelled');
+
+    function beginTermination(reason: 'timeout' | 'output-limit' | 'stdin-error' | 'cancelled'): void {
       if (termination || settled) return;
       termination = reason;
       clearTimeout(timeout);
@@ -80,6 +101,7 @@ export function runMissionProcess(
           settlementTimeout = setTimeout(() => {
             if (settled) return;
             settled = true;
+            input.signal?.removeEventListener('abort', onAbort);
             reject(terminationError ?? inputError
               ?? new Error('Mission process did not terminate after SIGKILL reconciliation.'));
           }, 500);
@@ -91,6 +113,7 @@ export function runMissionProcess(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      input.signal?.removeEventListener('abort', onAbort);
       if (settlementTimeout) clearTimeout(settlementTimeout);
       reject(error);
     });
@@ -111,6 +134,7 @@ export function runMissionProcess(
     function finishClose(exitCode: number | null): void {
       if (settled) return;
       settled = true;
+      input.signal?.removeEventListener('abort', onAbort);
       if (settlementTimeout) clearTimeout(settlementTimeout);
       if (terminationError) {
         reject(terminationError);
@@ -124,7 +148,8 @@ export function runMissionProcess(
         stdout,
         stderr,
         exitCode: termination === 'timeout' ? 124
-          : termination === 'output-limit' ? 125 : (exitCode ?? 1),
+          : termination === 'output-limit' ? 125
+            : termination === 'cancelled' ? 130 : (exitCode ?? 1),
         timedOut: termination === 'timeout',
         termination: termination ?? 'exited',
       });

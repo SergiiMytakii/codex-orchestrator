@@ -32,6 +32,8 @@ export interface MissionRecord {
   residualFindingIds?: string[];
   resumeTarget?: SafeResumeTarget;
   nextEligibleAt?: string;
+  resumableReason?: string;
+  requiredPredicate?: string;
   actionKey?: string;
   inputSnapshot?: string;
   fencingEpoch?: number;
@@ -41,6 +43,33 @@ export interface MissionRecord {
   applyIntent?: MissionApplyIntent;
   applyReceipt?: MissionApplyReceipt;
   applyHistory?: MissionApplyReceipt[];
+  claim?: MissionClaim;
+  cancellation?: MissionCancellation;
+}
+
+export interface MissionProcessHandle {
+  actionKey: string;
+  pid: number;
+  hostId: string;
+  bootNonce: string;
+  startedAt: string;
+}
+
+export interface MissionClaim {
+  version: 1;
+  token: string;
+  daemonId: string;
+  hostId: string;
+  bootNonce: string;
+  fencingEpoch: number;
+  claimedAt: string;
+  leaseUntil: string;
+  processes: MissionProcessHandle[];
+}
+
+export interface MissionCancellation {
+  requestedAt: string;
+  requestedBy: string;
 }
 
 export interface MissionActionExecution {
@@ -359,7 +388,13 @@ export function transitionMission(record: MissionRecord, event: MissionEvent): M
     if (!record.resumeTarget || !record.nextEligibleAt || event.now < record.nextEligibleAt) {
       throw new Error('Mission is not eligible to resume.');
     }
-    const { resumeTarget, nextEligibleAt: _nextEligibleAt, ...rest } = record;
+    const {
+      resumeTarget,
+      nextEligibleAt: _nextEligibleAt,
+      resumableReason: _resumableReason,
+      requiredPredicate: _requiredPredicate,
+      ...rest
+    } = record;
     return {
       ...rest,
       revision: record.revision + 1,
@@ -383,11 +418,50 @@ export function transitionMission(record: MissionRecord, event: MissionEvent): M
   }
 
   if (event.type === 'cancel-requested' && !terminalMissionStates.has(record.state) && record.state !== 'cancelling') {
-    const { resumeTarget: _resumeTarget, nextEligibleAt: _nextEligibleAt, ...rest } = record;
+    const {
+      resumeTarget: _resumeTarget,
+      nextEligibleAt: _nextEligibleAt,
+      resumableReason: _resumableReason,
+      requiredPredicate: _requiredPredicate,
+      authorizedPermit: _authorizedPermit,
+      ...rest
+    } = record;
     return {
       ...rest,
       revision: record.revision + 1,
       state: 'cancelling',
+    };
+  }
+
+  if (record.state === 'cancelling' && event.type === 'cancellation-reconciled') {
+    const {
+      claim: _claim,
+      authorizedPermit: _authorizedPermit,
+      applyPermit: _applyPermit,
+      applyIntent: _applyIntent,
+      applyReceipt: _applyReceipt,
+      ...rest
+    } = record;
+    return {
+      ...rest,
+      revision: record.revision + 1,
+      state: 'cancelled',
+    };
+  }
+
+  if (record.state === 'cancelling' && event.type === 'apply-reconciled-third-identity') {
+    const {
+      claim: _claim,
+      authorizedPermit: _authorizedPermit,
+      applyPermit: _applyPermit,
+      applyIntent: _applyIntent,
+      applyReceipt: _applyReceipt,
+      ...rest
+    } = record;
+    return {
+      ...rest,
+      revision: record.revision + 1,
+      state: 'safety-stop',
     };
   }
 
@@ -427,7 +501,7 @@ function resumable(
   actionKey: string,
   nextEligibleAt: string,
 ): MissionRecord {
-  const { authorizedPermit: _authorizedPermit, ...rest } = record;
+  const { authorizedPermit: _authorizedPermit, claim: _claim, ...rest } = record;
   return {
     ...rest,
     revision: record.revision + 1,

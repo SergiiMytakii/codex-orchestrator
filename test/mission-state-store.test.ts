@@ -222,6 +222,21 @@ test('mission state store rejects malformed aggregate records before publication
     };
   }), /missions\.lookup\.id must equal its map key/);
   assert.equal((await store.load()).generation, 0);
+
+  await assert.rejects(store.mutate(0, (draft) => {
+    draft.missions.retry = {
+      id: 'retry',
+      revision: 1,
+      state: 'resumable',
+      resumeTarget: 'diagnosing',
+      actionKey: 'diagnosis:retry',
+      nextEligibleAt: '2026-07-14T18:05:00Z',
+      resumableReason: 'transport retry',
+      requiredPredicate: 'transport is reachable',
+    };
+    draft.nextEligibleAt.retry = '2026-07-14T18:05:00Z';
+  }), /nextEligibleAt must be an exact UTC ISO timestamp/);
+  assert.equal((await store.load()).generation, 0);
 });
 
 test('mission state store rejects unknown snapshot fields before publication', async () => {
