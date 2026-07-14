@@ -172,7 +172,7 @@ test('mission state store rejects an oversized generation before publication', a
   );
 
   await assert.rejects(store.mutate(0, (draft) => {
-    draft.planParents.large = {
+    draft.publications.large = {
       revision: 1,
       value: { payload: 'x'.repeat(1_024) },
     };

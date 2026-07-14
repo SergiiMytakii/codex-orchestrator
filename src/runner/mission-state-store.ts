@@ -21,6 +21,11 @@ import {
   terminalMissionStates,
   type MissionRecord,
 } from './mission-state-machine.js';
+import {
+  assertPlanParentRecord,
+  planParentScheduleKey,
+  type PlanParentRecord,
+} from './mission-plan-parent.js';
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -42,7 +47,7 @@ export interface MissionBlobReference {
 
 export interface MissionStateDraft {
   missions: Record<string, MissionRecord>;
-  planParents: Record<string, StoredAggregate>;
+  planParents: Record<string, PlanParentRecord>;
   publications: Record<string, StoredAggregate>;
   reservations: Record<string, StoredAggregate>;
   nextEligibleAt: Record<string, string>;
@@ -567,13 +572,27 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
       invalid(`missions.${id}.authorizedPermit must match the aggregate identity`);
     }
   }
-  for (const collection of ['planParents', 'publications', 'reservations'] as const) {
+  for (const [id, parent] of Object.entries(record.planParents as Record<string, unknown>)) {
+    assertPlanParentRecord(parent, `planParents.${id}`);
+    if (parent.id !== id) invalid(`planParents.${id}.id must equal its map key`);
+  }
+  for (const collection of ['publications', 'reservations'] as const) {
     for (const [id, aggregate] of Object.entries(record[collection] as Record<string, unknown>)) {
       assertStoredAggregate(aggregate, `${collection}.${id}`);
     }
   }
   for (const [id, nextEligibleAt] of Object.entries(record.nextEligibleAt as Record<string, unknown>)) {
     assertNonEmptyString(nextEligibleAt, `nextEligibleAt.${id}`);
+    if (id.startsWith('plan-parent:')) {
+      const parentId = id.slice('plan-parent:'.length);
+      const parent = (record.planParents as Record<string, PlanParentRecord>)[parentId];
+      const waiting = parent?.state === 'wave-waiting' && parent.nextEligibleAt === nextEligibleAt;
+      const claimed = parent?.claim?.leaseUntil === nextEligibleAt;
+      if (!parent || (!waiting && !claimed) || planParentScheduleKey(parent.id) !== id) {
+        invalid(`nextEligibleAt.${id} does not match a waiting Plan Parent`);
+      }
+      continue;
+    }
     const mission = (record.missions as Record<string, MissionRecord>)[id];
     if (!mission) invalid(`nextEligibleAt.${id} references a missing mission`);
     if (mission.state === 'resumable') {
@@ -610,6 +629,18 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
         && !(record.blobs as Record<string, unknown>)[execution.receiptSha256!]) {
         invalid(`missions.${id}.actionExecutions.${actionKey} references a missing receipt blob`);
       }
+    }
+  }
+  for (const [id, parent] of Object.entries(record.planParents as Record<string, PlanParentRecord>)) {
+    const scheduleKey = planParentScheduleKey(id);
+    if (parent.state === 'wave-waiting') {
+      if ((record.nextEligibleAt as Record<string, unknown>)[scheduleKey] !== parent.nextEligibleAt) {
+        invalid(`planParents.${id} requires matching nextEligibleAt index`);
+      }
+    } else if ((record.nextEligibleAt as Record<string, unknown>)[scheduleKey] !== undefined
+      && (!parent.claim || parent.claim.leaseUntil
+        !== (record.nextEligibleAt as Record<string, unknown>)[scheduleKey])) {
+      invalid(`planParents.${id} has stale scheduling metadata`);
     }
   }
 }

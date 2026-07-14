@@ -549,10 +549,24 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 
 ## Slice 8 — Durable Plan Parent and wave checkpoints
 
-- Persist graph/waves/children/labels/integration intents and immutable descriptors in the atomic snapshot.
-- Branch each wave from the prior checkpoint; integrate serially with the deterministic tree/ref transaction.
-- Prove dependency visibility, sibling preservation, deterministic child linkage, and restart after every merge/validation/checkpoint/creation step.
-- Run the Slice correctness review; cleanup remains deferred to the single final overall gate.
+- [x] Persist a typed Plan Parent aggregate with pinned graph hash, deterministic waves, child links, immutable descriptors, label receipts, integration cursor/intents/history, validation receipts, checkpoints, recovery links, cancellation, and Publication link.
+- [x] Atomically create deterministic child Missions from each wave checkpoint and require later-wave children to bind the prior wave's immutable commit/tree.
+- [x] Journal serial integration before ref execution, replay intent/completion idempotently, preserve intent through transient backoff, and create deterministic integration/validation recovery Missions.
+- [x] Add indexed expected-generation/revision parent claims, exact phase resume, atomic cancellation propagation, integration cancellation reconciliation, and terminal guards for children/processes.
+- [x] Prove dependency visibility, sibling preservation, deterministic child/recovery linkage, lost-response replay, transient restart, validation recovery, final Publication linkage, exhaustive state/event rejection, and no blocked outcome.
+- [x] Pass correctness review, `git diff --check`, typecheck, 22 focused Slice 8/store/identifier contracts, and the complete 656-test suite. Cleanup remains deferred to the single final overall gate per user instruction.
+
+### Slice 8 Contract Test Ledger
+
+| Contract | Failure prevented | Test / evidence | Status |
+|---|---|---|---|
+| Plan Parent and child links commit in one atomic generation | A crash or replay orphans or duplicates a child Mission | `mission-plan-parent.test.ts: atomically links first-wave child missions` | green |
+| Every wave starts from the prior immutable checkpoint | Later children miss earlier-wave output or siblings overwrite one another | `mission-plan-parent.test.ts: wave checkpoint makes later children observe prior-wave output` | green |
+| Serial integration persists intent and cursor before completion | Lost responses duplicate child integration or advance the cursor twice | `mission-plan-parent.test.ts: integration intent replay is fenced` | green |
+| Integration and validation failures link deterministic recovery Missions | Conflict or failed validation becomes a terminal parent blocker | `mission-plan-parent.test.ts` integration-conflict and validation-recovery cases | green |
+| Parent scheduler and cancellation are durable and indexed | Parent work disappears after restart or cancellation leaves live child work | `mission-plan-parent.test.ts` scheduling, transient reconciliation, and cascade cancellation cases | green |
+| Final checkpoint and Publication link are atomic | Publication observes a candidate different from the validated final checkpoint | `mission-plan-parent.test.ts: final checkpoint and Publication aggregate` | green |
+| Full local suite preserves legacy behavior | Typed Plan Parent storage regresses current plan-auto or runner workflows | `npm test` (656/656) | green |
 
 ## Slice 9 — Publication saga
 

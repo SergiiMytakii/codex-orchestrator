@@ -62,3 +62,45 @@ export function publicationAttemptId(input: Readonly<{
     configHash: requireText(input.configHash, 'configHash'),
   });
 }
+
+export function integrationRecoveryMissionId(input: Readonly<{
+  parentId: string;
+  wave: number;
+  checkpointCommit: string;
+  integratedTree: string;
+  cursor: number;
+  childCommit: string;
+  configHash: string;
+}>): string {
+  if (!Number.isSafeInteger(input.wave) || input.wave < 0
+    || !Number.isSafeInteger(input.cursor) || input.cursor < 0) {
+    throw new Error('integration recovery wave and cursor must be non-negative integers');
+  }
+  return stableIdentifier('mission-integration-recovery', {
+    kind: 'mission-integration-recovery',
+    version: 1,
+    parentId: requireText(input.parentId, 'parentId'),
+    wave: input.wave,
+    checkpointCommit: requireText(input.checkpointCommit, 'checkpointCommit'),
+    integratedTree: requireText(input.integratedTree, 'integratedTree'),
+    cursor: input.cursor,
+    childCommit: requireText(input.childCommit, 'childCommit'),
+    configHash: requireText(input.configHash, 'configHash'),
+  });
+}
+
+export function validationRecoveryMissionId(input: Readonly<{
+  parentId: string;
+  phase: string;
+  candidateTree: string;
+  configHash: string;
+}>): string {
+  return stableIdentifier('mission-validation-recovery', {
+    kind: 'mission-validation-recovery',
+    version: 1,
+    parentId: requireText(input.parentId, 'parentId'),
+    phase: requireText(input.phase, 'phase'),
+    candidateTree: requireText(input.candidateTree, 'candidateTree'),
+    configHash: requireText(input.configHash, 'configHash'),
+  });
+}
