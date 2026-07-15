@@ -32,6 +32,19 @@ export async function readRunnerConfig(targetRoot: string): Promise<CodexOrchest
   return validation.value;
 }
 
+export async function rereadRunnerConfigUnderFence(
+  targetRoot: string,
+  fencedStateDir: string,
+): Promise<CodexOrchestratorConfig> {
+  const config = await readRunnerConfig(targetRoot);
+  if (config.runner.stateDir !== fencedStateDir) {
+    throw new Error(
+      `target-activity-fence-config-changed: runner.stateDir changed from ${fencedStateDir} to ${config.runner.stateDir}.`,
+    );
+  }
+  return config;
+}
+
 function withRuntimeConfigDefaults(value: unknown): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return value;

@@ -11,7 +11,7 @@ import type { GitHubPullRequest, GitHubPullRequestAdapter } from '../github/pull
 import { resolveBaseBranch } from '../git/base-branch.js';
 import { GitWorktreeManager } from '../git/worktree.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
-import { readRunnerConfig } from './command-utils.js';
+import { readRunnerConfig, rereadRunnerConfigUnderFence } from './command-utils.js';
 import { readScopedCompletionReport } from './completion-report.js';
 import { writeDurableRunSummary } from './durable-run-summary.js';
 import { runFreshContextReviewIfEnabled } from './fresh-context-review.js';
@@ -34,6 +34,7 @@ import {
   decideImplementationRework,
   MISSING_COMPLETION_REPORT_REASON,
 } from './rework-policy.js';
+import { acquireTargetActivityFence } from './target-activity-fence.js';
 
 export const SCOPED_RECOVERY_LEASE_STALE_MS = 30 * 60 * 1000;
 export const SCOPED_RECOVERY_BLOCKED_MARKER_PREFIX = '<!-- codex-orchestrator:recovery-blocked';
@@ -152,8 +153,27 @@ export async function classifyScopedRecoveryRun(
 
 export async function recoverScopedRun(input: RecoverScopedRunInput): Promise<ScopedRecoveryRunResult> {
   const targetRoot = input.targetRoot;
-  const now = input.now ?? new Date();
   const config = await readRunnerConfig(targetRoot);
+  const lease = await acquireTargetActivityFence({
+    targetRoot,
+    stateDir: config.runner.stateDir,
+    mode: 'shared',
+    purpose: 'claim',
+  });
+  try {
+    const fencedConfig = await rereadRunnerConfigUnderFence(targetRoot, config.runner.stateDir);
+    return await recoverScopedRunFenced(input, fencedConfig);
+  } finally {
+    await lease.release();
+  }
+}
+
+async function recoverScopedRunFenced(
+  input: RecoverScopedRunInput,
+  config: CodexOrchestratorConfig,
+): Promise<ScopedRecoveryRunResult> {
+  const targetRoot = input.targetRoot;
+  const now = input.now ?? new Date();
   const issueAdapter = input.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter = input.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
   const git = input.git ?? new GitWorktreeManager();

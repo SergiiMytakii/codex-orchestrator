@@ -14,7 +14,7 @@ test('coordinator lock is exclusive and release is token-fenced', async () => {
     targetRoot: root,
     stateDir: '.codex-orchestrator/state',
     hostId: 'host-a',
-    bootNonce: 'boot-a',
+    bootNonce: 'boot-b',
     pid: 101,
     isProcessAlive: () => true,
   });
@@ -23,7 +23,7 @@ test('coordinator lock is exclusive and release is token-fenced', async () => {
     targetRoot: root,
     stateDir: '.codex-orchestrator/state',
     hostId: 'host-a',
-    bootNonce: 'boot-b',
+    bootNonce: 'boot-a',
     pid: 102,
     isProcessAlive: () => true,
   }), /already owned/);
@@ -42,7 +42,7 @@ test('coordinator lock reclaims only proven dead same-host owner', async () => {
     version: 1,
     token: 'old',
     hostId: 'host-a',
-    bootNonce: 'old-boot',
+    bootNonce: 'new-boot',
     pid: 90,
     acquiredAt: '2026-07-14T09:00:00.000Z',
   })}\n`, 'utf8');
@@ -93,7 +93,7 @@ test('two stale reclaimers cannot remove the newly acquired live lock', async ()
     targetRoot: root,
     stateDir: '.codex-orchestrator/state',
     hostId: 'host-a',
-    bootNonce: `boot-${pid}`,
+    bootNonce: 'current-boot',
     pid,
     isProcessAlive: (candidate) => candidate !== 90,
   }));

@@ -803,6 +803,21 @@ test('setup merge mode appends bundled prompt updates to locally edited prompts'
   assert.doesNotMatch(result.output, /prompt conflicts:/);
 });
 
+test('setup preparation mode rejects dry-run before invoking the bridge preparer', async () => {
+  const targetRoot = await tempRepo();
+  await runSetupCommand({
+    targetRoot,
+    githubOwner: 'SergiiMytakii',
+    githubRepo: 'IntelleReach',
+    labelAdapter: new InMemoryGitHubLabelAdapter(),
+  });
+  await assert.rejects(runSetupCommand({
+    targetRoot,
+    prepareSkillRuntimeV2: true,
+    dryRun: true,
+  }), /cannot be combined with --dry-run/);
+});
+
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }

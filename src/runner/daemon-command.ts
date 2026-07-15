@@ -6,7 +6,7 @@ import { hasIssueClosureEvidence, type GitHubIssue, type GitHubIssueAdapter } fr
 import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
 import type { GitHubPullRequestAdapter } from '../github/pull-requests.js';
 import { GitWorktreeManager } from '../git/worktree.js';
-import { readRunnerConfig } from './command-utils.js';
+import { readRunnerConfig, rereadRunnerConfigUnderFence } from './command-utils.js';
 import { discoverIssueWork, type IssueDiscoveryDecision } from './issue-state-machine.js';
 import { runPlanAutoCommand } from './plan-auto-command.js';
 import { RunnerStateStore } from './local-state.js';
@@ -15,6 +15,7 @@ import { recoverScopedRun } from './scoped-recovery.js';
 import { runScopedAutoCommand } from './scoped-auto-command.js';
 import { issueOwnershipScopes, scopesOverlap } from './scope-isolation-policy.js';
 import { cleanupMergedWorktrees, type WorktreeCleanupResult } from './worktree-cleanup.js';
+import { acquireTargetActivityFence } from './target-activity-fence.js';
 
 export interface DaemonCommandOptions {
   targetRoot: string;
@@ -51,6 +52,25 @@ function resolveDaemonConcurrency(value: number): number {
 export async function runDaemonCommand(options: DaemonCommandOptions): Promise<DaemonCommandResult> {
   const targetRoot = resolve(options.targetRoot);
   const config = await readRunnerConfig(targetRoot);
+  const activityLease = await acquireTargetActivityFence({
+    targetRoot,
+    stateDir: config.runner.stateDir,
+    mode: 'shared',
+    purpose: 'daemon',
+  });
+  try {
+    const fencedConfig = await rereadRunnerConfigUnderFence(targetRoot, config.runner.stateDir);
+    return await runDaemonCommandFenced(options, targetRoot, fencedConfig);
+  } finally {
+    await activityLease.release();
+  }
+}
+
+async function runDaemonCommandFenced(
+  options: DaemonCommandOptions,
+  targetRoot: string,
+  config: Awaited<ReturnType<typeof readRunnerConfig>>,
+): Promise<DaemonCommandResult> {
   const adapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter =
     options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);

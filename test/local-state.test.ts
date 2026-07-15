@@ -3,7 +3,11 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RunnerStateStore, type RunnerProcessMetadata } from '../src/runner/local-state.js';
+import {
+  RunnerStateStore,
+  type RunnerProcessMetadata,
+  type RunnerStateFileV2,
+} from '../src/runner/local-state.js';
 import { validConfig } from './fixtures/config.js';
 
 async function tempRepo(): Promise<string> {
@@ -130,5 +134,38 @@ test('local state rejects forbidden GitHub snapshot keys', async () => {
       runs: [{ ...metadata(1), pullRequests: [] } as unknown as RunnerProcessMetadata],
     }),
     /forbidden key pullRequests/,
+  );
+});
+
+test('bridge config v1 preserves the forward-compatible v2 envelope with legacy runs', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+  const emptyV2: RunnerStateFileV2 = { version: 2, generation: 7, runs: [] };
+
+  await store.save(emptyV2);
+  assert.deepEqual(await store.load(), emptyV2);
+
+  await store.upsertRun(metadata(2));
+  assert.deepEqual(await store.load(), { version: 2, generation: 7, runs: [metadata(2)] });
+
+  await store.removeRun(2);
+  assert.deepEqual(await store.load(), emptyV2);
+});
+
+test('bridge state rejects invalid v2 generation and structural run metadata', async () => {
+  const targetRoot = await tempRepo();
+  const store = new RunnerStateStore(targetRoot, validConfig);
+
+  await assert.rejects(
+    store.save({ version: 2, generation: -1, runs: [] } as RunnerStateFileV2),
+    /generation must be a non-negative integer/,
+  );
+  await assert.rejects(
+    store.save({
+      version: 2,
+      generation: 0,
+      runs: [{ ...metadata(1), skillRuntime: {} } as unknown as RunnerProcessMetadata],
+    }),
+    /forbidden key skillRuntime/,
   );
 });

@@ -33,7 +33,7 @@ export async function runHygieneCleanup(input: RunHygieneCleanupInput): Promise<
   const staleRunsRemoved = state.runs.filter((run) => !workspaceExists(targetRoot, run));
 
   if (staleRunsRemoved.length > 0) {
-    await store.save({ version: state.version, runs });
+    await store.save({ ...state, runs });
   }
 
   return { staleRunsRemoved, prunedGitWorktrees };

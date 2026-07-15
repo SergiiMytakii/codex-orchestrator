@@ -97,6 +97,21 @@ when live smoke is skipped and give the concrete reason.
   compatibility adapter for screenshot/mobile proof. Missing local
   browser/device tooling must be reported as a concrete limitation.
 
+## Skill Runtime V2 Release Boundary
+
+- Bridge work is a terminal release slice: validate the target activity fence,
+  preparation command, state-v2 forward compatibility, and
+  `bridge-runtime.json`, then stop.
+- Do not combine the bridge and structural runtime changes in one diff. The
+  structural phase requires a separately published bridge plus canonical
+  consumer `prepared-generation.json` evidence whose package hash matches the
+  released bridge.
+- `setup --prepare-skill-runtime-v2` is a real consumer migration action. Run it
+  only after the target's daemon and targeted runs are stopped; GitHub read or
+  process-identity ambiguity is an expected fail-closed blocker.
+- Local bridge validation does not authorize commit, push, npm publication,
+  consumer preparation, structural migration, or live smoke.
+
 ## Review Gates
 
 - Runtime code changes should include matching test changes unless the quality

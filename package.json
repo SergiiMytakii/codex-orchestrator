@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestrator",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "description": "Reusable GitHub Issues runner for Codex.",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,7 @@
   },
   "files": [
     "dist/src",
+    "bridge-runtime.json",
     "prompts",
     "docs/deep-dive.md",
     "CHANGELOG.md",
@@ -46,7 +47,8 @@
     "test": "npm run build && node --test dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "prepack": "npm run build"
+    "bridge:manifest": "npm run build --silent && node scripts/generate-bridge-runtime.mjs",
+    "prepack": "npm run bridge:manifest"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

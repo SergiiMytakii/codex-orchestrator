@@ -14,6 +14,7 @@ import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../proce
 import {
   formatSessionTimestamp,
   readRunnerConfig,
+  rereadRunnerConfigUnderFence,
   runConfiguredChecks,
 } from './command-utils.js';
 import {
@@ -72,6 +73,7 @@ import {
   finishReviewReadyCommentTerminalOutcome,
   finishReviewReadyTerminalOutcome,
 } from './terminal-outcome.js';
+import { acquireTargetActivityFence } from './target-activity-fence.js';
 
 export interface PlanAutoCommandOptions {
   targetRoot: string;
@@ -152,6 +154,23 @@ class ChildExecutionBlockedError extends Error {
 }
 
 export async function runPlanAutoCommand(options: PlanAutoCommandOptions): Promise<PlanAutoCommandResult> {
+  const targetRoot = resolve(options.targetRoot);
+  const config = await readRunnerConfig(targetRoot);
+  const lease = await acquireTargetActivityFence({
+    targetRoot,
+    stateDir: config.runner.stateDir,
+    mode: 'shared',
+    purpose: 'claim',
+  });
+  try {
+    await rereadRunnerConfigUnderFence(targetRoot, config.runner.stateDir);
+    return await runPlanAutoCommandFenced(options);
+  } finally {
+    await lease.release();
+  }
+}
+
+async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promise<PlanAutoCommandResult> {
   const targetRoot = resolve(options.targetRoot);
   const now = options.now ?? new Date();
   const config = await readRunnerConfig(targetRoot);

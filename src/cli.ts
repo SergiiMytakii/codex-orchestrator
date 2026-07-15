@@ -29,7 +29,7 @@ Usage:
   codex-orchestrator --version
   codex-orchestrator health
   codex-orchestrator doctor --target <path> [--json]
-  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--sync-prompts <mode>]
+  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--prepare-skill-runtime-v2] [--sync-prompts <mode>]
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
@@ -69,6 +69,7 @@ interface SetupCliArgs {
   prepareLabels: boolean;
   replacePackageSkills: boolean;
   promptSyncMode?: PromptSyncMode;
+  prepareSkillRuntimeV2: boolean;
 }
 
 interface StatusCliArgs {
@@ -135,6 +136,7 @@ async function main(args: string[]): Promise<number> {
         prepareLabels: parsed.value.prepareLabels,
         replacePackageSkills: parsed.value.replacePackageSkills,
         promptSyncMode: parsed.value.promptSyncMode,
+        prepareSkillRuntimeV2: parsed.value.prepareSkillRuntimeV2,
       });
       process.stdout.write(`${result.output}\n`);
       return 0;
@@ -579,6 +581,7 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
     dryRun: false,
     prepareLabels: false,
     replacePackageSkills: false,
+    prepareSkillRuntimeV2: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -612,6 +615,9 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
         break;
       case '--prepare-labels':
         parsed.prepareLabels = true;
+        break;
+      case '--prepare-skill-runtime-v2':
+        parsed.prepareSkillRuntimeV2 = true;
         break;
       case '--sync-prompts':
         if (!next || next.startsWith('--')) {

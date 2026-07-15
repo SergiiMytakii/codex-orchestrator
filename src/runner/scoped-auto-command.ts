@@ -14,6 +14,7 @@ import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../proce
 import {
   formatSessionTimestamp,
   readRunnerConfig,
+  rereadRunnerConfigUnderFence,
 } from './command-utils.js';
 import {
   buildPromotionRequestReport,
@@ -49,6 +50,7 @@ import {
   finishPromotionRequestedTerminalOutcome,
   finishReviewReadyTerminalOutcome,
 } from './terminal-outcome.js';
+import { acquireTargetActivityFence } from './target-activity-fence.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -86,15 +88,32 @@ export interface ScopedAutoCommandResult {
 }
 
 export async function runScopedAutoCommand(options: ScopedAutoCommandOptions): Promise<ScopedAutoCommandResult> {
-  return runScopedAutoCommandInternal(options);
+  return withScopedActivityFence(options, () => runScopedAutoCommandInternal(options));
 }
 
 export async function runScopedRecoveryRetry(options: ScopedRecoveryRetryOptions): Promise<ScopedAutoCommandResult> {
-  return runScopedAutoCommandInternal(options, {
+  return withScopedActivityFence(options, () => runScopedAutoCommandInternal(options, {
     issue: options.issue,
     startAttempt: options.startAttempt,
     initialRework: options.initialRework,
+  }));
+}
+
+async function withScopedActivityFence<T>(options: ScopedAutoCommandOptions, action: () => Promise<T>): Promise<T> {
+  const targetRoot = resolve(options.targetRoot);
+  const config = await readRunnerConfig(targetRoot);
+  const lease = await acquireTargetActivityFence({
+    targetRoot,
+    stateDir: config.runner.stateDir,
+    mode: 'shared',
+    purpose: 'claim',
   });
+  try {
+    await rereadRunnerConfigUnderFence(targetRoot, config.runner.stateDir);
+    return await action();
+  } finally {
+    await lease.release();
+  }
 }
 
 async function runScopedAutoCommandInternal(

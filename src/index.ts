@@ -49,7 +49,19 @@ export {
 } from './runner/issue-tree.js';
 export type { PlanChildNode, PlanDependencyEdge, PlanGraph, PlanGraphValidationResult } from './runner/issue-tree.js';
 export { RunnerStateStore } from './runner/local-state.js';
-export type { RunnerProcessMetadata, RunnerStateFile } from './runner/local-state.js';
+export type {
+  RunnerProcessMetadata,
+  RunnerStateFile,
+  RunnerStateFileV1,
+  RunnerStateFileV2,
+} from './runner/local-state.js';
+export {
+  buildBridgeRuntimeManifest,
+  readBridgeRuntimeManifest,
+  verifyBridgeRuntimeManifest,
+  writeBridgeRuntimeManifest,
+} from './bridge-runtime.js';
+export type { BridgeRuntimeFileV1, BridgeRuntimeManifestV1 } from './bridge-runtime.js';
 export { runLocalExecutionSession } from './runner/local-execution-session.js';
 export type {
   LocalExecutionPhaseExecutor,

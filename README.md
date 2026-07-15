@@ -225,8 +225,28 @@ Run setup and create missing labels:
 codex-orchestrator setup --prepare-labels
 ```
 
-Commit the generated `.codex-orchestrator/` directory to your repository. It is
-the repository-owned policy for how autonomous work should run.
+### Prepare A Consumer For Skill Runtime V2
+
+The bridge release adds a fail-closed activity fence without changing prompt
+execution. After that exact bridge package is installed, stop every runner for
+the target and prepare canonical migration evidence:
+
+```sh
+codex-orchestrator setup --target . --prepare-skill-runtime-v2
+```
+
+Preparation succeeds only when no daemon, targeted claim, setup, local
+nonterminal run, or open GitHub issue with the running label can overlap it.
+It writes `skill-runtime-v2/prepared-generation.json` below the configured
+runner state directory and records the verified bridge package hash. Relative
+or otherwise ambiguous daemon process identities block preparation. This
+command does not migrate config, switch the Codex transport, publish a package,
+or start work; those actions belong to a separately authorized structural
+release.
+
+For normal setup, commit the repository-owned config and prompt policy files
+under `.codex-orchestrator/`. Do not commit `prepared-generation.json`; it is
+runtime migration evidence beneath the ignored runner state directory.
 
 By default, setup reads the GitHub owner and repo from `git remote origin`. Use
 `--target`, `--github-owner`, or `--github-repo` only when you need to override

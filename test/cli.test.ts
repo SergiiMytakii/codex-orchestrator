@@ -68,6 +68,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /agent:auto/);
   assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--prepare-labels/);
+  assert.match(result.stdout, /--prepare-skill-runtime-v2/);
   assert.match(result.stdout, /--sync-prompts/);
   assert.match(result.stdout, /--version/);
   assert.match(result.stdout, /--help/);
@@ -219,6 +220,21 @@ test('runs setup with repository inferred from git origin', async () => {
   >;
   assert.equal(config.github.owner, 'SergiiMytakii');
   assert.equal(config.github.repo, 'IntelleReach');
+});
+
+test('setup parses the skill-runtime-v2 preparation mode and rejects dry-run ambiguity', async () => {
+  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-prepare-v2-'));
+  await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
+  await writeFile(
+    join(targetRoot, '.codex-orchestrator/config.json'),
+    `${JSON.stringify(validConfig, null, 2)}\n`,
+    'utf8',
+  );
+  const result = await runCli(['setup', '--target', targetRoot, '--prepare-skill-runtime-v2', '--dry-run']);
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /setup --prepare-skill-runtime-v2 cannot be combined with --dry-run/);
 });
 
 test('status missing target exits with usage error', async () => {

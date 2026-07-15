@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-07-15
+
+### Added
+- Added a target-scoped shared/exclusive activity fence for daemon lifetime,
+  targeted claims, setup, and skill-runtime-v2 preparation.
+- Added `setup --prepare-skill-runtime-v2`, strict Darwin/Linux legacy-process
+  drain checks, canonical prepared-generation evidence, and a verified
+  `bridge-runtime.json` package manifest.
+
+### Changed
+- Runner state can preserve a forward-compatible empty version-2 envelope while
+  bridge config remains version 1; bridge execution still stores only legacy
+  run records and does not change prompt or Codex transport behavior.
+
+### Security
+- Skill-runtime-v2 preparation now fails closed on foreign or ambiguous process
+  ownership, active local/GitHub claims, GitHub read failure, and bridge package
+  provenance mismatch.
+
 ## [0.1.49] - 2026-07-15
 
 ### Added

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import type { CodexOrchestratorConfig } from '../config/schema.js';
@@ -27,6 +27,12 @@ import {
   type PromptSyncResult,
 } from './prompt-sync.js';
 import { resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
+import { acquireTargetActivityFence } from '../runner/target-activity-fence.js';
+import { readRunnerConfig } from '../runner/command-utils.js';
+import {
+  prepareSkillRuntimeV2,
+  type PrepareSkillRuntimeV2Result,
+} from './skill-runtime-v2-preparation.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +46,7 @@ export interface SetupCommandOptions {
   promptSyncMode?: PromptSyncMode;
   labelAdapter?: GitHubLabelAdapter;
   codexCommandResolver?: CodexCommandResolver;
+  prepareSkillRuntimeV2?: boolean;
 }
 
 export interface SetupCommandResult {
@@ -50,9 +57,53 @@ export interface SetupCommandResult {
   promptFiles: string[];
   promptSync?: PromptSyncResult;
   output: string;
+  skillRuntimePreparation?: PrepareSkillRuntimeV2Result;
 }
 
 export async function runSetupCommand(options: SetupCommandOptions): Promise<SetupCommandResult> {
+  if (options.prepareSkillRuntimeV2) {
+    if (options.dryRun) throw new Error('setup --prepare-skill-runtime-v2 cannot be combined with --dry-run');
+    const config = await readRunnerConfig(resolve(options.targetRoot));
+    const preparation = await prepareSkillRuntimeV2({ targetRoot: options.targetRoot });
+    return {
+      config,
+      configPath: projectConfigPath(options.targetRoot),
+      dryRun: false,
+      labelPlan: { policy: 'report-only', existing: [], missing: [], created: [], wouldCreate: [] },
+      promptFiles: [],
+      output: [
+        'skill runtime v2 preparation: ready',
+        `prepared generation: ${preparation.path}`,
+        `bridge package hash: ${preparation.generation.bridgePackageHash}`,
+        `activity fence generation: ${preparation.generation.activityFenceGeneration}`,
+      ].join('\n'),
+      skillRuntimePreparation: preparation,
+    };
+  }
+  if (options.dryRun) return runSetupCommandFenced(options);
+  const existingConfig = await readExistingConfig(projectConfigPath(options.targetRoot));
+  const stateDir = readExistingString(existingConfig, 'runner', 'stateDir') ?? '.codex-orchestrator/state';
+  const lease = await acquireTargetActivityFence({
+    targetRoot: options.targetRoot,
+    stateDir,
+    mode: 'exclusive',
+    purpose: 'setup',
+  });
+  try {
+    const fencedExistingConfig = await readExistingConfig(projectConfigPath(options.targetRoot));
+    const fencedStateDir = readExistingString(fencedExistingConfig, 'runner', 'stateDir') ?? '.codex-orchestrator/state';
+    if (fencedStateDir !== stateDir) {
+      throw new Error(
+        `target-activity-fence-config-changed: runner.stateDir changed from ${stateDir} to ${fencedStateDir}.`,
+      );
+    }
+    return await runSetupCommandFenced(options);
+  } finally {
+    await lease.release();
+  }
+}
+
+async function runSetupCommandFenced(options: SetupCommandOptions): Promise<SetupCommandResult> {
   const dryRun = options.dryRun ?? false;
   const configPath = projectConfigPath(options.targetRoot);
   const existingConfig = await readExistingConfig(configPath);

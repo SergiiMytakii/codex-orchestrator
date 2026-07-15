@@ -11,6 +11,9 @@ export interface MissionCoordinatorLockInput {
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
   waitTimeoutMs?: number;
+  lockName?: string;
+  description?: string;
+  bootNonceSemantics?: 'process' | 'system-boot';
 }
 
 export interface MissionCoordinatorLock {
@@ -30,25 +33,34 @@ interface LockOwner {
 export async function acquireMissionCoordinatorLock(
   input: MissionCoordinatorLockInput,
 ): Promise<MissionCoordinatorLock> {
-  const lockDirectory = join(input.targetRoot, input.stateDir, 'mission-coordinator.lock');
+  const description = input.description ?? 'Mission coordinator';
+  const lockName = input.lockName ?? 'mission-coordinator.lock';
+  const bootNonceSemantics = input.bootNonceSemantics ?? 'process';
+  if (lockName.length === 0 || lockName.includes('/') || lockName.includes('\\')) {
+    throw new Error(`${description} lockName must be one path segment.`);
+  }
+  if (bootNonceSemantics !== 'process' && bootNonceSemantics !== 'system-boot') {
+    throw new Error(`${description} bootNonceSemantics must be process or system-boot.`);
+  }
+  const lockDirectory = join(input.targetRoot, input.stateDir, lockName);
   const metadataPath = join(lockDirectory, 'owner.json');
   const token = randomUUID();
   const owner: LockOwner = {
     version: 1,
     token,
-    hostId: requireText(input.hostId, 'hostId'),
-    bootNonce: requireText(input.bootNonce, 'bootNonce'),
+    hostId: requireText(input.hostId, 'hostId', description),
+    bootNonce: requireText(input.bootNonce, 'bootNonce', description),
     pid: input.pid ?? process.pid,
     acquiredAt: (input.now ?? new Date()).toISOString(),
   };
   if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
-    throw new Error('Mission coordinator pid must be a positive integer.');
+    throw new Error(`${description} pid must be a positive integer.`);
   }
   const alive = input.isProcessAlive ?? defaultProcessAlive;
   let reclaimGuardPath: string | undefined;
   const waitTimeoutMs = input.waitTimeoutMs ?? 0;
   if (!Number.isSafeInteger(waitTimeoutMs) || waitTimeoutMs < 0) {
-    throw new Error('Mission coordinator waitTimeoutMs must be a non-negative integer.');
+    throw new Error(`${description} waitTimeoutMs must be a non-negative integer.`);
   }
   const deadline = Date.now() + waitTimeoutMs;
   await mkdir(join(input.targetRoot, input.stateDir), { recursive: true });
@@ -73,7 +85,7 @@ export async function acquireMissionCoordinatorLock(
       }
       return {
         metadataPath,
-        release: () => releaseLock(lockDirectory, metadataPath, token),
+        release: () => releaseLock(lockDirectory, metadataPath, token, description),
       };
     } catch (error) {
       if (!isCode(error, 'EEXIST') && !isCode(error, 'ENOTEMPTY')) {
@@ -81,7 +93,7 @@ export async function acquireMissionCoordinatorLock(
       }
       let existing: LockOwner;
       try {
-        existing = await readLockOwner(metadataPath);
+        existing = await readLockOwner(metadataPath, description);
       } catch (readError) {
         if (isCode(readError, 'ENOENT')) {
           await delay(5);
@@ -90,17 +102,19 @@ export async function acquireMissionCoordinatorLock(
         throw readError;
       }
       if (existing.hostId !== owner.hostId) {
-        throw new Error(`Mission coordinator lock belongs to a different host: ${existing.hostId}.`);
+        throw new Error(`${description} lock belongs to a different host: ${existing.hostId}.`);
       }
-      const ownerStillAlive = existing.pid === owner.pid
-        ? existing.bootNonce === owner.bootNonce
-        : alive(existing.pid);
+      const ownerStillAlive = bootNonceSemantics === 'system-boot'
+        ? existing.bootNonce === owner.bootNonce && (existing.pid === owner.pid || alive(existing.pid))
+        : existing.pid === owner.pid
+          ? existing.bootNonce === owner.bootNonce
+          : alive(existing.pid);
       if (ownerStillAlive) {
         if (Date.now() < deadline) {
           await delay(10);
           continue;
         }
-        throw new Error(`Mission coordinator lock is already owned by pid ${existing.pid}.`);
+        throw new Error(`${description} lock is already owned by pid ${existing.pid}.`);
       }
       const stalePath = `${lockDirectory}.stale.${existing.token}`;
       try {
@@ -110,7 +124,7 @@ export async function acquireMissionCoordinatorLock(
           continue;
         }
         if (isCode(renameError, 'EEXIST') || isCode(renameError, 'ENOTEMPTY')) {
-          throw new Error(`Mission coordinator stale reclaim guard already exists for token ${existing.token}.`);
+          throw new Error(`${description} stale reclaim guard already exists for token ${existing.token}.`);
         }
         throw renameError;
       }
@@ -119,10 +133,10 @@ export async function acquireMissionCoordinatorLock(
   }
 }
 
-async function releaseLock(lockDirectory: string, metadataPath: string, token: string): Promise<void> {
+async function releaseLock(lockDirectory: string, metadataPath: string, token: string, description: string): Promise<void> {
   let current: LockOwner;
   try {
-    current = await readLockOwner(metadataPath);
+    current = await readLockOwner(metadataPath, description);
   } catch (error) {
     if (isCode(error, 'ENOENT')) {
       return;
@@ -144,7 +158,7 @@ async function releaseLock(lockDirectory: string, metadataPath: string, token: s
   await rm(releasePath, { recursive: true, force: true });
 }
 
-async function readLockOwner(path: string): Promise<LockOwner> {
+async function readLockOwner(path: string, description: string): Promise<LockOwner> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(path, 'utf8'));
@@ -152,10 +166,10 @@ async function readLockOwner(path: string): Promise<LockOwner> {
     if (isCode(error, 'ENOENT')) {
       throw error;
     }
-    throw new Error('Mission coordinator lock metadata is invalid and cannot be reclaimed safely.');
+    throw new Error(`${description} lock metadata is invalid and cannot be reclaimed safely.`);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Mission coordinator lock metadata is invalid and cannot be reclaimed safely.');
+    throw new Error(`${description} lock metadata is invalid and cannot be reclaimed safely.`);
   }
   const record = parsed as Record<string, unknown>;
   const exact = ['version', 'token', 'hostId', 'bootNonce', 'pid', 'acquiredAt'];
@@ -166,7 +180,7 @@ async function readLockOwner(path: string): Promise<LockOwner> {
     || typeof record.bootNonce !== 'string' || record.bootNonce.length === 0
     || !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0
     || typeof record.acquiredAt !== 'string' || !Number.isFinite(Date.parse(record.acquiredAt))) {
-    throw new Error('Mission coordinator lock metadata is invalid and cannot be reclaimed safely.');
+    throw new Error(`${description} lock metadata is invalid and cannot be reclaimed safely.`);
   }
   return record as unknown as LockOwner;
 }
@@ -180,9 +194,9 @@ function defaultProcessAlive(pid: number): boolean {
   }
 }
 
-function requireText(value: string, field: string): string {
+function requireText(value: string, field: string, description: string): string {
   if (value.trim().length === 0) {
-    throw new Error(`Mission coordinator ${field} must be non-empty.`);
+    throw new Error(`${description} ${field} must be non-empty.`);
   }
   return value;
 }

@@ -771,6 +771,33 @@ Each workflow points to either a package-owned fallback prompt or a compatible
 local skill/prompt copied during setup. This lets the package work out of the
 box while still allowing repositories to customize agent behavior.
 
+## Skill Runtime V2 Bridge Fence
+
+The bridge generation keeps the current prompt and `codex exec` behavior but
+adds a target-scoped activity fence around daemon lifetime, targeted run/claim,
+and setup. Shared daemon/run holders may coexist; preparation and setup require
+exclusive ownership. Ownership metadata uses canonical target identity plus
+host, boot nonce, PID, and release token, and its generation increases whenever
+new runner activity is admitted. A stale same-host holder is reclaimed only
+when PID/boot evidence proves that owner is gone; foreign or ambiguous owners
+block.
+
+`setup --prepare-skill-runtime-v2` verifies the installed
+`bridge-runtime.json`, inspects supported Darwin or Linux processes, requires
+an empty legacy runner-state union, and queries GitHub for every open issue with
+the configured running label while holding the exclusive fence. It then writes
+one fsynced canonical `prepared-generation.json` beneath the configured state
+directory. GitHub read failure, relative daemon targets, process identity
+ambiguity, active local state, or a package hash mismatch fail closed without
+publishing generation evidence.
+
+The bridge can read and preserve an empty state-v2 envelope while config remains
+v1, but it stores only legacy run records in that envelope. It does not perform
+the structural migration, change transport, or disable target workflow prompts.
+The structural phase must start later from an actually released bridge commit
+and must verify the canonical prepared generation and exact package hash before
+any config-v2 write.
+
 ## Config Surface
 
 The top-level config areas are:

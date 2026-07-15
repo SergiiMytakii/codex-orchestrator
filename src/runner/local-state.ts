@@ -27,10 +27,18 @@ export interface RunnerProcessMetadata {
   snapshotPath?: string;
 }
 
-export interface RunnerStateFile {
+export interface RunnerStateFileV1 {
   version: 1;
   runs: RunnerProcessMetadata[];
 }
+
+export interface RunnerStateFileV2 {
+  version: 2;
+  generation: number;
+  runs: RunnerProcessMetadata[];
+}
+
+export type RunnerStateFile = RunnerStateFileV1 | RunnerStateFileV2;
 
 export class RunnerStateStore {
   public constructor(
@@ -81,13 +89,14 @@ export class RunnerStateStore {
   public async removeRun(issueNumber: number): Promise<void> {
     const state = await this.load();
     await this.save({
-      version: 1,
+      ...state,
       runs: state.runs.filter((run) => run.issueNumber !== issueNumber),
     });
   }
 }
 
-const stateFileKeys = new Set(['version', 'runs']);
+const stateFileV1Keys = new Set(['version', 'runs']);
+const stateFileV2Keys = new Set(['version', 'generation', 'runs']);
 const runKeys = new Set([
   'issueNumber',
   'mode',
@@ -115,9 +124,15 @@ function assertValidStateFile(value: unknown): asserts value is RunnerStateFile 
     throw new Error('runner state must be an object');
   }
   const record = value as Record<string, unknown>;
-  assertOnlyKeys(record, stateFileKeys, 'runner state');
-  if (record.version !== 1) {
-    throw new Error('runner state version must be 1');
+  if (record.version === 1) {
+    assertOnlyKeys(record, stateFileV1Keys, 'runner state');
+  } else if (record.version === 2) {
+    assertOnlyKeys(record, stateFileV2Keys, 'runner state');
+    if (!Number.isSafeInteger(record.generation) || (record.generation as number) < 0) {
+      throw new Error('runner state generation must be a non-negative integer');
+    }
+  } else {
+    throw new Error('runner state version must be 1 or 2');
   }
   if (!Array.isArray(record.runs)) {
     throw new Error('runner state runs must be an array');
