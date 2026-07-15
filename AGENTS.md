@@ -71,16 +71,15 @@ See `docs/agents/domain.md`.
 
 ### Latest Release
 
-- `0.1.48` (2026-07-14):
-  - Resolution Missions autonomously diagnose, authorize, execute, reconcile,
-    and reevaluate recoverable blockers without emitting an internal blocked
-    result.
-  - Indexed scheduler claims, process ownership, cancellation, and apply
-    reconciliation survive daemon restarts without duplicating work.
-  - Durable Plan Parents pin dependency waves, child descriptors, integration
-    checkpoints, and deterministic recovery Missions in one atomic store.
-  - Exact idle timeouts before the first safe file change receive one bounded
-    recovery retry instead of being reported as normal completion.
+- `0.1.49` (2026-07-15):
+  - Runner-owned Publication pins validated candidates and reconciles branch,
+    draft PR, managed labels, and terminal comments without duplicate writes.
+  - Scoped Missions and Plan Parents link Publication atomically to the exact
+    applied or final-validated candidate.
+  - Restart recovery remains indexed until reconciliation, fails closed after
+    exhausted CAS retries, and counts only completed remote observations.
+  - Owner cancellation atomically cancels linked Publication work, while live
+    smoke isolates scenario configuration and emits current proof-plan reports.
 
 ## Final Response
 

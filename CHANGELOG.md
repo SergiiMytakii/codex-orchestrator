@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-07-15
+
+### Added
+- Added a Runner-owned Publication saga that pins validated candidates and
+  reconciles branch, draft PR, managed-label, and terminal-comment mutations
+  without duplicating non-idempotent GitHub writes.
+- Added atomic Publication preparation for both scoped Missions and durable Plan
+  Parents, including exact applied-candidate and final-validation fencing.
+
+### Changed
+- GitHub issue and pull-request adapters now expose canonical fully paginated
+  enumeration contracts with immutable remote identities.
+
+### Fixed
+- Publication recovery remains durably indexed through restart, counts only
+  completed postcondition observations, fails closed after exhausted state CAS,
+  and rejects attempts to overwrite an existing recovery schedule.
+- Plan Parent cancellation now atomically cancels linked Publication work so a
+  cancelled owner cannot continue remote mutations.
+- Live-smoke completion fixtures now satisfy the current proof-plan contract and
+  isolate each scenario from prior configuration overrides.
+
 ## [0.1.48] - 2026-07-14
 
 ### Added
