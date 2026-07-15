@@ -1,87 +1,35 @@
 # Repository Routing
 
-## Start Here
+Keep this file limited to repository-specific facts. Global skills and agent
+policy own TDD, review order, commit behavior, and response style.
 
-This file is the short routing layer for agents working on
-`codex-orchestrator`. Keep detailed rules in linked docs.
+## Read First
 
-- Product workflow: `README.md`.
-- Runner architecture and policy model: `docs/deep-dive.md`.
-- Runner-owned loop ADR: `docs/adr/0001-runner-owned-loop-policy.md`.
-- Agent execution and quality preflight: `docs/agents/execution-routing.md`.
-- Repo-local Dreaming-lite memory: `docs/agents/memory/README.md`.
-- Live smoke coverage: `docs/live-smoke-checklist.md`.
-- Release history: `CHANGELOG.md`.
+- Product workflow and commands: `README.md`.
+- Coding, validation, live-smoke, and release routing:
+  `docs/agents/execution-routing.md`.
+- Runner architecture and policy: `docs/deep-dive.md` and
+  `docs/adr/0001-runner-owned-loop-policy.md`.
+- Issues, triage, and domain language: `docs/agents/issue-tracker.md`,
+  `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and `CONTEXT.md`.
+- Optional recurring lessons: `docs/agents/memory/README.md`.
+- Live-smoke scenarios and release history: `docs/live-smoke-checklist.md` and
+  `CHANGELOG.md`.
 
-## Repo Map
+## Repository Boundaries
 
-- `src/` contains the TypeScript package source.
-- `test/` contains Node test runner coverage.
-- `prompts/` contains package-bundled workflow prompts copied by setup.
-- `.codex-orchestrator/config.json` owns this repo's checks, review gates, deny
-  rules, branches, and workflow prompt routing.
-
-## Non-Negotiables
-
-- Never read, print, or edit secret files such as `.env` or `.env.*`.
-- Keep reusable orchestration logic in the package and target-repo policy under
-  `.codex-orchestrator/`.
-- `codex-orchestrator` is published by pushing the release commit to `main`; do
-  not run `npm publish` manually unless the GitHub release workflow is
-  unavailable.
-
-## Task Routing
-
-- For behavior-changing code, use the global TDD routing rule before editing.
-- For docs-only changes, do not use TDD and do not run live smoke.
-- For repeated runner/debug/agent-workflow lessons, use
-  `docs/agents/memory/README.md` as a curated recall cache, not as mandatory
+- Reusable TypeScript orchestration belongs in `src/`; tests in `test/`;
+  package-bundled workflow prompts in `prompts/`.
+- Target-repository policy belongs under `.codex-orchestrator/`; its
+  `config.json` is this repo's live checks, review, branch, deny, and prompt
   policy.
-- For medium or large implementation changes, apply cleanup and final review
-  gates before handoff.
-- When imports, modules, jobs, services, scripts, cross-module wiring, runner
-  policy, or publication boundaries change, run the quality preflight in
-  `docs/agents/execution-routing.md` first.
+- Never read, print, or edit `.env` or `.env.*` files.
+- A requested intermediate commit is not a final handoff; final review gates do
+  not block that commit.
 
-## Agent skills
+## Publication
 
-### Issue tracker
-
-Issues and PRDs are tracked in GitHub Issues for
-`SergiiMytakii/codex-orchestrator`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Triage uses the default mattpocock/skills labels: `needs-triage`,
-`needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See
-`docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This is a single-context repo with root `CONTEXT.md` and root `docs/adr/`.
-See `docs/agents/domain.md`.
-
-## Release
-
-- When cutting a release, update the latest release summary below with 2-6
-  functional bullets.
-- Update `CHANGELOG.md` with human-readable "what got better" notes.
-- Run `npm run smoke:live` only when the user explicitly requests a live smoke
-  run; it creates or updates real GitHub issues and PRs.
-
-### Latest Release
-
-- `0.1.49` (2026-07-15):
-  - Runner-owned Publication pins validated candidates and reconciles branch,
-    draft PR, managed labels, and terminal comments without duplicate writes.
-  - Scoped Missions and Plan Parents link Publication atomically to the exact
-    applied or final-validated candidate.
-  - Restart recovery remains indexed until reconciliation, fails closed after
-    exhausted CAS retries, and counts only completed remote observations.
-  - Owner cancellation atomically cancels linked Publication work, while live
-    smoke isolates scenario configuration and emits current proof-plan reports.
-
-## Final Response
-
-Keep final answers short: state what changed, what was verified, and any
-remaining risk or skipped validation.
+- Releases are published by pushing the release commit to `main`. Do not run
+  `npm publish` manually unless the GitHub release workflow is unavailable.
+- `npm run smoke:live` mutates real GitHub issues, branches, and PRs. Run it
+  only when the user explicitly requests live smoke.
