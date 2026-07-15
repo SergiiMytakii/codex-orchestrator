@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "packageVersion": "0.1.50",
-  "packageHash": "033717e392b8b021eb72c7f1f90e5701e922565648429892ae6f9fdf941ca5c3",
+  "packageVersion": "0.1.51",
+  "packageHash": "4ed79806f4a56543c84be5139f1809b3356307b8dfabc8b51a8bbf1bf06754eb",
   "files": [
     {
       "path": "CHANGELOG.md",
       "mode": 420,
-      "size": 18202,
-      "sha256": "e832a98cbc893841d80737e4106302f31a61b16fc83fd3eee83c5b4aaff62b81"
+      "size": 18390,
+      "sha256": "e3b4f6aa3f5e58da194f72094720c62f1eb43520d2007b2ebd50630bf674cc62"
     },
     {
       "path": "README.md",
@@ -25,19 +25,19 @@
       "path": "dist/src/bridge-runtime.d.ts.map",
       "mode": 420,
       "size": 718,
-      "sha256": "0dfc74f2e3042ae06114e15e189bff4447d596ec434b99e814f07fcff7127de4"
+      "sha256": "02260d745e301c3cee389280748b9f96e3e1aab1b6de60817406c0e7e46de5f9"
     },
     {
       "path": "dist/src/bridge-runtime.js",
       "mode": 420,
-      "size": 7617,
-      "sha256": "d6cedc79c608c8ae4d7eb7e2a45decee02d87dd89420523091d872e5932bc5f9"
+      "size": 7711,
+      "sha256": "e4e906a81bb4820ea7b1f1deaeee6b4e978a4719f444452494d010e23a69096d"
     },
     {
       "path": "dist/src/bridge-runtime.js.map",
       "mode": 420,
-      "size": 8177,
-      "sha256": "68948b6d2e691ec7ad08097489905d893c12e19297dd66319209b91449e7cbeb"
+      "size": 8306,
+      "sha256": "2793b4d61c49b13b702d10d084521c6054fb40a1c45bdc916a94ca765697538d"
     },
     {
       "path": "dist/src/cli.d.ts",
@@ -2689,7 +2689,7 @@
       "path": "package.json",
       "mode": 420,
       "size": 2234,
-      "sha256": "d3ca38cec7418bc4475613404d5c961afc0b0cd91964017d87a4e167f10fd075"
+      "sha256": "5ebf9f844768784f212166e71b2d25e77432c8360d1703d6d4345f88a396c782"
     },
     {
       "path": "prompts/setup-skill.md",

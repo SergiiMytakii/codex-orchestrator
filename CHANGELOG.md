@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [0.1.51] - 2026-07-15
+
+### Fixed
+- Bridge publication normalizes the package CLI executable mode before hashing,
+  so installed-package verification matches npm's required `bin` mode.
+
 ## [0.1.50] - 2026-07-15
 
 ### Added

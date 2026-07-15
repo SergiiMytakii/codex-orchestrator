@@ -478,7 +478,7 @@ Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner 
 - [ ] Stop before any config write if bridge preparation, active/resumable v1 drain, package provenance, app-server capability, or package-home auth evidence is missing or ambiguous.
 - [ ] Stop before a model turn if any package entry/hash/path, exact CLI version, required app-server method/config restriction, exact structured skill selection, execution-policy intersection, or checked-in expected catalog fixture/hash cannot be proven. Actual model-bound catalog equality is a release-test proof against the pinned binary, not a runtime pre-turn claim.
 - [ ] Stop recovery if surviving worktree mutation cannot be attributed to the recorded implementation attempt with intact HEAD/index ownership; preserve evidence and return `partial-node-mutation`.
-- [x] Stop unconditionally after Phase A bridge-only cleanup review, code review, tests, and verified `bridge-runtime.json`. Phase B cannot begin in the same execution; it requires an actually released bridge, canonical prepared-generation evidence, and a fresh resumed run. The authorized `0.1.50` release candidate has bridge hash `033717e392b8b021eb72c7f1f90e5701e922565648429892ae6f9fdf941ca5c3`.
+- [x] Stop unconditionally after Phase A bridge-only cleanup review, code review, tests, and verified `bridge-runtime.json`. Phase B cannot begin in the same execution; it requires an actually released bridge, canonical prepared-generation evidence, and a fresh resumed run. Released `0.1.50` exposed npm's installed-bin mode normalization; the RED/GREEN bridge patch candidate is `0.1.51` with hash `4ed79806f4a56543c84be5139f1809b3356307b8dfabc8b51a8bbf1bf06754eb`.
 - [x] Stop before live smoke, npm publication, push, release, or consumer migration unless the user separately authorizes that exact action. The user authorized bridge commit/push/release and canonical consumer preparation on 2026-07-15; live smoke remains unauthorized and skipped.
 
 ## 3. Execution Slices
@@ -516,7 +516,7 @@ Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner 
 - [x] `npm test` — 711/711 passed after integrator repair batch.
 - [x] `npm pack --dry-run --json`
 - [x] Run `$cleanup-review`, apply safe fixes, rerun affected tests, then run bridge-only `$code-review`. Cleanup Full found five defects; integrator Full reopened three; the repair batch and same-session Closure verified all five.
-- [x] Verify `bridge-runtime.json` against the actual `npm pack --json` closure and include it in the tarball; do not create an alternate release-candidate authority artifact. The authorized package `0.1.50` candidate has bridge hash `033717e392b8b021eb72c7f1f90e5701e922565648429892ae6f9fdf941ca5c3`, 456 manifest files, and 458 packed files.
+- [x] Verify `bridge-runtime.json` against the actual `npm pack --json` closure and include it in the tarball; do not create an alternate release-candidate authority artifact. The `0.1.50` registry install correctly changed its package bin from `0644` to `0755` and thereby proved the original manifest unusable after install. The `0.1.51` candidate normalizes that mode before hashing and has bridge hash `4ed79806f4a56543c84be5139f1809b3356307b8dfabc8b51a8bbf1bf06754eb` with 456 manifest files.
 - [x] Stop unconditionally with `Bridge release hold: bridge-only candidate is reviewed; commit/push/release and consumer preparation require separate authorization`. Do not execute Slice 1 in this run.
 
 ### Phase B Resume Gate
@@ -677,7 +677,7 @@ In progress: the user explicitly authorized the bridge commit/push/release and c
 - [ ] **Real Local Contract:** Blocked: app-server, package runtime home, catalog fixture, and exact CLI `0.144.4` contract are Phase B deliverables and cannot exist before the released-bridge resume gate.
 - [ ] **Behavior Proof:** Blocked: manifest graph-node cutover, state-v2 runtime attempts, and migration behavior are Phase B deliverables and cannot exist before the released-bridge resume gate.
 - [x] **Live Validation:** `npm run smoke:live` was skipped because it mutates real GitHub state and the user did not separately authorize it.
-- [x] **Release/Rollout:** Bridge commit/push/publication, prepared consumer evidence, structural publication, and rollout were not performed; this execution stops at the authorization-bound bridge release hold.
+- [ ] **Release/Rollout:** Bridge `0.1.50` was published and its canonical installed-byte check found the npm bin-mode defect. The `0.1.51` bridge patch and prepared consumer evidence remain in progress; structural publication/rollout follows only after Phase B validation.
 - [x] **Final Reconciliation:** Every unchecked item is Phase B work explicitly blocked by the canonical resume gate; the Phase A Contract Test Ledger entries are green and later entries remain planned.
 - [x] **Final Handoff Requirements:** Final response records the Phase A contract, invariants, reviews/repairs, validation, skipped external actions, residual bridge hold, and files by role.
 

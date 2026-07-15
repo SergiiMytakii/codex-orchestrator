@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -56,6 +56,18 @@ test('bridge runtime verification detects byte and mode drift', async () => {
   await chmod(join(root, 'dist/src/cli.js'), 0o644);
   await assert.rejects(verifyBridgeRuntimeManifest(root, manifestPath), /bridge-runtime.json does not match package bytes/);
   assert.match(await readFile(manifestPath, 'utf8'), /"version": 1/);
+});
+
+test('bridge manifest writer normalizes the installed package bin mode before hashing', async () => {
+  const root = await bridgePackageFixture();
+  const cliPath = join(root, 'dist/src/cli.js');
+  await chmod(cliPath, 0o644);
+
+  const manifest = await writeBridgeRuntimeManifest(root);
+
+  assert.equal((await lstat(cliPath)).mode & 0o777, 0o755);
+  assert.equal(manifest.files.find((file) => file.path === 'dist/src/cli.js')?.mode, 0o755);
+  await verifyBridgeRuntimeManifest(root);
 });
 
 test('bridge manifest atomic publication removes its temporary file when rename fails', async () => {

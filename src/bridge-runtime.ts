@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  chmod,
   lstat,
   readFile,
   readdir,
@@ -86,7 +87,9 @@ export async function writeBridgeRuntimeManifest(
   packageRoot: string,
   manifestPath = join(resolve(packageRoot), 'bridge-runtime.json'),
 ): Promise<BridgeRuntimeManifestV1> {
-  const manifest = await buildBridgeRuntimeManifest(packageRoot);
+  const root = resolve(packageRoot);
+  await chmod(join(root, 'dist/src/cli.js'), 0o755);
+  const manifest = await buildBridgeRuntimeManifest(root);
   await writeDurableAtomicFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
