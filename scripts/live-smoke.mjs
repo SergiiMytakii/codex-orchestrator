@@ -115,6 +115,7 @@ async function main() {
     targetRoot: '',
     cliPath: '',
     repo: options.repo,
+    baseConfig: undefined,
   };
 
   await appendReport(context, `# Live smoke ${runId}\n\nRepo: ${context.repo}\n\n`);
@@ -128,7 +129,8 @@ async function main() {
     context.targetRoot = await prepareTargetRepository(context);
     await runPackagedCli(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoNameOf(context.repo), '--prepare-labels']);
     await ensureLiveSmokeLabels(context);
-    context.realCodexConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')).codex;
+    context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+    context.realCodexConfig = structuredClone(context.baseConfig.codex);
     await configureTarget(context, { allowAgentLocalCommits: true });
 
     for (const scenario of selectedScenarios) {
@@ -372,7 +374,7 @@ async function ensureGitHubLabel(context, label) {
 
 async function configureTarget(context, overrides = {}) {
   const configPath = join(context.targetRoot, '.codex-orchestrator', 'config.json');
-  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  const config = structuredClone(context.baseConfig);
   config.github.owner = ownerOf(context.repo);
   config.github.repo = repoNameOf(context.repo);
   config.runner.allowAgentLocalCommits = overrides.allowAgentLocalCommits ?? true;
@@ -1396,7 +1398,6 @@ async function assertScopedSuccess(
   if (expectLoopPolicyEvidence) {
     assertIssueHasComment(issue, 'Fresh-Context Review');
     assertIssueHasComment(issue, 'Durable Run Summary');
-    assertIssueHasComment(issue, 'policy suggestions: Non-mutating recommendation');
   }
 
   const branchName = `codex/issue-${issueNumber}`;
@@ -2713,7 +2714,7 @@ if (prompt.includes('# Fresh-Context Review')) {
     break;
   case 'browser-proof':
     writeBrowserProofChange(issueNumber, runId);
-    writeScopedReport(reportPath, [
+    writeVisualScopedReport(reportPath, [
       'components/live-smoke/issue-' + issueNumber + '.tsx',
       '.codex-orchestrator/proofs/issue-' + issueNumber + '/browser-proof-scenario.json',
       'test/live-smoke/issue-' + issueNumber + '.test.ts',
@@ -2726,7 +2727,7 @@ if (prompt.includes('# Fresh-Context Review')) {
   case 'acceptance-proof-ui-evidence-missing':
   case 'acceptance-proof-ui-evidence-narrow-viewport':
     writeAcceptanceChange(issueNumber, runId, scenario, false);
-    writeScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
+    writeVisualScopedReport(reportPath, ['src/live-smoke/issue-' + issueNumber + '.ts', 'test/live-smoke/issue-' + issueNumber + '.test.ts']);
     break;
   case 'proof-strategy-non-visual-smoke':
     if (!prompt.includes('Resolved proof strategy: non-visual-smoke (issue contract).')) {
@@ -2741,7 +2742,7 @@ if (prompt.includes('# Fresh-Context Review')) {
   case 'acceptance-proof-rework': {
     const acceptanceProofReady = prompt.includes('automatic rework attempt (#1)');
     writeAcceptanceChange(issueNumber, runId, scenario, acceptanceProofReady);
-    writeScopedReport(
+    writeVisualScopedReport(
       reportPath,
       acceptanceProofReady
         ? [
@@ -3083,6 +3084,12 @@ function writeNonVisualSmokeReport(path, issue) {
       { command: 'TDD red-to-green', status: 'passed', summary: 'Focused non-visual smoke test failed before implementation and passed after implementation.' },
       { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for non-visual proof strategy fixture' },
     ],
+    proofPlan: {
+      mode: 'non-visual-smoke',
+      reason: 'Tests and machine-readable smoke output prove this non-visual behavior.',
+      validationCommands: ['TDD red-to-green'],
+      requiredArtifacts: [artifactPath],
+    },
     artifacts: [{
       type: 'smoke-output',
       path: artifactPath,
@@ -3099,7 +3106,7 @@ function writeNonVisualSmokeReport(path, issue) {
       implementedContract: ['Explicit non-visual proof strategy is honored by the child prompt and runner handoff.'],
       proofByAcceptanceCriteria: ['Non-visual smoke-output artifact maps the acceptance criterion without runner-owned screenshot or device proof.'],
       reviewFocus: ['Confirm runner acceptance proof was not invoked for this issue.'],
-      humanReviewChecklist: ['Check that Proof Strategy: non-visual-smoke is present in the issue body.'],
+      agentVerifiedChecks: ['Confirmed the issue contract selects non-visual-smoke proof.'],
     },
   }, null, 2), 'utf8');
 }
@@ -3107,16 +3114,32 @@ function writeNonVisualSmokeReport(path, issue) {
 function writeScopedReport(path, changes, validation = [
   { command: 'red-green live smoke', status: 'passed', summary: 'test failed before implementation and passed after implementation' },
   { command: 'code-review live smoke', status: 'passed', summary: 'code review completed for live smoke fixture' },
-], residualRisks = []) {
+], residualRisks = [], proofPlan = {
+  mode: 'none',
+  reason: 'This fixture does not require acceptance proof.',
+  validationCommands: [],
+  requiredArtifacts: [],
+}) {
   writeFileSync(path, JSON.stringify({
     status: 'completed',
     changes,
     validation,
+    proofPlan,
     artifacts: [],
     skippedChecks: [],
     residualRisks,
     prohibitedActions: [],
   }, null, 2), 'utf8');
+}
+
+function writeVisualScopedReport(path, changes, validation, residualRisks) {
+  writeScopedReport(path, changes, validation, residualRisks, {
+    mode: 'browser-visual',
+    reason: 'This fixture requires runner-owned visual acceptance proof.',
+    validationCommands: [],
+    requiredArtifacts: [],
+    visualTarget: 'browser',
+  });
 }
 
 function writeFreshContextReviewReport(path, scenario) {

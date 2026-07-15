@@ -245,13 +245,13 @@ test('gh issue adapter uses exact mutation commands', async () => {
   };
   const adapter = new GhCliIssueAdapter('example', 'repo', executor);
 
-  await adapter.addLabels(1, ['agent:running']);
-  await adapter.removeLabels(1, ['agent:blocked']);
+  await adapter.addLabels(1, ['agent:running', 'agent:review']);
+  await adapter.removeLabels(1, ['agent:blocked', 'agent:stale']);
   await adapter.postComment(1, 'hello');
 
   assert.deepEqual(calls, [
-    ['issue', 'edit', '1', '--repo', 'example/repo', '--add-label', 'agent:running'],
-    ['issue', 'edit', '1', '--repo', 'example/repo', '--remove-label', 'agent:blocked'],
+    ['issue', 'edit', '1', '--repo', 'example/repo', '--add-label', 'agent:running', '--add-label', 'agent:review'],
+    ['issue', 'edit', '1', '--repo', 'example/repo', '--remove-label', 'agent:blocked', '--remove-label', 'agent:stale'],
     ['issue', 'comment', '1', '--repo', 'example/repo', '--body', 'hello'],
   ]);
 });
@@ -292,6 +292,48 @@ test('gh issue adapter truncates oversized comments before posting', async () =>
   const body = calls[0]?.at(-1) ?? '';
   assert.equal(body.length, 60_000);
   assert.match(body, /truncated by codex-orchestrator/);
+});
+
+test('gh issue adapter enumerates every comment page with immutable comment IDs', async () => {
+  const calls: string[][] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    calls.push(args);
+    return {
+      stdout: JSON.stringify([[
+        {
+          node_id: 'IC_first',
+          html_url: 'https://github.com/example/repo/issues/1#issuecomment-1',
+          body: 'first',
+          created_at: '2026-07-14T20:00:00Z',
+          user: { login: 'maintainer' },
+          author_association: 'MEMBER',
+        },
+      ], [
+        {
+          node_id: 'IC_terminal',
+          html_url: 'https://github.com/example/repo/issues/1#issuecomment-2',
+          body: '<!-- codex-orchestrator:publication-comment mission-227 -->',
+          created_at: '2026-07-14T20:01:00Z',
+          user: { login: 'codex-orchestrator' },
+          author_association: 'OWNER',
+        },
+      ]]),
+      stderr: '',
+    };
+  };
+  const adapter = new GhCliIssueAdapter('example', 'repo', executor);
+
+  const comments = await adapter.listAllComments(1);
+
+  assert.deepEqual(calls[0], [
+    'api', '--paginate', '--slurp', '--method', 'GET',
+    'repos/example/repo/issues/1/comments',
+    '-f', 'per_page=100',
+  ]);
+  assert.deepEqual(comments.map((comment) => ({ id: comment.id, body: comment.body })), [
+    { id: 'IC_first', body: 'first' },
+    { id: 'IC_terminal', body: '<!-- codex-orchestrator:publication-comment mission-227 -->' },
+  ]);
 });
 
 test('gh issue adapter creates issues and reads them back', async () => {

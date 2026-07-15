@@ -65,6 +65,8 @@ export interface GitHubIssueAdapter {
   listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   listClosedIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   getIssue(number: number): Promise<GitHubIssue | undefined>;
+  getLabels(issueNumber: number): Promise<string[]>;
+  listAllComments(issueNumber: number): Promise<GitHubIssueComment[]>;
   createIssue(input: CreateIssueInput): Promise<GitHubIssue>;
   updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue>;
   addLabels(issueNumber: number, labels: string[]): Promise<void>;
@@ -192,6 +194,14 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
   public async getIssue(number: number): Promise<GitHubIssue | undefined> {
     const issue = this.issues.get(number);
     return issue ? cloneIssue(issue) : undefined;
+  }
+
+  public async getLabels(issueNumber: number): Promise<string[]> {
+    return (await this.getIssue(issueNumber))?.labels.map((label) => label.name) ?? [];
+  }
+
+  public async listAllComments(issueNumber: number): Promise<GitHubIssueComment[]> {
+    return (await this.getIssue(issueNumber))?.comments ?? [];
   }
 
   public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {

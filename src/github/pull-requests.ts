@@ -6,6 +6,14 @@ export interface GitHubPullRequest {
   baseRefName: string;
 }
 
+export interface GitHubPullRequestDetails extends GitHubPullRequest {
+  nodeId: string;
+  state: 'OPEN' | 'CLOSED' | 'MERGED';
+  title: string;
+  body: string;
+  authorAssociation: string;
+}
+
 export interface CreateDraftPullRequestInput {
   title: string;
   body: string;
@@ -14,6 +22,7 @@ export interface CreateDraftPullRequestInput {
 }
 
 export interface GitHubPullRequestAdapter {
+  listAllByHeadBranch(headBranch: string): Promise<GitHubPullRequestDetails[]>;
   createDraftPullRequest(input: CreateDraftPullRequestInput): Promise<GitHubPullRequest>;
   getPullRequest(number: number): Promise<GitHubPullRequest | undefined>;
   findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined>;
@@ -70,6 +79,21 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
       }
     }
     return undefined;
+  }
+
+  public async listAllByHeadBranch(headBranch: string): Promise<GitHubPullRequestDetails[]> {
+    const open = await Promise.all(this.createdPullRequests.map(async (_input, index) => this.getPullRequest(index + 1)));
+    return [...open.filter((pullRequest): pullRequest is GitHubPullRequest =>
+      pullRequest?.headRefName === headBranch),
+    ...this.mergedPullRequests.filter((pullRequest) => pullRequest.headRefName === headBranch)]
+      .map((pullRequest) => ({
+        ...pullRequest,
+        nodeId: `PR_${pullRequest.number}`,
+        state: this.mergedPullRequests.includes(pullRequest) ? 'MERGED' as const : 'OPEN' as const,
+        title: this.createdPullRequests[pullRequest.number - 1]?.title ?? '',
+        body: this.createdPullRequests[pullRequest.number - 1]?.body ?? '',
+        authorAssociation: 'MEMBER',
+      }));
   }
 }
 

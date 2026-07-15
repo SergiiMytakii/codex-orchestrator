@@ -26,6 +26,12 @@ import {
   planParentScheduleKey,
   type PlanParentRecord,
 } from './mission-plan-parent.js';
+import {
+  assertMissionPublicationRecord,
+  hasScheduledPublicationRecovery,
+  publicationScheduleKey,
+  type MissionPublicationRecord,
+} from './mission-publication.js';
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -576,13 +582,48 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
     assertPlanParentRecord(parent, `planParents.${id}`);
     if (parent.id !== id) invalid(`planParents.${id}.id must equal its map key`);
   }
-  for (const collection of ['publications', 'reservations'] as const) {
-    for (const [id, aggregate] of Object.entries(record[collection] as Record<string, unknown>)) {
-      assertStoredAggregate(aggregate, `${collection}.${id}`);
+  for (const [id, aggregate] of Object.entries(record.publications as Record<string, unknown>)) {
+    assertStoredAggregate(aggregate, `publications.${id}`);
+    assertMissionPublicationRecord(aggregate.value, `publications.${id}.value`);
+    const publication = aggregate.value as unknown as MissionPublicationRecord;
+    if (publication.id !== id) invalid(`publications.${id}.value.id must equal its map key`);
+    if (publication.revision !== aggregate.revision) invalid(`publications.${id}.revision must match value.revision`);
+    const missionOwner = Boolean((record.missions as Record<string, unknown>)[publication.ownerId]);
+    const parentOwner = Boolean((record.planParents as Record<string, unknown>)[publication.ownerId]);
+    if (!missionOwner && !parentOwner) {
+      invalid(`publications.${id}.value.ownerId references a missing owner`);
     }
+    if (missionOwner && parentOwner) invalid(`publications.${id}.value.ownerId is ambiguous`);
+    const ownerMission = (record.missions as Record<string, MissionRecord>)[publication.ownerId];
+    const ownerParent = (record.planParents as Record<string, PlanParentRecord>)[publication.ownerId];
+    if (publication.state === 'resumable') {
+      const missionMapped = ownerMission?.state === 'resumable'
+        && ownerMission.resumeTarget === 'publication-prepared'
+        && ownerMission.nextEligibleAt === publication.nextEligibleAt
+        && ownerMission.actionKey === publication.actionKey;
+      const parentMapped = ownerParent?.state === 'wave-waiting'
+        && ownerParent.resumeTarget === 'publication-prepared'
+        && ownerParent.nextEligibleAt === publication.nextEligibleAt
+        && ownerParent.actionKey === publication.actionKey;
+      if (!missionMapped && !parentMapped) invalid(`publications.${id} resumable state must match its owner`);
+    }
+  }
+  for (const [id, aggregate] of Object.entries(record.reservations as Record<string, unknown>)) {
+    assertStoredAggregate(aggregate, `reservations.${id}`);
   }
   for (const [id, nextEligibleAt] of Object.entries(record.nextEligibleAt as Record<string, unknown>)) {
     assertNonEmptyString(nextEligibleAt, `nextEligibleAt.${id}`);
+    if (id.startsWith('publication:')) {
+      const publicationId = id.slice('publication:'.length);
+      const aggregate = (record.publications as Record<string, StoredAggregate>)[publicationId];
+      const publication = aggregate?.value as unknown as MissionPublicationRecord | undefined;
+      if (!publication || (publication.state !== 'resumable' && !hasScheduledPublicationRecovery(publication))
+        || publication.nextEligibleAt !== nextEligibleAt
+        || publicationScheduleKey(publication.id) !== id) {
+        invalid(`nextEligibleAt.${id} does not match a resumable Publication`);
+      }
+      continue;
+    }
     if (id.startsWith('plan-parent:')) {
       const parentId = id.slice('plan-parent:'.length);
       const parent = (record.planParents as Record<string, PlanParentRecord>)[parentId];
@@ -606,14 +647,30 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
   for (const [id, tombstone] of Object.entries(record.tombstones as Record<string, unknown>)) {
     assertTombstone(tombstone, `tombstones.${id}`);
   }
+  for (const [id, aggregate] of Object.entries(record.publications as Record<string, StoredAggregate>)) {
+    const publication = aggregate.value as unknown as MissionPublicationRecord;
+    const indexed = (record.nextEligibleAt as Record<string, unknown>)[publicationScheduleKey(id)];
+    if ((publication.state === 'resumable' || hasScheduledPublicationRecovery(publication))
+      && indexed !== publication.nextEligibleAt) {
+      invalid(`publications.${id} scheduled recovery requires matching nextEligibleAt index`);
+    }
+    if (publication.state !== 'resumable' && !hasScheduledPublicationRecovery(publication)
+      && indexed !== undefined) {
+      invalid(`publications.${id} has stale scheduling metadata`);
+    }
+  }
   for (const [hash, blob] of Object.entries(record.blobs as Record<string, unknown>)) {
     assertBlobReference(blob, `blobs.${hash}`, hash);
   }
   for (const [id, mission] of Object.entries(record.missions as Record<string, MissionRecord>)) {
+    const linkedPublication = Object.values(record.publications as Record<string, StoredAggregate>)
+      .map((aggregate) => aggregate.value as unknown as MissionPublicationRecord)
+      .find((publication) => publication.ownerId === id && publication.state === 'resumable');
     if (mission.state === 'resumable') {
       if (!mission.resumeTarget || !mission.nextEligibleAt || !mission.resumableReason
         || !mission.requiredPredicate
-        || (record.nextEligibleAt as Record<string, unknown>)[id] !== mission.nextEligibleAt) {
+        || ((record.nextEligibleAt as Record<string, unknown>)[id] !== mission.nextEligibleAt
+          && linkedPublication?.nextEligibleAt !== mission.nextEligibleAt)) {
         invalid(`missions.${id} resumable state requires complete indexed scheduling metadata`);
       }
     }
@@ -633,8 +690,12 @@ function assertMissionStateSnapshot(value: unknown): asserts value is MissionSta
   }
   for (const [id, parent] of Object.entries(record.planParents as Record<string, PlanParentRecord>)) {
     const scheduleKey = planParentScheduleKey(id);
+    const linkedPublication = Object.values(record.publications as Record<string, StoredAggregate>)
+      .map((aggregate) => aggregate.value as unknown as MissionPublicationRecord)
+      .find((publication) => publication.ownerId === id && publication.state === 'resumable');
     if (parent.state === 'wave-waiting') {
-      if ((record.nextEligibleAt as Record<string, unknown>)[scheduleKey] !== parent.nextEligibleAt) {
+      if ((record.nextEligibleAt as Record<string, unknown>)[scheduleKey] !== parent.nextEligibleAt
+        && linkedPublication?.nextEligibleAt !== parent.nextEligibleAt) {
         invalid(`planParents.${id} requires matching nextEligibleAt index`);
       }
     } else if ((record.nextEligibleAt as Record<string, unknown>)[scheduleKey] !== undefined

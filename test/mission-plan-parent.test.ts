@@ -16,6 +16,10 @@ import {
   listEligiblePlanParents,
 } from '../src/runner/mission-plan-parent-coordinator.js';
 import { MissionStateStore } from '../src/runner/mission-state-store.js';
+import {
+  createMissionPublication,
+  MissionPublicationSaga,
+} from '../src/runner/mission-publication.js';
 
 test('plan parent pins deterministic waves and atomically links first-wave child missions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'mission-plan-parent-'));
@@ -330,7 +334,34 @@ test('transient integration preserves its durable intent and resumes reconciliat
 });
 
 test('parent cancellation atomically revokes every nonterminal child', async () => {
-  const { coordinator, store, snapshot, parentId } = await readyParent();
+  const { coordinator, store, snapshot: initial, parentId } = await readyParent();
+  const parent = initial.planParents[parentId]!;
+  const publication = createMissionPublication({
+    ownerId: parentId,
+    repository: parent.repository,
+    issueNumber: parent.issueNumber,
+    fencingEpoch: 7,
+    candidateCommit: '3'.repeat(40),
+    candidateTree: '4'.repeat(40),
+    baseSha: parent.baseCommit,
+    validationSnapshot: '5'.repeat(40),
+    validationReceiptIds: ['validation:cancel'],
+    configHash: parent.configHash,
+    branch: `codex/${parentId}`,
+    baseBranch: 'main',
+    marker: `<!-- codex-orchestrator:publication ${parentId} -->`,
+    title: 'Cancel parent publication',
+    body: `<!-- codex-orchestrator:publication ${parentId} -->\nCancel me`,
+    managedLabels: ['agent:running', 'agent:review'],
+    desiredLabels: ['agent:review'],
+    terminalComment: `<!-- codex-orchestrator:publication-comment ${parentId} -->\nReady.`,
+  });
+  const snapshot = await store.mutate(initial.generation, (draft) => {
+    draft.publications[publication.id] = {
+      revision: publication.revision,
+      value: publication as never,
+    };
+  });
   let cancelled = await coordinator.requestCancellation({
     expectedGeneration: snapshot.generation,
     parentId,
@@ -339,6 +370,7 @@ test('parent cancellation atomically revokes every nonterminal child', async () 
     requestedBy: 'user',
   });
   assert.equal(cancelled.planParents[parentId]!.state, 'cancelling');
+  assert.equal((cancelled.publications[publication.id]?.value as unknown as { state: string }).state, 'cancelled');
   for (const child of Object.values(cancelled.planParents[parentId]!.children)) {
     assert.equal(cancelled.missions[child.missionId]?.state, 'cancelling');
   }
@@ -406,23 +438,96 @@ test('final checkpoint and Publication aggregate are linked in one generation', 
     checkpoint: { commitSha: '3'.repeat(40), treeSha: '6'.repeat(40) },
   });
   assert.equal(state.planParents[parent.id]!.state, 'final-validating');
+  const publication = createMissionPublication({
+    ownerId: parent.id,
+    repository: parent.repository,
+    issueNumber: parent.issueNumber,
+    fencingEpoch: 7,
+    candidateCommit: '3'.repeat(40),
+    candidateTree: '6'.repeat(40),
+    baseSha: '1'.repeat(40),
+    validationSnapshot: '7'.repeat(40),
+    validationReceiptIds: ['validation:final'],
+    configHash: `sha256:${'a'.repeat(64)}`,
+    branch: 'codex/tree-single-parent',
+    baseBranch: 'main',
+    marker: '<!-- codex-orchestrator:publication single-parent -->',
+    title: 'Plan parent 7',
+    body: '<!-- codex-orchestrator:publication single-parent -->\nPlan parent review',
+    managedLabels: ['agent:running', 'agent:review', 'agent:blocked'],
+    desiredLabels: ['agent:review'],
+    terminalComment: '<!-- codex-orchestrator:publication-comment single-parent -->\nReady.',
+  });
+  await assert.rejects(coordinator.preparePublication({
+    expectedGeneration: state.generation, parentId: parent.id,
+    expectedRevision: state.planParents[parent.id]!.revision,
+    receiptIds: ['validation:final', 'validation:extra'],
+    validationSnapshot: '7'.repeat(40),
+    publication,
+  }), /does not match final validation/);
+  await assert.rejects(coordinator.preparePublication({
+    expectedGeneration: state.generation, parentId: parent.id,
+    expectedRevision: state.planParents[parent.id]!.revision,
+    receiptIds: ['validation:final'],
+    validationSnapshot: '8'.repeat(40),
+    publication,
+  }), /does not match final validation/);
   const published = await coordinator.preparePublication({
     expectedGeneration: state.generation, parentId: parent.id,
     expectedRevision: state.planParents[parent.id]!.revision,
     receiptIds: ['validation:final'],
-    publicationId: 'publication:single-parent',
-    candidateCommit: '3'.repeat(40),
-    candidateTree: '6'.repeat(40),
+    validationSnapshot: '7'.repeat(40),
+    publication,
   });
   assert.equal(published.planParents[parent.id]!.state, 'publication-prepared');
-  assert.equal(published.planParents[parent.id]!.publicationId, 'publication:single-parent');
-  assert.deepEqual(published.publications['publication:single-parent']?.value, {
-    ownerId: parent.id,
-    candidateCommit: '3'.repeat(40),
-    candidateTree: '6'.repeat(40),
-    baseCommit: '1'.repeat(40),
-    configHash: `sha256:${'a'.repeat(64)}`,
-  });
+  assert.equal(published.planParents[parent.id]!.publicationId, publication.id);
+  assert.deepEqual(published.publications[publication.id]?.value, publication);
+
+  const reviewed = await new MissionPublicationSaga(store, {
+    branches: {
+      observe: async () => ({ kind: 'present', commitSha: publication.candidateCommit }),
+      push: async () => undefined,
+      observeBase: async () => publication.baseSha,
+    },
+    pullRequests: {
+      listAllByHeadBranch: async () => [{
+        number: 77,
+        nodeId: 'PR_parent',
+        url: 'https://github.com/owner/repo/pull/77',
+        state: 'OPEN',
+        isDraft: true,
+        headRefName: publication.branch,
+        baseRefName: publication.baseBranch,
+        title: publication.title,
+        body: publication.body,
+        authorAssociation: 'OWNER',
+      }],
+      createDraftPullRequest: async () => ({
+        number: 77,
+        url: 'https://github.com/owner/repo/pull/77',
+        isDraft: true,
+        headRefName: publication.branch,
+        baseRefName: publication.baseBranch,
+      }),
+    },
+    issues: {
+      getLabels: async () => publication.desiredLabels,
+      addLabels: async () => undefined,
+      removeLabels: async () => undefined,
+      listAllComments: async () => [{
+        id: 'IC_parent',
+        url: 'https://github.com/owner/repo/issues/227#issuecomment-parent',
+        body: publication.terminalComment,
+        createdAt: '2026-07-14T21:00:00.000Z',
+        author: { login: 'runner' },
+        authorAssociation: 'MEMBER',
+      }],
+      postComment: async () => undefined,
+    },
+    assertMutationFence: async () => undefined,
+  }).run(publication.id);
+  assert.equal(reviewed.publications[publication.id]?.revision, 6);
+  assert.equal(reviewed.planParents[parent.id]!.state, 'completed');
 });
 
 async function readyParent() {

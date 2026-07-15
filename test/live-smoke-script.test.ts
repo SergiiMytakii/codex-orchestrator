@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { readScopedCompletionReport } from '../src/runner/completion-report.js';
+
 interface CommandResult {
   status: number | null;
   stdout: string;
@@ -194,6 +196,98 @@ test('live smoke fake plan child writes only graph-owned paths', async () => {
   ]);
   assert.match(await readFile(join(root, 'src/live-smoke/issue-owned-by-child-a.ts'), 'utf8'), /plan-child/);
   assert.match(await readFile(join(root, 'test/live-smoke/issue-owned-by-child-a.test.ts'), 'utf8'), /20260702141645/);
+});
+
+test('live smoke fake scoped reports satisfy the runner completion-report contract', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-scoped-report-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-123-scoped.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Live smoke scoped report.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260714193000',
+    'LIVE_SMOKE_SCENARIO: scoped-runner-commit',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = await readScopedCompletionReport(reportPath);
+  assert.equal(report.kind, 'valid');
+  assert.deepEqual(report.report.proofPlan, {
+    mode: 'none',
+    reason: 'This fixture does not require acceptance proof.',
+    validationCommands: [],
+    requiredArtifacts: [],
+  });
+});
+
+test('live smoke fake acceptance reports request runner-owned browser proof', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-acceptance-report-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-124-scoped.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'ACCEPTANCE_PROOF_LIVE_SMOKE: pass.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260714193100',
+    'LIVE_SMOKE_SCENARIO: acceptance-proof',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = await readScopedCompletionReport(reportPath);
+  assert.equal(report.kind, 'valid');
+  assert.deepEqual(report.report.proofPlan, {
+    mode: 'browser-visual',
+    reason: 'This fixture requires runner-owned visual acceptance proof.',
+    validationCommands: [],
+    requiredArtifacts: [],
+    visualTarget: 'browser',
+  });
+});
+
+test('live smoke fake non-visual reports bind proof to validation and artifacts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-fake-non-visual-report-'));
+  const promptPath = join(root, 'prompt.md');
+  const reportPath = join(root, 'issue-125-scoped.json');
+  const fakeAgentPath = join(root, 'fake-agent.mjs');
+  await writeFile(promptPath, [
+    'Resolved proof strategy: non-visual-smoke (issue contract).',
+    'Do not prepare browser, screenshot, emulator, simulator, or device-backed visual proof for this issue.',
+    '',
+    'LIVE_SMOKE_RUN_ID: 20260714193200',
+    'LIVE_SMOKE_SCENARIO: proof-strategy-non-visual-smoke',
+  ].join('\n'), 'utf8');
+  await writeFile(fakeAgentPath, await extractFakeAgentSource(), 'utf8');
+
+  const result = await runNodeScript(fakeAgentPath, {
+    CODEX_ORCHESTRATOR_PROMPT_FILE: promptPath,
+    CODEX_ORCHESTRATOR_REPORT_FILE: reportPath,
+  }, root);
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = await readScopedCompletionReport(reportPath);
+  assert.equal(report.kind, 'valid');
+  assert.deepEqual(report.report.proofPlan, {
+    mode: 'non-visual-smoke',
+    reason: 'Tests and machine-readable smoke output prove this non-visual behavior.',
+    validationCommands: ['TDD red-to-green'],
+    requiredArtifacts: ['.codex-orchestrator/proofs/issue-125/non-visual-smoke-proof.txt'],
+  });
+  assert.deepEqual(report.report.reviewHandoff?.agentVerifiedChecks, [
+    'Confirmed the issue contract selects non-visual-smoke proof.',
+  ]);
 });
 
 test('live smoke fake agent supports tree-child quality rework markers', async () => {

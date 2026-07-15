@@ -75,6 +75,23 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
     }
   }
 
+  public async getLabels(issueNumber: number): Promise<string[]> {
+    return (await this.getIssue(issueNumber))?.labels.map((label) => label.name) ?? [];
+  }
+
+  public async listAllComments(issueNumber: number): Promise<GitHubIssueComment[]> {
+    const result = await this.executor('gh', [
+      'api', '--paginate', '--slurp', '--method', 'GET',
+      `repos/${this.repo}/issues/${issueNumber}/comments`,
+      '-f', 'per_page=100',
+    ]);
+    const pages = JSON.parse(result.stdout) as unknown;
+    if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+      throw new Error('GitHub issue comment pagination payload must be an array of pages');
+    }
+    return pages.flatMap((page) => (page as unknown[]).map(normalizeRestComment));
+  }
+
   public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
     const args = ['issue', 'create', '--repo', this.repo, '--title', input.title, '--body', input.body];
     for (const label of input.labels) {
@@ -116,15 +133,19 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async addLabels(issueNumber: number, labels: string[]): Promise<void> {
-    for (const label of labels) {
-      await this.executor('gh', ['issue', 'edit', String(issueNumber), '--repo', this.repo, '--add-label', label]);
-    }
+    if (labels.length === 0) return;
+    await this.executor('gh', [
+      'issue', 'edit', String(issueNumber), '--repo', this.repo,
+      ...labels.flatMap((label) => ['--add-label', label]),
+    ]);
   }
 
   public async removeLabels(issueNumber: number, labels: string[]): Promise<void> {
-    for (const label of labels) {
-      await this.executor('gh', ['issue', 'edit', String(issueNumber), '--repo', this.repo, '--remove-label', label]);
-    }
+    if (labels.length === 0) return;
+    await this.executor('gh', [
+      'issue', 'edit', String(issueNumber), '--repo', this.repo,
+      ...labels.flatMap((label) => ['--remove-label', label]),
+    ]);
   }
 
   public async postComment(issueNumber: number, body: string): Promise<void> {
@@ -204,6 +225,24 @@ function normalizeComment(input: unknown): GitHubIssueComment[] {
   const login = typeof author.login === 'string' ? author.login : '';
   const authorAssociation = typeof record.authorAssociation === 'string' ? record.authorAssociation : '';
   return [{ id, url, body, createdAt, author: { login }, authorAssociation }];
+}
+
+function normalizeRestComment(input: unknown): GitHubIssueComment {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new Error('GitHub issue comment payload must be an object');
+  }
+  const record = input as Record<string, unknown>;
+  const user = typeof record.user === 'object' && record.user !== null && !Array.isArray(record.user)
+    ? record.user as Record<string, unknown>
+    : {};
+  return {
+    id: readString(record, 'node_id'),
+    url: readString(record, 'html_url'),
+    body: readString(record, 'body'),
+    createdAt: readString(record, 'created_at'),
+    author: { login: readString(user, 'login') },
+    authorAssociation: readString(record, 'author_association'),
+  };
 }
 
 function normalizePullRequestLink(input: unknown): GitHubPullRequestLink[] {

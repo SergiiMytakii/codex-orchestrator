@@ -162,3 +162,67 @@ test('gh pull request adapter finds merged PRs by head branch', async () => {
   ]);
   assert.equal(pullRequest?.number, 42);
 });
+
+test('gh pull request adapter enumerates every PR page and preserves immutable identity', async () => {
+  const calls: string[][] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    calls.push(args);
+    return {
+      stdout: JSON.stringify([[
+        {
+          number: 41,
+          node_id: 'PR_first',
+          html_url: 'https://github.com/example/repo/pull/41',
+          state: 'closed',
+          draft: false,
+          merged_at: null,
+          head: { ref: 'codex/mission-227' },
+          base: { ref: 'main' },
+          title: 'Old attempt',
+          body: null,
+          author_association: 'MEMBER',
+        },
+      ], [
+        {
+          number: 42,
+          node_id: 'PR_expected',
+          html_url: 'https://github.com/example/repo/pull/42',
+          state: 'closed',
+          draft: false,
+          merged_at: '2026-07-14T20:00:00Z',
+          head: { ref: 'codex/mission-227' },
+          base: { ref: 'main' },
+          title: 'Expected',
+          body: '<!-- codex-orchestrator:publication mission-227 -->',
+          author_association: 'OWNER',
+        },
+      ]]),
+      stderr: '',
+    };
+  };
+  const adapter = new GhCliPullRequestAdapter('example', 'repo', executor);
+
+  const pullRequests = await adapter.listAllByHeadBranch('codex/mission-227');
+
+  assert.deepEqual(calls[0], [
+    'api', '--paginate', '--slurp', '--method', 'GET',
+    'repos/example/repo/pulls',
+    '-f', 'state=all',
+    '-f', 'head=example:codex/mission-227',
+    '-f', 'per_page=100',
+  ]);
+  assert.deepEqual(pullRequests.map((pullRequest) => ({
+    number: pullRequest.number,
+    nodeId: pullRequest.nodeId,
+    state: pullRequest.state,
+    body: pullRequest.body,
+  })), [
+    { number: 41, nodeId: 'PR_first', state: 'CLOSED', body: '' },
+    {
+      number: 42,
+      nodeId: 'PR_expected',
+      state: 'MERGED',
+      body: '<!-- codex-orchestrator:publication mission-227 -->',
+    },
+  ]);
+});

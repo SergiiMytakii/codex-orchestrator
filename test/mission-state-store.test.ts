@@ -10,8 +10,13 @@ import { mkdtemp } from './mission-test-temp.js';
 
 import {
   MissionStateStore,
+  type JsonValue,
   type MissionBlobReference,
 } from '../src/runner/mission-state-store.js';
+import {
+  createMissionPublication,
+  transitionMissionPublication,
+} from '../src/runner/mission-publication.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -172,7 +177,7 @@ test('mission state store rejects an oversized generation before publication', a
   );
 
   await assert.rejects(store.mutate(0, (draft) => {
-    draft.publications.large = {
+    draft.reservations.large = {
       revision: 1,
       value: { payload: 'x'.repeat(1_024) },
     };
@@ -215,6 +220,15 @@ test('mission state store rejects malformed aggregate records before publication
   assert.equal((await store.load()).generation, 0);
 
   await assert.rejects(store.mutate(0, (draft) => {
+    draft.missions.owner = { id: 'owner', revision: 1, state: 'publication-prepared' };
+    draft.publications.invalid = {
+      revision: 1,
+      value: { id: 'invalid', revision: 1, state: 'prepared' },
+    };
+  }), /publications\.invalid/);
+  assert.equal((await store.load()).generation, 0);
+
+  await assert.rejects(store.mutate(0, (draft) => {
     draft.missions.lookup = {
       id: 'different-id',
       revision: 1,
@@ -237,6 +251,34 @@ test('mission state store rejects malformed aggregate records before publication
     draft.nextEligibleAt.retry = '2026-07-14T18:05:00Z';
   }), /nextEligibleAt must be an exact UTC ISO timestamp/);
   assert.equal((await store.load()).generation, 0);
+});
+
+test('mission state store rejects a resumable Publication without its exact index', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mission-state-publication-index-'));
+  const store = new MissionStateStore(root, '.codex-orchestrator/state');
+  const publication = createMissionPublication({
+    ownerId: 'mission-publication-index', repository: 'owner/repo', issueNumber: 227,
+    fencingEpoch: 3, candidateCommit: '3'.repeat(40), candidateTree: '4'.repeat(40),
+    baseSha: '1'.repeat(40), validationSnapshot: '2'.repeat(40), validationReceiptIds: ['validation:1'],
+    configHash: `sha256:${'a'.repeat(64)}`, branch: 'codex/publication-index', baseBranch: 'main',
+    marker: '<!-- codex-orchestrator:publication publication-index -->', title: 'Publication index',
+    body: '<!-- codex-orchestrator:publication publication-index -->\nBody',
+    managedLabels: ['agent:review'], desiredLabels: ['agent:review'],
+    terminalComment: '<!-- codex-orchestrator:publication-comment publication-index -->\nReady.',
+  });
+  const resumable = transitionMissionPublication(publication, {
+    type: 'transient-failure', nextEligibleAt: '2026-07-14T21:00:00.000Z', actionKey: 'publication:observe-branch',
+  });
+  await assert.rejects(store.mutate(0, (draft) => {
+    draft.missions[publication.ownerId] = {
+      id: publication.ownerId, revision: 2, state: 'resumable',
+      resumeTarget: 'publication-prepared', nextEligibleAt: resumable.nextEligibleAt,
+      actionKey: resumable.actionKey,
+      resumableReason: 'Publication is transient.',
+      requiredPredicate: 'Publication becomes observable.',
+    };
+    draft.publications[publication.id] = { revision: resumable.revision, value: resumable as unknown as JsonValue };
+  }), /requires matching nextEligibleAt index/);
 });
 
 test('mission state store rejects unknown snapshot fields before publication', async () => {

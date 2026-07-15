@@ -12,7 +12,13 @@ import {
   validationRecoveryMissionId,
 } from './mission-identifiers.js';
 import { terminalMissionStates, transitionMission, type MissionClaim } from './mission-state-machine.js';
-import type { MissionStateSnapshot, MissionStateStore } from './mission-state-store.js';
+import {
+  assertMissionPublicationRecord,
+  publicationScheduleKey,
+  transitionMissionPublication,
+  type MissionPublicationRecord,
+} from './mission-publication.js';
+import type { JsonValue, MissionStateSnapshot, MissionStateStore } from './mission-state-store.js';
 
 export class MissionPlanParentCoordinator {
   public constructor(private readonly store: MissionStateStore) {}
@@ -319,34 +325,35 @@ export class MissionPlanParentCoordinator {
 
   public preparePublication(input: ParentFence & {
     receiptIds: string[];
-    publicationId: string;
-    candidateCommit: string;
-    candidateTree: string;
+    validationSnapshot: string;
+    publication: MissionPublicationRecord;
   }): Promise<MissionStateSnapshot> {
     return this.store.mutate(input.expectedGeneration, (draft) => {
       const current = requireParent(draft.planParents[input.parentId], input);
-      if (draft.publications[input.publicationId]) {
-        throw new Error(`Plan Parent publication ${input.publicationId} already exists.`);
+      assertMissionPublicationRecord(input.publication);
+      if (draft.publications[input.publication.id]) {
+        throw new Error(`Plan Parent publication ${input.publication.id} already exists.`);
       }
-      if (input.candidateCommit !== current.checkpoint.commitSha
-        || input.candidateTree !== current.checkpoint.treeSha) {
-        throw new Error('Plan Parent publication candidate does not match final checkpoint.');
+      if (input.publication.ownerId !== current.id
+        || input.publication.repository !== current.repository
+        || input.publication.issueNumber !== current.issueNumber
+        || input.publication.candidateCommit !== current.checkpoint.commitSha
+        || input.publication.candidateTree !== current.checkpoint.treeSha
+        || input.publication.baseSha !== current.baseCommit
+        || input.publication.configHash !== current.configHash
+        || input.publication.validationSnapshot !== input.validationSnapshot
+        || !sameStrings(input.publication.validationReceiptIds, input.receiptIds)) {
+        throw new Error('Plan Parent publication candidate does not match final validation.');
       }
       const prepared = transitionPlanParent(current, {
         type: 'final-validation-passed',
         receiptIds: input.receiptIds,
-        publicationId: input.publicationId,
+        publicationId: input.publication.id,
       });
       draft.planParents[input.parentId] = prepared;
-      draft.publications[input.publicationId] = {
-        revision: 1,
-        value: {
-          ownerId: input.parentId,
-          candidateCommit: input.candidateCommit,
-          candidateTree: input.candidateTree,
-          baseCommit: current.baseCommit,
-          configHash: current.configHash,
-        },
+      draft.publications[input.publication.id] = {
+        revision: input.publication.revision,
+        value: structuredClone(input.publication) as unknown as JsonValue,
       };
     });
   }
@@ -367,6 +374,19 @@ export class MissionPlanParentCoordinator {
         draft.missions[child.missionId] = transitionMission(mission, { type: 'cancel-requested' });
         delete draft.nextEligibleAt[child.missionId];
         delete draft.reservations[child.missionId];
+      }
+      for (const [publicationId, aggregate] of Object.entries(draft.publications)) {
+        const publication = aggregate.value as unknown as MissionPublicationRecord;
+        if (publication.ownerId !== current.id
+          || ['review-ready', 'external-input-required', 'safety-stop', 'cancelled'].includes(publication.state)) {
+          continue;
+        }
+        const cancelled = transitionMissionPublication(publication, { type: 'cancel-requested' });
+        draft.publications[publicationId] = {
+          revision: cancelled.revision,
+          value: structuredClone(cancelled) as unknown as JsonValue,
+        };
+        delete draft.nextEligibleAt[publicationScheduleKey(publicationId)];
       }
       delete draft.nextEligibleAt[planParentScheduleKey(input.parentId)];
       delete draft.reservations[input.parentId];
@@ -403,6 +423,12 @@ export class MissionPlanParentCoordinator {
         const mission = draft.missions[child.missionId];
         if (mission && !terminalMissionStates.has(mission.state)) {
           throw new Error(`Plan Parent cancellation child ${child.stableId} is not terminal.`);
+        }
+      }
+      for (const aggregate of Object.values(draft.publications)) {
+        const publication = aggregate.value as unknown as MissionPublicationRecord;
+        if (publication.ownerId === current.id && publication.state !== 'cancelled') {
+          throw new Error(`Plan Parent cancellation Publication ${publication.id} is not cancelled.`);
         }
       }
       draft.planParents[input.parentId] = transitionPlanParent(current, {
@@ -479,4 +505,11 @@ function sameIntent(
     && left.expectedOldCommit === right.expectedOldCommit
     && left.expectedNewCommit === right.expectedNewCommit
     && left.expectedNewTree === right.expectedNewTree;
+}
+
+function sameStrings(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftSorted = [...left].sort();
+  const rightSorted = [...right].sort();
+  return leftSorted.every((value, index) => value === rightSorted[index]);
 }

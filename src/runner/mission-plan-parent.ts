@@ -112,6 +112,7 @@ export type PlanParentEvent =
   | { type: 'checkpoint-committed'; checkpoint: PlanParentCheckpoint }
   | { type: 'final-validation-passed'; receiptIds: string[]; publicationId: string }
   | { type: 'publication-review-ready' }
+  | { type: 'publication-cancelled' }
   | { type: 'label-transition-recorded'; transition: PlanParentLabelTransition }
   | {
       type: 'transient-failure';
@@ -132,7 +133,7 @@ export const planParentEventTypes = [
   'wave-linked', 'wave-prepared', 'integration-started', 'integration-completed',
   'integration-conflict', 'recovery-ready', 'validation-failed',
   'validation-recovery-ready', 'validation-passed', 'checkpoint-committed',
-  'final-validation-passed', 'publication-review-ready', 'label-transition-recorded',
+  'final-validation-passed', 'publication-review-ready', 'publication-cancelled', 'label-transition-recorded',
   'transient-failure', 'resume-eligible', 'cancel-requested',
   'cancellation-integration-reconciled', 'cancellation-reconciled',
   'external-input-required', 'safety-stop',
@@ -402,6 +403,12 @@ export function transitionPlanParent(
   if (record.state === 'publication-prepared' && event.type === 'publication-review-ready') {
     delete next.claim;
     next.state = 'completed';
+    next.revision += 1;
+    return next;
+  }
+  if (record.state === 'publication-prepared' && event.type === 'publication-cancelled') {
+    delete next.claim;
+    next.state = 'cancelled';
     next.revision += 1;
     return next;
   }

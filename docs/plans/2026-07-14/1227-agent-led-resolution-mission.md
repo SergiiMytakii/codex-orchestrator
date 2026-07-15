@@ -382,6 +382,7 @@ Remote decision rules are exact:
 - Manual title/body edits, non-draft conversion, closed PR, or another node ID with provable maintainer history is `external-input-required`; ambiguous/reused marker identity is `safety-stop`.
 - Labels modify only the configured Runner-managed namespace and preserve unrelated human labels. Partial/lost mutations are refetched before another change.
 - Comments are fully paginated. Missing creates once through `comment-intent`; one exact marker+hash reuses; duplicates or conflicting content are `external-input-required`. The Runner never deletes comments automatically.
+- A non-idempotent request that may have been dispatched is observation-only: the Runner performs three indexed full-enumeration attempts and never reissues the write. If no remote postcondition becomes observable, it records `external-input-required` for irreducible remote ambiguity instead of retrying forever or risking a duplicate.
 - `review-ready` is terminal success for Publication. Merge commit, squash, and rebase outcomes are intentionally outside the Publication reducer.
 
 Scoped and Plan Parent publication use this same reducer. Their owning aggregate maps Publication `review-ready`, `resumable`, `external-input-required`, `safety-stop`, and `cancelled` exactly as declared in its own reducer. Failure injection covers every intent/request/observation boundary, eventual consistency, base advancement warning, manual PR edits, unrelated labels, deletion/recreation, duplicates, and lost responses, proving one draft PR and one terminal comment.
@@ -574,6 +575,18 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 - Implement pinned `prepared` state and every branch/base/PR/label/comment pre/postcondition.
 - Failure-inject every remote boundary and prove exact resume with no duplicate PR, label mutation, or comment.
 
+### Slice 9 Contract Test Ledger
+
+| Contract | Failure prevented | Test / evidence | Status |
+|---|---|---|---|
+| Every non-idempotent write persists intent before dispatch and reconciles by immutable remote identity | Lost responses duplicate branches, PRs, labels, or comments | `mission-publication.test.ts` lost-response and delayed-visibility cases | green |
+| Recovery remains durably indexed after resume until reconciliation advances the phase | A crash between resume and remote reconciliation strands active Publication work | `mission-publication.test.ts: Publication transient failures persist an exact indexed resume target` | green |
+| Ambiguous requests receive three completed postcondition enumerations and are never reissued | A request exception consumes the observation budget or a retry duplicates a write | `mission-publication.test.ts: Publication counts only full postcondition enumerations after an ambiguous request` | green |
+| Canonical GitHub adapters fully enumerate comments and PRs with immutable identity | Pagination or split adapter contracts hide an existing remote object | `github-issue-adapter.test.ts`; `pull-request-adapter.test.ts` | green |
+| Scoped Mission adaptation and Plan Parent final validation link Publication in one atomic generation | Publication starts without an owning aggregate pinned to the same candidate | `mission-publication.test.ts: Scoped Mission and Publication are linked in one atomic generation`; `mission-plan-parent.test.ts` final checkpoint case | green |
+| Publication terminal and cancellation state commit atomically with the owner | A ready or cancelled owner leaves live remote mutations behind | `mission-publication.test.ts` terminal comment case; `mission-plan-parent.test.ts` cancellation and Publication completion cases | green |
+| Full live matrix preserves proof, policy, plan-tree, and cleanup behavior | Publication/harness changes regress an unrelated workflow or leak GitHub artifacts | `/tmp/codex-orchestrator-live-smoke-slice9-proofplan-full-20260715-7/live-smoke-report.md` (25/25, cleanup passed) | green |
+
 ## Slice 10 — Controlled general rollout
 
 - Ship legacy-fence release first; inventory and stop pre-fence daemons before Mission activation.
@@ -581,6 +594,34 @@ Scoped and Plan Parent publication use this same reducer. Their owning aggregate
 - Roll back by disabling new claims while a compatible daemon drains existing Missions.
 - Remove obsolete terminal blocker branches only after parity, crash, concurrency, mixed-version, and migration tests.
 - Update ADR, deep-dive, operator, security-boundary, and config-migration docs.
+
+## Implementation Review State
+
+- Review profile: `high`; maximum completed reviews: 6.
+- Reconciled at Slice 9: earlier slice notes record root correctness checks but no independently attributable reviewer result, so they do not consume this budget.
+- Reviews used: 6; reviews remaining: 0.
+- Slice 9 exhausted this reviewed execution budget with an approved same-session final-integrator Closure. Slice 10 must begin from a fresh reviewed rollout revision with its own explicit review budget before implementation.
+- User release instruction on 2026-07-15 explicitly approves the bounded non-idempotent ambiguity rule for Slice 9 and waives the second-reopen stop so verified repairs can proceed to the final integrator.
+- Failed closed launch `slice9-full-1`: no reviewer session was created because full-history inheritance was incompatible with the requested reviewer role; no usable result and no budget consumed.
+- Completed review `slice9-full-2`: mode `Full`; reviewer/session `019f61be-9053-77c1-ae55-a9f324fb217a`; target `working-tree@359aea3`; same assigned lenses; outcome `Not Approved`; nine defects opened.
+- Defect Ledger:
+  - `S9-REV-001` high/verified by `slice9-closure-1`: durable attempt serialization and observation-only ambiguous reconciliation hold under delayed visibility and concurrency.
+  - `S9-REV-002` high/verified by `slice9-closure-2` after one reopen: fence/request authority failures produce valid terminal external state.
+  - `S9-REV-003` high/reopened twice by `slice9-closure-2`, then fixed locally but unverified: every phase-owned terminal observation now clears attempt and scheduling metadata; dispatched safety/external contracts are green. The second reopen triggers the implementation-review stop rule.
+  - `S9-REV-004` high/verified by `slice9-closure-1`: base advancement preserves every later phase.
+  - `S9-REV-005` high/verified by `slice9-closure-1`: fences are identity-bound and each label operation is one remote command.
+  - `S9-REV-006` medium/verified by `slice9-closure-1`: Publication and owner recovery map atomically.
+  - `S9-REV-007` medium/verified by `slice9-closure-1`: Publication schedule and owner parity are bidirectional.
+  - `S9-REV-008` medium/verified by `slice9-closure-1`: final validation snapshot and exact receipts are pinned.
+  - `S9-REV-009` medium/verified by `slice9-closure-1`: maintainer and ambiguous recreation classifications are distinct.
+  - `S9-REV-010` high/reopened once by `slice9-closure-2`, then fixed locally but unverified: prepared attempts retry, dispatched attempts receive three observation-only reconciliations, then terminalize as irreducible external ambiguity instead of retrying forever or risking a duplicate. This bounded terminal rule is a material spec clarification requiring explicit approval.
+- Completed review `slice9-closure-1`: mode `Closure`; reviewer/session `019f61be-9053-77c1-ae55-a9f324fb217a`; outcome `Not Approved`; seven defects verified, two reopened once, one repair-introduced defect opened.
+- Completed review `slice9-closure-2`: mode `Closure`; reviewer/session `019f61be-9053-77c1-ae55-a9f324fb217a`; outcome `Not Approved`; `S9-REV-002` verified, `S9-REV-003` reopened for the second time, and `S9-REV-010` reopened once.
+- Completed final cleanup review: reviewer/session `019f64f2-d2a5-7cd1-85c6-154f96b4c5bf`; outcome `Cleanup Needed`; recovery indexing, re-deferral, observation counting, canonical adapter ownership, and misleading test defects were repaired with focused contract coverage.
+- Interrupted final integrator attempt on the pre-cleanup tree produced no usable result and consumed no review budget.
+- Completed final integrator review: reviewer/session `019f64f2-d6f4-76b3-a42d-a454b1d14461`; outcome `Blocked`; Plan Parent cancellation, scoped Mission adaptation, post-resume re-deferral, and exhausted-CAS recovery defects were repaired with focused contract coverage.
+- Completed final-integrator Closure: reviewer/session `019f64f2-d6f4-76b3-a42d-a454b1d14461`; outcome `Approved`; all four findings verified and no repair-introduced high-severity inconsistency found.
+- Current review outcome: `Approved` for Slice 9 release.
 
 ## Validation gates
 
