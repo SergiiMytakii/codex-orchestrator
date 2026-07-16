@@ -62,7 +62,8 @@ test('packed install and update keep V2 skills/schema package-owned without muta
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
       'acceptance-proof', 'atomic-store', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
-      'implementation-report', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+      'implementation-report', 'legacy-cutover', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+      'setup', 'setup-cli', 'setup-store',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
     }
@@ -122,6 +123,14 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
   };
   assert.equal(Array.isArray(implementation.implementationReportOutputSchema().oneOf), true);
   assert.equal(Array.isArray(proof.proofReportOutputSchema().oneOf), true);
+  const setup = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'setup.js')).href) as {
+    Setup: new (...args: never[]) => unknown;
+  };
+  const setupCli = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'setup-cli.js')).href) as {
+    parseSetupArgs: (argv: string[]) => { operation: string };
+  };
+  assert.equal(typeof setup.Setup, 'function');
+  assert.equal(setupCli.parseSetupArgs(['setup', '--target', '/tmp/consumer']).operation, 'configure');
 }
 
 async function publishSnapshot(installed: string, runtimeRoot: string, snapshotRelativePath: string, cacheKey = 'a') {
