@@ -268,7 +268,10 @@ export class ContainedProofAgent implements ProofAgent {
           `Independently prove issue #${input.issue.number}.`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           `Checked change digest: ${input.checkedChangeSha256}.`,
+          `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
+          `Configured check receipts: ${canonicalJson(input.checks)}.`,
           `Write evidence only below ${config.proof.artifactDir}.`,
+          'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
           ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
           'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
@@ -390,6 +393,7 @@ export function createV2Runtime(input: {
           checkPolicySha256: sha256(canonicalJson(config.checks)),
         }),
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
+        inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
         proofArtifactDir: config.proof.artifactDir,
         createAttemptId: input.createAttemptId ?? randomUUID,
         now,
@@ -550,8 +554,19 @@ async function readRegularFile(path: string): Promise<Buffer> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error(`${path} is not a bounded regular file`);
+    if (!stat.isFile() || stat.size > 5 * 1024 * 1024) throw new Error(`${path} is not a bounded regular file`);
     return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > 5 * 1024 * 1024) throw new Error(`${path} is not a bounded regular file`);
+    return { modifiedAt: metadata.mtime.toISOString() };
   } finally {
     await handle.close();
   }

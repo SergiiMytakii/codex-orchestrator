@@ -5,7 +5,9 @@ description: Independently prove a checked change against frozen acceptance crit
 
 # Acceptance Proof
 
-Independently prove the checked change against every frozen acceptance criterion. Inspect the issue snapshot, actual diff, configured check receipts, and available repository evidence. For this contract generation, use non-visual proof only and require concrete evidence for every criterion.
+Independently prove the checked change against every frozen acceptance criterion. Inspect the issue snapshot, actual diff, configured check receipts, and available repository evidence. Classify each criterion as non-visual or visual from the criterion and changed behavior, preserve every frozen criterion ID, and require concrete evidence for every declared surface.
+
+For a browser surface, read and follow [references/browser.md](references/browser.md) from this exact immutable skill snapshot. Use its real-workflow, responsive-capture, diagnostics, freshness, analysis, and artifact-classification procedure. Android and iOS visual targets are not available until their package procedures are present; return a typed external tool blocker instead of fabricating mobile evidence.
 
 Do not edit product code, repair the implementation, change lifecycle state, or perform publication. Do not commit, push, open or edit a pull request, mutate GitHub labels/comments, publish packages, deploy, or use external credentials. Do not copy or print credential bytes or auth/secret paths. Report a typed external blocker only when proof genuinely depends on unavailable external authority.
 

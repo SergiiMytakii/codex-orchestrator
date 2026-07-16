@@ -154,6 +154,7 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     bindingSha256: 'a'.repeat(64),
     status: 'prepared',
     attempts: [{ attemptId: 'attempt-1', purpose: 'proof', status: 'prepared' }],
+    startedAt: timestamp(),
     updatedAt: timestamp(),
   });
   assert.equal(state.generation, 1);
@@ -166,6 +167,7 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     bindingSha256: 'b'.repeat(64),
     status: 'prepared',
     attempts: [{ attemptId: 'attempt-2', purpose: 'proof', status: 'prepared' }],
+    startedAt: timestamp(),
     updatedAt: timestamp(),
     lifecycle: 'publishing',
   } as never), /keys/u);

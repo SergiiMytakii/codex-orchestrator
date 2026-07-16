@@ -84,6 +84,7 @@ export class AcceptanceProof {
     proofAgent: ProofAgent;
     inspectFreshness: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
     readArtifact: (relativePath: string) => Promise<Buffer>;
+    inspectArtifact?: (relativePath: string) => Promise<{ modifiedAt: string }>;
     proofArtifactDir: string;
     createAttemptId: () => string;
     now: () => string;
@@ -145,6 +146,7 @@ export class AcceptanceProof {
     if (!state) {
       const attemptId = this.dependencies.createAttemptId();
       assertNonEmptyString(attemptId, 'attemptId');
+      const startedAt = this.timestamp();
       state = await this.dependencies.proofRecords.compareAndSwap(input.proofId, input.bindingSha256, 0, {
         schema: 'codex-orchestrator.acceptance-proof-state',
         version: 1,
@@ -152,7 +154,8 @@ export class AcceptanceProof {
         bindingSha256: input.bindingSha256,
         status: 'prepared',
         attempts: [{ attemptId, purpose: 'proof', status: 'prepared' }],
-        updatedAt: this.timestamp(),
+        startedAt,
+        updatedAt: startedAt,
       });
     }
 
@@ -224,17 +227,26 @@ export class AcceptanceProof {
 
       try {
         report = validateProofReport(agentResult.report);
-        validateSpecOneReport(report, input.frozenCriteria);
-        await this.validateArtifactsAndDiff(report, agentResult.proofPhaseChangedFiles);
-        break;
+        validateReportAgainstFrozenCriteria(report, input.frozenCriteria);
       } catch {
         const alreadyRepaired = state.attempts.some((attempt) => attempt.purpose === 'report-repair');
         if (!alreadyRepaired && await this.isFresh(input.payload)) {
           state = await this.startProofRetry(state, input.bindingSha256, 'report-repair');
           continue;
         }
-        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof report or artifacts are invalid.');
+        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof report is invalid.');
       }
+      try {
+        await this.validateArtifactsAndDiff(
+          report,
+          agentResult.proofPhaseChangedFiles,
+          state.startedAt,
+          purpose !== 'report-repair',
+        );
+      } catch {
+        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof artifacts are invalid.');
+      }
+      break;
     }
     if (!await this.isFresh(input.payload)) {
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Checked change became stale during proof.');
@@ -257,7 +269,12 @@ export class AcceptanceProof {
     return { status: 'external-block', blocker: structuredClone(report.blocker!), receipt: persisted.receipt! };
   }
 
-  private async validateArtifactsAndDiff(report: ProofReportV1, changedFiles: string[]): Promise<void> {
+  private async validateArtifactsAndDiff(
+    report: ProofReportV1,
+    changedFiles: string[],
+    proofStartedAt: string,
+    requireCurrentVisualWrites: boolean,
+  ): Promise<void> {
     if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
     const artifactPaths = new Set<string>();
     for (const artifact of report.artifacts) {
@@ -266,11 +283,26 @@ export class AcceptanceProof {
       }
       const bytes = await this.dependencies.readArtifact(artifact.relativePath);
       if (sha256(bytes) !== artifact.sha256) throw new Error('proof artifact hash mismatch');
+      validateArtifactBytes(artifact, bytes);
+      if (report.decision.mode === 'visual') {
+        if (!this.dependencies.inspectArtifact) throw new Error('visual artifact metadata inspection is unavailable');
+        const metadata = await this.dependencies.inspectArtifact(artifact.relativePath);
+        if (Number.isNaN(Date.parse(metadata.modifiedAt)) || new Date(metadata.modifiedAt).toISOString() !== metadata.modifiedAt) {
+          throw new Error('visual artifact timestamp is invalid');
+        }
+        if (Date.parse(metadata.modifiedAt) < Date.parse(proofStartedAt)) throw new Error('visual artifact is stale');
+      }
       artifactPaths.add(artifact.relativePath);
     }
     for (const path of changedFiles) {
       assertRelativePath(path, 'proof phase changed file');
       if (!artifactPaths.has(path)) throw new Error('proof phase changed a non-artifact path');
+    }
+    if (report.decision.mode === 'visual' && requireCurrentVisualWrites) {
+      const changed = new Set(changedFiles);
+      if (report.artifacts.some((artifact) => !changed.has(artifact.relativePath))) {
+        throw new Error('visual proof reused an unchanged artifact');
+      }
     }
   }
 
@@ -364,18 +396,43 @@ function createBindingSha256(input: {
   }));
 }
 
-function validateSpecOneReport(report: ProofReportV1, criteria: FrozenCriterion[]): void {
-  if (report.decision.mode !== 'non-visual' || report.decision.targets.length !== 0) {
-    throw new Error('Spec 1 accepts non-visual proof only');
-  }
+function validateReportAgainstFrozenCriteria(report: ProofReportV1, criteria: FrozenCriterion[]): void {
   const expectedIds = criteria.map((criterion) => criterion.id);
   const actualIds = report.criteria.map((criterion) => criterion.id);
   if (expectedIds.length !== actualIds.length || expectedIds.some((id, index) => id !== actualIds[index])) {
     throw new Error('proof report criterion coverage mismatch');
   }
-  if (report.criteria.some((criterion) => criterion.surfaces.length !== 1 || criterion.surfaces[0] !== 'non-visual')) {
-    throw new Error('Spec 1 criterion surfaces must be non-visual');
+}
+
+function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], bytes: Buffer): void {
+  const maxBytes = artifact.kind === 'screenshot' ? 5 * 1024 * 1024 : 1024 * 1024;
+  if (bytes.length === 0 || bytes.length > maxBytes) throw new Error('proof artifact size is invalid');
+  if (artifact.kind === 'screenshot') {
+    const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const validPng = bytes.length >= 24
+      && bytes.subarray(0, 8).equals(pngSignature)
+      && bytes.subarray(12, 16).toString('ascii') === 'IHDR'
+      && bytes.readUInt32BE(16) > 0
+      && bytes.readUInt32BE(20) > 0;
+    if (!validPng) throw new Error('proof screenshot PNG is invalid');
+    return;
   }
+  if (artifact.publishable && artifact.kind !== 'generated-file') {
+    throw new Error('only screenshots or sanitized generated summaries may be publishable');
+  }
+  if (artifact.publishable && bytes.length > 64 * 1024) throw new Error('publishable proof summary is too large');
+  const text = bytes.toString('utf8');
+  if (Buffer.from(text, 'utf8').equals(bytes) === false) throw new Error('proof text artifact is not UTF-8');
+  if (containsSensitiveEvidence(text)) throw new Error('proof text artifact contains sensitive material');
+}
+
+function containsSensitiveEvidence(value: string): boolean {
+  return [
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/iu,
+    /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
+    /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
+    /(?:^|[\s"'])(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|[A-Za-z]:\\Users\\[^\\\s"']+)/mu,
+  ].some((pattern) => pattern.test(value));
 }
 
 function validateIssue(value: unknown): asserts value is IssueSnapshot {

@@ -6,6 +6,7 @@ const MAX_ARRAY_LENGTH = 256;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SURFACES = ['non-visual', 'browser', 'android', 'ios'] as const;
 const TARGETS = ['browser', 'android', 'ios'] as const;
+const ARTIFACT_KINDS = ['command-output', 'static-inspection', 'generated-file', 'screenshot', 'dom-snapshot', 'console-log', 'network-log'] as const;
 
 interface ExternalBlocker {
   kind: 'credential' | 'tool' | 'service' | 'product-decision';
@@ -34,12 +35,28 @@ export interface ProofReportV1 {
   }>;
   artifacts: Array<{
     id: string;
-    kind: 'command-output' | 'static-inspection' | 'generated-file' | 'screenshot';
+    kind: typeof ARTIFACT_KINDS[number];
     relativePath: string;
     sha256: string;
     publishable: boolean;
     description: string;
   }>;
+  visualEvidence?: {
+    workflow: { entrypoint: string; steps: string[]; finalState: string };
+    captures: Array<{
+      target: 'browser';
+      name: string;
+      width: number;
+      height: number;
+      criteriaRefs: string[];
+      screenshotRef: string;
+      stateRef: string;
+    }>;
+    diagnostics: { consoleRef: string; networkRef: string };
+    freshness: { capturedAfterFinalInteraction: true };
+    layoutReview: Array<{ summary: string; evidenceRefs: string[] }>;
+    copyReview: Array<{ summary: string; evidenceRefs: string[] }>;
+  };
   findings: string[];
   residualRisks: string[];
   blocker?: ExternalBlocker;
@@ -61,8 +78,9 @@ export interface ProofReceipt {
 export function validateProofReport(value: unknown): ProofReportV1 {
   assertRecord(value, 'proof report');
   const commonKeys = ['version', 'status', 'decision', 'criteria', 'checks', 'artifacts', 'findings', 'residualRisks'];
+  const visualReport = value.status !== 'external-block' && isRecord(value.decision) && value.decision.mode === 'visual';
   if (value.status === 'passed' || value.status === 'needs-rework') {
-    assertExactObject(value, commonKeys, 'proof report');
+    assertExactObject(value, visualReport ? [...commonKeys, 'visualEvidence'] : commonKeys, 'proof report');
   } else if (value.status === 'external-block') {
     assertExactObject(value, [...commonKeys, 'blocker'], 'proof report');
   } else {
@@ -91,6 +109,15 @@ export function validateProofReport(value: unknown): ProofReportV1 {
     if (criteria.some((criterion) => criterion.surfaces.some((surface) => !available.has(surface)))) {
       throw new Error('visual proof criterion surface is absent from decision targets');
     }
+  }
+
+  if (visualReport) {
+    validateBrowserVisualEvidence(
+      value.visualEvidence,
+      criteria,
+      value.artifacts as ProofReportV1['artifacts'],
+      decision,
+    );
   }
 
   const evidenceIds = new Set<string>([
@@ -139,32 +166,56 @@ export function createProofReceipt(input: {
 export function proofReportOutputSchema(): Record<string, unknown> {
   const common = {
     version: { type: 'integer', const: 1 },
-    decision: decisionSchema(),
     artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: artifactSchema() },
     findings: stringArraySchema(),
     residualRisks: stringArraySchema(),
   };
+  const passedCriteria = { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(true) };
+  const openCriteria = { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(false) };
+  const passedChecks = { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(true) };
+  const openChecks = { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(false) };
   return {
     oneOf: [
       reportBranch({
         status: 'passed',
         common,
-        criteria: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(true) },
-        checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(true) },
+        decision: nonVisualDecisionSchema(),
+        criteria: passedCriteria,
+        checks: passedChecks,
         findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
+      }),
+      reportBranch({
+        status: 'passed',
+        common,
+        decision: browserDecisionSchema(),
+        criteria: passedCriteria,
+        checks: passedChecks,
+        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        visualEvidence: visualEvidenceSchema(),
       }),
       reportBranch({
         status: 'needs-rework',
         common,
-        criteria: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(false) },
-        checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(false) },
+        decision: nonVisualDecisionSchema(),
+        criteria: openCriteria,
+        checks: openChecks,
         findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
+      }),
+      reportBranch({
+        status: 'needs-rework',
+        common,
+        decision: browserDecisionSchema(),
+        criteria: openCriteria,
+        checks: openChecks,
+        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        visualEvidence: visualEvidenceSchema(),
       }),
       reportBranch({
         status: 'external-block',
         common,
-        criteria: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(false) },
-        checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(false) },
+        decision: decisionSchema(),
+        criteria: openCriteria,
+        checks: openChecks,
         findings: common.findings,
         blocker: externalBlockerSchema(),
       }),
@@ -184,19 +235,26 @@ export function proofReportSkillExcerpt(): string {
 function reportBranch(input: {
   status: ProofReportV1['status'];
   common: Record<string, unknown>;
+  decision: Record<string, unknown>;
   criteria: Record<string, unknown>;
   checks: Record<string, unknown>;
   findings: unknown;
   blocker?: Record<string, unknown>;
+  visualEvidence?: Record<string, unknown>;
 }): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     ...input.common,
     status: { type: 'string', const: input.status },
+    decision: input.decision,
     criteria: input.criteria,
     checks: input.checks,
     findings: input.findings,
   };
   const required = ['version', 'status', 'decision', 'criteria', 'checks', 'artifacts', 'findings', 'residualRisks'];
+  if (input.visualEvidence) {
+    properties.visualEvidence = input.visualEvidence;
+    required.push('visualEvidence');
+  }
   if (input.blocker) {
     properties.blocker = input.blocker;
     required.push('blocker');
@@ -207,15 +265,7 @@ function reportBranch(input: {
 function decisionSchema(): Record<string, unknown> {
   return {
     oneOf: [
-      {
-        type: 'object',
-        additionalProperties: false,
-        required: ['mode', 'targets'],
-        properties: {
-          mode: { type: 'string', const: 'non-visual' },
-          targets: { type: 'array', maxItems: 0, uniqueItems: true, items: { type: 'string', enum: TARGETS } },
-        },
-      },
+      nonVisualDecisionSchema(),
       {
         type: 'object',
         additionalProperties: false,
@@ -226,6 +276,30 @@ function decisionSchema(): Record<string, unknown> {
         },
       },
     ],
+  };
+}
+
+function nonVisualDecisionSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['mode', 'targets'],
+    properties: {
+      mode: { type: 'string', const: 'non-visual' },
+      targets: { type: 'array', maxItems: 0, uniqueItems: true, items: { type: 'string', enum: TARGETS } },
+    },
+  };
+}
+
+function browserDecisionSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['mode', 'targets'],
+    properties: {
+      mode: { type: 'string', const: 'visual' },
+      targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'browser' } },
+    },
   };
 }
 
@@ -273,11 +347,69 @@ function artifactSchema(): Record<string, unknown> {
     required: ['id', 'kind', 'relativePath', 'sha256', 'publishable', 'description'],
     properties: {
       id: boundedStringSchema(MAX_STRING_LENGTH),
-      kind: { type: 'string', enum: ['command-output', 'static-inspection', 'generated-file', 'screenshot'] },
+      kind: { type: 'string', enum: ARTIFACT_KINDS },
       relativePath: relativePathSchema(),
       sha256: sha256Schema(),
       publishable: { type: 'boolean' },
       description: boundedStringSchema(MAX_SUMMARY_LENGTH),
+    },
+  };
+}
+
+function visualEvidenceSchema(): Record<string, unknown> {
+  const reviewSchema = {
+    type: 'array',
+    minItems: 1,
+    maxItems: MAX_ARRAY_LENGTH,
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['summary', 'evidenceRefs'],
+      properties: {
+        summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
+        evidenceRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+      },
+    },
+  };
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['workflow', 'captures', 'diagnostics', 'freshness', 'layoutReview', 'copyReview'],
+    properties: {
+      workflow: {
+        type: 'object', additionalProperties: false, required: ['entrypoint', 'steps', 'finalState'],
+        properties: {
+          entrypoint: boundedStringSchema(MAX_STRING_LENGTH),
+          steps: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
+          finalState: boundedStringSchema(MAX_SUMMARY_LENGTH),
+        },
+      },
+      captures: {
+        type: 'array', minItems: 2, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true,
+        items: {
+          type: 'object', additionalProperties: false,
+          required: ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'],
+          properties: {
+            target: { type: 'string', const: 'browser' },
+            name: boundedStringSchema(MAX_STRING_LENGTH),
+            width: { type: 'integer' },
+            height: { type: 'integer' },
+            criteriaRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+            screenshotRef: boundedStringSchema(MAX_STRING_LENGTH),
+            stateRef: boundedStringSchema(MAX_STRING_LENGTH),
+          },
+        },
+      },
+      diagnostics: {
+        type: 'object', additionalProperties: false, required: ['consoleRef', 'networkRef'],
+        properties: { consoleRef: boundedStringSchema(MAX_STRING_LENGTH), networkRef: boundedStringSchema(MAX_STRING_LENGTH) },
+      },
+      freshness: {
+        type: 'object', additionalProperties: false, required: ['capturedAfterFinalInteraction'],
+        properties: { capturedAfterFinalInteraction: { type: 'boolean', const: true } },
+      },
+      layoutReview: reviewSchema,
+      copyReview: reviewSchema,
     },
   };
 }
@@ -340,16 +472,117 @@ function validateArtifacts(value: unknown): asserts value is ProofReportV1['arti
     const field = `proof report.artifacts[${index}]`;
     assertExactObject(artifact, ['id', 'kind', 'relativePath', 'sha256', 'publishable', 'description'], field);
     assertBoundedString(artifact.id, `${field}.id`, MAX_STRING_LENGTH, true);
-    if (!['command-output', 'static-inspection', 'generated-file', 'screenshot'].includes(artifact.kind as string)) {
+    if (!ARTIFACT_KINDS.includes(artifact.kind as typeof ARTIFACT_KINDS[number])) {
       throw new Error(`${field}.kind is invalid`);
     }
     assertRelativePath(artifact.relativePath, `${field}.relativePath`);
     assertSha256(artifact.sha256, `${field}.sha256`);
     if (typeof artifact.publishable !== 'boolean') throw new Error(`${field}.publishable must be boolean`);
+    if (['dom-snapshot', 'console-log', 'network-log'].includes(artifact.kind as string) && artifact.publishable !== false) {
+      throw new Error(`${field}.kind must remain local-only`);
+    }
     assertBoundedString(artifact.description, `${field}.description`, MAX_SUMMARY_LENGTH, true);
     ids.push(artifact.id);
   }
   assertUnique(ids, 'proof report.artifact ids');
+}
+
+function validateBrowserVisualEvidence(
+  value: unknown,
+  criteria: ProofReportV1['criteria'],
+  artifacts: ProofReportV1['artifacts'],
+  decision: ProofReportV1['decision'],
+): asserts value is NonNullable<ProofReportV1['visualEvidence']> {
+  if (decision.targets.length !== 1 || decision.targets[0] !== 'browser') {
+    throw new Error('Spec 3 visual proof supports the browser target only');
+  }
+  assertExactObject(value, ['workflow', 'captures', 'diagnostics', 'freshness', 'layoutReview', 'copyReview'], 'proof report.visualEvidence');
+  assertExactObject(value.workflow, ['entrypoint', 'steps', 'finalState'], 'proof report.visualEvidence.workflow');
+  assertBoundedString(value.workflow.entrypoint, 'proof report.visualEvidence.workflow.entrypoint', MAX_STRING_LENGTH, true);
+  if (!/^https?:\/\//u.test(value.workflow.entrypoint as string)) throw new Error('visual workflow entrypoint must be HTTP(S)');
+  assertStringArray(value.workflow.steps, 'proof report.visualEvidence.workflow.steps');
+  if (value.workflow.steps.length === 0) throw new Error('visual workflow requires steps');
+  assertBoundedString(value.workflow.finalState, 'proof report.visualEvidence.workflow.finalState', MAX_SUMMARY_LENGTH, true);
+
+  const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+  const browserCriteria = criteria.filter((criterion) => criterion.surfaces.includes('browser'));
+  const browserCriterionIds = new Set(browserCriteria.map((criterion) => criterion.id));
+  if (browserCriteria.length === 0) throw new Error('browser decision requires a browser criterion surface');
+  if (!Array.isArray(value.captures) || value.captures.length < 2 || value.captures.length > MAX_ARRAY_LENGTH) {
+    throw new Error('browser visual evidence requires at least two captures');
+  }
+  const captureNames: string[] = [];
+  for (const [index, capture] of value.captures.entries()) {
+    const field = `proof report.visualEvidence.captures[${index}]`;
+    assertExactObject(capture, ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'], field);
+    if (capture.target !== 'browser') throw new Error(`${field}.target must be browser`);
+    assertBoundedString(capture.name, `${field}.name`, MAX_STRING_LENGTH, true);
+    if (!Number.isSafeInteger(capture.width) || !Number.isSafeInteger(capture.height)
+      || (capture.width as number) < 1 || (capture.height as number) < 1
+      || (capture.width as number) > 10_000 || (capture.height as number) > 10_000) {
+      throw new Error(`${field} dimensions are invalid`);
+    }
+    assertStringArray(capture.criteriaRefs, `${field}.criteriaRefs`);
+    assertUnique(capture.criteriaRefs, `${field}.criteriaRefs`);
+    if (capture.criteriaRefs.length === 0 || capture.criteriaRefs.some((id) => !browserCriterionIds.has(id))) {
+      throw new Error(`${field} has irrelevant criterion mapping`);
+    }
+    for (const criterionId of browserCriterionIds) {
+      if (!capture.criteriaRefs.includes(criterionId)) throw new Error(`${field} omits browser criterion ${criterionId}`);
+    }
+    assertBoundedString(capture.screenshotRef, `${field}.screenshotRef`, MAX_STRING_LENGTH, true);
+    assertBoundedString(capture.stateRef, `${field}.stateRef`, MAX_STRING_LENGTH, true);
+    const screenshot = artifactById.get(capture.screenshotRef as string);
+    const state = artifactById.get(capture.stateRef as string);
+    if (screenshot?.kind !== 'screenshot') throw new Error(`${field} lacks screenshot evidence`);
+    if (state?.kind !== 'dom-snapshot') throw new Error(`${field} lacks DOM state evidence`);
+    for (const criterionId of capture.criteriaRefs as string[]) {
+      const criterion = browserCriteria.find((candidate) => candidate.id === criterionId)!;
+      if (!criterion.evidenceRefs.includes(screenshot.id) || !criterion.evidenceRefs.includes(state.id)) {
+        throw new Error(`${field} evidence is not linked to criterion ${criterionId}`);
+      }
+    }
+    captureNames.push(capture.name as string);
+  }
+  assertUnique(captureNames, 'proof report.visualEvidence capture names');
+  if (!(value.captures as Array<{ width: number }>).some((capture) => capture.width >= 1024)) {
+    throw new Error('browser visual evidence lacks desktop coverage');
+  }
+  if (!(value.captures as Array<{ width: number }>).some((capture) => capture.width <= 480)) {
+    throw new Error('browser visual evidence lacks narrow responsive coverage');
+  }
+
+  assertExactObject(value.diagnostics, ['consoleRef', 'networkRef'], 'proof report.visualEvidence.diagnostics');
+  if (artifactById.get(value.diagnostics.consoleRef as string)?.kind !== 'console-log') {
+    throw new Error('browser visual evidence lacks console diagnostics');
+  }
+  if (artifactById.get(value.diagnostics.networkRef as string)?.kind !== 'network-log') {
+    throw new Error('browser visual evidence lacks network diagnostics');
+  }
+  assertExactObject(value.freshness, ['capturedAfterFinalInteraction'], 'proof report.visualEvidence.freshness');
+  if (value.freshness.capturedAfterFinalInteraction !== true) throw new Error('browser evidence is not post-interaction');
+  validateVisualReview(value.layoutReview, 'layoutReview', artifactById);
+  validateVisualReview(value.copyReview, 'copyReview', artifactById);
+}
+
+function validateVisualReview(
+  value: unknown,
+  fieldName: 'layoutReview' | 'copyReview',
+  artifactById: Map<string, ProofReportV1['artifacts'][number]>,
+): void {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ARRAY_LENGTH) {
+    throw new Error(`proof report.visualEvidence.${fieldName} must be non-empty`);
+  }
+  for (const [index, finding] of value.entries()) {
+    const field = `proof report.visualEvidence.${fieldName}[${index}]`;
+    assertExactObject(finding, ['summary', 'evidenceRefs'], field);
+    assertBoundedString(finding.summary, `${field}.summary`, MAX_SUMMARY_LENGTH, true);
+    assertStringArray(finding.evidenceRefs, `${field}.evidenceRefs`);
+    assertUnique(finding.evidenceRefs, `${field}.evidenceRefs`);
+    if (finding.evidenceRefs.length === 0 || finding.evidenceRefs.some((ref) => !artifactById.has(ref))) {
+      throw new Error(`${field} has invalid evidence references`);
+    }
+  }
 }
 
 function validateExternalBlocker(value: unknown, field: string): asserts value is ExternalBlocker {
@@ -443,6 +676,10 @@ function assertBoundedString(
 
 function assertRecord(value: unknown, field: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} must be an object`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function assertExactObject(value: unknown, keys: string[], field: string): asserts value is Record<string, unknown> {

@@ -29,6 +29,7 @@ export interface ProofStateV1 {
     reportSha256?: string;
   }>;
   receipt?: ProofReceipt;
+  startedAt: string;
   updatedAt: string;
 }
 
@@ -116,6 +117,7 @@ export function validateProofState(value: unknown): ProofStateV1 {
     'status',
     'attempts',
     ...(hasReceipt(value) ? ['receipt'] : []),
+    'startedAt',
     'updatedAt',
   ], 'proof state');
   if (value.schema !== 'codex-orchestrator.acceptance-proof-state' || value.version !== 1) {
@@ -151,7 +153,9 @@ export function validateProofState(value: unknown): ProofStateV1 {
   const terminal = TERMINAL_STATUSES.includes(value.status as typeof TERMINAL_STATUSES[number]);
   if (terminal !== hasReceipt(value)) throw new Error('proof terminal state and receipt must appear together');
   if (hasReceipt(value)) validateReceipt(value.receipt);
+  assertIsoTimestamp(value.startedAt);
   assertIsoTimestamp(value.updatedAt);
+  if (Date.parse(value.updatedAt as string) < Date.parse(value.startedAt as string)) throw new Error('proof state timestamps are reversed');
   return value as unknown as ProofStateV1;
 }
 

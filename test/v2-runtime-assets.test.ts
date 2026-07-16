@@ -53,6 +53,22 @@ test('fails closed when package bytes change during resolution and publishes no 
   });
 });
 
+test('fails closed when acceptance-proof procedure bytes change during resolution', async () => {
+  await withFixture(async ({ packageRoot, runtimeRoot }) => {
+    await assert.rejects(publishRuntimeAssetSnapshot({
+      packageRoot,
+      runtimeRoot,
+      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/procedure-race/snapshot',
+      skill: 'acceptance-proof',
+      onStep: async (step) => {
+        if (step === 'after-source-resolve') {
+          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'browser.md'), 'BROWSER PROCEDURE B\n');
+        }
+      },
+    }), /package assets changed during resolution/u);
+  });
+});
+
 test('keeps version-A attempt bytes immutable while a new attempt snapshots version B', async () => {
   await withFixture(async ({ packageRoot, runtimeRoot }) => {
     const first = await publishRuntimeAssetSnapshot({
@@ -205,6 +221,8 @@ test('serializes concurrent publishers and reuses the one exact committed snapsh
     ]);
     assert.equal([left.reused, right.reused].filter(Boolean).length, 1);
     assert.deepEqual(left.files, right.files);
+    assert.deepEqual(left.files.map((file) => file.relativePath), ['SKILL.md', 'output-schema.json', 'references/browser.md']);
+    assert.match(await readFile(join(left.snapshotRoot, 'references', 'browser.md'), 'utf8'), /BROWSER PROCEDURE/u);
     await verifyRuntimeAssetSnapshot(left);
   });
 });
@@ -224,6 +242,8 @@ async function withFixture(
     await writeFile(join(packageRoot, 'package.json'), '{"name":"codex-orchestrator","version":"1.0.0"}\n');
     await writeFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'), 'PACKAGE AGENT A\n');
     await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'SKILL.md'), 'PACKAGE PROOF A\n');
+    await mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references'), { recursive: true });
+    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'browser.md'), 'BROWSER PROCEDURE A\n');
     await run({ packageRoot, runtimeRoot });
   } finally {
     await rm(root, { recursive: true, force: true });

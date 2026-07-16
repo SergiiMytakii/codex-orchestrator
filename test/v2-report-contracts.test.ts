@@ -62,6 +62,36 @@ const passedProof: ProofReportV1 = {
   residualRisks: [],
 };
 
+const visualProof: ProofReportV1 = {
+  ...passedProof,
+  decision: { mode: 'visual', targets: ['browser'] },
+  criteria: [{
+    id: 'ac-web', status: 'passed', confidence: 'high', surfaces: ['browser'],
+    evidenceRefs: ['shot-wide', 'dom-wide', 'shot-narrow', 'dom-narrow'],
+    analysis: 'The final workflow state is visible at both required widths.',
+  }],
+  checks: [],
+  artifacts: [
+    visualArtifact('shot-wide', 'screenshot', 'proofs/visual/wide.png', true),
+    visualArtifact('dom-wide', 'dom-snapshot', 'proofs/visual/wide.json', false),
+    visualArtifact('shot-narrow', 'screenshot', 'proofs/visual/narrow.png', true),
+    visualArtifact('dom-narrow', 'dom-snapshot', 'proofs/visual/narrow.json', false),
+    visualArtifact('console', 'console-log', 'proofs/visual/console.json', false),
+    visualArtifact('network', 'network-log', 'proofs/visual/network.json', false),
+  ],
+  visualEvidence: {
+    workflow: { entrypoint: 'http://127.0.0.1:4173/', steps: ['Open', 'Activate'], finalState: 'Dashboard ready' },
+    captures: [
+      { target: 'browser', name: 'wide', width: 1280, height: 720, criteriaRefs: ['ac-web'], screenshotRef: 'shot-wide', stateRef: 'dom-wide' },
+      { target: 'browser', name: 'narrow', width: 390, height: 844, criteriaRefs: ['ac-web'], screenshotRef: 'shot-narrow', stateRef: 'dom-narrow' },
+    ],
+    diagnostics: { consoleRef: 'console', networkRef: 'network' },
+    freshness: { capturedAfterFinalInteraction: true },
+    layoutReview: [{ summary: 'Responsive layout is aligned and unclipped.', evidenceRefs: ['shot-wide', 'shot-narrow'] }],
+    copyReview: [{ summary: 'Visible copy matches the criterion.', evidenceRefs: ['dom-wide', 'dom-narrow'] }],
+  },
+};
+
 test('implementation output schema and runtime validator have parity across status branches', () => {
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: completedImplementation, accepted: true },
@@ -97,6 +127,8 @@ test('implementation output schema and runtime validator have parity across stat
 test('proof output schema and runtime validator have parity across terminal report branches', () => {
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: passedProof, accepted: true },
+    { value: visualProof, accepted: true },
+    { value: { ...visualProof, visualEvidence: undefined }, accepted: false },
     {
       value: {
         ...passedProof,
@@ -181,6 +213,15 @@ function assertParity(
     assert.equal(schemaAccepts(schema, fixture.value), fixture.accepted, `schema parity failed for ${JSON.stringify(fixture.value)}`);
     assert.equal(runtimeAccepts(validate, fixture.value), fixture.accepted, `runtime parity failed for ${JSON.stringify(fixture.value)}`);
   }
+}
+
+function visualArtifact(
+  id: string,
+  kind: ProofReportV1['artifacts'][number]['kind'],
+  relativePath: string,
+  publishable: boolean,
+): ProofReportV1['artifacts'][number] {
+  return { id, kind, relativePath, publishable, sha256: 'e'.repeat(64), description: `${id} evidence` };
 }
 
 function runtimeAccepts(validate: (value: unknown) => unknown, value: unknown): boolean {

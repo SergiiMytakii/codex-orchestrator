@@ -30,7 +30,7 @@ export type RuntimeAssetPublishStep =
   | 'after-parent-sync';
 
 export interface RuntimeAssetFileEvidence {
-  relativePath: 'SKILL.md' | 'output-schema.json';
+  relativePath: string;
   sha256: string;
   size: number;
   mode: number;
@@ -92,7 +92,10 @@ export async function publishRuntimeAssetSnapshot(input: {
     await mkdir(tempRoot, { mode: SNAPSHOT_ROOT_MODE });
     const expectedFiles = sourceSnapshotFiles(source, expectedUid);
     for (const [index, file] of expectedFiles.entries()) {
-      const bytes = file.relativePath === 'SKILL.md' ? source.skillBytes : source.schemaBytes;
+      const bytes = sourceFileBytes(source, file.relativePath);
+      if (file.relativePath.includes('/')) {
+        await mkdir(dirname(join(tempRoot, file.relativePath)), { recursive: true, mode: SNAPSHOT_ROOT_MODE });
+      }
       const handle = await open(join(tempRoot, file.relativePath), 'wx', SNAPSHOT_FILE_MODE);
       try {
         await handle.writeFile(bytes);
@@ -100,6 +103,7 @@ export async function publishRuntimeAssetSnapshot(input: {
       } finally {
         await handle.close();
       }
+      await syncDirectory(dirname(join(tempRoot, file.relativePath)));
       if (index === 0) await input.onStep?.('after-first-file-sync');
     }
 
@@ -153,8 +157,10 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   assertOwner(rootStat.uid, expectedUid, snapshotRoot);
   assertMode(rootStat.mode, SNAPSHOT_ROOT_MODE, snapshotRoot);
 
-  const expectedNames = ['SKILL.md', 'output-schema.json'];
-  const actualNames = (await readdir(snapshotRoot)).sort();
+  const expectedNames = snapshot.skill === 'acceptance-proof'
+    ? ['SKILL.md', 'output-schema.json', 'references/browser.md']
+    : ['SKILL.md', 'output-schema.json'];
+  const actualNames = await snapshotFilePaths(snapshotRoot, expectedUid);
   if (actualNames.length !== expectedNames.length || actualNames.some((name, index) => name !== expectedNames[index])) {
     throw new Error('snapshot has missing or extra entries');
   }
@@ -180,7 +186,7 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   if (resolve(snapshot.skillPath) !== skillPath || resolve(snapshot.schemaPath) !== schemaPath) {
     throw new Error('snapshot evidence paths are invalid');
   }
-  if (snapshot.generatedSchemaSha256 !== snapshot.files[1]?.sha256) {
+  if (snapshot.generatedSchemaSha256 !== snapshot.files.find((file) => file.relativePath === 'output-schema.json')?.sha256) {
     throw new Error('generated schema hash does not match snapshot evidence');
   }
 }
@@ -194,16 +200,23 @@ interface SourceAssets {
   skillSourcePath: string;
   skillBytes: Buffer;
   schemaBytes: Buffer;
+  browserProcedureSourcePath?: string;
+  browserProcedureBytes?: Buffer;
 }
 
 async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName): Promise<SourceAssets> {
   const packageJsonPath = join(packageRoot, 'package.json');
   const skillSourcePath = join(packageRoot, 'internal-skills', skill, 'SKILL.md');
+  const browserProcedureSourcePath = skill === 'acceptance-proof'
+    ? join(packageRoot, 'internal-skills', skill, 'references', 'browser.md')
+    : undefined;
   await assertSourcePath(packageRoot, packageJsonPath, true);
   await assertSourcePath(packageRoot, skillSourcePath, true);
-  const [packageJsonBytes, skillBytes] = await Promise.all([
+  if (browserProcedureSourcePath) await assertSourcePath(packageRoot, browserProcedureSourcePath, true);
+  const [packageJsonBytes, skillBytes, browserProcedureBytes] = await Promise.all([
     readFile(packageJsonPath),
     readFile(skillSourcePath),
+    browserProcedureSourcePath ? readFile(browserProcedureSourcePath) : Promise.resolve(undefined),
   ]);
   const packageJson = JSON.parse(packageJsonBytes.toString('utf8')) as { name?: unknown; version?: unknown };
   if (packageJson.name !== 'codex-orchestrator' || typeof packageJson.version !== 'string' || packageJson.version.length === 0) {
@@ -219,17 +232,24 @@ async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName
     skillSourcePath,
     skillBytes,
     schemaBytes: Buffer.from(`${canonicalJson(schema)}\n`, 'utf8'),
+    ...(browserProcedureSourcePath && browserProcedureBytes ? { browserProcedureSourcePath, browserProcedureBytes } : {}),
   };
 }
 
 async function assertSourceUnchanged(source: SourceAssets): Promise<void> {
   await assertSourcePath(source.packageRoot, source.packageJsonPath, true);
   await assertSourcePath(source.packageRoot, source.skillSourcePath, true);
-  const [packageJsonBytes, skillBytes] = await Promise.all([
+  if (source.browserProcedureSourcePath) await assertSourcePath(source.packageRoot, source.browserProcedureSourcePath, true);
+  const [packageJsonBytes, skillBytes, browserProcedureBytes] = await Promise.all([
     readFile(source.packageJsonPath),
     readFile(source.skillSourcePath),
+    source.browserProcedureSourcePath ? readFile(source.browserProcedureSourcePath) : Promise.resolve(undefined),
   ]);
   if (!packageJsonBytes.equals(source.packageJsonBytes) || !skillBytes.equals(source.skillBytes)) {
+    throw new Error('package assets changed during resolution');
+  }
+  if ((browserProcedureBytes && !browserProcedureBytes.equals(source.browserProcedureBytes!))
+    || (!browserProcedureBytes && source.browserProcedureBytes)) {
     throw new Error('package assets changed during resolution');
   }
 }
@@ -252,13 +272,13 @@ function expectedSnapshot(input: {
     rootMode: SNAPSHOT_ROOT_MODE,
     ownerUid: input.expectedUid,
     files,
-    generatedSchemaSha256: files[1]!.sha256,
+    generatedSchemaSha256: files.find((file) => file.relativePath === 'output-schema.json')!.sha256,
     reused: input.reused,
   };
 }
 
 function sourceSnapshotFiles(source: SourceAssets, ownerUid: number): RuntimeAssetFileEvidence[] {
-  return [
+  const files: RuntimeAssetFileEvidence[] = [
     {
       relativePath: 'SKILL.md',
       sha256: sha256(source.skillBytes),
@@ -274,6 +294,52 @@ function sourceSnapshotFiles(source: SourceAssets, ownerUid: number): RuntimeAss
       ownerUid,
     },
   ];
+  if (source.browserProcedureBytes) {
+    files.push({
+      relativePath: 'references/browser.md',
+      sha256: sha256(source.browserProcedureBytes),
+      size: source.browserProcedureBytes.length,
+      mode: SNAPSHOT_FILE_MODE,
+      ownerUid,
+    });
+  }
+  return files;
+}
+
+function sourceFileBytes(source: SourceAssets, relativePath: string): Buffer {
+  if (relativePath === 'SKILL.md') return source.skillBytes;
+  if (relativePath === 'output-schema.json') return source.schemaBytes;
+  if (relativePath === 'references/browser.md' && source.browserProcedureBytes) return source.browserProcedureBytes;
+  throw new Error(`unknown runtime asset: ${relativePath}`);
+}
+
+async function snapshotFilePaths(snapshotRoot: string, expectedUid: number): Promise<string[]> {
+  const paths: string[] = [];
+  const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      const path = join(directory, entry.name);
+      const info = await lstat(path);
+      if (entry.isSymbolicLink() || info.isSymbolicLink()) throw new Error(`snapshot contains a symbolic link: ${relativePath}`);
+      assertOwner(info.uid, expectedUid, path);
+      if (entry.isDirectory()) {
+        assertMode(info.mode, SNAPSHOT_ROOT_MODE, path);
+        await visit(path, relativePath);
+      } else if (entry.isFile()) {
+        paths.push(relativePath);
+      } else {
+        throw new Error(`snapshot contains a special entry: ${relativePath}`);
+      }
+    }
+  };
+  await visit(snapshotRoot, '');
+  return paths.sort((left, right) => expectedAssetOrder(left) - expectedAssetOrder(right) || left.localeCompare(right));
+}
+
+function expectedAssetOrder(path: string): number {
+  if (path === 'SKILL.md') return 0;
+  if (path === 'output-schema.json') return 1;
+  return 2;
 }
 
 async function ensureManagedDirectoryPath(runtimeRoot: string, target: string, expectedUid: number): Promise<void> {
