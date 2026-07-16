@@ -45,7 +45,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **[Spec 3 — Browser proof](2330-agent-auto-v2-browser-proof.md)** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
 | **[Spec 4 — Android proof](2359-agent-auto-v2-android-proof.md)** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
 | **[Spec 5 — iOS proof](0045-agent-auto-v2-ios-proof.md)** | 6 | Runner-created iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and waived-review reconciliation; Xcode, Simulator runtime/device type, and the safe temporary XCUITest fixture path are confirmed. |
-| **Spec 6 — Setup** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and final review; config/state roots are settled. |
+| **[Spec 6 — Setup](0125-agent-auto-v2-setup.md)** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and waived-review reconciliation; config/state roots are settled. |
 | **Spec 7 — Operational consumers** | 8-9 | Relevant live-smoke scenario migration and local self-improvement consumption of the single CLI JSON/runIssue path. | Spec 6 is fully complete, including Setup crash matrix and final review; live smoke still requires separate explicit authorization. |
 | **Spec 8 — Cutover and deletion** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is fully complete, including authorized relevant live smoke and self-improvement validation; every earlier spec remains reconciled. |
 
@@ -77,10 +77,10 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
-| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 3 |
-| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 3 |
-| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green through Spec 3 |
-| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 3 |
+| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 5 |
+| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 5 |
+| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green through Spec 5 |
+| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 5 |
 | Final tarball contains one runtime path and no plan-auto/graph/app-server/migration compatibility surface. | Cutover ships two authorities or preserves the complexity the rewrite is intended to remove. | Spec 8 tarball inventory and public CLI/export snapshots | planned |
 
 ## 6. Master Execution Checklist
@@ -107,12 +107,12 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### Phases 3-5 — Browser, Android, and iOS proof
 
-- [ ] Author each platform spec only after the immediately preceding numbered spec is fully complete; all three consume the unchanged `AcceptanceProof` Interface.
-- [ ] Browser completion requires a real local fixture. Android/iOS completion requires actual runner-leased emulator/simulator evidence; mocked screenshots are insufficient.
+- [x] Author each platform spec only after the immediately preceding numbered spec is fully complete; all three consume the unchanged `AcceptanceProof` Interface.
+- [x] Browser completion requires a real local fixture. Android/iOS completion requires actual runner-leased emulator/simulator evidence; mocked screenshots are insufficient.
 
 ### Phase 6 — Setup
 
-- [ ] Author and review Setup from plan Section 2.3 and slice 7 after config/state paths settle.
+- [x] Author Setup from plan Section 2.3 and slice 7 after config/state paths settle; independent review remains waived and executable self-check gates are recorded.
 - [ ] Prove config-last and matching-manifest recovery through `Setup.execute`; keep CLI handlers policy-free.
 
 ### Phase 7 — Operational consumers
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 5 — iOS proof — authored and authorized for execution.
-- **Execution Outcome:** Specs 1-4 completed on 2026-07-16. Spec 4's exact Android visual contract, runner lease, artifact custody/redaction, immutable package procedure/helper, real isolated emulator fixture, safe release, full test, package, and containment gates are GREEN under the independent-review waiver.
+- **Current Child:** Spec 6 — Setup — authored and authorized for execution.
+- **Execution Outcome:** Specs 1-5 are complete. Spec 5's exact iOS visual contract, runner-created Simulator lease, bundle/process custody, immutable procedure/helper, accessibility-driven XCUITest fixture, visually inspected final PNG, exact deletion, unchanged pre-existing Simulator inventory, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 4's terminal gate is satisfied and Spec 5 is linked above. Spec 5 may execute now; Specs 6-8 remain gated until each predecessor completes.
+- **Sequencing Decision:** Spec 5's terminal gate is satisfied and Spec 6 is linked above. Spec 6 may execute now; Specs 7-8 remain gated until each predecessor completes.
 
 ## 10. Final Action
 
