@@ -44,7 +44,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **Spec 2 — Autonomous recovery** | 3 | Same-worktree rework, bounded transport/report repair, capability-separated durable state, crash resume, exact publication intents, and duplicate-effect prevention. [Spec](./2253-agent-auto-v2-autonomous-recovery.md) | Spec 1 is fully complete: checklist/ledger, containment canary, all validation, waived reviews, and final handoff are reconciled. Author from its settled Interfaces. |
 | **[Spec 3 — Browser proof](2330-agent-auto-v2-browser-proof.md)** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
 | **[Spec 4 — Android proof](2359-agent-auto-v2-android-proof.md)** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
-| **Spec 5 — iOS proof** | 6 | Runner-leased iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and final review; iOS toolchain/safe lease fixture are confirmed. |
+| **[Spec 5 — iOS proof](0045-agent-auto-v2-ios-proof.md)** | 6 | Runner-created iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and waived-review reconciliation; Xcode, Simulator runtime/device type, and the safe temporary XCUITest fixture path are confirmed. |
 | **Spec 6 — Setup** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and final review; config/state roots are settled. |
 | **Spec 7 — Operational consumers** | 8-9 | Relevant live-smoke scenario migration and local self-improvement consumption of the single CLI JSON/runIssue path. | Spec 6 is fully complete, including Setup crash matrix and final review; live smoke still requires separate explicit authorization. |
 | **Spec 8 — Cutover and deletion** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is fully complete, including authorized relevant live smoke and self-improvement validation; every earlier spec remains reconciled. |
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 5 — iOS proof — authorized for authoring after Spec 4 reconciliation.
+- **Current Child:** Spec 5 — iOS proof — authored and authorized for execution.
 - **Execution Outcome:** Specs 1-4 completed on 2026-07-16. Spec 4's exact Android visual contract, runner lease, artifact custody/redaction, immutable package procedure/helper, real isolated emulator fixture, safe release, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 4's terminal gate is satisfied and linked above. Spec 5 is authorized for deterministic authoring; Specs 6-8 remain gated until each predecessor completes.
+- **Sequencing Decision:** Spec 4's terminal gate is satisfied and Spec 5 is linked above. Spec 5 may execute now; Specs 6-8 remain gated until each predecessor completes.
 
 ## 10. Final Action
 
