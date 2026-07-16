@@ -53,6 +53,8 @@ export interface ProofAgent {
     checkedChangeSha256: string;
     changedFiles: string[];
     checks: CheckedChangePayloadV1['checks'];
+    repairOnly: boolean;
+    repairFindings: string[];
     signal: AbortSignal;
   }): Promise<ProofAgentResult>;
 }
@@ -149,7 +151,7 @@ export class AcceptanceProof {
         proofId: input.proofId,
         bindingSha256: input.bindingSha256,
         status: 'prepared',
-        attempts: [{ attemptId, status: 'prepared' }],
+        attempts: [{ attemptId, purpose: 'proof', status: 'prepared' }],
         updatedAt: this.timestamp(),
       });
     }
@@ -177,46 +179,62 @@ export class AcceptanceProof {
       );
     }
 
-    let agentResult: ProofAgentResult;
-    try {
-      agentResult = await this.dependencies.proofAgent.run({
-        proofId: input.proofId,
-        runId: input.payload.runId,
-        issue: structuredClone(input.issue),
-        frozenCriteria: structuredClone(input.frozenCriteria),
-        checkedChangeSha256: input.checkedChangeSha256,
-        changedFiles: [...input.payload.changedFiles],
-        checks: structuredClone(input.payload.checks),
-        signal: this.dependencies.signal ?? new AbortController().signal,
-      });
-    } catch (error) {
-      if (error instanceof ProofQuiescenceError) throw error;
-      return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
-    }
-
-    if (this.dependencies.signal?.aborted) {
-      const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
-      return { status: 'cancelled', receipt: outcome.receipt };
-    }
-    if (agentResult.kind === 'transport-failed') {
-      const outcome = await this.persistOperationalTerminal(state, 'transport-failed', input, 'Proof transport failed.');
-      return { status: 'transport-failed', resumable: agentResult.resumable, receipt: outcome.receipt };
-    }
-    if (agentResult.kind === 'cancelled') {
-      const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
-      return { status: 'cancelled', receipt: outcome.receipt };
-    }
-    if (agentResult.kind === 'internal-error') {
-      return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
-    }
-
     let report: ProofReportV1;
-    try {
-      report = validateProofReport(agentResult.report);
-      validateSpecOneReport(report, input.frozenCriteria);
-      await this.validateArtifactsAndDiff(report, agentResult.proofPhaseChangedFiles);
-    } catch {
-      return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof report or artifacts are invalid.');
+    while (true) {
+      const purpose = state.attempts.at(-1)!.purpose;
+      let agentResult: ProofAgentResult;
+      try {
+        agentResult = await this.dependencies.proofAgent.run({
+          proofId: input.proofId,
+          runId: input.payload.runId,
+          issue: structuredClone(input.issue),
+          frozenCriteria: structuredClone(input.frozenCriteria),
+          checkedChangeSha256: input.checkedChangeSha256,
+          changedFiles: [...input.payload.changedFiles],
+          checks: structuredClone(input.payload.checks),
+          repairOnly: purpose === 'report-repair',
+          repairFindings: purpose === 'report-repair' ? ['The previous Proof Report did not match the generated schema or evidence contract.'] : [],
+          signal: this.dependencies.signal ?? new AbortController().signal,
+        });
+      } catch (error) {
+        if (error instanceof ProofQuiescenceError) throw error;
+        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
+      }
+
+      if (this.dependencies.signal?.aborted) {
+        const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
+        return { status: 'cancelled', receipt: outcome.receipt };
+      }
+      if (agentResult.kind === 'transport-failed') {
+        const alreadyRetried = state.attempts.some((attempt) => attempt.purpose === 'transport-retry');
+        if (agentResult.resumable && !alreadyRetried && await this.isFresh(input.payload)) {
+          state = await this.startProofRetry(state, input.bindingSha256, 'transport-retry');
+          continue;
+        }
+        const outcome = await this.persistOperationalTerminal(state, 'transport-failed', input, 'Proof transport failed.');
+        return { status: 'transport-failed', resumable: false, receipt: outcome.receipt };
+      }
+      if (agentResult.kind === 'cancelled') {
+        const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
+        return { status: 'cancelled', receipt: outcome.receipt };
+      }
+      if (agentResult.kind === 'internal-error') {
+        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
+      }
+
+      try {
+        report = validateProofReport(agentResult.report);
+        validateSpecOneReport(report, input.frozenCriteria);
+        await this.validateArtifactsAndDiff(report, agentResult.proofPhaseChangedFiles);
+        break;
+      } catch {
+        const alreadyRepaired = state.attempts.some((attempt) => attempt.purpose === 'report-repair');
+        if (!alreadyRepaired && await this.isFresh(input.payload)) {
+          state = await this.startProofRetry(state, input.bindingSha256, 'report-repair');
+          continue;
+        }
+        return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof report or artifacts are invalid.');
+      }
     }
     if (!await this.isFresh(input.payload)) {
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Checked change became stale during proof.');
@@ -254,6 +272,30 @@ export class AcceptanceProof {
       assertRelativePath(path, 'proof phase changed file');
       if (!artifactPaths.has(path)) throw new Error('proof phase changed a non-artifact path');
     }
+  }
+
+  private async startProofRetry(
+    state: ProofStateV1,
+    bindingSha256: string,
+    purpose: 'transport-retry' | 'report-repair',
+  ): Promise<ProofStateV1> {
+    const attemptId = this.dependencies.createAttemptId();
+    assertNonEmptyString(attemptId, 'attemptId');
+    return this.dependencies.proofRecords.compareAndSwap(
+      state.proofId,
+      bindingSha256,
+      state.generation,
+      bodyFrom(state, {
+        status: 'running',
+        attempts: [
+          ...state.attempts.map((attempt, index) => index === state.attempts.length - 1
+            ? { ...attempt, status: 'terminal' as const }
+            : attempt),
+          { attemptId, purpose, status: 'running' },
+        ],
+        updatedAt: this.timestamp(),
+      }),
+    );
   }
 
   private async isFresh(payload: CheckedChangePayloadV1): Promise<boolean> {

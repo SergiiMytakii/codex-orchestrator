@@ -103,6 +103,28 @@ test('malformed report, rewritten criteria, raw path escape, and forbidden proof
   }
 });
 
+test('one malformed-report repair and one transport retry stay proof-internal under the same binding', async () => {
+  const malformed = proofFixture({
+    agentResults: [
+      { kind: 'report', report: { status: 'passed' }, proofPhaseChangedFiles: [] },
+      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
+    ],
+  });
+  assert.equal((await malformed.proof.proveChange(malformed.input())).status, 'passed');
+  assert.equal(malformed.agentCalls.length, 2);
+  assert.deepEqual((await malformed.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'report-repair']);
+
+  const transport = proofFixture({
+    agentResults: [
+      { kind: 'transport-failed', resumable: true },
+      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
+    ],
+  });
+  assert.equal((await transport.proof.proveChange(transport.input())).status, 'passed');
+  assert.equal(transport.agentCalls.length, 2);
+  assert.deepEqual((await transport.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'transport-retry']);
+});
+
 test('passed proof returns a sanitized receipt and persists no run lifecycle capability', async () => {
   const fixture = proofFixture();
   const result = await fixture.proof.proveChange(fixture.input());
@@ -166,6 +188,7 @@ test('needs-rework, external-block, transport, cancellation, and internal agent 
 
 function proofFixture(options: {
   agentResult?: ProofAgentResult;
+  agentResults?: ProofAgentResult[];
   inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
 } = {}) {
   const capabilities = createCheckedChangeCapabilities();
@@ -190,7 +213,7 @@ function proofFixture(options: {
     proofAgent: {
       run: async (input) => {
         agentCalls.push(input);
-        return options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
+        return options.agentResults?.shift() ?? options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
       },
     },
     inspectFreshness: async (value) => {
@@ -202,7 +225,7 @@ function proofFixture(options: {
       return artifactBytes;
     },
     proofArtifactDir: 'proofs/proof-1',
-    createAttemptId: () => 'attempt-1',
+    createAttemptId: (() => { let attempt = 0; return () => `attempt-${++attempt}`; })(),
     now: () => '2026-07-16T12:00:00.000Z',
   });
   return {

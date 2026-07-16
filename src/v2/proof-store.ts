@@ -24,6 +24,7 @@ export interface ProofStateV1 {
   status: ProofStatus;
   attempts: Array<{
     attemptId: string;
+    purpose: 'proof' | 'transport-retry' | 'report-repair';
     status: 'prepared' | 'running' | 'terminal';
     reportSha256?: string;
   }>;
@@ -127,12 +128,25 @@ export function validateProofState(value: unknown): ProofStateV1 {
   if (!Array.isArray(value.attempts) || value.attempts.length === 0 || value.attempts.length > 256) {
     throw new Error('proof state attempts are invalid');
   }
+  const attemptIds = new Set<string>();
+  const purposeCounts = new Map<string, number>();
   for (const [index, attempt] of value.attempts.entries()) {
-    const keys = hasReportSha(attempt) ? ['attemptId', 'status', 'reportSha256'] : ['attemptId', 'status'];
+    const keys = hasReportSha(attempt) ? ['attemptId', 'purpose', 'status', 'reportSha256'] : ['attemptId', 'purpose', 'status'];
     assertExactObject(attempt, keys, `proof state.attempts[${index}]`);
     assertNonEmptyString(attempt.attemptId, `proof state.attempts[${index}].attemptId`);
+    if (!['proof', 'transport-retry', 'report-repair'].includes(attempt.purpose as string)) throw new Error('proof attempt purpose is invalid');
+    const purpose = attempt.purpose as 'proof' | 'transport-retry' | 'report-repair';
     if (!['prepared', 'running', 'terminal'].includes(attempt.status as string)) throw new Error('proof attempt status is invalid');
     if (hasReportSha(attempt)) assertSha256(attempt.reportSha256, 'proof attempt reportSha256');
+    if (attemptIds.has(attempt.attemptId)) throw new Error('proof attempt IDs must be unique');
+    attemptIds.add(attempt.attemptId);
+    purposeCounts.set(purpose, (purposeCounts.get(purpose) ?? 0) + 1);
+    if (index === 0 && purpose !== 'proof') throw new Error('first proof attempt purpose is invalid');
+    if (index > 0 && purpose === 'proof') throw new Error('proof purpose cannot repeat');
+    if (index < value.attempts.length - 1 && attempt.status !== 'terminal') throw new Error('prior proof attempts must be terminal');
+  }
+  if ((purposeCounts.get('transport-retry') ?? 0) > 1 || (purposeCounts.get('report-repair') ?? 0) > 1) {
+    throw new Error('proof retry budget is exceeded');
   }
   const terminal = TERMINAL_STATUSES.includes(value.status as typeof TERMINAL_STATUSES[number]);
   if (terminal !== hasReceipt(value)) throw new Error('proof terminal state and receipt must appear together');

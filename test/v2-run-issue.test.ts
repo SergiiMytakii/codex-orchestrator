@@ -68,6 +68,18 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
 });
 
+test('repeated runIssue replays the durable terminal outcome without a second claim or publication', async () => {
+  const fixture = await runFixture();
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'review-ready');
+  const effectsBefore = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length;
+
+  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(second, first);
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length, effectsBefore);
+  assert.equal((await fixture.store.read()).runs.length, 1);
+});
+
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
   const checkGate = deferred<{ status: 'passed'; output: Buffer }>();
   const proofGate = deferred<ReturnType<typeof passedProof>>();
@@ -110,15 +122,13 @@ test('malformed config and run state return typed internal error before claim ef
   assert.equal(invalidState.events.includes('effect:claim-labels'), false);
 });
 
-test('agent-authored commit, failed check, proof rework, and proof external block map without publication', async () => {
+test('agent-authored commit and proof external block map without publication', async () => {
   const cases: Array<{
     name: string;
     options: FixtureOptions;
     expected: Partial<RunIssueResult>;
   }> = [
     { name: 'agent commit', options: { agentCommit: true }, expected: { status: 'blocked', kind: 'safety' } },
-    { name: 'check failed', options: { check: async () => ({ status: 'failed', output: Buffer.from('failed') }) }, expected: { status: 'internal-error' } },
-    { name: 'proof rework', options: { proof: async () => ({ status: 'needs-rework', findings: ['fix'], receipt: receipt() }) }, expected: { status: 'internal-error' } },
     {
       name: 'proof external',
       options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }) },
@@ -133,17 +143,73 @@ test('agent-authored commit, failed check, proof rework, and proof external bloc
   }
 });
 
-test('invoked publication rejection is non-resumable, retains intent, and starts no later effect', async () => {
+test('failed checks and proof findings rework the same worktree until review-ready', async () => {
+  let checkCalls = 0;
+  const checkFixture = await runFixture({
+    check: async () => (++checkCalls === 1
+      ? { status: 'failed', output: Buffer.from('typecheck failed') }
+      : { status: 'passed', output: Buffer.from('ok') }),
+  });
+  assert.equal((await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(checkFixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal((await checkFixture.store.read()).runs[0]?.cycle, 2);
+
+  let proofCalls = 0;
+  const proofFixture = await runFixture({
+    proof: async () => (++proofCalls === 1
+      ? { status: 'needs-rework', findings: ['fix acceptance behavior'], receipt: receipt() }
+      : passedProof()),
+  });
+  assert.equal((await proofFixture.runner.runIssue({ targetRoot: proofFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(proofFixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal(proofFixture.events.filter((event) => event === 'proof').length, 2);
+  assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
+});
+
+test('the fifth failed implementation cycle exhausts without publication', async () => {
+  const fixture = await runFixture({
+    check: async () => ({ status: 'failed', output: Buffer.from('still failing') }),
+  });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'exhausted', resumable: true });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 5);
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 5);
+});
+
+test('malformed report repair and clean transport retry use separate budgets without consuming a cycle', async () => {
+  const malformed = await runFixture({
+    implementationResults: [
+      { kind: 'completed', report: { status: 'completed' } },
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
+    ],
+  });
+  assert.equal((await malformed.runner.runIssue({ targetRoot: malformed.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(malformed.events.filter((event) => event === 'agent').length, 2);
+  assert.deepEqual(pick((await malformed.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 1 });
+
+  const transport = await runFixture({
+    implementationResults: [
+      { kind: 'transport-failed', resumable: true },
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
+    ],
+  });
+  assert.equal((await transport.runner.runIssue({ targetRoot: transport.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(transport.events.filter((event) => event === 'agent').length, 2);
+  assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
+});
+
+test('invoked publication rejection is resumable, retains intent, and starts no later effect', async () => {
   const fixture = await runFixture({ rejectEffect: 'push' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const state = await fixture.store.read();
-  assert.equal(state.runs[0]?.lifecycle, 'transport-failed');
+  assert.equal(state.runs[0]?.lifecycle, 'publishing');
   assert.equal(state.runs[0]?.intent?.kind, 'push');
   assert.equal(fixture.events.includes('effect:pr'), false);
 });
 
-test('every invoked remote effect rejection is non-resumable while local commit rejection is internal', async () => {
+test('every invoked effect rejection stays resumable with its exact durable intent', async () => {
   const remoteCases: Array<{ effect: NonNullable<FixtureOptions['rejectEffect']>; intent: string }> = [
     { effect: 'claim-labels', intent: 'claim-labels' },
     { effect: 'claim-comment', intent: 'comment' },
@@ -154,11 +220,14 @@ test('every invoked remote effect rejection is non-resumable while local commit 
   for (const entry of remoteCases) {
     const fixture = await runFixture({ rejectEffect: entry.effect });
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: false }, entry.effect);
+    assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.effect);
     assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, entry.intent, entry.effect);
   }
   const local = await runFixture({ rejectEffect: 'commit' });
-  assert.equal((await local.runner.runIssue({ targetRoot: local.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  assert.deepEqual(
+    pick(await local.runner.runIssue({ targetRoot: local.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
   assert.equal(local.events.includes('git:push'), false);
 });
 
@@ -184,7 +253,7 @@ test('implementation and proof transport, cancellation, internal failure, and ma
   }
 });
 
-test('issue read rejection is resumable before effect; post-effect CAS failure is non-resumable with retained intent', async () => {
+test('issue read rejection and post-effect CAS failure are resumable with retained intent', async () => {
   const readFailure = await runFixture({ issueReadRejectAt: 3 });
   const readResult = await readFailure.runner.runIssue({ targetRoot: readFailure.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(readResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
@@ -192,10 +261,69 @@ test('issue read rejection is resumable before effect; post-effect CAS failure i
 
   const casFailure = await runFixture({ rejectStoreEvent: 'state:publishing:none', rejectStoreOccurrence: 2 });
   const casResult = await casFailure.runner.runIssue({ targetRoot: casFailure.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(casResult, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
+  assert.deepEqual(pick(casResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const state = await casFailure.store.read();
   assert.equal(state.runs[0]?.intent?.kind, 'commit');
   assert.equal(casFailure.events.includes('git:push'), false);
+});
+
+test('restart after effect-before-confirmation reconciles publication without duplicate effects', async () => {
+  for (const occurrence of [2, 3, 4, 5] as const) {
+    const fixture = await runFixture({ rejectStoreEvent: 'state:publishing:none', rejectStoreOccurrence: occurrence });
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, `occurrence ${occurrence}`);
+    const countsBefore = effectCounts(fixture.events);
+
+    const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(second.status, 'review-ready', `occurrence ${occurrence}: ${JSON.stringify(second)}`);
+    const countsAfter = effectCounts(fixture.events);
+    for (const [effect, count] of Object.entries(countsBefore)) {
+      if (count > 0) assert.equal(countsAfter[effect], count, `${effect} duplicated at occurrence ${occurrence}`);
+    }
+    assert.equal((await fixture.store.read()).runs.length, 1);
+  }
+});
+
+test('restart reconciles an interrupted claim without creating a second run', async () => {
+  for (const effect of ['claim-labels', 'claim-comment'] as const) {
+    const fixture = await runFixture({ rejectEffect: effect });
+    assert.deepEqual(
+      pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+      { status: 'transport-failed', resumable: true },
+    );
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'review-ready', `${effect}: ${JSON.stringify(result)}`);
+    assert.equal((await fixture.store.read()).runs.length, 1);
+    assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  }
+});
+
+test('restart resumes interrupted implementation in the same worktree as the next bounded cycle', async () => {
+  const options: FixtureOptions = { implementationResult: { kind: 'transport-failed', resumable: false } };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: 'codex-orchestrator.agent-auto-state',
+    version: 1,
+    runs: [interrupted],
+  });
+  options.implementationResult = undefined;
+  fixture.dependencies.packageVersion = '0.1.52';
+  fixture.dependencies.skillHashes = { 'agent-auto': 'c'.repeat(64), 'acceptance-proof': 'd'.repeat(64) };
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready');
+  const state = await fixture.store.read();
+  assert.equal(state.runs.length, 1);
+  assert.equal(state.runs[0]?.cycle, 2);
+  assert.equal(state.runs[0]?.packageVersion, '0.1.52');
+  assert.equal(state.runs[0]?.skillHashes['agent-auto'], 'c'.repeat(64));
+  assert.equal(state.runs[0]?.worktreePath, fixture.worktreePath);
 });
 
 test('safe-halt retains process ownership and owner lock until absence is confirmed', async () => {
@@ -296,6 +424,7 @@ interface FixtureOptions {
   check?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer }>;
   proof?: (checkedChange: CheckedChange) => Promise<ProveChangeResult>;
   implementationResult?: ImplementationAgentResult;
+  implementationResults?: ImplementationAgentResult[];
   agentWrites?: boolean;
   checkReject?: boolean;
   proofReject?: boolean;
@@ -336,8 +465,15 @@ async function runFixture(options: FixtureOptions = {}) {
   const git = traceGit(localGit, events, options);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
   let comments: Array<{ body: string; authorAssociation: string }> = [];
+  let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
   let authReads = 0;
+  const rejectedEffects = new Set<string>();
+  const shouldReject = (effect: string) => {
+    if (options.rejectEffect !== effect || rejectedEffects.has(effect)) return false;
+    rejectedEffects.add(effect);
+    return true;
+  };
   const issue = {
     number: 42,
     title: 'Implement behavior',
@@ -369,37 +505,40 @@ async function runFixture(options: FixtureOptions = {}) {
       setLabels: async (_issueNumber, next) => {
         const claim = next.includes('agent:running');
         events.push(claim ? 'effect:claim-labels' : 'effect:terminal-labels');
-        if (options.rejectEffect === 'claim-labels' && claim) throw new Error('claim labels rejected');
-        if (options.rejectEffect === 'labels' && !claim) throw new Error('labels rejected');
+        if (claim && shouldReject('claim-labels')) throw new Error('claim labels rejected');
+        if (!claim && shouldReject('labels')) throw new Error('labels rejected');
         labels = [...next];
       },
       postComment: async (_issueNumber, body) => {
         const claim = body.split('\n')[0]?.endsWith(':claim -->') ?? false;
         events.push(claim ? 'effect:claim-comment' : 'effect:handoff-comment');
-        if (options.rejectEffect === 'claim-comment' && claim) throw new Error('claim comment rejected');
-        if (options.rejectEffect === 'comment' && !claim) throw new Error('comment rejected');
+        if (claim && shouldReject('claim-comment')) throw new Error('claim comment rejected');
+        if (!claim && shouldReject('comment')) throw new Error('comment rejected');
         comments.push({ body, authorAssociation: 'OWNER' });
       },
     },
     pullRequests: {
-      findOpen: async () => undefined,
-      createDraft: async () => {
+      findOpen: async () => pullRequest,
+      createDraft: async ({ body }) => {
         events.push('effect:pr');
-        if (options.rejectEffect === 'pr') throw new Error('pr rejected');
-        return { url: 'https://example.invalid/pull/1' };
+        if (shouldReject('pr')) throw new Error('pr rejected');
+        pullRequest = { url: 'https://example.invalid/pull/1', body };
+        return { url: pullRequest.url };
       },
     },
     git,
     implementationAgent: {
       run: async ({ worktreePath: path }) => {
         events.push('agent');
-        if (options.implementationResult) return options.implementationResult;
+        const sequenced = options.implementationResults?.shift();
+        const selected = sequenced ?? options.implementationResult;
+        if (selected?.kind !== 'completed' && selected) return selected;
         if (options.agentWrites !== false) await writeFile(join(path, 'feature.txt'), 'implemented\n');
         if (options.agentCommit) {
           await execFileAsync('git', ['-C', path, 'add', '--all']);
           await execFileAsync('git', ['-C', path, '-c', 'user.name=agent', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent commit']);
         }
-        return { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
+        return selected ?? { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
       },
     },
     checks: {
@@ -428,7 +567,7 @@ async function runFixture(options: FixtureOptions = {}) {
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), targetRoot, remoteRoot, worktreePath, baseSha, events, store: rawStore };
+  return { runner: new RunIssue(dependencies), dependencies, targetRoot, remoteRoot, worktreePath, baseSha, events, store: rawStore };
 }
 
 function traceStore(
@@ -462,17 +601,26 @@ function traceStore(
 }
 
 function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: FixtureOptions): RunIssueGit {
+  const rejected = new Set<string>();
+  const shouldReject = (effect: string) => {
+    if (options.rejectEffect !== effect || rejected.has(effect)) return false;
+    rejected.add(effect);
+    return true;
+  };
   return {
     getBaseSha: (input) => delegate.getBaseSha(input),
     createWorktree: (input) => delegate.createWorktree(input),
+    inspectWorktree: (input) => delegate.inspectWorktree(input),
     snapshot: (path) => delegate.snapshot(path),
     listChangedFiles: (path) => delegate.listChangedFiles(path),
     stageAll: async (path) => { events.push('git:stage'); return delegate.stageAll(path); },
     getTreeSha: (path) => delegate.getTreeSha(path),
     getHead: (path) => delegate.getHead(path),
+    inspectHead: (path) => delegate.inspectHead(path),
+    getRemoteBranchSha: (path, branch) => delegate.getRemoteBranchSha(path, branch),
     commit: async (input) => {
       events.push('git:commit');
-      if (options.rejectEffect === 'commit') throw new Error('commit rejected');
+      if (shouldReject('commit')) throw new Error('commit rejected');
       return delegate.commit(input);
     },
     push: async (input) => {
@@ -481,7 +629,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
         events.push('effect:push-deferred');
         await options.pushGate;
       }
-      if (options.rejectEffect === 'push') throw new Error('push rejected');
+      if (shouldReject('push')) throw new Error('push rejected');
       return delegate.push(input);
     },
   };
@@ -520,6 +668,14 @@ function receipt() {
 
 function pick(value: object, keys: string[]): Record<string, unknown> {
   return Object.fromEntries(keys.map((key) => [key, (value as Record<string, unknown>)[key]]));
+}
+
+function effectCounts(events: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const event of events.filter((value) => value.startsWith('effect:') || value.startsWith('git:'))) {
+    counts[event] = (counts[event] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function assertSubsequence(actual: string[], expected: string[]): void {

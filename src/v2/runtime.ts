@@ -55,6 +55,21 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     });
   }
 
+  async inspectWorktree(input: { worktreePath: string; branchName: string; baseSha: string }): Promise<'absent' | 'matching' | 'diverged'> {
+    try {
+      const stat = await lstat(input.worktreePath);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return 'diverged';
+    } catch (error) {
+      if (isErrorCode(error, 'ENOENT')) return 'absent';
+      throw error;
+    }
+    const [head, branch] = await Promise.all([
+      this.getHead(input.worktreePath),
+      this.git(['-C', input.worktreePath, 'branch', '--show-current']),
+    ]);
+    return head === input.baseSha && branch.trim() === input.branchName ? 'matching' : 'diverged';
+  }
+
   async snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>> {
     const [headSha, indexTreeSha, trackedDiff, untrackedPaths, canonicalPath, gitDirectory] = await Promise.all([
       this.getHead(worktreePath),
@@ -93,6 +108,24 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     return this.worktrees.getHead(worktreePath);
   }
 
+  async inspectHead(worktreePath: string): Promise<{ sha: string; parentSha: string; treeSha: string; message: string }> {
+    const [sha, parentSha, treeSha, message] = (await this.git([
+      '-C', worktreePath, 'show', '-s', '--format=%H%n%P%n%T%n%B', 'HEAD',
+    ])).split('\n', 4);
+    if (!sha || !parentSha || !treeSha || message === undefined || parentSha.includes(' ')) throw new Error('HEAD commit is not a single-parent commit');
+    return { sha, parentSha, treeSha, message: message.trimEnd() };
+  }
+
+  async getRemoteBranchSha(worktreePath: string, branchName: string): Promise<string | undefined> {
+    const output = (await this.git(['-C', worktreePath, 'ls-remote', '--heads', 'origin', `refs/heads/${branchName}`])).trim();
+    if (!output) return undefined;
+    const rows = output.split('\n');
+    if (rows.length !== 1) throw new Error('remote branch observation is ambiguous');
+    const [sha, ref] = rows[0]!.split(/\s+/u);
+    if (!sha || ref !== `refs/heads/${branchName}`) throw new Error('remote branch observation is invalid');
+    return sha;
+  }
+
   async commit(input: { worktreePath: string; message: string }): Promise<string> {
     await this.worktrees.commitAll(input);
     return this.getHead(input.worktreePath);
@@ -128,6 +161,9 @@ export class ContainedImplementationAgent {
     worktreePath: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
+    cycle: number;
+    reworkFindings: string[];
+    repairOnly: boolean;
     signal: AbortSignal;
   }): Promise<ImplementationAgentResult> {
     const config = this.dependencies.config();
@@ -157,7 +193,10 @@ export class ContainedImplementationAgent {
         prompt: [
           `Follow the exact skill at ${attempt.skillPath}.`,
           `Implement issue #${input.issue.number}: ${input.issue.title}`,
+          `Implementation cycle: ${input.cycle}.`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
+          ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
+          ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
@@ -230,6 +269,7 @@ export class ContainedProofAgent implements ProofAgent {
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           `Checked change digest: ${input.checkedChangeSha256}.`,
           `Write evidence only below ${config.proof.artifactDir}.`,
+          ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
           'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
@@ -406,7 +446,13 @@ export function createV2Runtime(input: {
       postComment: (issueNumber, body) => input.issues.postComment(issueNumber, body),
     },
     pullRequests: {
-      findOpen: ({ headBranch, baseBranch }) => input.pullRequests.findOpenPullRequestByHeadAndBase(headBranch, baseBranch),
+      findOpen: async ({ headBranch, baseBranch }) => {
+        const matches = (await input.pullRequests.listAllByHeadBranch(headBranch))
+          .filter((pullRequest) => pullRequest.state === 'OPEN' && pullRequest.baseRefName === baseBranch);
+        if (matches.length > 1) throw new Error('multiple open pull requests match publication intent');
+        const match = matches[0];
+        return match ? { url: match.url, body: match.body } : undefined;
+      },
       createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
     },
     git,

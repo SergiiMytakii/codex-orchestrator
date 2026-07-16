@@ -46,6 +46,37 @@ test('run state rejects malformed and lifecycle-inconsistent records', async () 
   await assert.rejects(writer.read(), /terminalOutcome|review-ready/u);
 });
 
+test('run state accepts bounded recovery counters and rejects values beyond the autonomous budgets', async () => {
+  const root = await temporaryRoot();
+  const writer = new FileRunRecordWriter(join(root, 'run-state.json'), deterministicAtomicOptions());
+  const recoverable = {
+    ...record(),
+    cycle: 5,
+    reportRepairs: 1,
+    transportRetries: 1,
+    issueSnapshot: {
+      number: 42,
+      title: 'Implement behavior',
+      body: 'Acceptance criteria',
+      url: 'https://example.invalid/issues/42',
+      state: 'OPEN',
+      labels: ['agent:auto'],
+    },
+    frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
+    reworkFindings: ['typecheck failed'],
+  } as unknown as RunRecordV1;
+  assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 5);
+
+  for (const invalid of [
+    { ...recoverable, cycle: 6 },
+    { ...recoverable, reportRepairs: 2 },
+    { ...recoverable, transportRetries: 2 },
+  ]) {
+    const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries/u);
+  }
+});
+
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
   for (const point of ['before-file-fsync', 'before-rename'] as const) {
     const root = await temporaryRoot();
@@ -122,7 +153,7 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     proofId: 'proof-1',
     bindingSha256: 'a'.repeat(64),
     status: 'prepared',
-    attempts: [{ attemptId: 'attempt-1', status: 'prepared' }],
+    attempts: [{ attemptId: 'attempt-1', purpose: 'proof', status: 'prepared' }],
     updatedAt: timestamp(),
   });
   assert.equal(state.generation, 1);
@@ -134,7 +165,7 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     proofId: 'proof-2',
     bindingSha256: 'b'.repeat(64),
     status: 'prepared',
-    attempts: [{ attemptId: 'attempt-2', status: 'prepared' }],
+    attempts: [{ attemptId: 'attempt-2', purpose: 'proof', status: 'prepared' }],
     updatedAt: timestamp(),
     lifecycle: 'publishing',
   } as never), /keys/u);
@@ -164,6 +195,17 @@ function record(): RunRecordV1 {
     lifecycle: 'claimed',
     cycle: 1,
     reportRepairs: 0,
+    transportRetries: 0,
+    issueSnapshot: {
+      number: 42,
+      title: 'Implement behavior',
+      body: 'Acceptance criteria',
+      url: 'https://example.invalid/issues/42',
+      state: 'OPEN',
+      labels: ['agent:auto'],
+    },
+    frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
+    reworkFindings: [],
     packageVersion: '0.1.51',
     skillHashes: { 'agent-auto': 'b'.repeat(64), 'acceptance-proof': 'c'.repeat(64) },
     checks: [],

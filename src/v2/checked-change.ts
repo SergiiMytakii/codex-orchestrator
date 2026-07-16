@@ -13,7 +13,7 @@ export interface CheckedChangePayloadV1 {
   canonicalRepository: string;
   runId: string;
   issueNumber: number;
-  cycle: 1;
+  cycle: 1 | 2 | 3 | 4 | 5;
   baseSha: string;
   headSha: string;
   indexTreeSha: string;
@@ -104,7 +104,7 @@ function validatePayload(value: unknown): asserts value is CheckedChangePayloadV
     'packageVersion',
     'proofSchemaVersion',
   ], 'CheckedChange payload');
-  if (value.version !== 1 || value.cycle !== 1 || value.proofSchemaVersion !== 1) {
+  if (value.version !== 1 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5 || value.proofSchemaVersion !== 1) {
     throw new Error('CheckedChange payload versions/cycle are invalid');
   }
   if (typeof value.canonicalRepository !== 'string' || !REPOSITORY_PATTERN.test(value.canonicalRepository)) {

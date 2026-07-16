@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from '../src/v2/config.js';
-import { CANDIDATE_COMMANDS, RUN_ISSUE_STATUSES } from '../src/v2/cli-contract.js';
+import { CANDIDATE_COMMANDS, RUN_ISSUE_STATUSES, renderRunResultJson, runIssueExitCode } from '../src/v2/cli-contract.js';
+import type { RunIssueResult } from '../src/v2/run-issue.js';
 
 function validConfig(): AgentAutoConfigV1 {
   return {
@@ -100,4 +101,25 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
   ];
 
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
+});
+
+test('candidate CLI JSON and exit mapping are total over every public runIssue outcome', () => {
+  const cases: Array<{ result: RunIssueResult; exit: number }> = [
+    { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
+    { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
+    { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
+    { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },
+    { result: { status: 'blocked', kind: 'exhausted', resumable: true, evidencePath: 'evidence/5.json' }, exit: 20 },
+    { result: { status: 'transport-failed', resumable: true, evidencePath: 'evidence/6.json' }, exit: 70 },
+    { result: { status: 'internal-error', evidencePath: 'evidence/7.json' }, exit: 70 },
+    { result: { status: 'cancelled', evidencePath: 'evidence/8.json' }, exit: 130 },
+  ];
+  for (const entry of cases) {
+    assert.equal(runIssueExitCode(entry.result), entry.exit);
+    assert.deepEqual(JSON.parse(renderRunResultJson(entry.result)), {
+      schema: 'codex-orchestrator.agent-auto-run-result',
+      version: 1,
+      result: entry.result,
+    });
+  }
 });

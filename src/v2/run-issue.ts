@@ -41,11 +41,14 @@ export interface RunIssueSnapshot {
 export interface RunIssueGit {
   getBaseSha(input: { targetRoot: string; baseBranch: string }): Promise<string>;
   createWorktree(input: { targetRoot: string; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }): Promise<void>;
+  inspectWorktree(input: { worktreePath: string; branchName: string; baseSha: string }): Promise<'absent' | 'matching' | 'diverged'>;
   snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   listChangedFiles(worktreePath: string): Promise<string[]>;
   stageAll(worktreePath: string): Promise<void>;
   getTreeSha(worktreePath: string): Promise<string>;
   getHead(worktreePath: string): Promise<string>;
+  inspectHead(worktreePath: string): Promise<{ sha: string; parentSha: string; treeSha: string; message: string }>;
+  getRemoteBranchSha(worktreePath: string, branchName: string): Promise<string | undefined>;
   commit(input: { worktreePath: string; message: string }): Promise<string>;
   push(input: { worktreePath: string; branchName: string }): Promise<void>;
 }
@@ -69,7 +72,7 @@ export interface RunIssueDependencies {
     postComment(issueNumber: number, body: string): Promise<void>;
   };
   pullRequests: {
-    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string } | undefined>;
+    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string; body: string } | undefined>;
     createDraft(input: { title: string; body: string; headBranch: string; baseBranch: string }): Promise<{ url: string }>;
   };
   git: RunIssueGit;
@@ -79,6 +82,9 @@ export interface RunIssueDependencies {
       worktreePath: string;
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
+      cycle: number;
+      reworkFindings: string[];
+      repairOnly: boolean;
       signal: AbortSignal;
     }): Promise<ImplementationAgentResult>;
   };
@@ -123,6 +129,211 @@ export class RunIssue {
 
   constructor(private readonly dependencies: RunIssueDependencies) {
     this.signal = dependencies.signal ?? new AbortController().signal;
+  }
+
+  private async reconcileClaim(
+    starting: ActiveRun,
+    config: AgentAutoConfigV1,
+  ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    let active = starting;
+    const { issueNumber, runId, branchName } = active.record;
+    const expectedLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
+    if (active.record.intent && !['claim-labels', 'comment'].includes(active.record.intent.kind)) {
+      return { result: await this.publicationDiverged(active, 'claim-intent-diverged') };
+    }
+    let observation = await this.readIssue(issueNumber);
+    if (!observation || observation.state !== 'OPEN') return { result: await this.publicationDiverged(active, 'claim-issue-missing') };
+    if (active.record.intent?.kind === 'claim-labels') {
+      if (!sameStrings(observation.labels, expectedLabels)) {
+        const labels = new Set(observation.labels);
+        if (!labels.has(config.github.labels.auto.name)
+          || labels.has(config.github.labels.blocked.name)
+          || labels.has(config.github.labels.review.name)) {
+          return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
+        }
+        try { await this.dependencies.issues.setLabels(issueNumber, expectedLabels); }
+        catch { return { result: await this.invokedFailure(active, 'claim-labels-delivery-unknown') }; }
+        observation = await this.readIssue(issueNumber);
+      }
+      if (!observation || !sameStrings(observation.labels, expectedLabels)) {
+        return { result: await this.publicationDiverged(active, 'claim-labels-observation-diverged') };
+      }
+      active = await this.confirmEffect(active);
+    } else if (!sameStrings(observation.labels, expectedLabels)) {
+      return { result: await this.publicationDiverged(active, 'claim-labels-missing-before-comment') };
+    }
+
+    const body = claimComment(runId, issueNumber, branchName);
+    const marker = body.split('\n')[0]!;
+    if (!active.record.intent) {
+      active = await this.persist(active, { intent: { kind: 'comment', issueNumber, marker, bodySha256: sha256(body) } });
+    }
+    if (active.record.intent?.kind !== 'comment' || active.record.intent.marker !== marker || active.record.intent.bodySha256 !== sha256(body)) {
+      return { result: await this.publicationDiverged(active, 'claim-comment-intent-diverged') };
+    }
+    observation = await this.readIssue(issueNumber);
+    let comments = observation ? commentsWithMarker(observation, marker) : [];
+    if (comments.some((comment) => comment.body !== body) || comments.length > 1) {
+      return { result: await this.publicationDiverged(active, 'claim-comment-diverged') };
+    }
+    if (comments.length === 0) {
+      try { await this.dependencies.issues.postComment(issueNumber, body); }
+      catch { return { result: await this.invokedFailure(active, 'claim-comment-delivery-unknown') }; }
+      observation = await this.readIssue(issueNumber);
+      comments = observation ? commentsWithMarker(observation, marker) : [];
+    }
+    if (comments.length !== 1 || comments[0]!.body !== body
+      || !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comments[0]!.authorAssociation)) {
+      return { result: await this.publicationDiverged(active, 'claim-comment-observation-diverged') };
+    }
+    active = await this.confirmEffect(active);
+    return { active };
+  }
+
+  private async publish(
+    starting: ActiveRun,
+    config: AgentAutoConfigV1,
+    issue: IssueSnapshot,
+    issueNumber: number,
+  ): Promise<RunIssueResult> {
+    let active = starting;
+    const { runId, branchName, worktreePath, baseSha } = active.record;
+    const message = `feat: implement #${issueNumber}`;
+
+    let commitSha = await this.dependencies.git.getHead(worktreePath);
+    if (active.record.intent?.kind === 'commit' || !active.record.intent) {
+      if (!active.record.intent) {
+        if (commitSha === baseSha) {
+          active = await this.persist(active, {
+            intent: { kind: 'commit', parentSha: baseSha, treeSha: await this.dependencies.git.getTreeSha(worktreePath), message },
+          });
+        }
+      }
+      const intent = active.record.intent;
+      if (intent?.kind === 'commit') {
+        if (commitSha === intent.parentSha) {
+          if (await this.dependencies.git.getTreeSha(worktreePath) !== intent.treeSha) return await this.publicationDiverged(active, 'commit-tree-diverged');
+          if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+          if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+          try { commitSha = await this.dependencies.git.commit({ worktreePath, message: intent.message }); }
+          catch { return await this.invokedFailure(active, 'commit-delivery-unknown'); }
+        }
+        const observed = await this.dependencies.git.inspectHead(worktreePath);
+        if (observed.sha !== commitSha || observed.parentSha !== intent.parentSha || observed.treeSha !== intent.treeSha || observed.message !== intent.message) {
+          return await this.publicationDiverged(active, 'commit-observation-diverged');
+        }
+        active = await this.confirmEffect(active);
+      }
+    }
+    const commit = await this.dependencies.git.inspectHead(worktreePath);
+    if (commit.sha !== commitSha || commit.parentSha !== baseSha || commit.message !== message || commit.treeSha !== await this.dependencies.git.getTreeSha(worktreePath)) {
+      return await this.publicationDiverged(active, 'commit-identity-diverged');
+    }
+
+    if (active.record.intent?.kind === 'push' || !active.record.intent) {
+      if (!active.record.intent) active = await this.persist(active, { intent: { kind: 'push', branch: branchName, sha: commitSha } });
+      const intent = active.record.intent;
+      if (intent?.kind !== 'push' || intent.branch !== branchName || intent.sha !== commitSha) return await this.publicationDiverged(active, 'push-intent-diverged');
+      let remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
+      if (remoteSha && remoteSha !== commitSha) return await this.publicationDiverged(active, 'remote-branch-diverged');
+      if (!remoteSha) {
+        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        try { await this.dependencies.git.push({ worktreePath, branchName }); }
+        catch { return await this.invokedFailure(active, 'push-delivery-unknown'); }
+        remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
+      }
+      if (remoteSha !== commitSha) return await this.publicationDiverged(active, 'push-observation-diverged');
+      active = await this.confirmEffect(active);
+    } else if (await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName) !== commitSha) {
+      return await this.publicationDiverged(active, 'push-missing-before-later-effect');
+    }
+
+    const prMarker = `<!-- codex-orchestrator:run:${runId}:pr -->`;
+    const prBody = `${prMarker}\n\nCloses #${issueNumber}`;
+    if (active.record.intent?.kind === 'pr' || !active.record.intent) {
+      if (!active.record.intent) {
+        active = await this.persist(active, {
+          intent: {
+            kind: 'pr', owner: config.github.owner, repo: config.github.repo, head: branchName,
+            base: config.github.baseBranch, issueNumber, marker: prMarker,
+          },
+        });
+      }
+      let observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
+      if (observed && observed.body !== prBody) return await this.publicationDiverged(active, 'pr-marker-diverged');
+      if (!observed) {
+        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        try {
+          await this.dependencies.pullRequests.createDraft({
+            title: `Implement #${issueNumber}: ${issue.title}`,
+            body: prBody,
+            headBranch: branchName,
+            baseBranch: config.github.baseBranch,
+          });
+        } catch { return await this.invokedFailure(active, 'pr-delivery-unknown'); }
+        observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
+      }
+      if (!observed || observed.body !== prBody) return await this.publicationDiverged(active, 'pr-observation-diverged');
+      active = await this.confirmEffect(active);
+    }
+    const pullRequest = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
+    if (!pullRequest || pullRequest.body !== prBody) return await this.publicationDiverged(active, 'pr-missing-before-handoff');
+
+    const handoffMarker = `<!-- codex-orchestrator:run:${runId}:handoff -->`;
+    const handoffBody = `${handoffMarker}\nReview-ready draft PR: ${pullRequest.url}`;
+    if (active.record.intent?.kind === 'comment' || !active.record.intent) {
+      if (!active.record.intent) {
+        active = await this.persist(active, {
+          intent: { kind: 'comment', issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
+        });
+      }
+      let observation = await this.readIssue(issueNumber);
+      if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-handoff');
+      let matching = commentsWithMarker(observation, handoffMarker);
+      if (matching.some((comment) => sha256(comment.body) !== sha256(handoffBody)) || matching.length > 1) {
+        return await this.publicationDiverged(active, 'handoff-comment-diverged');
+      }
+      if (matching.length === 0) {
+        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        try { await this.dependencies.issues.postComment(issueNumber, handoffBody); }
+        catch { return await this.invokedFailure(active, 'handoff-comment-delivery-unknown'); }
+        observation = await this.readIssue(issueNumber);
+        matching = observation ? commentsWithMarker(observation, handoffMarker) : [];
+      }
+      if (matching.length !== 1 || sha256(matching[0]!.body) !== sha256(handoffBody)) {
+        return await this.publicationDiverged(active, 'handoff-comment-observation-diverged');
+      }
+      active = await this.confirmEffect(active);
+    }
+
+    const terminalLabels = [config.github.labels.review.name];
+    if (active.record.intent?.kind === 'labels' || !active.record.intent) {
+      if (!active.record.intent) active = await this.persist(active, { intent: { kind: 'labels', issueNumber, expected: terminalLabels } });
+      let observation = await this.readIssue(issueNumber);
+      if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-labels');
+      if (!sameStrings(observation.labels, terminalLabels)) {
+        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        try { await this.dependencies.issues.setLabels(issueNumber, terminalLabels); }
+        catch { return await this.invokedFailure(active, 'terminal-labels-delivery-unknown'); }
+        observation = await this.readIssue(issueNumber);
+      }
+      if (!observation || !sameStrings(observation.labels, terminalLabels)) return await this.publicationDiverged(active, 'terminal-labels-diverged');
+    }
+
+    const evidence = await this.dependencies.writeEvidence({ runId, code: 'review-ready', summary: pullRequest.url });
+    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path };
+    try {
+      await this.persist(active, { lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome });
+    } catch { throw new PostEffectStateError(active); }
+    return outcome;
+  }
+
+  private publicationDiverged(active: ActiveRun, code: string): Promise<RunIssueResult> {
+    return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, code);
   }
 
   async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
@@ -170,62 +381,98 @@ export class RunIssue {
       } catch {
         return await this.preClaimTransport(input.issueNumber);
       }
-      const ineligible = await this.ineligibilityReason(issue, config);
-      if (ineligible) {
-        const evidence = await this.dependencies.writeEvidence({ runId: `issue-${input.issueNumber}`, code: 'not-eligible', summary: ineligible });
-        return { status: 'not-eligible', reason: ineligible, evidencePath: evidence.path };
+      const persisted = await this.dependencies.runRecords.read();
+      const matchingRuns = persisted.runs.filter((run) => run.issueNumber === input.issueNumber && run.canonicalRepository === canonicalRepository);
+      if (matchingRuns.length > 1) return await this.preClaimInternal('ambiguous-run-state', input.issueNumber);
+      const existing = matchingRuns[0];
+      let issueSnapshot: IssueSnapshot;
+      let frozenCriteria: FrozenCriterion[];
+      let runId: string;
+      let branchName: string;
+      let worktreePath: string;
+      let baseSha: string;
+      if (existing) {
+        const expectedBranch = `codex/issue-${input.issueNumber}`;
+        const expectedWorktree = resolve(targetRoot, config.runner.workspaceRoot, `issue-${input.issueNumber}`);
+        if (existing.branchName !== expectedBranch || existing.worktreePath !== expectedWorktree) {
+          return await this.preClaimInternal('run-identity-mismatch', input.issueNumber);
+        }
+        if (existing.terminalOutcome) return publicOutcome(existing.terminalOutcome);
+        active = { state: persisted, record: existing };
+        issueSnapshot = structuredClone(existing.issueSnapshot);
+        frozenCriteria = structuredClone(existing.frozenCriteria);
+        runId = existing.runId;
+        branchName = existing.branchName;
+        worktreePath = existing.worktreePath;
+        baseSha = existing.baseSha;
+        if (existing.lifecycle === 'publishing') {
+          return await this.publish(active, config, issueSnapshot, input.issueNumber);
+        }
+        if (existing.lifecycle === 'claimed') {
+          const claim = await this.reconcileClaim(active, config);
+          if ('result' in claim) return claim.result;
+          active = claim.active;
+          const worktree = await this.dependencies.git.inspectWorktree({ worktreePath, branchName, baseSha });
+          if (worktree === 'diverged') return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'claim-worktree-diverged');
+          if (worktree === 'absent') {
+            try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
+            catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
+          }
+          active = await this.persist(active, { lifecycle: 'implementing' });
+        } else {
+          if (existing.lifecycle === 'safe-halt') return await this.publicationDiverged(active, 'safe-halt-requires-process-absence');
+          if (!['implementing', 'reworking', 'checking', 'proving'].includes(existing.lifecycle)) {
+            return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
+          }
+          if (existing.cycle >= config.runner.maxCycles) {
+            return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+          }
+          if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
+          active = await this.startNextCycle(active, [`Recovered interrupted ${existing.lifecycle} phase.`]);
+        }
+      } else {
+        const ineligible = await this.ineligibilityReason(issue, config);
+        if (ineligible) {
+          const evidence = await this.dependencies.writeEvidence({ runId: `issue-${input.issueNumber}`, code: 'not-eligible', summary: ineligible });
+          return { status: 'not-eligible', reason: ineligible, evidencePath: evidence.path };
+        }
+        issueSnapshot = snapshotIssue(issue!);
+        frozenCriteria = freezeCriteria(issueSnapshot);
+        runId = this.dependencies.createRunId();
+        assertUuid(runId);
+        branchName = `codex/issue-${input.issueNumber}`;
+        worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${input.issueNumber}`);
+        baseSha = await this.dependencies.git.getBaseSha({ targetRoot, baseBranch: config.github.baseBranch });
+        assertGitSha(baseSha, 'baseSha');
+        const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
+        active = await this.createRun({
+          runId, issueNumber: input.issueNumber, canonicalRepository, baseSha, branchName, worktreePath,
+          issueSnapshot, frozenCriteria,
+          intent: { kind: 'claim-labels', issueNumber: input.issueNumber, expected: runningLabels },
+        });
+        const claim = await this.reconcileClaim(active, config);
+        if ('result' in claim) return claim.result;
+        active = claim.active;
+        try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
+        catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
+        active = await this.persist(active, { lifecycle: 'implementing' });
       }
-      const eligibleIssue = issue!;
-      const issueSnapshot = snapshotIssue(eligibleIssue);
-      const frozenCriteria = freezeCriteria(issueSnapshot);
-      const runId = this.dependencies.createRunId();
-      assertUuid(runId);
-      const proofId = this.dependencies.createProofId();
-      assertNonEmptyString(proofId, 'proofId');
-      const branchName = `codex/issue-${input.issueNumber}`;
-      const worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${input.issueNumber}`);
-      const baseSha = await this.dependencies.git.getBaseSha({ targetRoot, baseBranch: config.github.baseBranch });
-      assertGitSha(baseSha, 'baseSha');
-      const claimBody = claimComment(runId, input.issueNumber, branchName);
-      const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
-
-      active = await this.createRun({
-        runId,
-        issueNumber: input.issueNumber,
-        canonicalRepository,
-        baseSha,
-        branchName,
-        worktreePath,
-        intent: { kind: 'claim-labels', issueNumber: input.issueNumber, expected: runningLabels },
-      });
-      try {
-        await this.dependencies.issues.setLabels(input.issueNumber, runningLabels);
-      } catch {
-        return await this.invokedFailure(active, 'claim-labels-delivery-unknown');
-      }
-      active = await this.confirmEffect(active);
-      active = await this.persist(active, {
-        intent: { kind: 'comment', issueNumber: input.issueNumber, marker: claimBody.split('\n')[0]!, bodySha256: sha256(claimBody) },
-      });
-      try {
-        await this.dependencies.issues.postComment(input.issueNumber, claimBody);
-      } catch {
-        return await this.invokedFailure(active, 'claim-comment-delivery-unknown');
-      }
-      active = await this.confirmEffect(active);
-
-      try {
-        await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha });
-      } catch {
-        return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' });
-      }
-      active = await this.persist(active, { lifecycle: 'implementing' });
+      attemptLoop: while (true) {
       if (!await this.authorized(input.issueNumber, runId, branchName, config)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
-      const implementation = await this.runImplementation({ runId, worktreePath, issue: issueSnapshot, frozenCriteria });
+      const implementationBaseline = await this.dependencies.git.snapshot(worktreePath);
+      let implementation = await this.runImplementation({
+        runId,
+        worktreePath,
+        issue: issueSnapshot,
+        frozenCriteria,
+        cycle: active.record.cycle,
+        reworkFindings: active.record.reworkFindings,
+        repairOnly: false,
+      });
       if (implementation.kind === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
         while (true) {
@@ -238,12 +485,48 @@ export class RunIssue {
         }
         return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
       }
+      if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
+        const afterTransport = await this.dependencies.git.snapshot(worktreePath);
+        if (!sameFreshness(implementationBaseline, afterTransport)) {
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'transport-baseline-changed');
+        }
+        active = await this.persist(active, { transportRetries: 1 });
+        continue attemptLoop;
+      }
       if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
       let report;
       try {
         report = validateImplementationReport(implementation.report);
       } catch {
-        return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' });
+        if (active.record.reportRepairs >= 1) {
+          return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' });
+        }
+        const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
+        active = await this.persist(active, { reportRepairs: 1 });
+        implementation = await this.runImplementation({
+          runId,
+          worktreePath,
+          issue: issueSnapshot,
+          frozenCriteria,
+          cycle: active.record.cycle,
+          reworkFindings: ['The previous implementation report did not match the generated schema.'],
+          repairOnly: true,
+        });
+        if (implementation.kind === 'safe-halt') {
+          active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
+          while (true) {
+            try { await implementation.waitForAbsence(); break; }
+            catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
+          }
+          return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+        }
+        if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
+        const afterRepair = await this.dependencies.git.snapshot(worktreePath);
+        if (!sameFreshness(repairBaseline, afterRepair)) {
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
+        }
+        try { report = validateImplementationReport(implementation.report); }
+        catch { return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' }); }
       }
       if (report.status === 'external-block') {
         return await this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
@@ -269,7 +552,11 @@ export class RunIssue {
         const row = { id, command, status: check.status, outputSha256: sha256(check.output) } as const;
         active = await this.persist(active, { checks: [...active.record.checks, row] });
         if (check.status !== 'passed') {
-          return await this.terminal(active, { status: 'internal-error', code: 'check-rework-loop-not-yet-implemented' });
+          if (active.record.cycle >= config.runner.maxCycles) {
+            return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+          }
+          active = await this.startNextCycle(active, [`Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`]);
+          continue attemptLoop;
         }
       }
 
@@ -288,7 +575,7 @@ export class RunIssue {
         canonicalRepository,
         runId,
         issueNumber: input.issueNumber,
-        cycle: 1,
+        cycle: active.record.cycle,
         baseSha,
         headSha: freshness.headSha,
         indexTreeSha: freshness.indexTreeSha,
@@ -303,6 +590,8 @@ export class RunIssue {
       };
       const checkedChange = this.dependencies.checkedChangeMint.mint(payload);
       const checkedChangeSha256 = checkedChangePayloadSha256(payload);
+      const proofId = this.dependencies.createProofId();
+      assertNonEmptyString(proofId, 'proofId');
       active = await this.persist(active, { lifecycle: 'proving', checkedChangeSha256, proofId });
 
       let proof: ProveChangeResult;
@@ -338,88 +627,19 @@ export class RunIssue {
         return await this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
+      if (proof.status === 'needs-rework') {
+        if (active.record.cycle >= config.runner.maxCycles) {
+          return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+        }
+        active = await this.startNextCycle(active, proof.findings);
+        continue attemptLoop;
+      }
       if (proof.status !== 'passed') return await this.mapProofFailure(active, proof);
-      active = await this.persist(active, { lifecycle: 'publishing', proofReceipt: proof.receipt });
+      active = await this.persist(active, { lifecycle: 'publishing', proofReceipt: proof.receipt, reworkFindings: [] });
+      break;
+      }
 
-      const message = `feat: implement #${input.issueNumber}`;
-      const parentSha = await this.dependencies.git.getHead(worktreePath);
-      const treeSha = await this.dependencies.git.getTreeSha(worktreePath);
-      active = await this.persist(active, { intent: { kind: 'commit', parentSha, treeSha, message } });
-      if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-      let commitSha: string;
-      try {
-        commitSha = await this.dependencies.git.commit({ worktreePath, message });
-      } catch {
-        return await this.terminal(await this.clearIntent(active), { status: 'internal-error', code: 'local-git-effect-failed' });
-      }
-      active = await this.confirmEffect(active);
-
-      active = await this.persist(active, { intent: { kind: 'push', branch: branchName, sha: commitSha } });
-      if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-      try {
-        await this.dependencies.git.push({ worktreePath, branchName });
-      } catch {
-        return await this.invokedFailure(active, 'push-delivery-unknown');
-      }
-      active = await this.confirmEffect(active);
-
-      const prMarker = `<!-- codex-orchestrator:run:${runId}:pr -->`;
-      active = await this.persist(active, {
-        intent: {
-          kind: 'pr', owner: config.github.owner, repo: config.github.repo, head: branchName,
-          base: config.github.baseBranch, issueNumber: input.issueNumber, marker: prMarker,
-        },
-      });
-      if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-      let pullRequest: { url: string };
-      try {
-        pullRequest = await this.dependencies.pullRequests.createDraft({
-          title: `Implement #${input.issueNumber}: ${issueSnapshot.title}`,
-          body: `${prMarker}\n\nCloses #${input.issueNumber}`,
-          headBranch: branchName,
-          baseBranch: config.github.baseBranch,
-        });
-      } catch {
-        return await this.invokedFailure(active, 'pr-delivery-unknown');
-      }
-      active = await this.confirmEffect(active);
-
-      const handoffMarker = `<!-- codex-orchestrator:run:${runId}:handoff -->`;
-      const handoffBody = `${handoffMarker}\nReview-ready draft PR: ${pullRequest.url}`;
-      active = await this.persist(active, {
-        intent: { kind: 'comment', issueNumber: input.issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
-      });
-      if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-      try {
-        await this.dependencies.issues.postComment(input.issueNumber, handoffBody);
-      } catch {
-        return await this.invokedFailure(active, 'handoff-comment-delivery-unknown');
-      }
-      active = await this.confirmEffect(active);
-
-      const terminalLabels = [config.github.labels.review.name];
-      active = await this.persist(active, { intent: { kind: 'labels', issueNumber: input.issueNumber, expected: terminalLabels } });
-      if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-      try {
-        await this.dependencies.issues.setLabels(input.issueNumber, terminalLabels);
-      } catch {
-        return await this.invokedFailure(active, 'terminal-labels-delivery-unknown');
-      }
-      const evidence = await this.dependencies.writeEvidence({ runId, code: 'review-ready', summary: pullRequest.url });
-      const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path };
-      try {
-        active = await this.persist(active, {
-          lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome,
-        });
-      } catch {
-        throw new PostEffectStateError(active);
-      }
-      return outcome;
+      return await this.publish(active, config, issueSnapshot, input.issueNumber);
     } catch (error) {
       if (!active && error instanceof TransportReadError) {
         return await this.preClaimTransport(input.issueNumber);
@@ -428,7 +648,7 @@ export class RunIssue {
         return await this.invokedFailure(error.active, 'post-effect-state-write-failed');
       }
       if (active && error instanceof TransportReadError) {
-        return await this.terminal(active, { status: 'transport-failed', resumable: true }, 'authorization-read-failed');
+        return await this.invokedFailure(active, 'authorization-read-failed');
       }
       if (active) {
         try {
@@ -484,13 +704,16 @@ export class RunIssue {
     baseSha: string;
     branchName: string;
     worktreePath: string;
+    issueSnapshot: IssueSnapshot;
+    frozenCriteria: FrozenCriterion[];
     intent: PublicationIntent;
   }): Promise<ActiveRun> {
     const state = await this.dependencies.runRecords.read();
     const now = this.timestamp();
     const record: RunRecordV1 = {
       ...input,
-      lifecycle: 'claimed', cycle: 1, reportRepairs: 0,
+      lifecycle: 'claimed', cycle: 1, reportRepairs: 0, transportRetries: 0,
+      reworkFindings: [],
       packageVersion: this.dependencies.packageVersion,
       skillHashes: structuredClone(this.dependencies.skillHashes),
       checks: [], createdAt: now, updatedAt: now,
@@ -505,6 +728,9 @@ export class RunIssue {
     const record = { ...active.record, ...changes, updatedAt: this.timestamp() } as RunRecordV1;
     if (Object.hasOwn(changes, 'intent') && changes.intent === undefined) delete record.intent;
     if (Object.hasOwn(changes, 'process') && changes.process === undefined) delete record.process;
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId'] as const) {
+      if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
+    }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
     const saved = await this.dependencies.runRecords.compareAndSwap(active.state.generation, {
       schema: 'codex-orchestrator.agent-auto-state', version: 1, runs,
@@ -525,12 +751,7 @@ export class RunIssue {
   }
 
   private async authorized(issueNumber: number, runId: string, branchName: string, config: AgentAutoConfigV1): Promise<boolean> {
-    let issue: RunIssueSnapshot | undefined;
-    try {
-      issue = await this.dependencies.issues.read(issueNumber);
-    } catch {
-      throw new TransportReadError();
-    }
+    const issue = await this.readIssue(issueNumber);
     if (!issue || issue.state !== 'OPEN') return false;
     const labels = new Set(issue.labels);
     if (!labels.has(config.github.labels.auto.name) || !labels.has(config.github.labels.running.name)) return false;
@@ -546,12 +767,39 @@ export class RunIssue {
     return current.length === 1 && ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(current[0]!.authorAssociation);
   }
 
-  private async runImplementation(input: { runId: string; worktreePath: string; issue: IssueSnapshot; frozenCriteria: FrozenCriterion[] }): Promise<ImplementationAgentResult> {
+  private async readIssue(issueNumber: number): Promise<RunIssueSnapshot | undefined> {
+    try { return await this.dependencies.issues.read(issueNumber); }
+    catch { throw new TransportReadError(); }
+  }
+
+  private async runImplementation(input: {
+    runId: string;
+    worktreePath: string;
+    issue: IssueSnapshot;
+    frozenCriteria: FrozenCriterion[];
+    cycle: number;
+    reworkFindings: string[];
+    repairOnly: boolean;
+  }): Promise<ImplementationAgentResult> {
     try {
       return await this.dependencies.implementationAgent.run({ ...input, signal: this.signal });
     } catch {
       return { kind: 'internal-error' };
     }
+  }
+
+  private async startNextCycle(active: ActiveRun, findings: string[]): Promise<ActiveRun> {
+    active = await this.persist(active, { lifecycle: 'reworking', reworkFindings: [...findings] });
+    return this.persist(active, {
+      lifecycle: 'implementing',
+      cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+      packageVersion: this.dependencies.packageVersion,
+      skillHashes: structuredClone(this.dependencies.skillHashes),
+      checks: [],
+      checkedChangeSha256: undefined,
+      proofId: undefined,
+      proofReceipt: undefined,
+    });
   }
 
   private async mapImplementationFailure(
@@ -576,7 +824,8 @@ export class RunIssue {
   }
 
   private async invokedFailure(active: ActiveRun, code: string): Promise<RunIssueResult> {
-    return this.terminal(active, { status: 'transport-failed', resumable: false }, code, true);
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary: 'Publication delivery requires reconciliation.' });
+    return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
 
   private async terminal(
@@ -675,6 +924,21 @@ function sameStrings(left: string[], right: string[]): boolean {
   const a = [...left].sort();
   const b = [...right].sort();
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function sameFreshness(
+  left: Omit<CheckedChangeFreshness, 'checkPolicySha256'>,
+  right: Omit<CheckedChangeFreshness, 'checkPolicySha256'>,
+): boolean {
+  return left.headSha === right.headSha
+    && left.indexTreeSha === right.indexTreeSha
+    && left.trackedContentSha256 === right.trackedContentSha256
+    && left.untrackedContentSha256 === right.untrackedContentSha256
+    && left.worktreeIdentity === right.worktreeIdentity;
+}
+
+function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
+  return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
 }
 
 function sortedUnique(values: string[]): string[] {

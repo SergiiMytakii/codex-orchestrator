@@ -9,6 +9,7 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 export type Lifecycle =
   | 'claimed'
   | 'implementing'
+  | 'reworking'
   | 'checking'
   | 'proving'
   | 'publishing'
@@ -34,6 +35,22 @@ export type RunTerminalOutcome =
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; code: string; evidencePath: string };
 
+export interface PersistedIssueSnapshotV1 {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  state: 'OPEN';
+  labels: string[];
+}
+
+export interface PersistedFrozenCriterionV1 {
+  id: string;
+  order: number;
+  text: string;
+  source: 'explicit' | 'fallback';
+}
+
 export interface RunRecordV1 {
   runId: string;
   issueNumber: number;
@@ -42,8 +59,12 @@ export interface RunRecordV1 {
   branchName: string;
   worktreePath: string;
   lifecycle: Lifecycle;
-  cycle: 1;
-  reportRepairs: 0;
+  cycle: 1 | 2 | 3 | 4 | 5;
+  reportRepairs: 0 | 1;
+  transportRetries: 0 | 1;
+  issueSnapshot: PersistedIssueSnapshotV1;
+  frozenCriteria: PersistedFrozenCriterionV1[];
+  reworkFindings: string[];
   packageVersion: string;
   skillHashes: Record<string, string>;
   process?: {
@@ -151,7 +172,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
-    'reportRepairs', 'packageVersion', 'skillHashes', 'checks', 'createdAt', 'updatedAt', ...optional,
+    'reportRepairs', 'transportRetries', 'issueSnapshot', 'frozenCriteria', 'reworkFindings',
+    'packageVersion', 'skillHashes', 'checks', 'createdAt', 'updatedAt', ...optional,
   ], field);
   if (typeof value.runId !== 'string' || !UUID_V4_PATTERN.test(value.runId)) throw new Error(`${field}.runId is invalid`);
   assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -164,7 +186,12 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field}.worktreePath is invalid`);
   }
   if (!isLifecycle(value.lifecycle)) throw new Error(`${field}.lifecycle is invalid`);
-  if (value.cycle !== 1 || value.reportRepairs !== 0) throw new Error(`${field} cycle/reportRepairs are invalid`);
+  if (!Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5) throw new Error(`${field}.cycle is invalid`);
+  if (value.reportRepairs !== 0 && value.reportRepairs !== 1) throw new Error(`${field}.reportRepairs is invalid`);
+  if (value.transportRetries !== 0 && value.transportRetries !== 1) throw new Error(`${field}.transportRetries is invalid`);
+  validateIssueSnapshot(value.issueSnapshot, `${field}.issueSnapshot`);
+  validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
+  validateStringList(value.reworkFindings, `${field}.reworkFindings`);
   assertNonEmptyString(value.packageVersion, `${field}.packageVersion`);
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   validateChecks(value.checks, `${field}.checks`);
@@ -224,6 +251,35 @@ function validateChecks(value: unknown, field: string): asserts value is RunReco
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);
   }
+}
+
+function validateIssueSnapshot(value: unknown, field: string): asserts value is PersistedIssueSnapshotV1 {
+  assertExactObject(value, ['number', 'title', 'body', 'url', 'state', 'labels'], field);
+  assertPositiveInteger(value.number, `${field}.number`);
+  assertNonEmptyString(value.title, `${field}.title`);
+  if (typeof value.body !== 'string' || value.body.length > 16 * 1024) throw new Error(`${field}.body is invalid`);
+  assertNonEmptyString(value.url, `${field}.url`);
+  if (value.state !== 'OPEN') throw new Error(`${field}.state is invalid`);
+  validateStringArray(value.labels, `${field}.labels`);
+}
+
+function validateFrozenCriteria(value: unknown, field: string): asserts value is PersistedFrozenCriterionV1[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 256) throw new Error(`${field} is invalid`);
+  const ids = new Set<string>();
+  for (const [index, criterion] of value.entries()) {
+    assertExactObject(criterion, ['id', 'order', 'text', 'source'], `${field}[${index}]`);
+    assertNonEmptyString(criterion.id, `${field}[${index}].id`);
+    if (criterion.order !== index + 1) throw new Error(`${field}[${index}].order is invalid`);
+    assertNonEmptyString(criterion.text, `${field}[${index}].text`);
+    if (criterion.source !== 'explicit' && criterion.source !== 'fallback') throw new Error(`${field}[${index}].source is invalid`);
+    if (ids.has(criterion.id)) throw new Error(`${field} IDs must be unique`);
+    ids.add(criterion.id);
+  }
+}
+
+function validateStringList(value: unknown, field: string): asserts value is string[] {
+  if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
+  for (const item of value) assertNonEmptyString(item, field);
 }
 
 function validateIntent(value: unknown, field: string): void {
@@ -318,7 +374,7 @@ function emptyRunState(): RunStateFileV1 {
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'implementing', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }
