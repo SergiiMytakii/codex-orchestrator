@@ -15,6 +15,7 @@ import {
   type ProofReportV1,
 } from './proof-report.js';
 import type { ProofRecordWriter, ProofStateBodyV1, ProofStateV1, ProofStatus } from './proof-store.js';
+import type { AndroidLeaseVerifier } from './mobile-lease.js';
 
 export interface IssueSnapshot {
   number: number;
@@ -85,6 +86,7 @@ export class AcceptanceProof {
     inspectFreshness: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
     readArtifact: (relativePath: string) => Promise<Buffer>;
     inspectArtifact?: (relativePath: string) => Promise<{ modifiedAt: string }>;
+    androidLease?: AndroidLeaseVerifier;
     proofArtifactDir: string;
     createAttemptId: () => string;
     now: () => string;
@@ -113,7 +115,9 @@ export class AcceptanceProof {
         payload: checked.payload,
         checkedChangeSha256: checked.checkedChangeSha256,
       });
-      return await this.execute({ ...input, ...checked, bindingSha256 });
+      const result = await this.execute({ ...input, ...checked, bindingSha256 });
+      await this.releaseAndroidLeaseIfSettled(input.proofId, bindingSha256);
+      return result;
     } catch (error) {
       if (error instanceof ProofQuiescenceError) throw error;
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
@@ -238,6 +242,7 @@ export class AcceptanceProof {
       }
       try {
         await this.validateArtifactsAndDiff(
+          input.proofId,
           report,
           agentResult.proofPhaseChangedFiles,
           state.startedAt,
@@ -270,6 +275,7 @@ export class AcceptanceProof {
   }
 
   private async validateArtifactsAndDiff(
+    proofId: string,
     report: ProofReportV1,
     changedFiles: string[],
     proofStartedAt: string,
@@ -277,6 +283,13 @@ export class AcceptanceProof {
   ): Promise<void> {
     if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
     const artifactPaths = new Set<string>();
+    const androidLeaseRef = report.decision.mode === 'visual'
+      && report.decision.targets[0] === 'android'
+      && report.visualEvidence
+      && 'lease' in report.visualEvidence
+      ? report.visualEvidence.lease.leaseRef
+      : undefined;
+    let androidLeaseArtifact: { relativePath: string; bytes: Buffer } | undefined;
     for (const artifact of report.artifacts) {
       if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, artifact.relativePath)) {
         throw new Error('proof artifact escapes proof-owned directory');
@@ -293,6 +306,7 @@ export class AcceptanceProof {
         if (Date.parse(metadata.modifiedAt) < Date.parse(proofStartedAt)) throw new Error('visual artifact is stale');
       }
       artifactPaths.add(artifact.relativePath);
+      if (artifact.id === androidLeaseRef) androidLeaseArtifact = { relativePath: artifact.relativePath, bytes };
     }
     for (const path of changedFiles) {
       assertRelativePath(path, 'proof phase changed file');
@@ -304,6 +318,21 @@ export class AcceptanceProof {
         throw new Error('visual proof reused an unchanged artifact');
       }
     }
+    if (androidLeaseRef) {
+      if (!this.dependencies.androidLease || !androidLeaseArtifact) throw new Error('Android lease verification is unavailable');
+      await this.dependencies.androidLease.verify({
+        proofId,
+        artifactRelativePath: androidLeaseArtifact.relativePath,
+        artifactBytes: androidLeaseArtifact.bytes,
+      });
+    }
+  }
+
+  private async releaseAndroidLeaseIfSettled(proofId: string, bindingSha256: string): Promise<void> {
+    if (!this.dependencies.androidLease) return;
+    const state = await this.dependencies.proofRecords.read(proofId);
+    if (!state || state.bindingSha256 !== bindingSha256 || !isTerminalStatus(state.status)) return;
+    await this.dependencies.androidLease.release(proofId);
   }
 
   private async startProofRetry(

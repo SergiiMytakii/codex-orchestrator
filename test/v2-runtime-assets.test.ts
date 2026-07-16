@@ -69,6 +69,22 @@ test('fails closed when acceptance-proof procedure bytes change during resolutio
   });
 });
 
+test('fails closed when acceptance-proof lease helper bytes change during resolution', async () => {
+  await withFixture(async ({ packageRoot, runtimeRoot }) => {
+    await assert.rejects(publishRuntimeAssetSnapshot({
+      packageRoot,
+      runtimeRoot,
+      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/helper-race/snapshot',
+      skill: 'acceptance-proof',
+      onStep: async (step) => {
+        if (step === 'after-source-resolve') {
+          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'android-lease.mjs'), 'HELPER B\n');
+        }
+      },
+    }), /package assets changed during resolution/u);
+  });
+});
+
 test('keeps version-A attempt bytes immutable while a new attempt snapshots version B', async () => {
   await withFixture(async ({ packageRoot, runtimeRoot }) => {
     const first = await publishRuntimeAssetSnapshot({
@@ -221,8 +237,12 @@ test('serializes concurrent publishers and reuses the one exact committed snapsh
     ]);
     assert.equal([left.reused, right.reused].filter(Boolean).length, 1);
     assert.deepEqual(left.files, right.files);
-    assert.deepEqual(left.files.map((file) => file.relativePath), ['SKILL.md', 'output-schema.json', 'references/browser.md']);
+    assert.deepEqual(left.files.map((file) => file.relativePath), [
+      'SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'tools/android-lease.mjs',
+    ]);
+    assert.match(await readFile(join(left.snapshotRoot, 'references', 'android.md'), 'utf8'), /ANDROID PROCEDURE/u);
     assert.match(await readFile(join(left.snapshotRoot, 'references', 'browser.md'), 'utf8'), /BROWSER PROCEDURE/u);
+    assert.match(await readFile(join(left.snapshotRoot, 'tools', 'android-lease.mjs'), 'utf8'), /ANDROID LEASE HELPER/u);
     await verifyRuntimeAssetSnapshot(left);
   });
 });
@@ -236,14 +256,16 @@ async function withFixture(
     const runtimeRoot = join(root, 'runtime');
     await Promise.all([
       mkdir(join(packageRoot, 'internal-skills', 'agent-auto'), { recursive: true }),
-      mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof'), { recursive: true }),
+      mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools'), { recursive: true }),
       mkdir(runtimeRoot, { recursive: true, mode: 0o700 }),
     ]);
     await writeFile(join(packageRoot, 'package.json'), '{"name":"codex-orchestrator","version":"1.0.0"}\n');
     await writeFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'), 'PACKAGE AGENT A\n');
     await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'SKILL.md'), 'PACKAGE PROOF A\n');
     await mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references'), { recursive: true });
+    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'android.md'), 'ANDROID PROCEDURE A\n');
     await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'browser.md'), 'BROWSER PROCEDURE A\n');
+    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'android-lease.mjs'), 'ANDROID LEASE HELPER A\n');
     await run({ packageRoot, runtimeRoot });
   } finally {
     await rm(root, { recursive: true, force: true });

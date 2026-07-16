@@ -92,6 +92,35 @@ const visualProof: ProofReportV1 = {
   },
 };
 
+const androidVisualProof: ProofReportV1 = {
+  ...passedProof,
+  decision: { mode: 'visual', targets: ['android'] },
+  criteria: [{
+    id: 'ac-android', status: 'passed', confidence: 'high', surfaces: ['android'],
+    evidenceRefs: ['android-shot', 'android-tree'],
+    analysis: 'The leased Android workflow reached its final visible state.',
+  }],
+  checks: [],
+  artifacts: [
+    visualArtifact('android-shot', 'screenshot', 'proofs/android/final.png', true),
+    visualArtifact('android-tree', 'ui-hierarchy', 'proofs/android/final.xml', false),
+    visualArtifact('android-log', 'device-log', 'proofs/android/logcat.txt', false),
+    visualArtifact('android-lease', 'lease-record', 'proofs/android/lease.json', false),
+  ],
+  visualEvidence: {
+    workflow: { entrypoint: 'dev.codex.proof/.MainActivity', steps: ['Open', 'Activate'], finalState: 'Android proof ready' },
+    captures: [{
+      target: 'android', name: 'final', width: 1080, height: 2424, criteriaRefs: ['ac-android'],
+      screenshotRef: 'android-shot', stateRef: 'android-tree',
+    }],
+    diagnostics: { deviceLogRef: 'android-log' },
+    lease: { leaseRef: 'android-lease' },
+    freshness: { capturedAfterFinalInteraction: true },
+    layoutReview: [{ summary: 'The Android layout is aligned and unclipped.', evidenceRefs: ['android-shot'] }],
+    copyReview: [{ summary: 'Visible Android copy matches the criterion.', evidenceRefs: ['android-shot', 'android-tree'] }],
+  },
+};
+
 test('implementation output schema and runtime validator have parity across status branches', () => {
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: completedImplementation, accepted: true },
@@ -128,7 +157,9 @@ test('proof output schema and runtime validator have parity across terminal repo
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: passedProof, accepted: true },
     { value: visualProof, accepted: true },
+    { value: androidVisualProof, accepted: true },
     { value: { ...visualProof, visualEvidence: undefined }, accepted: false },
+    { value: { ...androidVisualProof, visualEvidence: { ...androidVisualProof.visualEvidence, lease: undefined } }, accepted: false },
     {
       value: {
         ...passedProof,

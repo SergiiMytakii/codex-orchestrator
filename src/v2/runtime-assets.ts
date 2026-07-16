@@ -158,7 +158,7 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   assertMode(rootStat.mode, SNAPSHOT_ROOT_MODE, snapshotRoot);
 
   const expectedNames = snapshot.skill === 'acceptance-proof'
-    ? ['SKILL.md', 'output-schema.json', 'references/browser.md']
+    ? ['SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'tools/android-lease.mjs']
     : ['SKILL.md', 'output-schema.json'];
   const actualNames = await snapshotFilePaths(snapshotRoot, expectedUid);
   if (actualNames.length !== expectedNames.length || actualNames.some((name, index) => name !== expectedNames[index])) {
@@ -200,23 +200,26 @@ interface SourceAssets {
   skillSourcePath: string;
   skillBytes: Buffer;
   schemaBytes: Buffer;
-  browserProcedureSourcePath?: string;
-  browserProcedureBytes?: Buffer;
+  supplementalAssets: Array<{ sourcePath: string; relativePath: string; bytes: Buffer }>;
 }
 
 async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName): Promise<SourceAssets> {
   const packageJsonPath = join(packageRoot, 'package.json');
   const skillSourcePath = join(packageRoot, 'internal-skills', skill, 'SKILL.md');
-  const browserProcedureSourcePath = skill === 'acceptance-proof'
-    ? join(packageRoot, 'internal-skills', skill, 'references', 'browser.md')
-    : undefined;
+  const supplementalPaths = skill === 'acceptance-proof'
+    ? [
+      { relativePath: 'references/android.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'android.md') },
+      { relativePath: 'references/browser.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'browser.md') },
+      { relativePath: 'tools/android-lease.mjs', sourcePath: join(packageRoot, 'internal-skills', skill, 'tools', 'android-lease.mjs') },
+    ]
+    : [];
   await assertSourcePath(packageRoot, packageJsonPath, true);
   await assertSourcePath(packageRoot, skillSourcePath, true);
-  if (browserProcedureSourcePath) await assertSourcePath(packageRoot, browserProcedureSourcePath, true);
-  const [packageJsonBytes, skillBytes, browserProcedureBytes] = await Promise.all([
+  await Promise.all(supplementalPaths.map((asset) => assertSourcePath(packageRoot, asset.sourcePath, true)));
+  const [packageJsonBytes, skillBytes, supplementalBytes] = await Promise.all([
     readFile(packageJsonPath),
     readFile(skillSourcePath),
-    browserProcedureSourcePath ? readFile(browserProcedureSourcePath) : Promise.resolve(undefined),
+    Promise.all(supplementalPaths.map((asset) => readFile(asset.sourcePath))),
   ]);
   const packageJson = JSON.parse(packageJsonBytes.toString('utf8')) as { name?: unknown; version?: unknown };
   if (packageJson.name !== 'codex-orchestrator' || typeof packageJson.version !== 'string' || packageJson.version.length === 0) {
@@ -232,24 +235,23 @@ async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName
     skillSourcePath,
     skillBytes,
     schemaBytes: Buffer.from(`${canonicalJson(schema)}\n`, 'utf8'),
-    ...(browserProcedureSourcePath && browserProcedureBytes ? { browserProcedureSourcePath, browserProcedureBytes } : {}),
+    supplementalAssets: supplementalPaths.map((asset, index) => ({ ...asset, bytes: supplementalBytes[index] })),
   };
 }
 
 async function assertSourceUnchanged(source: SourceAssets): Promise<void> {
   await assertSourcePath(source.packageRoot, source.packageJsonPath, true);
   await assertSourcePath(source.packageRoot, source.skillSourcePath, true);
-  if (source.browserProcedureSourcePath) await assertSourcePath(source.packageRoot, source.browserProcedureSourcePath, true);
-  const [packageJsonBytes, skillBytes, browserProcedureBytes] = await Promise.all([
+  await Promise.all(source.supplementalAssets.map((asset) => assertSourcePath(source.packageRoot, asset.sourcePath, true)));
+  const [packageJsonBytes, skillBytes, supplementalBytes] = await Promise.all([
     readFile(source.packageJsonPath),
     readFile(source.skillSourcePath),
-    source.browserProcedureSourcePath ? readFile(source.browserProcedureSourcePath) : Promise.resolve(undefined),
+    Promise.all(source.supplementalAssets.map((asset) => readFile(asset.sourcePath))),
   ]);
   if (!packageJsonBytes.equals(source.packageJsonBytes) || !skillBytes.equals(source.skillBytes)) {
     throw new Error('package assets changed during resolution');
   }
-  if ((browserProcedureBytes && !browserProcedureBytes.equals(source.browserProcedureBytes!))
-    || (!browserProcedureBytes && source.browserProcedureBytes)) {
+  if (supplementalBytes.some((bytes, index) => !bytes.equals(source.supplementalAssets[index].bytes))) {
     throw new Error('package assets changed during resolution');
   }
 }
@@ -294,11 +296,11 @@ function sourceSnapshotFiles(source: SourceAssets, ownerUid: number): RuntimeAss
       ownerUid,
     },
   ];
-  if (source.browserProcedureBytes) {
+  for (const asset of source.supplementalAssets) {
     files.push({
-      relativePath: 'references/browser.md',
-      sha256: sha256(source.browserProcedureBytes),
-      size: source.browserProcedureBytes.length,
+      relativePath: asset.relativePath,
+      sha256: sha256(asset.bytes),
+      size: asset.bytes.length,
       mode: SNAPSHOT_FILE_MODE,
       ownerUid,
     });
@@ -309,7 +311,8 @@ function sourceSnapshotFiles(source: SourceAssets, ownerUid: number): RuntimeAss
 function sourceFileBytes(source: SourceAssets, relativePath: string): Buffer {
   if (relativePath === 'SKILL.md') return source.skillBytes;
   if (relativePath === 'output-schema.json') return source.schemaBytes;
-  if (relativePath === 'references/browser.md' && source.browserProcedureBytes) return source.browserProcedureBytes;
+  const supplemental = source.supplementalAssets.find((asset) => asset.relativePath === relativePath);
+  if (supplemental) return supplemental.bytes;
   throw new Error(`unknown runtime asset: ${relativePath}`);
 }
 

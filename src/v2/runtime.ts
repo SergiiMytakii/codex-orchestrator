@@ -2,8 +2,8 @@ import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
-import { hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { homedir, hostname } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
 import { GitWorktreeManager } from '../git/worktree.js';
@@ -24,6 +24,7 @@ import {
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
+import { FileAndroidLeaseVerifier } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import { OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
@@ -233,6 +234,7 @@ export class ContainedProofAgent implements ProofAgent {
     safePath: string;
     targetRoot: string;
     packageVersion: string;
+    androidAdbPath: string;
     process?: CodexProcess;
     createAttemptId?: () => string;
   }) {}
@@ -251,6 +253,14 @@ export class ContainedProofAgent implements ProofAgent {
       expectedPackageVersion: this.dependencies.packageVersion,
     });
     const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
+    const snapshotRoot = dirname(attempt.skillPath);
+    const androidLeaseRoot = join(
+      resolve(this.dependencies.orchestratorHome),
+      'v2',
+      sha256(canonicalRepository),
+      'leases',
+    );
+    const androidLeaseArtifact = join(artifactRoot, input.proofId, 'android-lease.json');
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
     try {
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
@@ -272,6 +282,13 @@ export class ContainedProofAgent implements ProofAgent {
           `Configured check receipts: ${canonicalJson(input.checks)}.`,
           `Write evidence only below ${config.proof.artifactDir}.`,
           'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
+          'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
+          `Android lease helper: ${join(snapshotRoot, 'tools', 'android-lease.mjs')}.`,
+          `Android lease root: ${androidLeaseRoot}.`,
+          `Android lease artifact: ${androidLeaseArtifact}.`,
+          `Android lease proof ID: ${input.proofId}.`,
+          `Android lease owner PID: ${process.pid}.`,
+          `Android adb path: ${this.dependencies.androidAdbPath}.`,
           ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
           'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
@@ -327,6 +344,7 @@ export function createV2Runtime(input: {
   createAttemptId?: () => string;
   now?: () => string;
   processAlive?: (pid: number) => boolean;
+  androidAdbPath?: string;
 }): V2Runtime {
   const targetRoot = resolve(input.targetRoot);
   const orchestratorHome = resolve(input.orchestratorHome);
@@ -337,6 +355,12 @@ export function createV2Runtime(input: {
   let currentConfig: AgentAutoConfigV1 | undefined;
   let runRecords: RunRecordWriter | undefined;
   const containedProcess = input.codexProcess ?? new CodexProcess();
+  const configuredAndroidAdbPath = input.androidAdbPath
+    ?? process.env.ANDROID_ADB
+    ?? (process.env.ANDROID_HOME ? join(process.env.ANDROID_HOME, 'platform-tools', 'adb') : undefined)
+    ?? (process.env.ANDROID_SDK_ROOT ? join(process.env.ANDROID_SDK_ROOT, 'platform-tools', 'adb') : undefined)
+    ?? join(homedir(), 'Library', 'Android', 'sdk', 'platform-tools', 'adb');
+  const androidAdbPath = resolve(configuredAndroidAdbPath);
   const containedDependencies = () => ({
     config: () => requireConfig(currentConfig),
     packageRoot: requireRuntimeString(input.packageRoot, 'packageRoot'),
@@ -355,6 +379,7 @@ export function createV2Runtime(input: {
   const proofAgent = input.proofAgent ?? new ContainedProofAgent({
     ...containedDependencies(),
     targetRoot,
+    androidAdbPath,
   });
 
   const readConfig = async (requestedRoot: string) => {
@@ -384,6 +409,12 @@ export function createV2Runtime(input: {
       const repoKey = sha256(checked.payload.canonicalRepository);
       const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'));
       const worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
+      const androidLease = new FileAndroidLeaseVerifier({
+        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
+        worktreeRoot: worktreePath,
+        now: () => new Date(now()),
+        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/android-lease.json`,
+      });
       const acceptanceProof = new AcceptanceProof({
         checkedChangeReader: capabilities,
         proofRecords,
@@ -394,6 +425,7 @@ export function createV2Runtime(input: {
         }),
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
         inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
+        androidLease,
         proofArtifactDir: config.proof.artifactDir,
         createAttemptId: input.createAttemptId ?? randomUUID,
         now,
