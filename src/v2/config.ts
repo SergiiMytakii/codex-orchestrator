@@ -49,8 +49,8 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfigV1 {
   if (value.version !== 1) throw new Error('config.version is invalid');
 
   assertExactObject(value.github, ['owner', 'repo', 'baseBranch', 'labels'], 'config.github');
-  assertNonEmptyString(value.github.owner, 'config.github.owner');
-  assertNonEmptyString(value.github.repo, 'config.github.repo');
+  assertGitHubOwner(value.github.owner, 'config.github.owner');
+  assertGitHubRepo(value.github.repo, 'config.github.repo');
   assertNonEmptyString(value.github.baseBranch, 'config.github.baseBranch');
   assertExactObject(value.github.labels, ['auto', 'running', 'blocked', 'review'], 'config.github.labels');
   for (const key of ['auto', 'running', 'blocked', 'review'] as const) {
@@ -152,6 +152,18 @@ function assertPositiveSafeInteger(value: unknown, field: string): asserts value
 function assertNonEmptyString(value: unknown, field: string, maxLength = MAX_STRING_LENGTH): asserts value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) {
     throw new Error(`${field} must be a non-empty bounded string`);
+  }
+}
+
+function assertGitHubOwner(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.length > 39 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u.test(value)) {
+    throw new Error(`${field} is not a canonical GitHub owner`);
+  }
+}
+
+function assertGitHubRepo(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.length > 100 || !/^[A-Za-z0-9._-]+$/u.test(value) || value === '.' || value === '..') {
+    throw new Error(`${field} is not a canonical GitHub repository name`);
   }
 }
 

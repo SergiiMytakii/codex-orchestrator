@@ -48,6 +48,11 @@ export interface CheckedChangeReadCapability {
   verifyAndRead(value: CheckedChange): { payload: CheckedChangePayloadV1; checkedChangeSha256: string };
 }
 
+export function checkedChangePayloadSha256(payload: CheckedChangePayloadV1): string {
+  validatePayload(payload);
+  return sha256(canonicalJson(payload));
+}
+
 export function createCheckedChangeCapabilities(): CheckedChangeMintCapability & CheckedChangeReadCapability {
   const values = new WeakMap<object, { payload: CheckedChangePayloadV1; checkedChangeSha256: string }>();
   return {
@@ -56,7 +61,7 @@ export function createCheckedChangeCapabilities(): CheckedChangeMintCapability &
       const stored = structuredClone(payload);
       deepFreeze(stored);
       const value = Object.freeze({}) as CheckedChange;
-      values.set(value as object, { payload: stored, checkedChangeSha256: sha256(canonicalJson(stored)) });
+      values.set(value as object, { payload: stored, checkedChangeSha256: checkedChangePayloadSha256(stored) });
       return value;
     },
     verifyAndRead(value) {

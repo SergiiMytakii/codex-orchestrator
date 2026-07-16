@@ -47,12 +47,24 @@ export type ProofAgentResult =
 export interface ProofAgent {
   run(input: {
     proofId: string;
+    runId: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     checkedChangeSha256: string;
     changedFiles: string[];
     checks: CheckedChangePayloadV1['checks'];
+    signal: AbortSignal;
   }): Promise<ProofAgentResult>;
+}
+
+export class ProofQuiescenceError extends Error {
+  constructor(
+    readonly pid: number,
+    readonly processGroupId: number,
+    readonly waitForAbsence: () => Promise<void>,
+  ) {
+    super('proof process quiescence is not yet confirmed');
+  }
 }
 
 export type ProveChangeResult =
@@ -73,6 +85,7 @@ export class AcceptanceProof {
     proofArtifactDir: string;
     createAttemptId: () => string;
     now: () => string;
+    signal?: AbortSignal;
   }) {
     assertRelativePath(dependencies.proofArtifactDir, 'proofArtifactDir');
   }
@@ -98,7 +111,8 @@ export class AcceptanceProof {
         checkedChangeSha256: checked.checkedChangeSha256,
       });
       return await this.execute({ ...input, ...checked, bindingSha256 });
-    } catch {
+    } catch (error) {
+      if (error instanceof ProofQuiescenceError) throw error;
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
     }
   }
@@ -143,6 +157,10 @@ export class AcceptanceProof {
     if (!await this.isFresh(input.payload)) {
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Checked change is stale.');
     }
+    if (this.dependencies.signal?.aborted) {
+      const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
+      return { status: 'cancelled', receipt: outcome.receipt };
+    }
     if (state.status === 'prepared') {
       const preparedState = state;
       state = await this.dependencies.proofRecords.compareAndSwap(
@@ -163,16 +181,23 @@ export class AcceptanceProof {
     try {
       agentResult = await this.dependencies.proofAgent.run({
         proofId: input.proofId,
+        runId: input.payload.runId,
         issue: structuredClone(input.issue),
         frozenCriteria: structuredClone(input.frozenCriteria),
         checkedChangeSha256: input.checkedChangeSha256,
         changedFiles: [...input.payload.changedFiles],
         checks: structuredClone(input.payload.checks),
+        signal: this.dependencies.signal ?? new AbortController().signal,
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof ProofQuiescenceError) throw error;
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
     }
 
+    if (this.dependencies.signal?.aborted) {
+      const outcome = await this.persistOperationalTerminal(state, 'cancelled', input, 'Proof was cancelled.');
+      return { status: 'cancelled', receipt: outcome.receipt };
+    }
     if (agentResult.kind === 'transport-failed') {
       const outcome = await this.persistOperationalTerminal(state, 'transport-failed', input, 'Proof transport failed.');
       return { status: 'transport-failed', resumable: agentResult.resumable, receipt: outcome.receipt };

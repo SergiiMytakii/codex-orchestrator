@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "fcc478a2ea9bff82e17b1f404922a5ffabc82fbe2289efc63cb11f5bc9c1fd2a"
+approved_content_sha256: "2a51c59c81b39efdddb647df23b703ed4fb0b8ec09177333a685f069cf82a30c"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -155,9 +155,9 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 ### 9.1 Current Execution Status
 
 - **Current Child:** Spec 1 — Core tracer.
-- **Execution Outcome:** Spec 1 resumed on 2026-07-16 under explicit user acceptance of shared Codex auth; containment preflight, Slices 1-4, and the root containment self-check are GREEN, and Slice 5 is active.
+- **Execution Outcome:** Spec 1 resumed on 2026-07-16 under explicit user acceptance of shared Codex auth; containment preflight, Slices 1-5, and both root self-check checkpoints are GREEN, and packed reconciliation Slice 6 is active.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
-- **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 root self-check and executable containment gates passed. Outcome remains `Waived`, not independently approved.
+- **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
 - **Sequencing Decision:** Specs 2-8 remain unauthored and may not start until revised Spec 1 fully completes.
 
 ## 10. Final Action

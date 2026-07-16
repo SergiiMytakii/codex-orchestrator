@@ -307,7 +307,7 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function parseJsonWithoutDuplicateKeys(source: string): unknown {
+export function parseJsonWithoutDuplicateKeys(source: string): unknown {
   let index = 0;
 
   const skipWhitespace = () => {

@@ -1,4 +1,7 @@
 import type { ProofReceipt } from './proof-report.js';
+import { join } from 'node:path';
+
+import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TERMINAL_STATUSES = [
@@ -66,6 +69,39 @@ export class InMemoryProofRecordWriter implements ProofRecordWriter {
     validateProofState(state);
     this.states.set(proofId, state);
     return structuredClone(state);
+  }
+}
+
+export class FileProofRecordWriter implements ProofRecordWriter {
+  constructor(
+    private readonly proofsRoot: string,
+    private readonly options: AtomicStateFileOptions = {},
+  ) {}
+
+  async read(proofId: string): Promise<ProofStateV1 | undefined> {
+    return this.file(proofId).read();
+  }
+
+  async compareAndSwap(
+    proofId: string,
+    expectedBinding: string,
+    expectedGeneration: number,
+    next: ProofStateBodyV1,
+  ): Promise<ProofStateV1> {
+    assertProofId(proofId);
+    assertSha256(expectedBinding, 'expected proof binding');
+    if (next.proofId !== proofId || next.bindingSha256 !== expectedBinding) throw new Error('proof state identity mismatch');
+    const current = await this.read(proofId);
+    if (current && current.bindingSha256 !== expectedBinding) throw new Error('proof binding mismatch');
+    return this.file(proofId).compareAndSwap(expectedGeneration, {
+      ...structuredClone(next),
+      generation: expectedGeneration + 1,
+    });
+  }
+
+  private file(proofId: string): AtomicStateFile<ProofStateV1> {
+    assertProofId(proofId);
+    return new AtomicStateFile(join(this.proofsRoot, proofId, 'state.json'), validateProofState, this.options);
   }
 }
 
@@ -146,6 +182,11 @@ function assertNonEmptyString(value: unknown, field: string): asserts value is s
 
 function assertSha256(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !SHA256_PATTERN.test(value)) throw new Error(`${field} must be lowercase SHA-256`);
+}
+
+function assertProofId(value: unknown): asserts value is string {
+  assertNonEmptyString(value, 'proofId');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value) || value === '.' || value === '..') throw new Error('proofId is unsafe');
 }
 
 function assertIsoTimestamp(value: unknown): asserts value is string {
