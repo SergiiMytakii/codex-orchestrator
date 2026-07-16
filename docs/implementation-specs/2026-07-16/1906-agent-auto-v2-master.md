@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "826a53cabcf3b3c1714d723a766257d85c147664d9c4a7e21c4abae8db7abea4"
+approved_content_sha256: "63e20d903c430f5b176889e4ef615feed7416b0b4448e1309211beb369830483"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -42,7 +42,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | --- | --- | --- | --- |
 | **Spec 1 — Core tracer** | 1-2 | Isolated V2 source root, package-owned skills/schemas, immutable attempt snapshots, ordinary `codex exec` containment, and fake-backed `runIssue -> AcceptanceProof -> draft PR`. | Reviewed with this master; may start after the dedicated worktree is created from `v0.1.51`. |
 | **Spec 2 — Autonomous recovery** | 3 | Same-worktree rework, bounded transport/report repair, capability-separated durable state, crash resume, exact publication intents, and duplicate-effect prevention. [Spec](./2253-agent-auto-v2-autonomous-recovery.md) | Spec 1 is fully complete: checklist/ledger, containment canary, all validation, waived reviews, and final handoff are reconciled. Author from its settled Interfaces. |
-| **Spec 3 — Browser proof** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
+| **[Spec 3 — Browser proof](2330-agent-auto-v2-browser-proof.md)** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
 | **Spec 4 — Android proof** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
 | **Spec 5 — iOS proof** | 6 | Runner-leased iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and final review; iOS toolchain/safe lease fixture are confirmed. |
 | **Spec 6 — Setup** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and final review; config/state roots are settled. |
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 2 — Autonomous recovery — complete. Spec 3 is not yet authored.
+- **Current Child:** Spec 3 — Browser proof — authored and authorized for execution.
 - **Execution Outcome:** Specs 1-2 completed on 2026-07-16. Spec 2's crash/idempotency, bounded repair/rework, CLI JSON, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 2's terminal gate is satisfied. Spec 3 may now be authored from the settled private `AcceptanceProof` implementation while its public Interface remains unchanged; Specs 4-8 remain gated.
+- **Sequencing Decision:** Spec 2's terminal gate is satisfied and Spec 3 is linked above. Specs 4-8 remain gated until each predecessor completes.
 
 ## 10. Final Action
 
