@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Not run; independent artifact and code review waived by user"
 review_coverage: "Root executable self-checks cover state ownership, retry accounting, process quiescence, publication idempotency, and Interface stability"
-approved_content_sha256: "3e892d8a1bffa8de2a1b485b8e0465a1193733c87216459bc56849a13eb3a33f"
+approved_content_sha256: "01bd32ff1f234fa9fa6f479412911b7925ed4067d84e835c63b03d627f057727"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -52,90 +52,99 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 | Invariant | First RED proof | Status |
 | --- | --- | --- |
-| Existing matching nonterminal state resumes in the same worktree/run instead of claiming or creating a second run. | `runIssue` crash-resume Interface matrix | planned |
-| Failed checks and `needs-rework` proof feed exact findings to a new implementation cycle in the same worktree; cycle 5 exhausts without publication. | bounded same-worktree rework Interface test | planned |
-| One malformed report repair and one unchanged-baseline transport retry use separate counters and do not consume an implementation cycle; changed baseline blocks retry. | repair/transport counter matrix | planned |
-| No retry, terminal transition, or owner release occurs before process/check/proof/store/effect quiescence. | deferred/safe-halt/orphan matrix | planned |
-| Each publication intent is persisted before invocation and reconciled from exact local/remote observation after restart; matching effects are reused and divergence fails closed. | before/after every effect crash matrix | planned |
-| A package/schema change on resume starts a new recorded cycle and snapshot; an active snapshot remains immutable. | package-version resume test plus packed snapshot proof | planned |
-| Every `RunIssueResult` maps to one versioned CLI JSON status and exact exit code without prose parsing. | exhaustive CLI contract test | planned |
-| Store/proof capabilities cannot choose lifecycle or mutate each other's state. | strict schema/capability tests | planned |
+| Existing matching nonterminal state resumes in the same worktree/run instead of claiming or creating a second run. | `runIssue` crash-resume Interface matrix | green |
+| Failed checks and `needs-rework` proof feed exact findings to a new implementation cycle in the same worktree; cycle 5 exhausts without publication. | bounded same-worktree rework Interface test | green |
+| One malformed report repair and one unchanged-baseline transport retry use separate counters and do not consume an implementation cycle; changed baseline blocks retry. | repair/transport counter matrix | green |
+| No retry, terminal transition, or owner release occurs before process/check/proof/store/effect quiescence. | deferred/safe-halt/orphan matrix | green |
+| Each publication intent is persisted before invocation and reconciled from exact local/remote observation after restart; matching effects are reused and divergence fails closed. | before/after every effect crash matrix | green |
+| A package/schema change on resume starts a new recorded cycle and snapshot; an active snapshot remains immutable. | package-version resume test plus packed snapshot proof | green |
+| Every `RunIssueResult` maps to one versioned CLI JSON status and exact exit code without prose parsing. | exhaustive CLI contract test | green |
+| Store/proof capabilities cannot choose lifecycle or mutate each other's state. | strict schema/capability tests | green |
 
 ## 5. Execution Slices
 
 ### Progress Discipline
 
-- [ ] Update leaf checklist and ledger statuses during execution.
-- [ ] Begin every behavior slice with a failing public-seam test and preserve the observed RED reason.
-- [ ] Use per-slice local checkpoint commits only after each exit gate passes; never push.
-- [ ] Stop if implementation requires changing the approved Module Interfaces or granting proof/setup a run-record capability.
+- [x] Update leaf checklist and ledger statuses during execution.
+- [x] Begin every behavior slice with a failing public-seam test and preserve the observed RED reason.
+- [x] Use local checkpoint commits only after exit gates pass; Slices 1-4 shared the same state-machine files, so they were committed as one settled implementation checkpoint. Never push.
+- [x] Stop if implementation requires changing the approved Module Interfaces or granting proof/setup a run-record capability.
 
 ### Slice 1 — Durable resume and legal lifecycle
 
-- [ ] **Test/Proof First:** Add RED tests that seed each nonterminal lifecycle/intent and call only `runIssue`; assert exact run/worktree reuse, no duplicate claim, legal next transition, terminal replay, and fail-closed identity/config/worktree mismatch.
-- [ ] Extend `RunRecordV1` with bounded `cycle`, `reportRepairs`, `transportRetries`, immutable issue/frozen-criteria identity, current attempt/package/schema identity, and exact recoverable phase evidence.
-- [ ] Make `RunIssue` find and resume the unique matching record after owner acquisition and authorization; reject duplicate/ambiguous records and state that cannot be reconciled.
-- [ ] Keep transition legality private to `RunIssue`; store tests prove only shape, generation CAS, and state invariants.
-- [ ] **Exit Gate:** focused run-store/runIssue resume suite, typecheck, architecture scan, and `git diff --check` pass.
+- [x] **Test/Proof First:** Add RED tests that seed each nonterminal lifecycle/intent and call only `runIssue`; assert exact run/worktree reuse, no duplicate claim, legal next transition, terminal replay, and fail-closed identity/config/worktree mismatch.
+- [x] Extend `RunRecordV1` with bounded `cycle`, `reportRepairs`, `transportRetries`, immutable issue/frozen-criteria identity, current attempt/package/schema identity, and exact recoverable phase evidence.
+- [x] Make `RunIssue` find and resume the unique matching record after owner acquisition and authorization; reject duplicate/ambiguous records and state that cannot be reconciled.
+- [x] Keep transition legality private to `RunIssue`; store tests prove only shape, generation CAS, and state invariants.
+- [x] **Exit Gate:** focused run-store/runIssue resume suite, typecheck, architecture scan, and `git diff --check` pass.
 
 ### Self-Check Checkpoint 1 — state ownership
 
-- [ ] Root self-check hunts illegal transitions, counter drift, duplicate run creation, stale package/criteria reuse, proof capability leakage, and lock release before settlement. Independent review outcome remains `Waived`.
+- [x] Root self-check hunts illegal transitions, counter drift, duplicate run creation, stale package/criteria reuse, proof capability leakage, and lock release before settlement. Independent review outcome remains `Waived`.
 
 ### Slice 2 — Same-worktree autonomous repair
 
-- [ ] **Test/Proof First:** Add RED public tests for check failure -> rework -> pass, proof `needs-rework` -> rework -> pass, exact five-cycle exhaustion, malformed implementation/proof report repair, clean transport retry, changed-baseline refusal, cancellation, and package-version next-cycle identity.
-- [ ] Pass typed cycle/rework/repair context to contained implementation/proof agents without changing `runIssue` or `proveChange` Interfaces.
-- [ ] Persist counters and findings before launching the next attempt; clear stale checks/proof identity when returning to implementation.
-- [ ] Keep report repair separately bounded at one and transport retry separately bounded at one; neither increments implementation cycle until a new implementation attempt is actually admitted.
-- [ ] **Exit Gate:** focused rework/repair/transport and process-quiescence suites pass with exact durable counters.
+- [x] **Test/Proof First:** Add RED public tests for check failure -> rework -> pass, proof `needs-rework` -> rework -> pass, exact five-cycle exhaustion, malformed implementation/proof report repair, clean transport retry, changed-baseline refusal, cancellation, and package-version next-cycle identity.
+- [x] Pass typed cycle/rework/repair context to contained implementation/proof agents without changing `runIssue` or `proveChange` Interfaces.
+- [x] Persist counters and findings before launching the next attempt; clear stale checks/proof identity when returning to implementation.
+- [x] Keep report repair separately bounded at one and transport retry separately bounded at one; neither increments implementation cycle until a new implementation attempt is actually admitted.
+- [x] **Exit Gate:** focused rework/repair/transport and process-quiescence suites pass with exact durable counters.
 
 ### Slice 3 — Exact publication reconciliation
 
-- [ ] **Test/Proof First:** Add RED crash points immediately before invocation, after matching effect but before confirmation CAS, and after confirmation for claim labels/comment, deterministic commit, lease-protected push, draft PR, handoff comment, and terminal labels.
-- [ ] Extend concrete Adapters only with required observations: local commit parent/tree/message, remote branch SHA, open draft PR head/base/marker, issue comments by marker/body digest, and complete label state.
-- [ ] On resume, reuse only exact matching effects; invoke only when absent and safe; fail closed on unexpected commit/remote SHA/PR marker/comment digest/label divergence; never force push.
-- [ ] Persist one intent before each effect and clear it only after exact observation confirms completion.
-- [ ] **Exit Gate:** complete crash/idempotency matrix proves one commit/push/PR/handoff/terminal-label effect and no later effect after divergence.
+- [x] **Test/Proof First:** Add RED crash points immediately before invocation, after matching effect but before confirmation CAS, and after confirmation for claim labels/comment, deterministic commit, lease-protected push, draft PR, handoff comment, and terminal labels.
+- [x] Extend concrete Adapters only with required observations: local commit parent/tree/message, remote branch SHA, open draft PR head/base/marker, issue comments by marker/body digest, and complete label state.
+- [x] On resume, reuse only exact matching effects; invoke only when absent and safe; fail closed on unexpected commit/remote SHA/PR marker/comment digest/label divergence; never force push.
+- [x] Persist one intent before each effect and clear it only after exact observation confirms completion.
+- [x] **Exit Gate:** complete crash/idempotency matrix proves one commit/push/PR/handoff/terminal-label effect and no later effect after divergence.
 
 ### Self-Check Checkpoint 2 — publication safety
 
-- [ ] Root self-check hunts ambiguous-delivery duplication, missing authorization refresh, intent clearing before observation, force-push paths, stale remote reads, comment/PR marker collisions, and CAS failure after effect. Independent review outcome remains `Waived`.
+- [x] Root self-check hunts ambiguous-delivery duplication, missing authorization refresh, intent clearing before observation, force-push paths, stale remote reads, comment/PR marker collisions, and CAS failure after effect. Independent review outcome remains `Waived`.
 
 ### Slice 4 — Candidate CLI outcome contract and reconciliation
 
-- [ ] **Test/Proof First:** Add RED exhaustive table over every `RunIssueResult` variant and blocked kind; assert versioned JSON bytes and exit `0 | 20 | 21 | 70 | 130`.
-- [ ] Implement one pure candidate result-envelope renderer and total exit mapper in `cli-contract.ts`; daemon/self-improvement consumption remains future work.
-- [ ] Rerun immutable Interface-shape, containment, packed-consumer, and no-old-runtime-import checks.
-- [ ] **Exit Gate:** all focused V2 tests, full tests, typecheck, pack dry-run, architecture scan, and diff check pass.
+- [x] **Test/Proof First:** Add RED exhaustive table over every `RunIssueResult` variant and blocked kind; assert versioned JSON bytes and exit `0 | 20 | 21 | 70 | 130`.
+- [x] Implement one pure candidate result-envelope renderer and total exit mapper in `cli-contract.ts`; daemon/self-improvement consumption remains future work.
+- [x] Rerun immutable Interface-shape, containment, packed-consumer, and no-old-runtime-import checks.
+- [x] **Exit Gate:** all focused V2 tests, full tests, typecheck, pack dry-run, architecture scan, and diff check pass.
 
 ## 6. Halt Conditions
 
-- [ ] Stop if a retry cannot prove prior process/output/worktree quiescence or exact unchanged baseline.
-- [ ] Stop if persisted intent cannot be reconciled from exact local/remote state without guessing delivery.
-- [ ] Stop if a matching run has foreign repository/issue/worktree/base/criteria identity or duplicate active records exist.
-- [ ] Stop if exact recovery requires force push, destructive reset, real GitHub mutation, or changing stable Module Interfaces.
-- [ ] Stop if package-version change would execute old recorded hashes with new package bytes.
+- [x] Stop if a retry cannot prove prior process/output/worktree quiescence or exact unchanged baseline.
+- [x] Stop if persisted intent cannot be reconciled from exact local/remote state without guessing delivery.
+- [x] Stop if a matching run has foreign repository/issue/worktree/base/criteria identity or duplicate active records exist.
+- [x] Stop if exact recovery requires force push, destructive reset, real GitHub mutation, or changing stable Module Interfaces.
+- [x] Stop if package-version change would execute old recorded hashes with new package bytes.
 
 ## 7. Validation And Done Criteria
 
-- [ ] Focused RED/GREEN tests cover every ledger row.
-- [ ] `npm run typecheck` passes.
-- [ ] Full `npm test` passes.
-- [ ] `npm pack --dry-run --json --ignore-scripts` contains the candidate recovery modules and unchanged V1 public bin.
-- [ ] `git diff --check` passes.
-- [ ] Architecture scan finds no old coordinator/graph/app-server/migration import under `src/v2`.
-- [ ] Independent cleanup/code review is explicitly `Waived`; root self-check fixes are integrated and affected/full validation rerun.
-- [ ] Every checklist/ledger row is green, blocked with evidence, or explicitly not applicable.
+- [x] Focused RED/GREEN tests cover every ledger row.
+- [x] `npm run typecheck` passes.
+- [x] Full `npm test` passes.
+- [x] `npm pack --dry-run --json --ignore-scripts` contains the candidate recovery modules and unchanged V1 public bin.
+- [x] `git diff --check` passes.
+- [x] Architecture scan finds no old coordinator/graph/app-server/migration import under `src/v2`.
+- [x] Independent cleanup/code review is explicitly `Waived`; root self-check fixes are integrated and affected/full validation rerun.
+- [x] Every checklist/ledger row is green, blocked with evidence, or explicitly not applicable.
 
 ## 8. Implementation Review State
 
 - **Profile:** high.
 - **Plan:** Independent artifact, checkpoint, cleanup, and final code review waived by the user. Root executes two named self-check matrices plus final validation.
-- **Pass History:** None; outcome `Waived`.
+- **Pass History:** Independent passes: none; outcome `Waived`. Root self-check checkpoint 1 covered state/counter/capability ownership; checkpoint 2 covered exact effect observation and ambiguous-delivery restart; final self-check covered all 64 focused V2 tests and 774 repository tests.
 - **Verified Defects:** None.
 - **Accepted Risks:** `S2-REVIEW-WAIVER-001` — independent review omitted by direct user instruction; executable self-checks are evidence but not approval.
 - **Open Defects:** None.
+
+### 8.1 Execution Evidence
+
+- **Implementation Outcome:** GREEN. Check/proof failures re-enter the same worktree, cycle 5 exhausts, implementation and proof report repair are separately bounded, clean transport gets one retry, and package/skill changes advance the durable cycle.
+- **Recovery Outcome:** GREEN. Terminal replay, interrupted claim, interrupted implementation, and publication restart all preserve one run. Matching commit/push/PR/comment/labels are observed and reused; divergence safety-blocks without force push.
+- **Self-Check Fixes:** Transport budget no longer resets between cycles; GitHub reads inside claim/publication are normalized to resumable transport evidence; proof attempts enforce unique IDs and one repair/retry purpose; final effect confirmation remains behind exact observation.
+- **Validation:** Focused V2 `64/64`; full repository `774/774`; `npm run typecheck`; `git diff --check`; architecture import scan; packed-consumer; `npm pack --dry-run --json --ignore-scripts`; real `npm run test:v2-containment`.
+- **Skipped Live Gates:** Real GitHub/live smoke, daemon, mobile runtime, package publication, and public cutover are outside Spec 2.
+- **Checkpoint Commits:** `7e44502` — combined Slices 1-4 implementation checkpoint because the same state-machine files own all four vertical behaviors. Documentation reconciliation follows separately.
 
 ## 9. Final Action
 
