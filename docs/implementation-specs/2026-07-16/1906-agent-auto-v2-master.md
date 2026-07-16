@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "20952a9793f9229fea2c68ea2b5e6f3df2d5be53e7691f4a9a454b5e5bf1c2c2"
+approved_content_sha256: "8610c29fdb647029c891f6ec4755e4a907c4415f4c0ffde4d55919c8d2144011"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -41,7 +41,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | Delivery spec | Plan slices | Authorized result | Creation / start gate |
 | --- | --- | --- | --- |
 | **Spec 1 — Core tracer** | 1-2 | Isolated V2 source root, package-owned skills/schemas, immutable attempt snapshots, ordinary `codex exec` containment, and fake-backed `runIssue -> AcceptanceProof -> draft PR`. | Reviewed with this master; may start after the dedicated worktree is created from `v0.1.51`. |
-| **Spec 2 — Autonomous recovery** | 3 | Same-worktree rework, bounded transport/report repair, capability-separated durable state, crash resume, exact publication intents, and duplicate-effect prevention. | Spec 1 is fully complete: checklist/ledger, containment canary, all validation, early/final code reviews, and final handoff are reconciled. Author from its settled Interfaces. |
+| **Spec 2 — Autonomous recovery** | 3 | Same-worktree rework, bounded transport/report repair, capability-separated durable state, crash resume, exact publication intents, and duplicate-effect prevention. [Spec](./2253-agent-auto-v2-autonomous-recovery.md) | Spec 1 is fully complete: checklist/ledger, containment canary, all validation, waived reviews, and final handoff are reconciled. Author from its settled Interfaces. |
 | **Spec 3 — Browser proof** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
 | **Spec 4 — Android proof** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
 | **Spec 5 — iOS proof** | 6 | Runner-leased iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and final review; iOS toolchain/safe lease fixture are confirmed. |
@@ -49,7 +49,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **Spec 7 — Operational consumers** | 8-9 | Relevant live-smoke scenario migration and local self-improvement consumption of the single CLI JSON/runIssue path. | Spec 6 is fully complete, including Setup crash matrix and final review; live smoke still requires separate explicit authorization. |
 | **Spec 8 — Cutover and deletion** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is fully complete, including authorized relevant live smoke and self-improvement validation; every earlier spec remains reconciled. |
 
-Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator/docs/implementation-specs/2026-07-16/1907-agent-auto-v2-core-tracer.md`. Specs 2-8 must be produced with `implementation-spec-maker`, reviewed against the then-current implementation, and linked into this table before their implementation starts.
+Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `implementation-spec-maker`, checked against the then-current implementation, and linked into this table before their implementation starts. Independent reviews remain waived until the user changes that decision.
 
 ## 3. Repository And Branch Contract
 
@@ -95,14 +95,14 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 
 ### Phase 1 — Core tracer
 
-- [ ] Execute Spec 1 at `docs/implementation-specs/2026-07-16/1907-agent-auto-v2-core-tracer.md` through its final review and validation gates.
+- [x] Execute Spec 1 at `docs/implementation-specs/2026-07-16/1907-agent-auto-v2-core-tracer.md` through its waived-review self-check and validation gates.
 - **Resumed:** The user accepted shared Codex-auth and user-readable host-file exposure and waived independent review. The revised V2 canary recorded those reads while denying every tested external credential/production capability, so Slice 1 may begin.
-- [ ] Record the settled V2 source paths, Interface hashes/snapshots, containment result, and remaining residual risks in this master before authoring Spec 2.
-- [ ] Do not author or start Spec 2 until Spec 1's complete checklist, Contract Test Ledger, early/final reviews, validation, and handoff are reconciled.
+- [x] Record the settled V2 source paths, Interface hashes/snapshots, containment result, and remaining residual risks in this master before authoring Spec 2.
+- [x] Do not author or start Spec 2 until Spec 1's complete checklist, Contract Test Ledger, waived reviews, validation, and handoff are reconciled.
 
 ### Phase 2 — Autonomous recovery
 
-- [ ] Author and review Spec 2 from plan slice 3 and the settled Spec 1 implementation.
+- [x] Author Spec 2 from plan slice 3 and the settled Spec 1 implementation; independent artifact review is waived and executable self-check gates are recorded.
 - [ ] Do not start platform work until recovery, publication idempotency, and crash-matrix checkpoints are green.
 
 ### Phases 3-5 — Browser, Android, and iOS proof
@@ -154,11 +154,11 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 1 — Core tracer — complete. Spec 2 is not yet authored.
-- **Execution Outcome:** Spec 1 completed on 2026-07-16 under explicit user acceptance of shared Codex auth; containment preflight, Slices 1-6, packed reconciliation, both root self-check checkpoints, and final validation are GREEN.
+- **Current Child:** Spec 2 — Autonomous recovery — authored and authorized for execution.
+- **Execution Outcome:** Spec 1 completed on 2026-07-16. Spec 2 is the active child under the same shared-auth acceptance and independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 1's terminal gate is satisfied. Specs 2-8 remain unauthored and require their own approved execution specs before implementation.
+- **Sequencing Decision:** Spec 1's terminal gate is satisfied and Spec 2 is linked above. Specs 3-8 remain unauthored until their predecessor gates pass.
 
 ## 10. Final Action
 
