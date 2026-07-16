@@ -12,11 +12,11 @@ review_profile: "high"
 review_reasons:
   - "This first slice defines credential containment and launches ordinary codex exec; a wrong environment can expose publication credentials across a trust boundary."
   - "The tracer creates durable run evidence and performs commit, push, draft-PR, comment, and label effects; wrong ordering can publish unproved work or duplicate effects."
-review_outcome: "Approved"
-review_verdict: "Approved"
-review_coverage: "Architecture/Execution and Failure/Contracts covered by two independent Full reviews plus same-session affected-lens Closure"
-approved_content_sha256: "9a27bc388792ac745bcde9d9852e09db99d8006b3c514d752a546a472f34a7f0"
-source_plan_sha256: "da1283bdbe500692d5eb416e6459d2927c265b929c06f89ff664cc9028095919"
+review_outcome: "Waived"
+review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
+review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
+approved_content_sha256: "de1239bdb7f74c2d9d66c579b0d0f80a15fe0457550281d6082ce6b027f22c29"
+source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
 ## 1. Execution Context
@@ -26,12 +26,12 @@ source_plan_sha256: "da1283bdbe500692d5eb416e6459d2927c265b929c06f89ff664cc90280
 - **Approved Scope:** Plan slices 1-2 only: isolated `src/v2/` candidate, exact package-owned implementation/proof skills, generated report schemas, immutable per-attempt snapshot, ordinary `codex exec` process containment, clean V2 config/state rejection, candidate CLI/config/label surface, and one fake-backed review-ready tracer.
 - **Out of Scope:** Multi-cycle rework; crash resume after external effects; complete publication reconciliation; browser/Android/iOS proof; Setup implementation; daemon polling; live-smoke migration; self-improvement adaptation; public bin/export switch; old runtime deletion; package publication.
 - **Simplest Viable Path:** Keep the shipped V1 entrypoint untouched. Add a parallel V2 candidate under `src/v2/`, use the existing Git/GitHub interfaces and durable atomic-file primitive as concrete Adapters, and test the deep `RunIssue` and `AcceptanceProof` Modules through one end-to-end fake-backed tracer. Port no old coordinator implementation.
-- **Primary Risk:** The candidate can appear green while inheriting user credentials/local skills, accepting stale or structurally forged proof input, or publishing before checks/proof and durable intent.
+- **Primary Risk:** The candidate can appear green while shared Codex auth leaks into output/artifacts, non-Codex publication credentials reach tools, stale or structurally forged proof input is accepted, or publication starts before checks/proof and durable intent.
 
 ## 2. Preconditions And Evidence
 
 - **Required Services / Env / Fixtures:** Node `v24.2.0`, npm `11.3.0`, Git, local Codex CLI `0.144.4`, existing user-owned Codex authentication, and macOS sandbox support for the containment feasibility canary. Unit/integration tests use temporary local/bare Git repositories plus deferred/rejecting GitHub/process/store fakes; no real GitHub repository is used.
-- **Blocking Unknowns:** Whether ordinary `codex exec` can keep the actual parent Codex credential readable by the parent while making that same credential unreadable and unusable from root and native-child tool shells. Slice 0 resolves this before runtime implementation. Failure produces a blocked spec execution and invalidates the ordinary-exec direction; it is not repaired with prose, hidden credentials, or a weaker canary.
+- **Accepted Risk / Remaining Unknown:** The user explicitly accepts that ordinary `codex exec` root and native-child tool shells may read/use the same Codex auth as the parent and may read any local file available to the same macOS user. Slice 0 now proves the narrower enforceable boundary: those reads work without credential/path output, while GitHub/Git/npm/SSH/cloud identity and the production sentinel remain unavailable. Any non-Codex external-authority leak still blocks implementation.
 - **Implementation checkout:** Create `/Users/serhiimytakii/Projects/codex-orchestrator-v2-agent-auto` on branch `codex/v2-agent-auto` from tag `v0.1.51` (`2ae87065fe70b61bd5ec09c51b2e380045f3d144`) exactly as specified by the master. Materialize and commit the plan/master/Spec 1 there before runtime edits.
 - **Confirmed reuse targets:**
   - `src/fs/durable-atomic-file.ts:writeDurableAtomicFile` — reuse the concrete temp-write/fsync/rename/parent-fsync primitive.
@@ -300,32 +300,32 @@ interface ProofStateV1 {
 
 ### 3.6 Exact Containment Certificate
 
-`src/v2/containment.ts` owns the one schema/validator used by the canary and runtime. The canary writes `join(orchestratorHome, 'v2', 'certifications', 'containment-codex-0.144.4.json')` only after every mandatory root and native-child probe is attempted and denied:
+`src/v2/containment.ts` owns the one schema/validator used by the canary and runtime. The canary writes `join(orchestratorHome, 'v2', 'certifications', 'containment-codex-0.144.4.json')` only after every mandatory root and native-child probe confirms the accepted shared Codex-auth/host-read contract and denies every tested non-Codex external-authority capability:
 
 ```ts
-interface ContainmentProbeResultV1 {
-  parentAuthReadable: false;
-  parentAuthUsable: false;
+interface ContainmentProbeResultV2 {
+  parentAuthReadable: true;
+  parentAuthUsable: true;
   externalCredentialsUsable: false;
-  deniedSecretReadable: false;
+  deniedSecretReadable: true;
   productionSentinelExecuted: false;
 }
 
-interface ContainmentCertificateV1 {
+interface ContainmentCertificateV2 {
   schema: 'codex-orchestrator.containment';
-  version: 1;
+  version: 2;
   codexVersion: '0.144.4';
   platform: 'darwin';
   packageVersion: string;
   argvPolicySha256: string;
-  root: ContainmentProbeResultV1;
-  nativeChild: ContainmentProbeResultV1;
+  root: ContainmentProbeResultV2;
+  nativeChild: ContainmentProbeResultV2;
   completedAt: string;
   resultSha256: string;
 }
 ```
 
-The native-child probe is mandatory: unavailable, unstarted, unattempted, malformed, or wider than root fails the canary. `resultSha256` binds the strict canonical result before that field is added. On failure, the canary deletes any stale certificate matching its package/Codex/argv-policy tuple and writes no green replacement. Before issue fetch/claim, candidate runtime requires strict parse, current package version, exact Codex version/platform, `argvPolicySha256` of the production argv/environment builder, all literal `false` results, and recomputed `resultSha256`; otherwise it returns a pre-claim safety block. The certificate contains no auth/secret path or credential value.
+The native-child probe is mandatory: unavailable, unstarted, unattempted, malformed, or broader in external authority than root fails the canary. `resultSha256` binds the strict canonical result before that field is added. On failure, the canary deletes any stale certificate matching its package/Codex/argv-policy tuple and writes no green replacement. Before issue fetch/claim, candidate runtime requires strict parse, current package version, exact Codex version/platform, certificate version `2`, `argvPolicySha256` of the production argv/environment builder, literal `true` for shared Codex-auth and denied-host-file readability, literal `false` for external credential and production fields, and recomputed `resultSha256`; otherwise it returns a pre-claim safety block. The certificate contains no auth/secret path or credential value. The accepted risks are explicit: skill prose forbids copying or printing shared Codex auth/local secrets, but the OS does not enforce read isolation.
 
 ### 3.7 Exact Supervised Process Seam
 
@@ -401,12 +401,12 @@ No additional runtime file is authorized without first recording why one of thes
 ## 5. Risk Controls
 
 - **Source of Truth:** `RunIssue` owns lifecycle/publication; `AcceptanceProof` owns proof; each report contract file owns its schema; the package directory owns internal skill bytes; `run-store.ts` owns durability mechanics only.
-- **Safety Constraints:** After Slice 0 proves feasibility, `CodexProcess` invokes `codex exec --strict-config --ignore-user-config --ignore-rules --sandbox workspace-write --output-schema <snapshot-schema> --output-last-message <attempt-report> -c approval_policy=\"never\" -c skills.include_instructions=false -c web_search=\"disabled\" -c features.apps=false -c sandbox_workspace_write.network_access=false -c shell_environment_policy.inherit=none`, followed by explicit `shell_environment_policy.set.<KEY>=<VALUE>` overrides only for isolated tool `HOME`, fixed safe `PATH`, attempt `TMPDIR`, and locale. It does not disable native multi-agent features; root and any native child must remain under identical sandbox/environment/credential constraints. It supplies the exact snapshot skill path in the static prompt, no MCP/plugin/app configuration, and no authenticated external-write tool.
-- **Credential Constraints:** The Codex parent receives only user-owned Codex authentication. Tool subprocesses receive an isolated package-owned `HOME`, fixed safe `PATH`, locale/temp variables, and the minimum attempt paths. They do not inherit `GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR`, Git credential helpers/askpass, `SSH_AUTH_SOCK`, npm auth/config, cloud credentials, target `.env*`, or arbitrary parent env. No canary prints secret values.
+- **Safety Constraints:** After Slice 0 proves feasibility, `CodexProcess` invokes `codex exec --strict-config --ignore-user-config --ignore-rules --sandbox workspace-write --output-schema <snapshot-schema> --output-last-message <attempt-report> -c approval_policy=\"never\" -c skills.include_instructions=false -c web_search=\"disabled\" -c features.apps=false -c sandbox_workspace_write.network_access=false -c shell_environment_policy.inherit=none`, followed by explicit `shell_environment_policy.set.<KEY>=<VALUE>` overrides for isolated tool `HOME`, fixed safe `PATH`, attempt `TMPDIR`, locale, and empty tombstones for the exact GitHub/Git/SSH/npm/cloud credential keys exercised by the canary. It does not disable native multi-agent features; root and any native child must remain under identical sandbox/environment/credential constraints. It supplies the exact snapshot skill path in the static prompt, no MCP/plugin/app configuration, and no authenticated external-write tool.
+- **Credential Constraints:** The Codex parent plus root/native-child tool shells may read/use the same user-owned Codex authentication and any user-readable host file under the user's explicit risk acceptance. Tool subprocesses otherwise receive an isolated package-owned `HOME`, fixed safe `PATH`, locale/temp variables, minimum attempt paths, and explicit empty credential tombstones. They do not inherit usable `GH_TOKEN`, `GITHUB_TOKEN`, `GH_CONFIG_DIR`, Git credential helpers/askpass, `SSH_AUTH_SOCK`, npm auth/config, or cloud credentials. No canary, report, log, artifact, commit, or PR content may contain credential bytes or auth/secret paths.
 - **Network Constraint:** Tool network is disabled for this spec. Target network opt-in is deferred until a later spec can prove the same credential scrub; the tracer requires no network inside Codex tools.
 - **Publication Constraints:** The implementation/proof agents cannot run Git publication. `RunIssue` rereads OPEN+auto+run-marker authorization before agent start and before commit, push, draft PR, handoff comment, and terminal labels. It performs configured checks and obtains `passed` proof before it CAS-persists each lifecycle/intent and awaits the corresponding effect in order. Spec 1 proves ordering/settlement and deterministic failure without retry; complete crash reconciliation is Spec 2.
 - **Package Constraints:** `internal-skills/` is read from the installed package and privately snapshotted per attempt. No target skill copy, manifest graph, import script, activation command, or postinstall mutation is introduced.
-- **Early Review Gates:** Run one containment/process `$code-review` after Slices 1-3 and before proof work. Run a second lifecycle/publication `$code-review` after Slice 5 and before packed reconciliation. Continue only after critical/high findings in the assigned focus are fixed and focused tests rerun.
+- **Early Review Gates:** Independent containment/process, lifecycle/publication, cleanup, and final code reviews are waived by the user's explicit 2026-07-16 instruction to self-check and continue. The root executor still runs the named focused tests, architecture scan, full validation, and checklist reconciliation at the same boundaries; this waiver is not an independent approval.
 - **Final Handoff Requirements:** Final response must include the exact tracer contract, containment canary result, package snapshot proof, report/interface invariants, early review findings/fixes, commands run, skipped live gates, residual risks deferred to Spec 2, and files grouped by Module/Adapter/test/package asset.
 
 ## 6. Contract Test Ledger
@@ -419,7 +419,7 @@ No additional runtime file is authorized without first recording why one of thes
 | Generated output schema and runtime validation come from the same TypeScript owner for each report. | Skill prose, schema file, and parser accept different report shapes. | RED parity fixtures in `test/v2-report-contracts.test.ts` | planned |
 | Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability and binding-mismatch cases in `test/v2-report-contracts.test.ts` | planned |
 | `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | planned |
-| Root and native-child tool shells cannot read/use the actual Codex parent auth source, use runner/GitHub/npm/SSH/cloud credentials, read denied fixtures, or launch the production sentinel. | Ordinary Codex execution or native delegation crosses the authentication/publication/secret trust boundary. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; failure blocks the design | planned |
+| Root and native-child tool shells can read/use shared Codex auth and user-readable host files without emitting credential/path material, but cannot use runner/GitHub/npm/SSH/cloud credentials or launch the production sentinel. | Accepted local-read exposure silently expands into publication authority or secret exfiltration. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; any external capability leak blocks the design | red — prior stricter expectations failed as expected; revised accepted-risk V2 certificate proof pending |
 | Every Codex terminal path reaches process-group/descendant absence plus stream/report quiescence before lifecycle/proof/publication/return/lock release. | An orphan mutates a supposedly settled worktree or races validation. | RED detached-descendant tests in `test/v2-codex-process.test.ts` | planned |
 | Stale/concurrent run/proof generations cannot overwrite committed state; pre/post-rename/fsync ambiguity is reread and classified deterministically. | Durable state is lost or two owners both believe they committed. | RED CAS/crash matrix in `test/v2-run-store.test.ts` | planned |
 | `claimed -> implementing -> checking -> proving -> publishing -> review-ready` and each intent are durably CAS-persisted before the next owner/effect. | A terminal snapshot hides skipped stages or publication without durable intent. | RED gated-transition event trace in `test/v2-run-issue.test.ts` | planned |
@@ -433,19 +433,20 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Progress Discipline
 
-- [ ] Update this checklist and ledger in the implementation worktree as work completes.
-- [ ] Keep each slice RED -> GREEN -> local refactor; do not batch all tests before implementation.
-- [ ] Stop if repo reality contradicts an exact target, command, capability, or source-of-truth rule.
-- [ ] Do not widen a stable Interface or add an Adapter registry to make a test easier.
-- [ ] Do not run a real GitHub issue, push, or PR; all publication in this spec uses a local bare remote and in-memory GitHub Adapters.
+- [x] Update this checklist and ledger in the implementation worktree as work completes.
+- [x] Keep each slice RED -> GREEN -> local refactor; do not batch all tests before implementation.
+- [x] Stop if repo reality contradicts an exact target, command, capability, or source-of-truth rule.
+- [x] Do not widen a stable Interface or add an Adapter registry to make a test easier.
+- [x] Do not run a real GitHub issue, push, or PR; all publication in this spec uses a local bare remote and in-memory GitHub Adapters.
 
 ### Preflight Gate — Ordinary-exec containment feasibility
 
-- [ ] **Objective:** Prove the approved ordinary-`codex exec` direction can preserve parent Codex authentication while denying that authority and every configured sensitive capability to root/native-child tool shells before any V2 runtime code is implemented.
-- [ ] Create only `src/v2/containment.ts`, `test/v2-containment.canary.ts`, its `test:v2-containment` package script, and the temporary fixture files it owns. The harness invokes real Codex `0.144.4` with the exact strict-config/sandbox/network/shell-environment settings from Section 5 and a strict boolean-only output schema. No other `src/v2/` runtime file may be created before this gate passes.
-- [ ] The root agent and, when Codex starts one, a native child must attempt without printing values: read the exact parent `CODEX_HOME` auth source; run `CODEX_HOME=<parent> codex login status`; inspect/use GH/Git/npm/SSH/cloud identity; read one denied secret fixture; and execute one harmless denied sentinel whose only possible effect is creating a marker in the canary temp root.
-- [ ] Passing requires parent Codex execution succeeds, every mandatory root/native-child tool probe reports inaccessible/unusable, no sentinel marker exists, output contains no credential/path content, and all process descendants are absent. The harness records only CLI/package version, booleans, timestamps, and output hash, then atomically writes the Section 3.6 durable certificate. The production runtime validates that certificate before issue fetch/claim.
-- [ ] **Hard stop:** If any probe succeeds, a native child receives wider authority, strict config rejects the planned controls, or the result cannot distinguish inaccessible from unattempted, mark Spec 1 execution blocked and return to the approved plan. Do not implement `src/v2/`, claim an issue, copy auth, disable native subagents, weaken the canary, or invent a package login flow.
+- [x] **Objective:** Prove the revised ordinary-`codex exec` direction records accepted shared Codex-auth/host-file readability while denying every external credential and production capability before any later V2 runtime code is implemented.
+- [x] Create only `src/v2/containment.ts`, `test/v2-containment.canary.ts`, its `test:v2-containment` package script, and the temporary fixture files it owns. The harness invokes real Codex `0.144.4` with the exact strict-config/sandbox/network/shell-environment settings from Section 5 and a strict boolean-only output schema. No other `src/v2/` runtime file may be created before this gate passes.
+- [x] The root agent and one native child must each attempt without printing values: read the exact parent `CODEX_HOME` auth source; run `CODEX_HOME=<parent> codex login status`; inspect/use GH/Git/npm/SSH/cloud identity; read one separate host-file fixture outside `CODEX_HOME`; and execute one harmless denied sentinel whose only possible effect is creating a marker in the canary temp root.
+- [x] Passing requires parent/root/native-child Codex auth and the host-read fixture are readable, every external credential/production probe reports inaccessible/unusable, no sentinel marker exists, output contains no credential/path content, and all process descendants are absent. The harness records only CLI/package version, booleans, timestamps, and output hash, then atomically writes the Section 3.6 V2 certificate. The production runtime validates that certificate before issue fetch/claim.
+- **Accepted Risk Resolution:** The earlier all-false certificate failed because root/native-child shells could read/use parent Codex auth and could read the separate host-file fixture. The user explicitly accepted both local-read risks, required self-check instead of independent review, and authorized a V2 certificate that records them as `true`. The old failure remains historical RED evidence, not an active blocker.
+- [x] **Hard stop:** If shared Codex auth/host reads are unavailable to a mandatory probe, any external credential/production probe succeeds, a native child has broader external authority, strict config rejects the planned controls, credential/path material appears in output, or the result cannot distinguish inaccessible from unattempted, mark Spec 1 execution blocked. None of these stop conditions occurred; no issue or external publication surface was touched.
 
 ### Slice 1 — Isolated package contract
 
@@ -474,8 +475,8 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Review Checkpoint 1 — Containment
 
-- [ ] Run `$code-review` from root on Slices 1-3 before implementing the issue tracer.
-- [ ] Continue only when critical/high findings are fixed, focused tests and the real canary rerun green, and no raw credential value was written to logs/artifacts.
+- [ ] Run the user-authorized root self-check on Slices 1-3 before implementing the issue tracer; independent `$code-review` is waived.
+- [ ] Continue only when self-check findings are fixed, focused tests and the real canary rerun green, and no raw credential value or auth/secret path was written to logs/artifacts.
 
 ### Review Focus
 
@@ -502,8 +503,8 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Review Checkpoint 2 — Lifecycle And Publication
 
-- [ ] Run `$code-review` on Slices 4-5 before packed reconciliation.
-- [ ] Continue only after critical/high findings in durable transition/intent ordering, authorization freshness, awaited effects, capability separation, proof binding, and false review-ready outcomes are fixed and focused store/proof/tracer tests rerun green.
+- [ ] Run the user-authorized root self-check on Slices 4-5 before packed reconciliation; independent `$code-review` is waived.
+- [ ] Continue only after self-check findings in durable transition/intent ordering, authorization freshness, awaited effects, capability separation, proof binding, and false review-ready outcomes are fixed and focused store/proof/tracer tests rerun green.
 
 ### Review Focus 2
 
@@ -520,7 +521,7 @@ No additional runtime file is authorized without first recording why one of thes
 ## 8. Halt Conditions
 
 - [ ] Stop if the dedicated branch/worktree or base tag differs from the precondition; do not reuse or reset an existing conflicting branch/worktree.
-- [ ] Stop if ordinary `codex exec` cannot preserve Codex auth while withholding any tested runner/GitHub/npm/SSH/cloud authority from tool subprocesses.
+- [ ] Stop if ordinary `codex exec` cannot provide the accepted shared Codex-auth/host-read behavior while withholding any tested runner/GitHub/npm/SSH/cloud authority or production command from tool subprocesses.
 - [ ] Safe-halt if a spawned process group cannot be proven absent after bounded termination attempts: retain durable PID/PGID/baseline and repository owner lock, publish nothing, and keep `runIssue` unresolved until absence is externally or subsequently confirmed. Do not misreport this as a completed terminal outcome.
 - [ ] Stop if a V2 Module needs to import old coordinator/graph/app-server/migration code rather than a proven leaf Adapter/utility.
 - [ ] Stop if proof can pass after the checked change/binding/worktree changed, or if `ProofReceipt` must expose a raw local path.
@@ -534,9 +535,9 @@ No additional runtime file is authorized without first recording why one of thes
 - [ ] **Architecture Check:** `rg -n "src/(runner|codex)/(scoped-auto-command|agent-attempt|acceptance-proof-loop|skill-runtime|app-server)|runtime-skills" src/v2 test/v2-*.test.ts test/v2-containment.canary.ts` returns no V2 production import; evidence-only comments/test strings must be reviewed manually.
 - [ ] **Package Proof:** `npm pack --dry-run --json --ignore-scripts` and packed-consumer install/update tests.
 - [ ] **Containment Proof:** `npm run test:v2-containment` with Codex CLI `0.144.4`.
-- [ ] **Live/Manual Validation:** No real GitHub/mobile/live-smoke run in this spec.
+- [x] **Live/Manual Validation:** No real GitHub/mobile/live-smoke run in this spec.
 - [ ] **Behavior Proof:** One fake-backed public `runIssue` returns `review-ready` with exactly one local runner commit/push, one in-memory draft PR/handoff, passed checks/proof, and durable evidence.
-- [ ] **Cleanup/Final Review:** After all tests, run `$cleanup-review`, integrate safe simplifications, rerun affected/full validation, then run one final `$code-review` on the settled Spec 1 change set.
+- [ ] **Cleanup/Final Review:** Independent cleanup and final code review are user-waived. Perform one root self-check over the settled diff, integrate safe simplifications, and rerun affected/full validation; report the review waiver explicitly.
 - [ ] **Final Reconciliation:** Every checklist/ledger row is green, blocked with evidence, or explicitly not applicable; no unchecked work is described as complete.
 - [ ] **Final Handoff Requirements:** Report Contract implemented, High-risk checkpoints, Main invariants proved, Code-review findings, Fixes after review, Validation, Skipped checks, Residual risks, and Files by role. State explicitly that recovery, real platform proof, Setup, live smoke, and public cutover remain future specs.
 
@@ -549,7 +550,7 @@ No additional runtime file is authorized without first recording why one of thes
 | ID | Repair | Status |
 | --- | --- | --- |
 | `S1-DELEGATION-001` | Removed native-subagent suppression; root/native children share identical containment and canary obligations. | verified |
-| `S1-CONTAIN-002` | Added a pre-runtime, boolean-only feasibility gate plus exact durable certificate for actual parent auth, denied capabilities, secret path, and production sentinel; failure blocks ordinary exec. | verified |
+| `S1-CONTAIN-002` | Added a pre-runtime, boolean-only feasibility gate plus exact durable certificate for actual parent auth, accepted host-file readability, denied external capabilities, output-path hygiene, and production sentinel; failure outside the accepted risks blocks ordinary exec. | verified |
 | `S1-DTO-003` | Added exact issue/criteria/implementation/proof/receipt/checked-change contracts, limits, canonical encoding, conditional validation, and outcome mapping. | verified |
 | `S1-CONFIG-004` | Added exact strict config, labels, candidate commands, eligibility, and handoff predicates. | verified |
 | `S1-PROOF-STORE-005` | Added exact orchestrator home/repository key, absent-state CAS, separate proof-only schema/writer/path, and composition rule; run fields are unrepresentable. | verified |
@@ -562,6 +563,16 @@ No additional runtime file is authorized without first recording why one of thes
 | `S1-STORE-012` | Added side-effect-free identity read, host-global owner lock, config reread, exact first-write CAS/ambiguous-commit rules, and crash/concurrency tests. | verified |
 | `S1-LIFECYCLE-013` | Added durable lifecycle/intent CAS, process/check/terminal evidence, and non-terminal safe-halt before every next owner/effect. | verified |
 | `S1-AUTH-014` | Added exact trusted UUID-v4 claim marker and mutable authorization rereads before agent and every publication effect. | verified |
+
+### 10.1 Implementation Execution State
+
+- **Execution Outcome:** Containment preflight is GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 1 is active.
+- **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
+- **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
+- **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
+- **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
+- **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap. No RED containment implementation or failed validation state was committed.
 
 ## 11. Final Action
 

@@ -12,11 +12,11 @@ review_profile: "high"
 review_reasons:
   - "The program changes durable run/proof ownership, retry and idempotency, credential containment, and GitHub publication; an ordering error can duplicate external effects or publish unproved work."
   - "Eight sequential delivery specs span package assets, Codex process execution, browser/mobile proof, setup cutover, live GitHub smoke, and deletion of the old runtime."
-review_outcome: "Approved"
-review_verdict: "Approved"
-review_coverage: "Architecture/Execution and Failure/Contracts covered by two independent Full reviews plus affected-lens Closure"
-approved_content_sha256: "eabf85e2fa13ba07933cca962f0dcaf4a8dd7d97f0ab8d111b20308741d520a8"
-source_plan_sha256: "da1283bdbe500692d5eb416e6459d2927c265b929c06f89ff664cc9028095919"
+review_outcome: "Waived"
+review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
+review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
+approved_content_sha256: "b7c2c84b3abce90c98fab87a10fc571dc2467ce742adc56e7777745cd930c583"
+source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
 ## 1. Execution Context
@@ -25,7 +25,7 @@ source_plan_sha256: "da1283bdbe500692d5eb416e6459d2927c265b929c06f89ff664cc90280
 - **Source Material:** The approved plan at `/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md` is the architectural and product authority. This master spec owns sequencing and cross-spec gates only.
 - **Approved Scope:** The ten plan slices grouped into eight delivery specs: core tracer, recovery, browser proof, Android proof, iOS proof, Setup, operational consumers, and final cutover/deletion.
 - **Out of Scope:** Direct code implementation from this master document; `agent:plan-auto`; issue trees; generic skill graphs; app-server transport; package-specific authentication; consumer `postinstall`; automatic config migration; automatic merge; multi-host ownership; package publication.
-- **Simplest Viable Path:** One root agent executes one reviewed child spec at a time. Later child specs are authored just in time from the settled implementation and this master contract. No speculative file-level instructions are written for code that does not yet exist.
+- **Simplest Viable Path:** One root agent executes one authorized child spec at a time. Later child specs are authored just in time from the settled implementation and this master contract. No speculative file-level instructions are written for code that does not yet exist.
 - **Primary Risk:** A later spec can bypass predecessor gates, create a second owner for lifecycle/proof/setup policy, or switch the package entrypoint before the new runtime has complete proof and recovery coverage.
 
 ## 2. Decision Snapshot And Child Specs
@@ -63,8 +63,9 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 
 ## 4. Risk Controls
 
-- **Source of Truth:** The approved plan owns product scope and Module Interfaces. This master owns child-spec order. Each reviewed child spec owns only its authorized implementation slice and checklist.
+- **Source of Truth:** The approved plan owns product scope and Module Interfaces. This master owns child-spec order. Each authorized child spec owns only its implementation slice and checklist; its frontmatter records whether review was approved or waived.
 - **Safety Constraints:** No live smoke, real GitHub issue/branch/PR mutation, daemon start, package publish, release, mobile session takeover, or destructive Legacy cleanup occurs without the plan's explicit gate and separate user authorization where required.
+- **Accepted Local-Read Risks:** Root/native-child tool shells may read/use the same user-owned Codex auth and any local file readable by the current macOS user. This acceptance does not extend to credential/path output, GitHub/npm/SSH/cloud credentials, tool network, production commands, or runner-owned publication.
 - **Contract Constraints:** A child spec may deepen private Implementation and concrete external Adapters but may not add platform/storage/device parameters to `runIssue` or `proveChange`, expose raw proof paths, or grant proof/setup code a run-record write capability.
 - **Concurrency / State Constraints:** Delivery is serial and single-agent. No two child specs are implemented concurrently. One host-global repository owner remains the supported runtime model.
 - **Cutover Constraint:** `src/cli.ts`, `src/index.ts`, package exports/bin, and removal of the old runtime remain unchanged until Spec 8, except package-file inclusion needed to test the parallel V2 candidate. Earlier specs test the candidate surface directly under `src/v2/`.
@@ -86,15 +87,16 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 
 ### Progress Discipline
 
-- [ ] Execute only the current reviewed child spec.
-- [ ] Update this master table and checklist when a child spec is created, approved, completed, blocked, or superseded.
-- [ ] Leave future child specs unauthored until their creation gate is satisfied.
-- [ ] Stop when repo reality contradicts the plan, a predecessor exit gate, or an approved Interface; do not repair the contradiction by silently redesigning the next spec.
-- [ ] Keep each child implementation single-agent unless the user separately approves a disjoint multi-agent execution contract.
+- [x] Execute only the current authorized child spec.
+- [x] Update this master table and checklist when a child spec is created, approved, completed, blocked, or superseded.
+- [x] Leave future child specs unauthored until their creation gate is satisfied.
+- [x] Stop when repo reality contradicts the plan, a predecessor exit gate, or an approved Interface; do not repair the contradiction by silently redesigning the next spec.
+- [x] Keep each child implementation single-agent unless the user separately approves a disjoint multi-agent execution contract.
 
 ### Phase 1 — Core tracer
 
 - [ ] Execute Spec 1 at `docs/implementation-specs/2026-07-16/1907-agent-auto-v2-core-tracer.md` through its final review and validation gates.
+- **Resumed:** The user accepted shared Codex-auth and user-readable host-file exposure and waived independent review. The revised V2 canary recorded those reads while denying every tested external credential/production capability, so Slice 1 may begin.
 - [ ] Record the settled V2 source paths, Interface hashes/snapshots, containment result, and remaining residual risks in this master before authoring Spec 2.
 - [ ] Do not author or start Spec 2 until Spec 1's complete checklist, Contract Test Ledger, early/final reviews, validation, and handoff are reconciled.
 
@@ -127,7 +129,7 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 
 - [ ] Stop if `v0.1.51`, `codex/v2-agent-auto`, or the intended worktree path resolves to a different state than Section 3.
 - [ ] Stop if a child spec needs to change an approved Module owner or stable Interface rather than only its private Implementation.
-- [ ] Stop if containment canaries expose runner/GitHub/npm/SSH/cloud credentials to agent tools.
+- [ ] Stop if containment canaries expose runner/GitHub/npm/SSH/cloud credentials, production commands, or credential/path output to agent tools. Shared Codex auth and user-readable host files are explicitly accepted.
 - [ ] Stop if a live/mobile/release gate is required but authorization or a safe environment is absent; preserve the completed local work and exact blocker.
 - [ ] Stop final cutover if any prior child spec, real platform proof, relevant live smoke, cleanup review, or final code review remains incomplete.
 
@@ -149,6 +151,14 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 | --- | --- | --- |
 | `MASTER-SEQ-001` | Every Spec 2-8 now requires the full terminal/review/validation gate of its immediate predecessor. | verified |
 | `MASTER-BOOT-002` | Plan/spec authority is digest-pinned and copied with canonical hash plus byte-equality checks before the docs-only branch commit. | verified |
+
+### 9.1 Current Execution Status
+
+- **Current Child:** Spec 1 — Core tracer.
+- **Execution Outcome:** Spec 1 resumed on 2026-07-16 under explicit user acceptance of shared Codex auth.
+- **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
+- **Review Decision:** Independent artifact/code reviews are user-waived; root self-check and the existing executable validation gates remain mandatory. Outcome is `Waived`, not independently approved.
+- **Sequencing Decision:** Specs 2-8 remain unauthored and may not start until revised Spec 1 fully completes.
 
 ## 10. Final Action
 

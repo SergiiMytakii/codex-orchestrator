@@ -45,6 +45,7 @@
     "orchestrator:daemon:max3": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --max-runs 3",
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:v2-containment": "npm run build --silent && node dist/test/v2-containment.canary.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke:live": "node scripts/live-smoke.mjs",
     "bridge:manifest": "npm run build --silent && node scripts/generate-bridge-runtime.mjs",
