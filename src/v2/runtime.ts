@@ -24,7 +24,7 @@ import {
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
-import { FileAndroidLeaseVerifier } from './mobile-lease.js';
+import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import { OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
@@ -235,6 +235,8 @@ export class ContainedProofAgent implements ProofAgent {
     targetRoot: string;
     packageVersion: string;
     androidAdbPath: string;
+    iosXcrunPath: string;
+    processExecutor: ProcessExecutor;
     process?: CodexProcess;
     createAttemptId?: () => string;
   }) {}
@@ -261,6 +263,14 @@ export class ContainedProofAgent implements ProofAgent {
       'leases',
     );
     const androidLeaseArtifact = join(artifactRoot, input.proofId, 'android-lease.json');
+    const iosLeaseRoot = join(
+      resolve(this.dependencies.orchestratorHome),
+      'v2',
+      sha256(canonicalRepository),
+      'leases',
+    );
+    const iosLeaseArtifact = join(artifactRoot, input.proofId, 'ios-lease.json');
+    const iosTooling = await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
     try {
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
@@ -289,6 +299,17 @@ export class ContainedProofAgent implements ProofAgent {
           `Android lease proof ID: ${input.proofId}.`,
           `Android lease owner PID: ${process.pid}.`,
           `Android adb path: ${this.dependencies.androidAdbPath}.`,
+          'When a frozen criterion has an iOS surface, follow references/ios.md from the exact acceptance-proof skill snapshot.',
+          `iOS lease helper: ${join(snapshotRoot, 'tools', 'ios-lease.mjs')}.`,
+          `iOS lease root: ${iosLeaseRoot}.`,
+          `iOS lease artifact: ${iosLeaseArtifact}.`,
+          `iOS lease proof ID: ${input.proofId}.`,
+          `iOS lease owner PID: ${process.pid}.`,
+          `iOS xcrun path: ${this.dependencies.iosXcrunPath}.`,
+          ...(iosTooling ? [
+            `iOS runtime ID: ${iosTooling.runtimeId}.`,
+            `iOS device type ID: ${iosTooling.deviceTypeId}.`,
+          ] : ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.']),
           ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
           'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
@@ -345,6 +366,7 @@ export function createV2Runtime(input: {
   now?: () => string;
   processAlive?: (pid: number) => boolean;
   androidAdbPath?: string;
+  iosXcrunPath?: string;
 }): V2Runtime {
   const targetRoot = resolve(input.targetRoot);
   const orchestratorHome = resolve(input.orchestratorHome);
@@ -361,6 +383,7 @@ export function createV2Runtime(input: {
     ?? (process.env.ANDROID_SDK_ROOT ? join(process.env.ANDROID_SDK_ROOT, 'platform-tools', 'adb') : undefined)
     ?? join(homedir(), 'Library', 'Android', 'sdk', 'platform-tools', 'adb');
   const androidAdbPath = resolve(configuredAndroidAdbPath);
+  const iosXcrunPath = resolve(input.iosXcrunPath ?? '/usr/bin/xcrun');
   const containedDependencies = () => ({
     config: () => requireConfig(currentConfig),
     packageRoot: requireRuntimeString(input.packageRoot, 'packageRoot'),
@@ -380,6 +403,8 @@ export function createV2Runtime(input: {
     ...containedDependencies(),
     targetRoot,
     androidAdbPath,
+    iosXcrunPath,
+    processExecutor: commandExecutor,
   });
 
   const readConfig = async (requestedRoot: string) => {
@@ -415,6 +440,15 @@ export function createV2Runtime(input: {
         now: () => new Date(now()),
         artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/android-lease.json`,
       });
+      const iosLease = new FileIosLeaseVerifier({
+        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
+        worktreeRoot: worktreePath,
+        now: () => new Date(now()),
+        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/ios-lease.json`,
+        targetController: {
+          release: (record) => releaseIosSimulator(commandExecutor, iosXcrunPath, record),
+        },
+      });
       const acceptanceProof = new AcceptanceProof({
         checkedChangeReader: capabilities,
         proofRecords,
@@ -426,6 +460,7 @@ export function createV2Runtime(input: {
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
         inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
         androidLease,
+        iosLease,
         proofArtifactDir: config.proof.artifactDir,
         createAttemptId: input.createAttemptId ?? randomUUID,
         now,
@@ -662,6 +697,68 @@ function processIsAlive(pid: number): boolean {
     return true;
   } catch (error) {
     return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export async function discoverIosTooling(
+  executor: ProcessExecutor,
+  xcrunPath: string,
+): Promise<{ runtimeId: string; deviceTypeId: string } | undefined> {
+  const [runtimeResult, deviceTypeResult] = await Promise.all([
+    executor(xcrunPath, ['simctl', 'list', 'runtimes', '-j']),
+    executor(xcrunPath, ['simctl', 'list', 'devicetypes', '-j']),
+  ]).catch(() => []);
+  if (!runtimeResult || !deviceTypeResult || runtimeResult.exitCode !== 0 || deviceTypeResult.exitCode !== 0) return undefined;
+  try {
+    const runtimes = (JSON.parse(runtimeResult.stdout) as {
+      runtimes?: Array<{ identifier?: unknown; version?: unknown; isAvailable?: unknown }>;
+    }).runtimes ?? [];
+    const deviceTypes = (JSON.parse(deviceTypeResult.stdout) as {
+      devicetypes?: Array<{ identifier?: unknown; name?: unknown }>;
+    }).devicetypes ?? [];
+    const runtime = runtimes
+      .filter((item) => item.isAvailable !== false && typeof item.identifier === 'string'
+        && item.identifier.startsWith('com.apple.CoreSimulator.SimRuntime.iOS-'))
+      .sort((left, right) => String(right.version ?? '').localeCompare(String(left.version ?? ''), undefined, { numeric: true }))[0];
+    const deviceType = deviceTypes
+      .filter((item) => typeof item.identifier === 'string' && item.identifier.startsWith('com.apple.CoreSimulator.SimDeviceType.iPhone-'))
+      .sort((left, right) => {
+        const leftPro = /Pro/u.test(String(left.name)) ? 0 : 1;
+        const rightPro = /Pro/u.test(String(right.name)) ? 0 : 1;
+        return leftPro - rightPro || String(right.name).localeCompare(String(left.name), undefined, { numeric: true });
+      })[0];
+    if (typeof runtime?.identifier !== 'string' || typeof deviceType?.identifier !== 'string') return undefined;
+    return { runtimeId: runtime.identifier, deviceTypeId: deviceType.identifier };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function releaseIosSimulator(
+  executor: ProcessExecutor,
+  xcrunPath: string,
+  record: IosLeaseRecordV1,
+): Promise<void> {
+  if (!record.runnerCreated) throw new Error('iOS release requires runner-created ownership');
+  const readDevices = async () => {
+    const result = await executor(xcrunPath, ['simctl', 'list', 'devices', '-j']);
+    if (result.exitCode !== 0) throw new Error('iOS Simulator inventory failed during release');
+    const parsed = JSON.parse(result.stdout) as {
+      devices?: Record<string, Array<{ udid?: unknown; name?: unknown; state?: unknown; isAvailable?: unknown }>>;
+    };
+    return Object.values(parsed.devices ?? {}).flat().filter((device) => device.isAvailable !== false);
+  };
+  const matches = (await readDevices()).filter((device) => device.udid === record.udid);
+  if (matches.length === 0) return;
+  if (matches.length !== 1 || matches[0].name !== record.deviceName) throw new Error('iOS release target identity is ambiguous');
+  if (matches[0].state === 'Booted') {
+    const shutdown = await executor(xcrunPath, ['simctl', 'shutdown', record.udid]);
+    if (shutdown.exitCode !== 0) throw new Error('iOS runner-created Simulator shutdown failed');
+  }
+  const deleted = await executor(xcrunPath, ['simctl', 'delete', record.udid]);
+  if (deleted.exitCode !== 0) throw new Error('iOS runner-created Simulator deletion failed');
+  if ((await readDevices()).some((device) => device.udid === record.udid)) {
+    throw new Error('iOS runner-created Simulator deletion was not confirmed');
   }
 }
 

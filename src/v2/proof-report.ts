@@ -44,13 +44,13 @@ export interface ProofReportV1 {
     publishable: boolean;
     description: string;
   }>;
-  visualEvidence?: BrowserVisualEvidenceV1 | AndroidVisualEvidenceV1;
+  visualEvidence?: BrowserVisualEvidenceV1 | AndroidVisualEvidenceV1 | IosVisualEvidenceV1;
   findings: string[];
   residualRisks: string[];
   blocker?: ExternalBlocker;
 }
 
-interface VisualCaptureV1<Target extends 'browser' | 'android'> {
+interface VisualCaptureV1<Target extends 'browser' | 'android' | 'ios'> {
   target: Target;
   name: string;
   width: number;
@@ -74,6 +74,12 @@ export interface BrowserVisualEvidenceV1 extends VisualEvidenceCommonV1 {
 
 export interface AndroidVisualEvidenceV1 extends VisualEvidenceCommonV1 {
   captures: Array<VisualCaptureV1<'android'>>;
+  diagnostics: { deviceLogRef: string };
+  lease: { leaseRef: string };
+}
+
+export interface IosVisualEvidenceV1 extends VisualEvidenceCommonV1 {
+  captures: Array<VisualCaptureV1<'ios'>>;
   diagnostics: { deviceLogRef: string };
   lease: { leaseRef: string };
 }
@@ -219,6 +225,15 @@ export function proofReportOutputSchema(): Record<string, unknown> {
         visualEvidence: androidVisualEvidenceSchema(),
       }),
       reportBranch({
+        status: 'passed',
+        common,
+        decision: iosDecisionSchema(),
+        criteria: passedCriteria,
+        checks: passedChecks,
+        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        visualEvidence: iosVisualEvidenceSchema(),
+      }),
+      reportBranch({
         status: 'needs-rework',
         common,
         decision: nonVisualDecisionSchema(),
@@ -243,6 +258,15 @@ export function proofReportOutputSchema(): Record<string, unknown> {
         checks: openChecks,
         findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
         visualEvidence: androidVisualEvidenceSchema(),
+      }),
+      reportBranch({
+        status: 'needs-rework',
+        common,
+        decision: iosDecisionSchema(),
+        criteria: openCriteria,
+        checks: openChecks,
+        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        visualEvidence: iosVisualEvidenceSchema(),
       }),
       reportBranch({
         status: 'external-block',
@@ -345,6 +369,18 @@ function androidDecisionSchema(): Record<string, unknown> {
     properties: {
       mode: { type: 'string', const: 'visual' },
       targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'android' } },
+    },
+  };
+}
+
+function iosDecisionSchema(): Record<string, unknown> {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['mode', 'targets'],
+    properties: {
+      mode: { type: 'string', const: 'visual' },
+      targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'ios' } },
     },
   };
 }
@@ -461,6 +497,14 @@ function browserVisualEvidenceSchema(): Record<string, unknown> {
 }
 
 function androidVisualEvidenceSchema(): Record<string, unknown> {
+  return mobileVisualEvidenceSchema('android');
+}
+
+function iosVisualEvidenceSchema(): Record<string, unknown> {
+  return mobileVisualEvidenceSchema('ios');
+}
+
+function mobileVisualEvidenceSchema(target: 'android' | 'ios'): Record<string, unknown> {
   const reviewSchema = {
     type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH,
     items: {
@@ -490,7 +534,7 @@ function androidVisualEvidenceSchema(): Record<string, unknown> {
           type: 'object', additionalProperties: false,
           required: ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'],
           properties: {
-            target: { type: 'string', const: 'android' },
+            target: { type: 'string', const: target },
             name: boundedStringSchema(MAX_STRING_LENGTH),
             width: { type: 'integer' },
             height: { type: 'integer' },
@@ -601,6 +645,7 @@ function validateVisualEvidence(
   if (decision.targets.length !== 1) throw new Error('visual proof requires one settled platform target');
   if (decision.targets[0] === 'browser') return validateBrowserVisualEvidence(value, criteria, artifacts, decision);
   if (decision.targets[0] === 'android') return validateAndroidVisualEvidence(value, criteria, artifacts, decision);
+  if (decision.targets[0] === 'ios') return validateIosVisualEvidence(value, criteria, artifacts, decision);
   throw new Error('visual proof target is not implemented');
 }
 
@@ -688,26 +733,45 @@ function validateAndroidVisualEvidence(
   artifacts: ProofReportV1['artifacts'],
   decision: ProofReportV1['decision'],
 ): asserts value is AndroidVisualEvidenceV1 {
-  if (decision.targets.length !== 1 || decision.targets[0] !== 'android') throw new Error('Android visual target mismatch');
+  validateMobileVisualEvidence(value, criteria, artifacts, decision, 'android');
+}
+
+function validateIosVisualEvidence(
+  value: unknown,
+  criteria: ProofReportV1['criteria'],
+  artifacts: ProofReportV1['artifacts'],
+  decision: ProofReportV1['decision'],
+): asserts value is IosVisualEvidenceV1 {
+  validateMobileVisualEvidence(value, criteria, artifacts, decision, 'ios');
+}
+
+function validateMobileVisualEvidence(
+  value: unknown,
+  criteria: ProofReportV1['criteria'],
+  artifacts: ProofReportV1['artifacts'],
+  decision: ProofReportV1['decision'],
+  target: 'android' | 'ios',
+): asserts value is AndroidVisualEvidenceV1 | IosVisualEvidenceV1 {
+  if (decision.targets.length !== 1 || decision.targets[0] !== target) throw new Error(`${target} visual target mismatch`);
   assertExactObject(value, ['workflow', 'captures', 'diagnostics', 'lease', 'freshness', 'layoutReview', 'copyReview'], 'proof report.visualEvidence');
   assertExactObject(value.workflow, ['entrypoint', 'steps', 'finalState'], 'proof report.visualEvidence.workflow');
   assertBoundedString(value.workflow.entrypoint, 'proof report.visualEvidence.workflow.entrypoint', MAX_STRING_LENGTH, true);
   assertStringArray(value.workflow.steps, 'proof report.visualEvidence.workflow.steps');
-  if (value.workflow.steps.length === 0) throw new Error('Android visual workflow requires steps');
+  if (value.workflow.steps.length === 0) throw new Error(`${target} visual workflow requires steps`);
   assertBoundedString(value.workflow.finalState, 'proof report.visualEvidence.workflow.finalState', MAX_SUMMARY_LENGTH, true);
 
   const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
-  const androidCriteria = criteria.filter((criterion) => criterion.surfaces.includes('android'));
+  const androidCriteria = criteria.filter((criterion) => criterion.surfaces.includes(target));
   const androidCriterionIds = new Set(androidCriteria.map((criterion) => criterion.id));
-  if (androidCriteria.length === 0) throw new Error('Android decision requires an Android criterion surface');
+  if (androidCriteria.length === 0) throw new Error(`${target} decision requires a ${target} criterion surface`);
   if (!Array.isArray(value.captures) || value.captures.length === 0 || value.captures.length > MAX_ARRAY_LENGTH) {
-    throw new Error('Android visual evidence requires a capture');
+    throw new Error(`${target} visual evidence requires a capture`);
   }
   const captureNames: string[] = [];
   for (const [index, capture] of value.captures.entries()) {
     const field = `proof report.visualEvidence.captures[${index}]`;
     assertExactObject(capture, ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'], field);
-    if (capture.target !== 'android') throw new Error(`${field}.target must be android`);
+    if (capture.target !== target) throw new Error(`${field}.target must be ${target}`);
     assertBoundedString(capture.name, `${field}.name`, MAX_STRING_LENGTH, true);
     if (!Number.isSafeInteger(capture.width) || !Number.isSafeInteger(capture.height)
       || (capture.width as number) < 1 || (capture.height as number) < 1
@@ -720,7 +784,7 @@ function validateAndroidVisualEvidence(
       throw new Error(`${field} has irrelevant criterion mapping`);
     }
     for (const criterionId of androidCriterionIds) {
-      if (!capture.criteriaRefs.includes(criterionId)) throw new Error(`${field} omits Android criterion ${criterionId}`);
+      if (!capture.criteriaRefs.includes(criterionId)) throw new Error(`${field} omits ${target} criterion ${criterionId}`);
     }
     assertBoundedString(capture.screenshotRef, `${field}.screenshotRef`, MAX_STRING_LENGTH, true);
     assertBoundedString(capture.stateRef, `${field}.stateRef`, MAX_STRING_LENGTH, true);
@@ -739,14 +803,14 @@ function validateAndroidVisualEvidence(
   assertUnique(captureNames, 'proof report.visualEvidence capture names');
   assertExactObject(value.diagnostics, ['deviceLogRef'], 'proof report.visualEvidence.diagnostics');
   if (artifactById.get(value.diagnostics.deviceLogRef as string)?.kind !== 'device-log') {
-    throw new Error('Android visual evidence lacks device log diagnostics');
+    throw new Error(`${target} visual evidence lacks device log diagnostics`);
   }
   assertExactObject(value.lease, ['leaseRef'], 'proof report.visualEvidence.lease');
   if (artifactById.get(value.lease.leaseRef as string)?.kind !== 'lease-record') {
-    throw new Error('Android visual evidence lacks lease record');
+    throw new Error(`${target} visual evidence lacks lease record`);
   }
   assertExactObject(value.freshness, ['capturedAfterFinalInteraction'], 'proof report.visualEvidence.freshness');
-  if (value.freshness.capturedAfterFinalInteraction !== true) throw new Error('Android evidence is not post-interaction');
+  if (value.freshness.capturedAfterFinalInteraction !== true) throw new Error(`${target} evidence is not post-interaction`);
   validateVisualReview(value.layoutReview, 'layoutReview', artifactById);
   validateVisualReview(value.copyReview, 'copyReview', artifactById);
 }

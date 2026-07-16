@@ -15,7 +15,7 @@ import {
   type ProofReportV1,
 } from './proof-report.js';
 import type { ProofRecordWriter, ProofStateBodyV1, ProofStateV1, ProofStatus } from './proof-store.js';
-import type { AndroidLeaseVerifier } from './mobile-lease.js';
+import type { AndroidLeaseVerifier, IosLeaseVerifier } from './mobile-lease.js';
 
 export interface IssueSnapshot {
   number: number;
@@ -87,6 +87,7 @@ export class AcceptanceProof {
     readArtifact: (relativePath: string) => Promise<Buffer>;
     inspectArtifact?: (relativePath: string) => Promise<{ modifiedAt: string }>;
     androidLease?: AndroidLeaseVerifier;
+    iosLease?: IosLeaseVerifier;
     proofArtifactDir: string;
     createAttemptId: () => string;
     now: () => string;
@@ -116,7 +117,7 @@ export class AcceptanceProof {
         checkedChangeSha256: checked.checkedChangeSha256,
       });
       const result = await this.execute({ ...input, ...checked, bindingSha256 });
-      await this.releaseAndroidLeaseIfSettled(input.proofId, bindingSha256);
+      await this.releaseMobileLeasesIfSettled(input.proofId, bindingSha256);
       return result;
     } catch (error) {
       if (error instanceof ProofQuiescenceError) throw error;
@@ -283,13 +284,15 @@ export class AcceptanceProof {
   ): Promise<void> {
     if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
     const artifactPaths = new Set<string>();
-    const androidLeaseRef = report.decision.mode === 'visual'
-      && report.decision.targets[0] === 'android'
+    const mobileTarget = report.decision.mode === 'visual' && ['android', 'ios'].includes(report.decision.targets[0] ?? '')
+      ? report.decision.targets[0] as 'android' | 'ios'
+      : undefined;
+    const mobileLeaseRef = mobileTarget
       && report.visualEvidence
       && 'lease' in report.visualEvidence
       ? report.visualEvidence.lease.leaseRef
       : undefined;
-    let androidLeaseArtifact: { relativePath: string; bytes: Buffer } | undefined;
+    let mobileLeaseArtifact: { relativePath: string; bytes: Buffer } | undefined;
     for (const artifact of report.artifacts) {
       if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, artifact.relativePath)) {
         throw new Error('proof artifact escapes proof-owned directory');
@@ -306,7 +309,7 @@ export class AcceptanceProof {
         if (Date.parse(metadata.modifiedAt) < Date.parse(proofStartedAt)) throw new Error('visual artifact is stale');
       }
       artifactPaths.add(artifact.relativePath);
-      if (artifact.id === androidLeaseRef) androidLeaseArtifact = { relativePath: artifact.relativePath, bytes };
+      if (artifact.id === mobileLeaseRef) mobileLeaseArtifact = { relativePath: artifact.relativePath, bytes };
     }
     for (const path of changedFiles) {
       assertRelativePath(path, 'proof phase changed file');
@@ -318,21 +321,23 @@ export class AcceptanceProof {
         throw new Error('visual proof reused an unchanged artifact');
       }
     }
-    if (androidLeaseRef) {
-      if (!this.dependencies.androidLease || !androidLeaseArtifact) throw new Error('Android lease verification is unavailable');
-      await this.dependencies.androidLease.verify({
+    if (mobileLeaseRef && mobileTarget) {
+      const verifier = mobileTarget === 'android' ? this.dependencies.androidLease : this.dependencies.iosLease;
+      if (!verifier || !mobileLeaseArtifact) throw new Error(`${mobileTarget} lease verification is unavailable`);
+      await verifier.verify({
         proofId,
-        artifactRelativePath: androidLeaseArtifact.relativePath,
-        artifactBytes: androidLeaseArtifact.bytes,
+        artifactRelativePath: mobileLeaseArtifact.relativePath,
+        artifactBytes: mobileLeaseArtifact.bytes,
       });
     }
   }
 
-  private async releaseAndroidLeaseIfSettled(proofId: string, bindingSha256: string): Promise<void> {
-    if (!this.dependencies.androidLease) return;
+  private async releaseMobileLeasesIfSettled(proofId: string, bindingSha256: string): Promise<void> {
+    if (!this.dependencies.androidLease && !this.dependencies.iosLease) return;
     const state = await this.dependencies.proofRecords.read(proofId);
     if (!state || state.bindingSha256 !== bindingSha256 || !isTerminalStatus(state.status)) return;
-    await this.dependencies.androidLease.release(proofId);
+    await this.dependencies.androidLease?.release(proofId);
+    await this.dependencies.iosLease?.release(proofId);
   }
 
   private async startProofRetry(

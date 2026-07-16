@@ -121,6 +121,35 @@ const androidVisualProof: ProofReportV1 = {
   },
 };
 
+const iosVisualProof: ProofReportV1 = {
+  ...passedProof,
+  decision: { mode: 'visual', targets: ['ios'] },
+  criteria: [{
+    id: 'ac-ios', status: 'passed', confidence: 'high', surfaces: ['ios'],
+    evidenceRefs: ['ios-shot', 'ios-tree'],
+    analysis: 'The runner-created iOS workflow reached its final visible state.',
+  }],
+  checks: [],
+  artifacts: [
+    visualArtifact('ios-shot', 'screenshot', 'proofs/ios/final.png', true),
+    visualArtifact('ios-tree', 'ui-hierarchy', 'proofs/ios/final.txt', false),
+    visualArtifact('ios-log', 'device-log', 'proofs/ios/simulator.log', false),
+    visualArtifact('ios-lease', 'lease-record', 'proofs/ios/lease.json', false),
+  ],
+  visualEvidence: {
+    workflow: { entrypoint: 'dev.codex.proof', steps: ['Open', 'Activate'], finalState: 'iOS proof ready' },
+    captures: [{
+      target: 'ios', name: 'final', width: 1206, height: 2622, criteriaRefs: ['ac-ios'],
+      screenshotRef: 'ios-shot', stateRef: 'ios-tree',
+    }],
+    diagnostics: { deviceLogRef: 'ios-log' },
+    lease: { leaseRef: 'ios-lease' },
+    freshness: { capturedAfterFinalInteraction: true },
+    layoutReview: [{ summary: 'The iOS layout is aligned and unclipped.', evidenceRefs: ['ios-shot'] }],
+    copyReview: [{ summary: 'Visible iOS copy matches the criterion.', evidenceRefs: ['ios-shot', 'ios-tree'] }],
+  },
+};
+
 test('implementation output schema and runtime validator have parity across status branches', () => {
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: completedImplementation, accepted: true },
@@ -158,8 +187,10 @@ test('proof output schema and runtime validator have parity across terminal repo
     { value: passedProof, accepted: true },
     { value: visualProof, accepted: true },
     { value: androidVisualProof, accepted: true },
+    { value: iosVisualProof, accepted: true },
     { value: { ...visualProof, visualEvidence: undefined }, accepted: false },
     { value: { ...androidVisualProof, visualEvidence: { ...androidVisualProof.visualEvidence, lease: undefined } }, accepted: false },
+    { value: { ...iosVisualProof, visualEvidence: { ...iosVisualProof.visualEvidence, diagnostics: {} } }, accepted: false },
     {
       value: {
         ...passedProof,

@@ -158,7 +158,10 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   assertMode(rootStat.mode, SNAPSHOT_ROOT_MODE, snapshotRoot);
 
   const expectedNames = snapshot.skill === 'acceptance-proof'
-    ? ['SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'tools/android-lease.mjs']
+    ? [
+      'SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'references/ios.md',
+      'tools/android-lease.mjs', 'tools/ios-lease.mjs',
+    ]
     : ['SKILL.md', 'output-schema.json'];
   const actualNames = await snapshotFilePaths(snapshotRoot, expectedUid);
   if (actualNames.length !== expectedNames.length || actualNames.some((name, index) => name !== expectedNames[index])) {
@@ -210,7 +213,9 @@ async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName
     ? [
       { relativePath: 'references/android.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'android.md') },
       { relativePath: 'references/browser.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'browser.md') },
+      { relativePath: 'references/ios.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'ios.md') },
       { relativePath: 'tools/android-lease.mjs', sourcePath: join(packageRoot, 'internal-skills', skill, 'tools', 'android-lease.mjs') },
+      { relativePath: 'tools/ios-lease.mjs', sourcePath: join(packageRoot, 'internal-skills', skill, 'tools', 'ios-lease.mjs') },
     ]
     : [];
   await assertSourcePath(packageRoot, packageJsonPath, true);

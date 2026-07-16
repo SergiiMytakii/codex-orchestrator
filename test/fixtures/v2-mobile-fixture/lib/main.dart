@@ -9,7 +9,7 @@ class ProofFixtureApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Android Proof Fixture',
+      title: 'Mobile Proof Fixture',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff3f51b5)),
         useMaterial3: true,
@@ -31,8 +31,9 @@ class _ProofFixtureScreenState extends State<ProofFixtureScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final platform = Theme.of(context).platform == TargetPlatform.iOS ? 'iOS' : 'Android';
     return Scaffold(
-      appBar: AppBar(title: const Text('Android Proof Fixture')),
+      appBar: AppBar(title: Text('$platform Proof Fixture')),
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
@@ -46,7 +47,7 @@ class _ProofFixtureScreenState extends State<ProofFixtureScreen> {
                   const Icon(Icons.verified_user_outlined, size: 72),
                   const SizedBox(height: 24),
                   Text(
-                    ready ? 'Android proof ready' : 'Fixture awaiting activation',
+                    ready ? '$platform proof ready' : 'Fixture awaiting activation',
                     key: const ValueKey('proof-state'),
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.headlineMedium,
@@ -55,13 +56,14 @@ class _ProofFixtureScreenState extends State<ProofFixtureScreen> {
                   Text(
                     ready
                         ? 'The leased workflow reached its final state.'
-                        : 'Activate the fixture to produce final Android evidence.',
+                        : 'Activate the fixture to produce final $platform evidence.',
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
                   Semantics(
                     button: true,
                     label: 'Activate proof',
+                    excludeSemantics: true,
                     child: FilledButton(
                       onPressed: ready ? null : () => setState(() => ready = true),
                       child: Text(ready ? 'Proof activated' : 'Activate proof'),
