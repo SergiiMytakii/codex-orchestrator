@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
-approved_content_sha256: "365646f102c04aed729a51671559fe06e9908c71f7882ff62bbb5b6f370fcaf3"
+approved_content_sha256: "e2060bb0e0f2be1bb557a65948ca4ba5fe4ec516f9e8380fd2232a0b84d89dc6"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -388,7 +388,8 @@ Spec 1 performs no automatic retry. Every row below is awaited, persisted, and t
 - `internal-skills/agent-auto/SKILL.md` — Create; exact implementation mission, authority limits, report schema path, and no publication.
 - `internal-skills/acceptance-proof/SKILL.md` — Create; independent non-visual proof mission for Spec 1. It must not reference browser/Android/iOS files until those files are packaged by later specs.
 - `test/v2-config-contract.test.ts` — Create; clean schema acceptance and Legacy/experimental/public-surface rejection.
-- `test/v2-report-contracts.test.ts` — Create; generated-schema/runtime-validator parity, nominal `CheckedChange`, binding mismatch, and `ProofReceipt` shape.
+- `test/v2-report-contracts.test.ts` — Create; generated-schema/runtime-validator parity and `ProofReceipt` shape.
+- `test/v2-acceptance-proof.test.ts` — Create; `proveChange` binding/freshness, proof-only persistence, criterion/artifact/diff validation, deterministic reuse, and exhaustive private proof outcomes. This separate Module-level test is required because report-schema parity alone cannot prove the deep `AcceptanceProof` Interface.
 - `test/v2-runtime-assets.test.ts` — Create; exact package resolution, immutable snapshot, symlink/extra-file/mode/hash/corruption/update races.
 - `test/v2-codex-process.test.ts` — Create; exact argv/environment/process terminal classification with fake process execution.
 - `test/v2-run-store.test.ts` — Create; strict state, generation CAS, concurrency, ambiguous rename/fsync recovery, and capability-isolation tests.
@@ -420,7 +421,7 @@ No additional runtime file is authorized without first recording why one of thes
 | Installed package bytes, not local same-name skills, own both agent workflows and generated schemas. | Local skills alter behavior or package updates leave stale target workflow copies. | RED packed-consumer conflicting-skill test in `test/v2-package-consumer.test.ts` | verified |
 | Every attempt executes one private symlink-free, exact-file, exact-mode, hash-verified snapshot; package changes cannot mutate active bytes. | Update/crash/symlink races change instructions after evidence is recorded. | RED corruption/update/race matrix in `test/v2-runtime-assets.test.ts` | verified |
 | Generated output schema and runtime validation come from the same TypeScript owner for each report. | Skill prose, schema file, and parser accept different report shapes. | RED parity fixtures in `test/v2-report-contracts.test.ts` | verified |
-| Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability and binding-mismatch cases in `test/v2-report-contracts.test.ts` | planned |
+| Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability, binding-mismatch, and pre/post freshness cases in `test/v2-acceptance-proof.test.ts` | verified |
 | `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | verified |
 | Root and native-child tool shells can read/use shared Codex auth and user-readable host files without emitting credential/path material, but cannot use runner/GitHub/npm/SSH/cloud credentials or launch the production sentinel. | Accepted local-read exposure silently expands into publication authority or secret exfiltration. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; any external capability leak blocks the design | verified — V2 certificate GREEN for root and native child |
 | Every Codex terminal path reaches process-group/descendant absence plus stream/report quiescence before lifecycle/proof/publication/return/lock release. | An orphan mutates a supposedly settled worktree or races validation. | RED detached-descendant tests in `test/v2-codex-process.test.ts` | verified |
@@ -487,11 +488,11 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Slice 4 — Checked change and non-visual proof tracer
 
-- [ ] **Objective:** A checked worktree becomes one nominal bound `CheckedChange`, receives an independent non-visual proof, and returns a sanitized `ProofReceipt`.
-- [ ] **Test/Proof First:** Add failing nominal-type, binding mismatch, stale HEAD/index/tracked/untracked/check-policy, raw-path rejection, criterion-ID coverage, malformed report, and forbidden proof-diff tests through `AcceptanceProof.proveChange`.
-- [ ] Implement `src/v2/checked-change.ts`, `src/v2/proof-store.ts`, and `src/v2/acceptance-proof.ts`; compose only `ProofRecordWriter` into proof, keep run fields unrepresentable, and expose no platform parameter.
-- [ ] In this spec only `passed` is needed for the end-to-end tracer, but every union outcome must be representable and contract-tested without untyped exceptions. Rework/retry orchestration remains Spec 2.
-- [ ] **Exit Gate:** Focused proof/report tests pass; repeating identical binding is deterministic, mismatched binding fails before process launch, and the receipt contains no raw storage field.
+- [x] **Objective:** A checked worktree becomes one nominal bound `CheckedChange`, receives an independent non-visual proof, and returns a sanitized `ProofReceipt`.
+- [x] **Test/Proof First:** Add failing nominal-type, binding mismatch, stale HEAD/index/tracked/untracked/check-policy, raw-path rejection, criterion-ID coverage, malformed report, and forbidden proof-diff tests through `AcceptanceProof.proveChange`.
+- [x] Implement `src/v2/checked-change.ts`, `src/v2/proof-store.ts`, and `src/v2/acceptance-proof.ts`; compose only `ProofRecordWriter` into proof, keep run fields unrepresentable, and expose no platform parameter.
+- [x] In this spec only `passed` is needed for the end-to-end tracer, but every union outcome must be representable and contract-tested without untyped exceptions. Rework/retry orchestration remains Spec 2.
+- [x] **Exit Gate:** Focused proof/report tests pass; repeating identical binding is deterministic, mismatched binding fails before process launch, and the receipt contains no raw storage field.
 
 ### Slice 5 — Single issue review-ready tracer
 
@@ -570,14 +571,15 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### 10.1 Implementation Execution State
 
-- **Execution Outcome:** Containment preflight, Slices 1-3, and root containment self-check are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 4 is active.
+- **Execution Outcome:** Containment preflight, Slices 1-4, and the root containment self-check are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 5 is active.
 - **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
 - **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
 - **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
 - **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
 - **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
-- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts; `ab6c2e2` records Slice 2 immutable runtime assets. No RED implementation or failed validation state was committed.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts; `ab6c2e2` records Slice 2 immutable runtime assets; `0b03200` records Slice 3 supervised Codex processes. No RED implementation or failed validation state was committed.
 - **Root Self-Check Evidence:** Focused Slices 1-3 suite `26/26`, real Codex containment canary, strict certificate/argv-policy validation, architecture import scan, `git diff --check`, and parent-auth-path diff scan all passed. Independent review remains waived.
+- **Slice 4 Self-Check Evidence:** Focused proof/report suite `11/11`, compile-time nominal branding, runtime anti-forgery, exact binding mismatch before process launch, pre/post freshness checks, proof-only persistence, artifact/diff confinement, architecture import scan, `npm run typecheck`, and `git diff --check` all passed.
 
 ## 11. Final Action
 

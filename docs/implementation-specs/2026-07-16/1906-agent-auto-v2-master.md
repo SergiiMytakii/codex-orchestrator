@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "5671e79fa3464910368ad3169d8f793680cad2c6482c53933c5e017d63f65311"
+approved_content_sha256: "fcc478a2ea9bff82e17b1f404922a5ffabc82fbe2289efc63cb11f5bc9c1fd2a"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -155,7 +155,7 @@ Only Spec 1 is authored now at `/Users/serhiimytakii/Projects/codex-orchestrator
 ### 9.1 Current Execution Status
 
 - **Current Child:** Spec 1 — Core tracer.
-- **Execution Outcome:** Spec 1 resumed on 2026-07-16 under explicit user acceptance of shared Codex auth; containment preflight, Slices 1-3, and the root containment self-check are GREEN, and Slice 4 is active.
+- **Execution Outcome:** Spec 1 resumed on 2026-07-16 under explicit user acceptance of shared Codex auth; containment preflight, Slices 1-4, and the root containment self-check are GREEN, and Slice 5 is active.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 root self-check and executable containment gates passed. Outcome remains `Waived`, not independently approved.
 - **Sequencing Decision:** Specs 2-8 remain unauthored and may not start until revised Spec 1 fully completes.
