@@ -22,7 +22,7 @@
   "files": [
     "dist/src",
     "bridge-runtime.json",
-    "prompts",
+    "runtime-skills",
     "docs/deep-dive.md",
     "CHANGELOG.md",
     "README.md",
@@ -43,12 +43,15 @@
     "orchestrator:daemon:once": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --once",
     "orchestrator:daemon:fast": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --interval-seconds 60",
     "orchestrator:daemon:max3": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --max-runs 3",
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean --silent && tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/src/cli.js',0o755)\"",
     "test": "npm run build && node --test dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke:live": "node scripts/live-smoke.mjs",
+    "runtime-skills:import": "node scripts/import-runtime-skills.mjs",
+    "runtime-skills:validate": "node scripts/validate-runtime-skills.mjs",
     "bridge:manifest": "npm run build --silent && node scripts/generate-bridge-runtime.mjs",
-    "prepack": "npm run bridge:manifest"
+    "prepack": "npm run bridge:manifest && npm run runtime-skills:validate"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

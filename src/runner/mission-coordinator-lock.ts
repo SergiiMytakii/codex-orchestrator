@@ -11,6 +11,7 @@ export interface MissionCoordinatorLockInput {
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
   waitTimeoutMs?: number;
+  pollIntervalMs?: number;
   lockName?: string;
   description?: string;
   bootNonceSemantics?: 'process' | 'system-boot';
@@ -63,6 +64,10 @@ export async function acquireMissionCoordinatorLock(
     throw new Error(`${description} waitTimeoutMs must be a non-negative integer.`);
   }
   const deadline = Date.now() + waitTimeoutMs;
+  const pollIntervalMs = input.pollIntervalMs ?? 10;
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error(`${description} pollIntervalMs must be a positive integer.`);
+  }
   await mkdir(join(input.targetRoot, input.stateDir), { recursive: true });
 
   while (true) {
@@ -111,7 +116,7 @@ export async function acquireMissionCoordinatorLock(
           : alive(existing.pid);
       if (ownerStillAlive) {
         if (Date.now() < deadline) {
-          await delay(10);
+          await delay(pollIntervalMs);
           continue;
         }
         throw new Error(`${description} lock is already owned by pid ${existing.pid}.`);

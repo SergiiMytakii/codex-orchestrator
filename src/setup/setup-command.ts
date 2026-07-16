@@ -3,10 +3,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import type { CodexOrchestratorConfig } from '../config/schema.js';
-import { validateConfig } from '../config/schema.js';
+import type { CodexOrchestratorConfig, RunnerConfig } from '../config/schema.js';
+import { validateConfig, validateConfigV2 } from '../config/schema.js';
 import { formatBaseBranch } from '../git/base-branch.js';
-import { resolveCodexCommand, type CodexCommandResolver } from './codex-command-resolver.js';
 import { GhCliLabelAdapter } from './github-label-adapter.js';
 import type { GitHubLabelAdapter, LabelPlan } from './labels.js';
 import { planLabels } from './labels.js';
@@ -14,25 +13,21 @@ import {
   assertNoRuntimeState,
   applyTargetPackageConfigDefaults,
   buildProjectConfig,
-  mergeExistingProjectConfig,
   projectConfigPath,
   readExistingConfig,
   writeProjectConfig,
 } from './project-config.js';
-import {
-  checkPromptFiles,
-  promptConflictGuidance,
-  syncPromptFiles,
-  type PromptSyncMode,
-  type PromptSyncResult,
-} from './prompt-sync.js';
-import { resolveWorkflowConfigs, workflowDefinitions } from './workflows.js';
+import { legacyWorkflowConfigs } from './legacy-workflow-migration.js';
 import { acquireTargetActivityFence } from '../runner/target-activity-fence.js';
 import { readRunnerConfig } from '../runner/command-utils.js';
 import {
   prepareSkillRuntimeV2,
   type PrepareSkillRuntimeV2Result,
 } from './skill-runtime-v2-preparation.js';
+import { activatePreparedSkillRuntimeV2, type ActivateSkillRuntimeV2Result } from './skill-runtime-v2-activation.js';
+import { migrateConfigV1ToV2 } from './skill-runtime-v2-migration.js';
+import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
+import { RunnerStateStore } from '../runner/local-state.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,25 +37,42 @@ export interface SetupCommandOptions {
   githubRepo?: string;
   dryRun?: boolean;
   prepareLabels?: boolean;
-  replacePackageSkills?: boolean;
-  promptSyncMode?: PromptSyncMode;
   labelAdapter?: GitHubLabelAdapter;
-  codexCommandResolver?: CodexCommandResolver;
   prepareSkillRuntimeV2?: boolean;
+  activateSkillRuntimeV2?: boolean;
 }
 
 export interface SetupCommandResult {
-  config: CodexOrchestratorConfig;
+  config: RunnerConfig;
   configPath: string;
   dryRun: boolean;
   labelPlan: LabelPlan;
-  promptFiles: string[];
-  promptSync?: PromptSyncResult;
   output: string;
   skillRuntimePreparation?: PrepareSkillRuntimeV2Result;
+  skillRuntimeActivation?: ActivateSkillRuntimeV2Result;
 }
 
 export async function runSetupCommand(options: SetupCommandOptions): Promise<SetupCommandResult> {
+  if (options.prepareSkillRuntimeV2 && options.activateSkillRuntimeV2) {
+    throw new Error('setup skill runtime preparation and activation are separate commands');
+  }
+  if (options.activateSkillRuntimeV2) {
+    if (options.dryRun) throw new Error('setup --activate-skill-runtime-v2 cannot be combined with --dry-run');
+    const activation = await activatePreparedSkillRuntimeV2({ targetRoot: options.targetRoot });
+    return {
+      config: activation.config,
+      configPath: activation.configPath,
+      dryRun: false,
+      labelPlan: { policy: 'report-only', existing: [], missing: [], created: [], wouldCreate: [] },
+      output: [
+        'skill runtime v2 activation: ready',
+        `config: ${activation.configPath}`,
+        `state: ${activation.statePath}`,
+        `backup: ${activation.backupPath}`,
+      ].join('\n'),
+      skillRuntimeActivation: activation,
+    };
+  }
   if (options.prepareSkillRuntimeV2) {
     if (options.dryRun) throw new Error('setup --prepare-skill-runtime-v2 cannot be combined with --dry-run');
     const config = await readRunnerConfig(resolve(options.targetRoot));
@@ -70,7 +82,6 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<Set
       configPath: projectConfigPath(options.targetRoot),
       dryRun: false,
       labelPlan: { policy: 'report-only', existing: [], missing: [], created: [], wouldCreate: [] },
-      promptFiles: [],
       output: [
         'skill runtime v2 preparation: ready',
         `prepared generation: ${preparation.path}`,
@@ -119,72 +130,48 @@ async function runSetupCommandFenced(options: SetupCommandOptions): Promise<Setu
   }
 
   const prepareLabels = options.prepareLabels ? 'create-missing' : 'report-only';
-  const workflows = await resolveWorkflowConfigs();
-  const discoveredCodexCommand = await (options.codexCommandResolver ?? resolveCodexCommand)();
-  const inferredBaseBranch = existingConfigBase(existingConfig) ?? await inferCurrentUpstreamBaseBranch(options.targetRoot);
-  const defaultConfig = buildProjectConfig({
-    owner,
-    repo,
-    prepareLabels,
-    workflows,
-    baseBranch: inferredBaseBranch,
-  });
-  const config = await applyTargetPackageConfigDefaults(
-    options.targetRoot,
-    mergeExistingProjectConfig(defaultConfig, existingConfig),
-  );
-  persistDiscoveredCodexCommand(config, discoveredCodexCommand);
-  const validation = validateConfig(config);
-
-  if (!validation.ok) {
-    throw new Error(`Generated config is invalid: ${validation.errors.join('; ')}`);
+  let config: RunnerConfig;
+  if (existingConfig) {
+    const existingV2 = validateConfigV2(existingConfig);
+    if (existingV2.ok) config = existingV2.value;
+    else {
+      const existingV1 = validateConfig(existingConfig);
+      if (existingV1.ok) throw new Error('orchestrator-skill-runtime-v2-activation-required');
+      throw new Error(`Existing config is invalid: ${existingV2.errors.join('; ')}`);
+    }
+  } else {
+    const inferredBaseBranch = await inferCurrentUpstreamBaseBranch(options.targetRoot);
+    const bridgeDefaults = await applyTargetPackageConfigDefaults(options.targetRoot, buildProjectConfig({
+      owner,
+      repo,
+      prepareLabels,
+      workflows: legacyWorkflowConfigs(),
+      baseBranch: inferredBaseBranch,
+    }));
+    config = migrateConfigV1ToV2(bridgeDefaults);
   }
 
   const adapter = options.labelAdapter ?? new GhCliLabelAdapter(owner, repo);
   const labelPlan = await planLabels(adapter, config.github.labels, prepareLabels, dryRun);
-  const promptFiles = workflowDefinitions.map((definition) => join(options.targetRoot, definition.promptPath));
-  const promptSyncMode = options.promptSyncMode ?? (options.replacePackageSkills ? 'replace' : 'auto');
-  let promptSync: PromptSyncResult | undefined;
-
-  if (dryRun) {
-    promptSync = await checkPromptFiles(options.targetRoot, promptSyncMode);
-  } else {
+  if (!dryRun) {
+    if (!existingConfig) {
+      const store = new RunnerStateStore(options.targetRoot, config as unknown as CodexOrchestratorConfig);
+      await writeDurableAtomicFile(store.statePath(), `${JSON.stringify({ version: 2, generation: 0, runs: [] }, null, 2)}\n`);
+    }
     await writeProjectConfig(options.targetRoot, config);
-    promptSync = await syncPromptFiles(options.targetRoot, promptSyncMode);
     await ensureRuntimeGitignoreEntries(options.targetRoot, config);
     await ensurePackageScripts(options.targetRoot);
   }
 
-  const output = formatSetupOutput(configPath, labelPlan, config, promptFiles, dryRun, promptSync);
+  const output = formatSetupOutput(configPath, labelPlan, config, dryRun);
 
   return {
     config,
     configPath,
     dryRun,
     labelPlan,
-    promptFiles,
-    promptSync,
     output,
   };
-}
-
-function persistDiscoveredCodexCommand(
-  config: CodexOrchestratorConfig,
-  discoveredCodexCommand: string | undefined,
-): void {
-  if (!discoveredCodexCommand) {
-    return;
-  }
-
-  if (config.codex.command === 'codex') {
-    config.codex.command = discoveredCodexCommand;
-  }
-
-  for (const profile of Object.values(config.codex.profiles ?? {})) {
-    if (profile?.command === 'codex') {
-      profile.command = discoveredCodexCommand;
-    }
-  }
 }
 
 const packageScripts: Record<string, string> = {
@@ -221,7 +208,7 @@ async function ensurePackageScripts(targetRoot: string): Promise<void> {
   await writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8');
 }
 
-async function ensureRuntimeGitignoreEntries(targetRoot: string, config: CodexOrchestratorConfig): Promise<void> {
+async function ensureRuntimeGitignoreEntries(targetRoot: string, config: RunnerConfig): Promise<void> {
   const gitignorePath = join(targetRoot, '.gitignore');
   const entries = runtimeGitignoreEntries(config);
   let existing = '';
@@ -255,7 +242,7 @@ function gitignoreDirectory(path: string): string {
   return `${path.replaceAll('\\', '/').replace(/^\.\//u, '').replace(/\/+$/u, '')}/`;
 }
 
-function runtimeGitignoreEntries(config: CodexOrchestratorConfig): string[] {
+function runtimeGitignoreEntries(config: RunnerConfig): string[] {
   return Array.from(new Set([
     gitignoreDirectory(config.reviewGates.acceptanceProof.artifactDir),
     gitignoreDirectory(config.runner.workspaceRoot),
@@ -274,30 +261,20 @@ function normalizeExistingGitignoreLine(line: string): string {
 function formatSetupOutput(
   configPath: string,
   labelPlan: LabelPlan,
-  config: CodexOrchestratorConfig,
-  promptFiles: string[],
+  config: RunnerConfig,
   dryRun: boolean,
-  promptSync: PromptSyncResult | undefined,
 ): string {
-  const workflowLines = Object.entries(config.workflows)
-    .map(([id, workflow]) => `  - ${id}: ${workflow.source}`)
-    .join('\n');
   const missingLabels = labelPlan.missing.map((label) => label.name).join(', ') || 'none';
-  const promptSummary = promptFiles.map((file) => `  - ${file}`).join('\n');
 
   return [
     `config: ${configPath}`,
     `mode: ${dryRun ? 'dry-run' : 'write'}`,
     `labels: ${labelPlan.policy}`,
     `missing labels: ${missingLabels}`,
-    'workflows:',
-    workflowLines,
-    'prompts:',
-    promptSummary,
-    formatPromptSync(promptSync),
+    'skill runtime: package-owned v2',
     `checks: ${Object.keys(config.checks).join(', ')}`,
     `gitignore runtime entries: ${runtimeGitignoreEntries(config).join(', ')}`,
-    `codex command: ${config.codex.command} ${config.codex.args.join(' ')}`,
+    `codex command: ${config.codex.command}`,
     `branches: base ${formatBaseBranch(config.branches.base)}, ${config.branches.scopedIssue}, ${config.branches.issueTree}`,
     `pull requests: ${config.pullRequests.scopedIssueTitle}, ${config.pullRequests.issueTreeTitle}`,
     'Codex will not be launched',
@@ -340,23 +317,6 @@ async function inferCurrentUpstreamBaseBranch(targetRoot: string): Promise<Codex
   } catch {
     return undefined;
   }
-}
-
-function formatPromptSync(promptSync: PromptSyncResult | undefined): string {
-  if (!promptSync) {
-    return 'prompt sync: dry-run';
-  }
-
-  const line = `prompt sync: ${promptSync.installed.length} installed, ${promptSync.updated.length} updated, ${promptSync.preserved.length} preserved, ${promptSync.conflicts.length} conflict`;
-  if (promptSync.conflicts.length === 0) {
-    return line;
-  }
-
-  return [
-    line,
-    `prompt conflicts: ${promptSync.conflicts.join(', ')}`,
-    ...promptConflictGuidance('codex-orchestrator setup'),
-  ].join('\n');
 }
 
 function readExistingString(

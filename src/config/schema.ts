@@ -6,6 +6,7 @@ import {
   workflowSources,
 } from './constants.js';
 import { reviewHandoffFlows, type ReviewHandoffFlow } from '../review-handoff.js';
+import type { WritableRootClass } from '../skills/package-skill-bundle.js';
 
 export type LabelKey = (typeof labelKeys)[number];
 export type LabelPreparationPolicy = 'report-only' | 'create-missing';
@@ -54,6 +55,28 @@ export interface CodexProfileConfig {
   timeoutMs?: number;
   idleTimeoutMs?: number;
   env?: Record<string, string>;
+}
+
+export interface CodexProfileConfigV2 {
+  model: string | null;
+  effort: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | null;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  env: Record<string, string>;
+}
+
+export interface TargetMcpServerPolicyV2 {
+  url: string;
+  httpHeaders: Record<string, string>;
+  enabledTools: string[];
+  approvals: Record<string, 'never'>;
+}
+
+export interface TargetExecutionPolicyV2 {
+  network: 'deny' | 'allow-listed';
+  networkHosts: string[];
+  writableRootClasses: WritableRootClass[];
+  mcpServers: Record<string, TargetMcpServerPolicyV2>;
 }
 
 export interface CodexFigmaMcpConfig {
@@ -275,9 +298,90 @@ export interface CodexOrchestratorConfig {
   };
 }
 
+export interface CodexOrchestratorConfigV2 extends Omit<CodexOrchestratorConfig, 'version' | 'codex' | 'project' | 'workflows'> {
+  version: 2;
+  codex: {
+    adapter: 'codex-app-server';
+    command: 'codex';
+    serverArgs: [];
+    requiredVersion: '0.144.4';
+    timeoutMs: number;
+    idleTimeoutMs: number;
+    profiles: Partial<Record<CodexPhase, CodexProfileConfigV2>>;
+    targetPolicy: TargetExecutionPolicyV2;
+  };
+  project: { configDir: '.codex-orchestrator' };
+}
+
+export type RunnerConfig = CodexOrchestratorConfig | CodexOrchestratorConfigV2;
+
 export type ConfigValidationResult =
   | { ok: true; value: CodexOrchestratorConfig }
   | { ok: false; errors: string[] };
+
+export type ConfigV2ValidationResult =
+  | { ok: true; value: CodexOrchestratorConfigV2 }
+  | { ok: false; errors: string[] };
+
+export function validateConfigV2(input: unknown): ConfigV2ValidationResult {
+  const errors: string[] = [];
+  const root = asObject(input);
+  if (!root) return { ok: false, errors: ['config must be an object'] };
+  const allowedRoot = new Set(['version', 'github', 'runner', 'codex', 'project', 'checks', 'checksPolicy', 'reviewGates', 'loopPolicy', 'deny', 'branches', 'pullRequests', 'issueClassification']);
+  for (const key of Object.keys(root)) if (!allowedRoot.has(key)) errors.push(`config v2 contains unknown key ${key}`);
+  if (root.version !== 2) errors.push('version must be 2');
+  const codex = asObject(root.codex);
+  if (!codex) errors.push('codex must be an object');
+  else {
+    const allowed = new Set(['adapter', 'command', 'serverArgs', 'requiredVersion', 'timeoutMs', 'idleTimeoutMs', 'profiles', 'targetPolicy']);
+    for (const key of Object.keys(codex)) if (!allowed.has(key)) errors.push(`codex contains unknown key ${key}`);
+    if (codex.adapter !== 'codex-app-server') errors.push('codex.adapter must be codex-app-server');
+    if (codex.command !== 'codex') errors.push('codex.command must be codex');
+    if (!Array.isArray(codex.serverArgs) || codex.serverArgs.length !== 0) errors.push('codex.serverArgs must be empty');
+    if (codex.requiredVersion !== '0.144.4') errors.push('codex.requiredVersion must be 0.144.4');
+    if (!positiveIntegerValue(codex.timeoutMs) || !positiveIntegerValue(codex.idleTimeoutMs)) errors.push('codex timeouts must be positive integers');
+    validateV2Profiles(codex.profiles, errors);
+    validateTargetPolicyV2(codex.targetPolicy, errors);
+  }
+  const project = asObject(root.project);
+  if (!project || Object.keys(project).length !== 1 || project.configDir !== '.codex-orchestrator') errors.push('project must contain only configDir=.codex-orchestrator');
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, value: input as CodexOrchestratorConfigV2 };
+}
+
+function validateV2Profiles(value: unknown, errors: string[]): void {
+  const profiles = asObject(value);
+  if (!profiles) { errors.push('codex.profiles must be an object'); return; }
+  for (const [phase, raw] of Object.entries(profiles)) {
+    if (!codexPhaseKeys.includes(phase as CodexPhase)) { errors.push(`codex.profiles contains unknown phase ${phase}`); continue; }
+    const profile = asObject(raw);
+    if (!profile) { errors.push(`codex.profiles.${phase} must be an object`); continue; }
+    const allowed = new Set(['model', 'effort', 'timeoutMs', 'idleTimeoutMs', 'env']);
+    for (const key of Object.keys(profile)) if (!allowed.has(key)) errors.push(`codex.profiles.${phase} contains unknown key ${key}`);
+    if (!(profile.model === null || typeof profile.model === 'string')) errors.push(`codex.profiles.${phase}.model is invalid`);
+    if (![null, 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(profile.effort as any)) errors.push(`codex.profiles.${phase}.effort is invalid`);
+    if ('timeoutMs' in profile && !positiveIntegerValue(profile.timeoutMs)) errors.push(`codex.profiles.${phase}.timeoutMs is invalid`);
+    if ('idleTimeoutMs' in profile && !positiveIntegerValue(profile.idleTimeoutMs)) errors.push(`codex.profiles.${phase}.idleTimeoutMs is invalid`);
+    const env = asObject(profile.env);
+    if (!env || Object.entries(env).some(([key, item]) => forbiddenAppServerProfileEnvKeys.has(key) || typeof item !== 'string')) errors.push(`codex.profiles.${phase}.env is invalid`);
+  }
+}
+
+const forbiddenAppServerProfileEnvKeys = new Set([...forbiddenCodexProfileEnvKeys, 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'CODEX_ACCESS_TOKEN', 'CODEX_API_KEY', 'OPENAI_API_KEY']);
+function validateTargetPolicyV2(value: unknown, errors: string[]): void {
+  const policy = asObject(value);
+  if (!policy) { errors.push('codex.targetPolicy must be an object'); return; }
+  const allowed = new Set(['network', 'networkHosts', 'writableRootClasses', 'mcpServers']);
+  for (const key of Object.keys(policy)) if (!allowed.has(key)) errors.push(`codex.targetPolicy contains unknown key ${key}`);
+  if (!['deny', 'allow-listed'].includes(String(policy.network))) errors.push('codex.targetPolicy.network is invalid');
+  if (!Array.isArray(policy.networkHosts) || policy.networkHosts.some((host) => typeof host !== 'string' || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(host))) errors.push('codex.targetPolicy.networkHosts is invalid');
+  if (policy.network === 'deny' && Array.isArray(policy.networkHosts) && policy.networkHosts.length > 0) errors.push('deny network requires empty hosts');
+  if (!Array.isArray(policy.writableRootClasses) || policy.writableRootClasses.some((item) => !['proof-artifacts', 'target-state', 'worktree'].includes(String(item)))) errors.push('codex.targetPolicy.writableRootClasses is invalid');
+  const mcp = asObject(policy.mcpServers);
+  if (!mcp || Object.keys(mcp).length !== 0) errors.push('orchestrator-mcp-catalog-fixture-missing');
+}
+
+function positiveIntegerValue(value: unknown): boolean { return Number.isSafeInteger(value) && (value as number) > 0; }
 
 type ObjectRecord = Record<string, unknown>;
 

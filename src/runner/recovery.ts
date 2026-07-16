@@ -85,6 +85,7 @@ export async function reconcileRunnerState(input: ReconcileRunnerStateInput): Pr
     }
 
     if (status === 'clarification-resumable' && allowClarificationResume) {
+      if (state.version === 2) throw new Error('orchestrator-v2-recovery-not-supported: clarification recovery must use the graph-aware v2 recovery path');
       await clearClarificationGate(input.issueAdapter, input.config, run.issueNumber, input.now);
     }
 
@@ -100,13 +101,17 @@ export async function reconcileRunnerState(input: ReconcileRunnerStateInput): Pr
   }
 
   if (updateLocalState) {
-    await input.store.save({
-      version: 1,
-      runs: state.runs.map((run) => ({
-        ...run,
-        lastRecoveredAt: input.now.toISOString(),
-      })),
-    });
+    if (state.version === 2) {
+      await input.store.mutateV2(state.generation, (latest) => ({
+        ...latest,
+        runs: latest.runs.map((run) => ({ ...run, lastRecoveredAt: input.now.toISOString() })),
+      }));
+    } else {
+      await input.store.save({
+        version: 1,
+        runs: state.runs.map((run) => ({ ...run, lastRecoveredAt: input.now.toISOString() })),
+      });
+    }
   }
 
   return entries.sort((left, right) => left.issueNumber - right.issueNumber);

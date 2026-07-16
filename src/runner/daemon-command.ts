@@ -16,6 +16,7 @@ import { runScopedAutoCommand } from './scoped-auto-command.js';
 import { issueOwnershipScopes, scopesOverlap } from './scope-isolation-policy.js';
 import { cleanupMergedWorktrees, type WorktreeCleanupResult } from './worktree-cleanup.js';
 import { acquireTargetActivityFence } from './target-activity-fence.js';
+import { runSkillRuntimePreflight } from './skill-runtime-preflight.js';
 
 export interface DaemonCommandOptions {
   targetRoot: string;
@@ -71,6 +72,11 @@ async function runDaemonCommandFenced(
   targetRoot: string,
   config: Awaited<ReturnType<typeof readRunnerConfig>>,
 ): Promise<DaemonCommandResult> {
+  const concurrency = resolveDaemonConcurrency(options.concurrency ?? config.runner.maxParallelScopedIssues ?? 1);
+  if (!options.executeIssue) {
+    if ((config as { version: number }).version !== 2) throw new Error('orchestrator-skill-runtime-v2-required');
+    await runSkillRuntimePreflight({ targetRoot, config: config as any, runId: 'daemon-preflight' });
+  }
   const adapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter =
     options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
@@ -78,7 +84,6 @@ async function runDaemonCommandFenced(
   const intervalMs = options.intervalMs ?? defaultIntervalMs;
   const once = options.once ?? false;
   const maxRuns = options.maxRuns;
-  const concurrency = resolveDaemonConcurrency(options.concurrency ?? config.runner.maxParallelScopedIssues ?? 1);
   const wait = options.sleep ?? sleep;
   const now = options.now ?? (() => new Date());
   const lines: string[] = [];

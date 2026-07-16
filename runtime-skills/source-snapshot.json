@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "sourceFingerprint": "c0d145190bbe16ab9cfd1d51e3c187b4910b118ec2119335e5fa019fcc036f5c",
+  "records": [
+    {
+      "logicalPath": "git-blobs/scripts/artifact_review_fingerprint.py",
+      "origin": "git-blob",
+      "sourcePath": "scripts/artifact_review_fingerprint.py",
+      "sourceRevision": "1c8a637009401fadd2b05bad0eb39ea2e8ecf5e8",
+      "mode": 493,
+      "size": 2136,
+      "sha256": "cd092e22f67c6dcc0fc90e2d6885aac5c86f94c32a735313335050dff5f8bd59"
+    },
+    {
+      "logicalPath": "git-blobs/scripts/test_artifact_review_fingerprint.py",
+      "origin": "git-blob",
+      "sourcePath": "scripts/test_artifact_review_fingerprint.py",
+      "sourceRevision": "1c8a637009401fadd2b05bad0eb39ea2e8ecf5e8",
+      "mode": 493,
+      "size": 1817,
+      "sha256": "2b8658d0d798bc9beeea9a19e602e765e0fba80add09237681e838332d631260"
+    },
+    {
+      "logicalPath": "git-blobs/skills/_shared/scripts/detect_test_command.py",
+      "origin": "git-blob",
+      "sourcePath": "skills/_shared/scripts/detect_test_command.py",
+      "sourceRevision": "8ff0f17f73713b9cee3e7d1da35ebeb06898c6d5",
+      "mode": 493,
+      "size": 4580,
+      "sha256": "28b4244a7077c2cd4b143e1e341cac11dc6992ba79017f37cb704bf2eb3a4c33"
+    },
+    {
+      "logicalPath": "git-blobs/skills/_shared/scripts/review_context.py",
+      "origin": "git-blob",
+      "sourcePath": "skills/_shared/scripts/review_context.py",
+      "sourceRevision": "8ff0f17f73713b9cee3e7d1da35ebeb06898c6d5",
+      "mode": 493,
+      "size": 7077,
+      "sha256": "785ed1df91af2b5e4010c6b04f9cb560fbaf150980565faf9119d7ff195e7c3f"
+    },
+    {
+      "logicalPath": "shared/docs/agents/artifact-review-loop.md",
+      "origin": "working-tree",
+      "sourcePath": "docs/agents/artifact-review-loop.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 16397,
+      "sha256": "fbe4881a3eee388feea167d270fac564aef13c336105eb4d978ab4940ccc05f3"
+    },
+    {
+      "logicalPath": "shared/docs/agents/confidence-rubric.md",
+      "origin": "working-tree",
+      "sourcePath": "docs/agents/confidence-rubric.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1883,
+      "sha256": "42c947db2775380867e7adcfbdbe0f67b8f511b9ddf33a6eef8e1b0e995912c2"
+    },
+    {
+      "logicalPath": "shared/docs/agents/contract-test-ledger.md",
+      "origin": "working-tree",
+      "sourcePath": "docs/agents/contract-test-ledger.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3779,
+      "sha256": "6f2327a40f218fbc746193c6440a69be08450938688b401f05163a3bb438a7f3"
+    },
+    {
+      "logicalPath": "shared/docs/agents/implementation-review-loop.md",
+      "origin": "working-tree",
+      "sourcePath": "docs/agents/implementation-review-loop.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 12086,
+      "sha256": "50d1b778a14b718bf32bd37c23a2dfab909ddd0c267ec12bdd93be74f754aa45"
+    },
+    {
+      "logicalPath": "skills/cleanup-review/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/cleanup-review/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3479,
+      "sha256": "90dcefb6ae2ac80a307e584be71c1bab70fb7bd6d4d711c48827cea7ed25e6ba"
+    },
+    {
+      "logicalPath": "skills/code-review/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/code-review/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 13869,
+      "sha256": "e4155eeea77b6496b04d48a8860714c638074d9b05d2f23320d7edaafc635228"
+    },
+    {
+      "logicalPath": "skills/code-review/references/bug-classes.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/code-review/references/bug-classes.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 4062,
+      "sha256": "1f8648af9914cbd7553d045915f959df0f3b50a88e97c3beefeb955342e7b12d"
+    },
+    {
+      "logicalPath": "skills/code-review/references/framework-lenses.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/code-review/references/framework-lenses.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1820,
+      "sha256": "ca9e7cb09f32f729cec5522e8ff7c7dcc43f76ef986e701e9c0a226514912cd8"
+    },
+    {
+      "logicalPath": "skills/code-review/references/targeted-recipes.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/code-review/references/targeted-recipes.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2564,
+      "sha256": "921b422958c97e606637d3fa2d2628239d9176f0316c7e45bbc55b20a22fe3c1"
+    },
+    {
+      "logicalPath": "skills/domain-modeling/ADR-FORMAT.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/domain-modeling/ADR-FORMAT.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2762,
+      "sha256": "768cbc82c2d659580ea18f50e43df6bd5c5523ee6134c90934c2e1c6eda493d4"
+    },
+    {
+      "logicalPath": "skills/domain-modeling/CONTEXT-FORMAT.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/domain-modeling/CONTEXT-FORMAT.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2130,
+      "sha256": "631ade9679c10d700a33793499b52c1af337355f155c28438d8d8d64dbe66e3a"
+    },
+    {
+      "logicalPath": "skills/domain-modeling/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/domain-modeling/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3421,
+      "sha256": "29fd7a5bfaa5cf3be58ac1251e0fc411c446abbae26a5b94a42bdb32eeff6828"
+    },
+    {
+      "logicalPath": "skills/grilling/ADR-FORMAT.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/grilling/ADR-FORMAT.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2779,
+      "sha256": "070340842eaf121ee528f660c81072a26a80cc24cb80aedec60e7efdaa8d95b0"
+    },
+    {
+      "logicalPath": "skills/grilling/CONTEXT-FORMAT.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/grilling/CONTEXT-FORMAT.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3158,
+      "sha256": "8a481fffa8bf5b9bbc66dd3f583da7f1b46ed630b19deefad9d359ee175151aa"
+    },
+    {
+      "logicalPath": "skills/grilling/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/grilling/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3898,
+      "sha256": "250348c8017eadd908805d7afa25f720c32cc0dd91c627b76f0436a920aaf301"
+    },
+    {
+      "logicalPath": "skills/implementation-spec-maker/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/implementation-spec-maker/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 21709,
+      "sha256": "64ea7efc4fe27da986bb20bac510e6a4c84a6367bc95f88b21f3a9446a80483a"
+    },
+    {
+      "logicalPath": "skills/implementation-spec-review/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/implementation-spec-review/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 14813,
+      "sha256": "aec94bd2ae18686c6c625071e0344594a2a69e8b73f83db5d772f92864ce67fc"
+    },
+    {
+      "logicalPath": "skills/improve-codebase-architecture/DEEPENING.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/improve-codebase-architecture/DEEPENING.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2565,
+      "sha256": "9577485f4fc32c0267639a9151bb41c8af0f8f6086e4bf8b84d5b236e30604e9"
+    },
+    {
+      "logicalPath": "skills/improve-codebase-architecture/HTML-REPORT.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/improve-codebase-architecture/HTML-REPORT.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1420,
+      "sha256": "4f859c3b642834ab4f9ba15fb35c5e70afefb4d5111f876cc6f9ad61bc16bb6c"
+    },
+    {
+      "logicalPath": "skills/improve-codebase-architecture/INTERFACE-DESIGN.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/improve-codebase-architecture/INTERFACE-DESIGN.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2725,
+      "sha256": "678c3e34f1339015053212b3316bf0b676c70aa251050a0613667d4e755fb35e"
+    },
+    {
+      "logicalPath": "skills/improve-codebase-architecture/LANGUAGE.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/improve-codebase-architecture/LANGUAGE.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3804,
+      "sha256": "6feca2140439c54a774749e8367f18350899ff69c777144ed2248cd4407949fa"
+    },
+    {
+      "logicalPath": "skills/improve-codebase-architecture/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/improve-codebase-architecture/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 4818,
+      "sha256": "a814b5865ed6fae72a77881f89a55c7d1a37fa2c08426c9206e6d5734fda1419"
+    },
+    {
+      "logicalPath": "skills/small-task-implementer/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/small-task-implementer/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3845,
+      "sha256": "75e7967ce5cb67b67f66f8552398067f24c67225f33911ba0a67155041cdc201"
+    },
+    {
+      "logicalPath": "skills/spec-implementer/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/spec-implementer/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 13267,
+      "sha256": "742f544fc30d293d9f6ef78456b00da6ffba095e89d420f2518d119a30c27e8c"
+    },
+    {
+      "logicalPath": "skills/tdd/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 7341,
+      "sha256": "b65130c290a0bf9b2e635f97399fc2fadf0b52f3bbd3feb5293cd7f8add9bdff"
+    },
+    {
+      "logicalPath": "skills/tdd/deep-modules.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/deep-modules.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1239,
+      "sha256": "f2123700bf953db1740625686c75bdd145efd486357c47c6818c869fee657a32"
+    },
+    {
+      "logicalPath": "skills/tdd/interface-design.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/interface-design.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 653,
+      "sha256": "764c5ff0e3fa6b4ab7095eb65ccc7201e090baf19fa16051dfdb72c06d27417d"
+    },
+    {
+      "logicalPath": "skills/tdd/mocking.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/mocking.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1481,
+      "sha256": "3ceb807fdf4a47d6a93d4d9a891e5ba6d362a6247bd08adc451feebfc17361ef"
+    },
+    {
+      "logicalPath": "skills/tdd/refactoring.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/refactoring.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 387,
+      "sha256": "54fced22dd1911b7094c3fe7979b7c1a40d40be307482c4adf7dc0588f27d6cc"
+    },
+    {
+      "logicalPath": "skills/tdd/tests.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tdd/tests.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 1640,
+      "sha256": "e12182f5c4c6a844b7c6ab4b8d2623b642aaaae5460fe58ed087efd4f3d5fb8a"
+    },
+    {
+      "logicalPath": "skills/tickets-breakdown-review/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-breakdown-review/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 5169,
+      "sha256": "bac300469c13d59b3251bc907f22b268f894489a00041165379f6865408d6f96"
+    },
+    {
+      "logicalPath": "skills/tickets-orchestrator/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-orchestrator/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 9149,
+      "sha256": "15204401bf3c4c896a5661741ff58be22cf375d52e4dae939facefe36e430cba"
+    },
+    {
+      "logicalPath": "skills/tickets-orchestrator/references/delegate-integrate.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-orchestrator/references/delegate-integrate.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 5311,
+      "sha256": "175f92c72dcb49bfbc0a1329d2f8560e26133402152467833919ccc4a79379c8"
+    },
+    {
+      "logicalPath": "skills/tickets-orchestrator/references/finish-delivery.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-orchestrator/references/finish-delivery.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 2636,
+      "sha256": "8967e8104020566d86969d993ab63ca6cfe815d228646e0ced8b804e82b04400"
+    },
+    {
+      "logicalPath": "skills/tickets-orchestrator/references/spec-gates.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-orchestrator/references/spec-gates.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3319,
+      "sha256": "97cf62e37c8fcd329dff91b169c75a6f23a1d4bd271c510b53dbaacf9948d996"
+    },
+    {
+      "logicalPath": "skills/tickets-orchestrator/references/stop-completion.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/tickets-orchestrator/references/stop-completion.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 3079,
+      "sha256": "32c4003835bbf0a30ab680d62c6da718e296761275126cb407d78f1917770459"
+    },
+    {
+      "logicalPath": "skills/to-spec/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/to-spec/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 5394,
+      "sha256": "09fe2071117f7b91a33aabaa461aa77f7b8c5595d6253571b9dabcc1b623c56a"
+    },
+    {
+      "logicalPath": "skills/to-tickets/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/to-tickets/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 7044,
+      "sha256": "b41e3955bf5a4b1e5ef1a6259d02e1453f4916a1d9d9f60ece8eed9246723e5a"
+    },
+    {
+      "logicalPath": "skills/to-tickets/references/publishing-details.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/to-tickets/references/publishing-details.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 6718,
+      "sha256": "9c7655d5f0c3d625c2b1dd825117949dbc4fa8d7f0fd063ced6c7ce8cd8e3da1"
+    },
+    {
+      "logicalPath": "skills/triage/AGENT-BRIEF.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/triage/AGENT-BRIEF.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 6921,
+      "sha256": "b15858e94a6fcf17b3e4ae106274164e4122b690f71fffc1f6180ef466021933"
+    },
+    {
+      "logicalPath": "skills/triage/OUT-OF-SCOPE.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/triage/OUT-OF-SCOPE.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 4282,
+      "sha256": "8ed8cf27833444060c81b3961a83c0e3d8e6cf2fcb2ddf6f8b07c6655cbb0d85"
+    },
+    {
+      "logicalPath": "skills/triage/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/triage/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 7944,
+      "sha256": "e81e7f8bad71212a630c1b1841c44f69012a8eff832791206ffff148bac31559"
+    },
+    {
+      "logicalPath": "skills/ui-evidence-proof/SKILL.md",
+      "origin": "working-tree",
+      "sourcePath": "skills/ui-evidence-proof/SKILL.md",
+      "sourceRevision": null,
+      "mode": 420,
+      "size": 6347,
+      "sha256": "2539fab30d5f00d46ae9417711e362f08fb1b3098a1e86863b90711e326d4b9a"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { hostname as osHostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -51,13 +51,7 @@ import {
   classifyPlanAutoParentRecovery,
   type PlanAutoChildRecoveryDecision,
 } from './plan-auto-recovery.js';
-import {
-  buildIssueTreeChildPrompt,
-  buildPlanAutoPrompt,
-  sessionPromptPath,
-  sessionReportPath,
-  writeDurablePrompt,
-} from './prompt.js';
+import { sessionPromptPath, sessionReportPath, writeDurablePrompt } from './prompt.js';
 import { runAgentAttemptLoop } from './agent-attempt.js';
 import type { ProcessProbeResult } from './scoped-recovery.js';
 import { evaluateParentRiskRoutingGate } from './review-gates.js';
@@ -67,13 +61,15 @@ import {
   buildReviewReadyHandoffEvidence,
 } from './runner-handoff-decision.js';
 import { sessionLogPath } from './run-log.js';
-import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
 import {
   finishBlockedTerminalOutcome,
   finishReviewReadyCommentTerminalOutcome,
   finishReviewReadyTerminalOutcome,
 } from './terminal-outcome.js';
 import { acquireTargetActivityFence } from './target-activity-fence.js';
+import { prepareSkillRuntimeExecution, skillExecutionPolicyHash } from './skill-runtime-execution.js';
+import { requireConfigV2 } from '../setup/skill-runtime-v2-migration.js';
+import { runSkillRuntimePreflight } from './skill-runtime-preflight.js';
 
 export interface PlanAutoCommandOptions {
   targetRoot: string;
@@ -174,34 +170,55 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
   const targetRoot = resolve(options.targetRoot);
   const now = options.now ?? new Date();
   const config = await readRunnerConfig(targetRoot);
+  let retainedOwner: import('../codex/app-server-process.js').AppServerProcessOwner | undefined;
+  if (!options.codexAdapter) {
+    if ((config as { version: number }).version !== 2) throw new Error('orchestrator-skill-runtime-v2-required');
+    retainedOwner = (await runSkillRuntimePreflight({
+      targetRoot, config: config as any, runId: `plan-${options.issueNumber}-preflight`, retainAppServer: true,
+    })).retainedOwner;
+  }
   const issueAdapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter = options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
   const git = options.git ?? new GitWorktreeManager();
   const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
-  const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(config);
-  const resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
-  const parentIssue = await issueAdapter.getIssue(options.issueNumber);
+  let resolvedBase;
+  let parentIssue;
+  try {
+    resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
+    parentIssue = await issueAdapter.getIssue(options.issueNumber);
+  } catch (error) {
+    await retainedOwner?.close('preclaim-failed');
+    throw error;
+  }
 
   if (!parentIssue) {
+    await retainedOwner?.close('preclaim-failed');
     throw new Error(`Issue #${options.issueNumber} was not found`);
   }
+  const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(requireConfigV2(config), { retainedOwner });
 
   const branchName = renderBranchTemplate(config.branches.issueTree, { parentIssueNumber: options.issueNumber });
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `tree-${options.issueNumber}`);
   const store = new RunnerStateStore(targetRoot, config);
-  const parentRecovery = await classifyPlanAutoParentRecovery({
-    targetRoot,
-    config,
-    parentIssue,
-    branchName,
-    worktreePath,
-    baseSha: resolvedBase.sha,
-    state: await store.load(),
-    git,
-    now,
-    hostname: options.hostname,
-    processProbe: options.processProbe,
-  });
+  let parentRecovery: Awaited<ReturnType<typeof classifyPlanAutoParentRecovery>>;
+  try {
+    parentRecovery = await classifyPlanAutoParentRecovery({
+      targetRoot,
+      config,
+      parentIssue,
+      branchName,
+      worktreePath,
+      baseSha: resolvedBase.sha,
+      state: await store.load(),
+      git,
+      now,
+      hostname: options.hostname,
+      processProbe: options.processProbe,
+    });
+  } catch (error) {
+    await retainedOwner?.close('preclaim-failed');
+    throw error;
+  }
   const decision = discoverIssueWork([parentIssue], config)[0];
   const parentLabels = new Set(parentIssue.labels.map((label) => label.name));
   const alreadyRunningPlanParent = decision?.kind === 'skipped'
@@ -210,13 +227,11 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
     && parentLabels.has(config.github.labels.planAuto.name)
     && !parentLabels.has(config.github.labels.child.name);
   if (!decision || !((decision.kind === 'eligible' && decision.mode === 'plan-parent') || alreadyRunningPlanParent)) {
+    await retainedOwner?.close('preclaim-failed');
     const reason = decision?.kind === 'skipped' ? decision.reason : 'not agent:plan-auto';
     throw new Error(`Issue #${options.issueNumber} is not eligible for agent:plan-auto planning: ${reason}`);
   }
 
-  const workflowPrompts = await readPlanWorkflowPrompts(targetRoot, config);
-  const issueTreeWorkflowPrompt = await readIssueTreeWorkflowPrompt(targetRoot, config);
-  const acceptanceProofWorkflowPrompt = await readAcceptanceProofWorkflowPrompt(targetRoot, config);
   let promptPath = '';
   let reportPath = '';
   let logPath = '';
@@ -230,9 +245,11 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
     baseResult(options.issueNumber, branchName, worktreePath, promptPath, reportPath, logPath, childIssues, sessionId, parentSnapshotPath);
 
   if (parentRecovery.kind === 'hard-block') {
+    await retainedOwner?.close('preclaim-failed');
     return finishPlanBlocked(issueAdapter, config, events, buildBase(), [parentRecovery.reason], childIssues, parentRecovery.marker);
   }
   if (alreadyRunningPlanParent && parentRecovery.kind !== 'resume-parent') {
+    await retainedOwner?.close('preclaim-failed');
     return finishPlanBlocked(
       issueAdapter,
       config,
@@ -244,7 +261,12 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
     );
   }
   if (!alreadyRunningPlanParent) {
-    await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
+    try {
+      await claimIssue(issueAdapter, config, options.issueNumber, 'plan-parent', now);
+    } catch (error) {
+      await retainedOwner?.close('preclaim-failed');
+      throw error;
+    }
   }
 
   try {
@@ -270,25 +292,7 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
     promptPath = sessionPromptPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
     logPath = sessionLogPath({ targetRoot, config, issueNumber: options.issueNumber, sessionId });
-    const isolatedHomePath = sessionCodexHomePath({ targetRoot, sessionId });
     await mkdir(dirname(reportPath), { recursive: true });
-    await mkdir(isolatedHomePath, { recursive: true });
-    const promptText = buildPlanAutoPrompt({
-      parentIssue,
-      config,
-      prompts: workflowPrompts,
-      promptPath,
-      reportPath,
-      branchName,
-      worktreePath,
-    });
-    await writeDurablePrompt({
-      targetRoot,
-      config,
-      issueNumber: options.issueNumber,
-      sessionId,
-      promptText,
-    });
     const snapshot = await writeContextSnapshot({
       targetRoot,
       config,
@@ -307,6 +311,21 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
       createdAt: now,
     });
     parentSnapshotPath = snapshot.path;
+    const execution = await prepareSkillRuntimeExecution({
+      targetRoot,
+      config,
+      worktreePath,
+      runId: `issue-${options.issueNumber}-${sessionId}`,
+      issueNumber: options.issueNumber,
+      sessionId,
+      branchName,
+      phase: 'plan-parent',
+      operationId: 'plan-parent',
+      attemptId: `${sessionId}-plan-parent`,
+      reportPath,
+      logPath,
+      context: { parentIssue, branchName, worktreePath, promptPath, reportPath, logPath },
+    });
     await safeAppendEvent(events, {
       timestamp: now,
       issueNumber: options.issueNumber,
@@ -333,28 +352,26 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
       host: (options.hostname ?? osHostname)(),
       leaseUpdatedAt: now.toISOString(),
       baseSha: resolvedBase.sha,
+      ...((config as { version: number }).version === 2 ? {
+        stateVersion: 2 as const,
+        runId: execution.input.runId,
+        skillRuntime: execution.input.skillRuntime,
+        executionPolicyHash: skillExecutionPolicyHash(execution.input.manifestNode),
+        effectivePolicySummary: execution.input.targetPolicy,
+        graph: execution.graph,
+      } : {}),
     });
 
     const beforeHead = await git.getHead(worktreePath);
     let codexResult: CodexCommandRunResult;
-    try {
-      codexResult = await codexAdapter.run({
-        targetRoot,
-        config,
-        worktreePath,
-        promptPath,
-        promptText,
-        reportPath,
-        isolatedHomePath,
-        issueNumber: options.issueNumber,
-        sessionId,
-        branchName,
-        phase: 'plan-parent',
-        logPath,
-      });
-    } finally {
-      await cleanupSessionCodexHome(isolatedHomePath);
-    }
+    await writeDurablePrompt({
+      targetRoot,
+      config,
+      issueNumber: options.issueNumber,
+      sessionId,
+      contextArtifactPath: execution.contextArtifactPath,
+    });
+    codexResult = await codexAdapter.run(execution.input);
     const afterHead = await git.getHead(worktreePath);
     const base = buildBase();
 
@@ -490,8 +507,6 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
         git,
         codexAdapter,
         shellExecutor,
-        issueTreeWorkflowPrompt,
-        acceptanceProofWorkflowPrompt,
         now,
         events,
         recovery: childRecoveryByStableId.get(child.metadata.stableId),
@@ -665,6 +680,7 @@ async function runPlanAutoCommandFenced(options: PlanAutoCommandOptions): Promis
       riskRoutingWarnings,
     };
   } catch (error) {
+    await retainedOwner?.close('runner-shutdown');
     const message = error instanceof Error ? error.message : 'plan-auto planning failed';
     if (pullRequest) {
       throw new Error(`Issue-tree execution failed after draft PR creation (${pullRequest.url}); not marking parent blocked: ${message}`);
@@ -702,47 +718,6 @@ async function readPlanReport(
   }
 }
 
-async function readPlanWorkflowPrompts(targetRoot: string, config: CodexOrchestratorConfig): Promise<PlanWorkflowPrompts> {
-  return {
-    prd: await readPlanWorkflowPrompt(targetRoot, config.workflows.prd.promptPath),
-    issueBreakdown: await readPlanWorkflowPrompt(targetRoot, config.workflows.issueBreakdown.promptPath),
-    breakdownReview: await readPlanWorkflowPrompt(targetRoot, config.workflows.breakdownReview.promptPath),
-    triage: await readPlanWorkflowPrompt(targetRoot, config.workflows.triage.promptPath),
-  };
-}
-
-async function readPlanWorkflowPrompt(targetRoot: string, promptPath: string | undefined): Promise<string> {
-  return readWorkflowPrompt(targetRoot, promptPath, 'Plan-auto workflow prompt');
-}
-
-async function readIssueTreeWorkflowPrompt(targetRoot: string, config: CodexOrchestratorConfig): Promise<string> {
-  return readWorkflowPrompt(
-    targetRoot,
-    config.workflows.issueTreeOrchestration.promptPath,
-    'Issue-tree orchestration workflow prompt',
-  );
-}
-
-async function readAcceptanceProofWorkflowPrompt(targetRoot: string, config: CodexOrchestratorConfig): Promise<string> {
-  return readWorkflowPrompt(
-    targetRoot,
-    config.workflows.acceptanceProof.promptPath,
-    'Acceptance proof workflow prompt',
-  );
-}
-
-async function readWorkflowPrompt(targetRoot: string, promptPath: string | undefined, promptName: string): Promise<string> {
-  const absolutePath = promptPath ? join(targetRoot, promptPath) : 'undefined';
-  try {
-    return await readFile(absolutePath, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      throw new Error(`${promptName} not found at ${absolutePath}`);
-    }
-    throw error;
-  }
-}
-
 async function executeChild(input: {
   targetRoot: string;
   config: CodexOrchestratorConfig;
@@ -754,8 +729,6 @@ async function executeChild(input: {
   git: GitWorktreeManager;
   codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
   shellExecutor: ShellCommandExecutor;
-  issueTreeWorkflowPrompt: string;
-  acceptanceProofWorkflowPrompt: string;
   now: Date;
   events: RunnerLifecycleEventStore;
   recovery?: Extract<PlanAutoChildRecoveryDecision, { kind: 'resume-child-rework' }>;
@@ -807,25 +780,13 @@ async function executeChild(input: {
     createdAt: input.now,
     firstAttempt: input.recovery ? input.recovery.rework.attempt : 0,
     initialRework: input.recovery?.rework,
+    runtimeContext: {
+      parentIssue: input.parentIssue,
+      childMetadata: input.child.metadata,
+      dependencyIssues: input.dependencyIssues,
+    },
     buildSessionId: ({ attempt, attemptNow }) =>
       `tree-${input.parentIssue.number}-issue-${childIssueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`,
-    buildPrompt: ({ promptPath: attemptPromptPath, reportPath: attemptReportPath, rework }) => {
-      const promptText = buildIssueTreeChildPrompt({
-        parentIssue: input.parentIssue,
-        childIssue: input.child.issue,
-        config: input.config,
-        workflowPromptText: input.issueTreeWorkflowPrompt,
-        childMetadata: input.child.metadata,
-        dependencyIssues: input.dependencyIssues,
-        promptPath: attemptPromptPath,
-        reportPath: attemptReportPath,
-        branchName,
-        worktreePath,
-      });
-      return rework
-        ? `${promptText}\n\n## Rework Request\nThis is an automatic rework attempt (#${rework.attempt}). Continue from the current worktree state; do not start over.\nThe previous attempt was blocked for these reasons:\n${rework.blockedReasons.map((reason) => `- ${reason}`).join('\n')}\n${rework.disableOptionalFigmaMcp ? 'Optional Figma MCP failed in the previous attempt. Continue without optional Figma MCP access unless the issue explicitly requires Figma.\n' : ''}Address the blockers, then produce a fresh completion report JSON for the runner.`
-        : promptText;
-    },
     buildSnapshotDecision: ({ rework }) => rework
       ? `tree-child rework attempt #${rework.attempt} under parent #${input.parentIssue.number}`
       : `child issue execution under parent #${input.parentIssue.number}`,
@@ -839,7 +800,6 @@ async function executeChild(input: {
     events: input.events,
     acceptanceProof: {
       targetRoot: input.targetRoot,
-      workflowPromptText: input.acceptanceProofWorkflowPrompt,
       codexAdapter: input.codexAdapter,
     },
     onAcceptanceProofAttemptEvent: ({ sessionId: attemptSessionId, event }) => appendAcceptanceProofEvent({

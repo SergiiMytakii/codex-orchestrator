@@ -1,15 +1,18 @@
 import { access, constants } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import type { CodexOrchestratorConfig } from '../config/schema.js';
+import type { CodexOrchestratorConfig, CodexOrchestratorConfigV2 } from '../config/schema.js';
 import { codexPhaseKeys } from '../config/schema.js';
 import { baseBranchParts, formatBaseBranch, isLegacyBaseBranch } from '../git/base-branch.js';
 import { resolveExecutableCommand, type ExecutableCommandResolver } from '../setup/codex-command-resolver.js';
 import type { GitHubLabelAdapter } from '../setup/labels.js';
 import { GhCliLabelAdapter } from '../setup/github-label-adapter.js';
-import { checkPromptFiles, promptConflictGuidance } from '../setup/prompt-sync.js';
 import { defaultShellCommandExecutor, type ShellCommandExecutor } from '../process/command.js';
 import { readRunnerConfig } from './command-utils.js';
+import { loadPackageSkillBundle } from '../skills/package-skill-bundle.js';
+import { RunnerStateStore } from './local-state.js';
+
+type DoctorConfig = CodexOrchestratorConfig | CodexOrchestratorConfigV2;
 
 export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -48,7 +51,7 @@ export interface DoctorCommandResult {
 export async function runDoctorCommand(options: DoctorCommandOptions): Promise<DoctorCommandResult> {
   const targetRoot = resolve(options.targetRoot);
   const checks: DoctorCheckResult[] = [];
-  let config: CodexOrchestratorConfig | undefined;
+  let config: DoctorConfig | undefined;
 
   try {
     config = await readRunnerConfig(targetRoot);
@@ -73,7 +76,7 @@ export async function runDoctorCommand(options: DoctorCommandOptions): Promise<D
 
 async function collectReadinessChecks(
   targetRoot: string,
-  config: CodexOrchestratorConfig,
+  config: DoctorConfig,
   labelAdapter: GitHubLabelAdapter,
   shellExecutor: ShellCommandExecutor,
   commandResolver: ExecutableCommandResolver,
@@ -101,7 +104,9 @@ async function collectReadinessChecks(
   checks.push(await checkPath(targetRoot, 'target', 'Target directory'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.stateDir), 'state-dir', 'Runner state directory', 'warn'));
   checks.push(await checkPath(resolve(targetRoot, config.runner.workspaceRoot), 'workspace-root', 'Runner workspace root', 'warn'));
-  checks.push(await checkPromptUpdates(targetRoot));
+  checks.push(config.version === 2
+    ? await checkSkillRuntimeV2(targetRoot, config)
+    : check('skill-runtime-v2', 'Package skill runtime', 'fail', 'orchestrator-skill-runtime-v2-activation-required'));
   checks.push(await checkCommand(commandResolver, config.codex.command, 'codex-command', 'Codex command'));
   checks.push(...await checkProfileCommands(config, commandResolver));
   checks.push(check(
@@ -127,7 +132,7 @@ async function collectReadinessChecks(
   return checks;
 }
 
-function baseBranchReadinessCommand(config: CodexOrchestratorConfig): string {
+function baseBranchReadinessCommand(config: DoctorConfig): string {
   const base = baseBranchParts(config.branches.base);
   return [
     `git fetch ${shellQuote(base.remote)} --prune`,
@@ -137,7 +142,7 @@ function baseBranchReadinessCommand(config: CodexOrchestratorConfig): string {
 
 async function checkCodexBranchBases(
   targetRoot: string,
-  config: CodexOrchestratorConfig,
+  config: DoctorConfig,
   shellExecutor: ShellCommandExecutor,
 ): Promise<DoctorCheckResult> {
   const base = baseBranchParts(config.branches.base);
@@ -160,31 +165,30 @@ async function checkCodexBranchBases(
   );
 }
 
-async function checkPromptUpdates(targetRoot: string): Promise<DoctorCheckResult> {
-  const result = await checkPromptFiles(targetRoot);
-  const pending = result.installed.length + result.updated.length + result.conflicts.length;
-  if (pending === 0) {
-    return check('prompt-sync', 'Prompt sync', 'pass', 'project prompts match bundled package prompts');
+async function checkSkillRuntimeV2(targetRoot: string, config: CodexOrchestratorConfigV2): Promise<DoctorCheckResult> {
+  try {
+    const { manifest } = await loadPackageSkillBundle();
+    const state = await new RunnerStateStore(targetRoot, config as unknown as CodexOrchestratorConfig).load();
+    if (state.version !== 2 || state.runs.some((run) => !('stateVersion' in run))) {
+      return check('skill-runtime-v2', 'Package skill runtime', 'fail', 'runner state v2 is required and cannot contain legacy runs');
+    }
+    return check(
+      'skill-runtime-v2',
+      'Package skill runtime',
+      'pass',
+      `package bundle ${manifest.package.version} (${manifest.bundleHash}) and runner state v2 are valid`,
+    );
+  } catch (error) {
+    return check('skill-runtime-v2', 'Package skill runtime', 'fail', error instanceof Error ? error.message : 'package skill runtime is invalid');
   }
-
-  return check(
-    'prompt-sync',
-    'Prompt sync',
-    'warn',
-    `prompt updates available: ${result.installed.length} missing, ${result.updated.length} safe update(s), ${result.conflicts.length} conflict(s)`,
-    [
-      'Run codex-orchestrator setup --sync-prompts=auto to apply safe prompt updates.',
-      'If conflicts are reported, ask the user to choose keep, merge, or replace.',
-      ...promptConflictGuidance('codex-orchestrator setup'),
-    ],
-  );
 }
 
 async function checkProfileCommands(
-  config: CodexOrchestratorConfig,
+  config: DoctorConfig,
   commandResolver: ExecutableCommandResolver,
 ): Promise<DoctorCheckResult[]> {
   const checks: DoctorCheckResult[] = [];
+  if (config.version === 2) return checks;
   for (const phase of codexPhaseKeys) {
     const command = config.codex.profiles?.[phase]?.command;
     if (!command || command === config.codex.command) {
@@ -273,7 +277,7 @@ function unavailableCommandSummary(id: string, command: string): string {
 
 function buildDoctorJson(
   targetRoot: string,
-  config: CodexOrchestratorConfig | undefined,
+  config: DoctorConfig | undefined,
   checks: DoctorCheckResult[],
 ): DoctorJson {
   const pass = checks.filter((item) => item.status === 'pass');

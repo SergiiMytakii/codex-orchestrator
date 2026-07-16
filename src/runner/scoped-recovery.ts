@@ -35,6 +35,7 @@ import {
   MISSING_COMPLETION_REPORT_REASON,
 } from './rework-policy.js';
 import { acquireTargetActivityFence } from './target-activity-fence.js';
+import { requireConfigV2 } from '../setup/skill-runtime-v2-migration.js';
 
 export const SCOPED_RECOVERY_LEASE_STALE_MS = 30 * 60 * 1000;
 export const SCOPED_RECOVERY_BLOCKED_MARKER_PREFIX = '<!-- codex-orchestrator:recovery-blocked';
@@ -177,7 +178,7 @@ async function recoverScopedRunFenced(
   const issueAdapter = input.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter = input.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
   const git = input.git ?? new GitWorktreeManager();
-  const codexAdapter = input.codexAdapter ?? new CodexCommandAdapter(config);
+  const codexAdapter = input.codexAdapter ?? new CodexCommandAdapter(requireConfigV2(config));
   const shellExecutor = input.shellExecutor ?? defaultShellCommandExecutor;
   const store = new RunnerStateStore(targetRoot, config);
   const state = await store.load();

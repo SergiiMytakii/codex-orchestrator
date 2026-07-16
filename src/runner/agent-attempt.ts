@@ -22,17 +22,8 @@ import { RunnerStateStore, type RunnerProcessMetadata } from './local-state.js';
 import { sessionPromptPath, sessionReportPath, writeDurablePrompt } from './prompt.js';
 import { decideImplementationRework } from './rework-policy.js';
 import { sessionLogPath } from './run-log.js';
-import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
-
-export interface AgentAttemptPromptInput {
-  attempt: number;
-  attemptNow: Date;
-  sessionId: string;
-  promptPath: string;
-  reportPath: string;
-  logPath: string;
-  rework?: AgentAttemptRework;
-}
+import { prepareSkillRuntimeExecution } from './skill-runtime-execution.js';
+import { skillExecutionPolicyHash } from './skill-runtime-execution.js';
 
 export interface AgentAttemptRework {
   attempt: number;
@@ -55,15 +46,14 @@ export interface AgentAttemptLoopInput {
   createdAt: Date;
   firstAttempt?: number;
   initialRework?: AgentAttemptRework;
+  runtimeContext?: Record<string, unknown>;
   buildSessionId: (input: { attempt: number; attemptNow: Date }) => string;
-  buildPrompt: (input: AgentAttemptPromptInput) => string;
   buildSnapshotDecision: (input: { rework?: AgentAttemptRework }) => string;
   startedSummary: (input: { rework?: AgentAttemptRework }) => string;
   reworkScheduledSummary: (input: { nextAttempt: number }) => string;
   reworkEventPhase?: CodexPhase;
   missingPublishabilityMessage?: string;
   codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
-  codexTimeoutMs?: number;
   git: Pick<GitWorktreeManager, 'getHead'> & ImplementationPublishabilityInput['git'];
   shellExecutor: ShellCommandExecutor;
   commitMessage: string;
@@ -121,25 +111,7 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
     promptPath = sessionPromptPath({ targetRoot: input.targetRoot, config: input.config, issueNumber: input.issueNumber, sessionId });
     reportPath = sessionReportPath({ targetRoot: input.targetRoot, config: input.config, issueNumber: input.issueNumber, sessionId });
     logPath = sessionLogPath({ targetRoot: input.targetRoot, config: input.config, issueNumber: input.issueNumber, sessionId });
-    const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId });
     await mkdir(dirname(reportPath), { recursive: true });
-    await mkdir(isolatedHomePath, { recursive: true });
-    const promptText = input.buildPrompt({
-      attempt,
-      attemptNow,
-      sessionId,
-      promptPath,
-      reportPath,
-      logPath,
-      rework,
-    });
-    await writeDurablePrompt({
-      targetRoot: input.targetRoot,
-      config: input.config,
-      issueNumber: input.issueNumber,
-      sessionId,
-      promptText,
-    });
     const snapshot = await writeContextSnapshot({
       targetRoot: input.targetRoot,
       config: input.config,
@@ -160,6 +132,32 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
       createdAt: attemptNow,
     });
     snapshotPath = snapshot.path;
+    const execution = await prepareSkillRuntimeExecution({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      worktreePath: input.worktreePath,
+      runId: `issue-${input.issueNumber}-${sessionId}`,
+      issueNumber: input.issueNumber,
+      sessionId,
+      branchName: input.branchName,
+      phase: input.phase,
+      operationId: 'implementation-attempt',
+      attemptId: `${sessionId}-implementation`,
+      reportPath,
+      logPath,
+      phaseEnv: {},
+      context: {
+        ...input.runtimeContext,
+        issue: input.issue,
+        mode: input.mode,
+        parentIssueNumber: input.parentIssueNumber,
+        baseBranch: input.baseBranch,
+        promptPath,
+        reportPath,
+        logPath,
+        rework,
+      },
+    });
     await store.upsertRun({
       issueNumber: input.issueNumber,
       mode: input.mode,
@@ -174,6 +172,14 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
       updatedAt: attemptNow.toISOString(),
       attemptStartedAt: attemptNow.toISOString(),
       snapshotPath,
+      ...((input.config as { version: number }).version === 2 ? {
+        stateVersion: 2 as const,
+        runId: execution.input.runId,
+        skillRuntime: execution.input.skillRuntime,
+        executionPolicyHash: skillExecutionPolicyHash(execution.input.manifestNode),
+        effectivePolicySummary: execution.input.targetPolicy,
+        graph: execution.graph,
+      } : {}),
       ...(input.parentIssueNumber ? { parentIssueNumber: input.parentIssueNumber } : {}),
       ...input.runMetadata?.({ attempt, attemptNow, sessionId, promptPath, reportPath, logPath, snapshotPath }),
     });
@@ -191,26 +197,14 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
 
     const beforeHead = await input.git.getHead(input.worktreePath);
     let codexResult: CodexCommandRunResult;
-    try {
-      codexResult = await input.codexAdapter.run({
-        targetRoot: input.targetRoot,
-        config: input.config,
-        worktreePath: input.worktreePath,
-        promptPath,
-        promptText,
-        reportPath,
-        isolatedHomePath,
-        issueNumber: input.issueNumber,
-        sessionId,
-        branchName: input.branchName,
-        phase: input.phase,
-        timeoutMs: input.codexTimeoutMs,
-        logPath,
-        disableOptionalFigmaMcp: rework?.disableOptionalFigmaMcp,
-      });
-    } finally {
-      await cleanupSessionCodexHome(isolatedHomePath);
-    }
+    await writeDurablePrompt({
+      targetRoot: input.targetRoot,
+      config: input.config,
+      issueNumber: input.issueNumber,
+      sessionId,
+      contextArtifactPath: execution.contextArtifactPath,
+    });
+    codexResult = await input.codexAdapter.run(execution.input);
     const afterHead = await input.git.getHead(input.worktreePath);
     publishability = await runImplementationPublishabilityCheck({
       config: input.config,
@@ -230,7 +224,6 @@ export async function runAgentAttemptLoop(input: AgentAttemptLoopInput): Promise
         targetRoot: input.targetRoot,
         sessionId,
         branchName: input.branchName,
-        workflowPromptText: promptText,
         codexAdapter: input.codexAdapter,
       },
       acceptanceProof: input.acceptanceProof

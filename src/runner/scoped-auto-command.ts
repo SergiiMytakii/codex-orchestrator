@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -35,9 +34,6 @@ import {
 import { RunnerStateStore } from './local-state.js';
 import { RunnerLifecycleEventStore, type LifecycleArtifact } from './lifecycle-events.js';
 import type { AcceptanceProofAttemptEvidence } from './acceptance-proof-runner.js';
-import {
-  buildScopedImplementationPrompt,
-} from './prompt.js';
 import { runAgentAttemptLoop } from './agent-attempt.js';
 import {
   buildBlockedHandoffEvidence,
@@ -51,6 +47,8 @@ import {
   finishReviewReadyTerminalOutcome,
 } from './terminal-outcome.js';
 import { acquireTargetActivityFence } from './target-activity-fence.js';
+import { requireConfigV2 } from '../setup/skill-runtime-v2-migration.js';
+import { runSkillRuntimePreflight } from './skill-runtime-preflight.js';
 
 export interface ScopedAutoCommandOptions {
   targetRoot: string;
@@ -131,44 +129,49 @@ async function runScopedAutoCommandInternal(
   const targetRoot = resolve(options.targetRoot);
   const now = options.now ?? new Date();
   const config = await readRunnerConfig(targetRoot);
+  let retainedOwner: import('../codex/app-server-process.js').AppServerProcessOwner | undefined;
+  if (!options.codexAdapter) {
+    if ((config as { version: number }).version !== 2) throw new Error('orchestrator-skill-runtime-v2-required');
+    retainedOwner = (await runSkillRuntimePreflight({
+      targetRoot, config: config as any, runId: `scoped-${options.issueNumber}-preflight`, retainAppServer: true,
+    })).retainedOwner;
+  }
   const issueAdapter = options.issueAdapter ?? new GhCliIssueAdapter(config.github.owner, config.github.repo);
   const pullRequestAdapter = options.pullRequestAdapter ?? new GhCliPullRequestAdapter(config.github.owner, config.github.repo);
   const git = options.git ?? new GitWorktreeManager();
   const shellExecutor = options.shellExecutor ?? defaultShellCommandExecutor;
-  const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(config);
-  const resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
-  const issue = recovery?.issue ?? await issueAdapter.getIssue(options.issueNumber);
+  let resolvedBase;
+  let issue;
+  try {
+    resolvedBase = await resolveBaseBranch({ targetRoot, base: config.branches.base });
+    issue = recovery?.issue ?? await issueAdapter.getIssue(options.issueNumber);
+  } catch (error) {
+    await retainedOwner?.close('preclaim-failed');
+    throw error;
+  }
 
   if (!issue) {
+    await retainedOwner?.close('preclaim-failed');
     throw new Error(`Issue #${options.issueNumber} was not found`);
   }
 
   if (issue.number !== options.issueNumber) {
+    await retainedOwner?.close('preclaim-failed');
     throw new Error(`Recovery issue #${issue.number} does not match scoped issue #${options.issueNumber}`);
   }
 
   if (!recovery) {
     const decision = discoverIssueWork([issue], config)[0];
     if (!decision || decision.kind !== 'eligible' || decision.mode !== 'scoped-issue') {
+      await retainedOwner?.close('preclaim-failed');
       const reason = decision?.kind === 'skipped' ? decision.reason : 'not scoped agent:auto';
       throw new Error(`Issue #${options.issueNumber} is not eligible for scoped agent:auto execution: ${reason}`);
     }
   }
+  const codexAdapter = options.codexAdapter ?? new CodexCommandAdapter(requireConfigV2(config), { retainedOwner });
 
-  const workflowPath = config.workflows.scopedImplementation.promptPath;
-  if (!workflowPath) {
-    throw new Error('Scoped implementation workflow prompt not found at undefined');
-  }
-  const workflowPromptPath = join(targetRoot, workflowPath);
-  const workflowPromptText = await readWorkflowPrompt(workflowPromptPath);
-  const acceptanceProofWorkflowPath = config.workflows.acceptanceProof.promptPath;
-  if (!acceptanceProofWorkflowPath) {
-    throw new Error('Acceptance proof workflow prompt not found at undefined');
-  }
-  const acceptanceProofWorkflowText = await readWorkflowPrompt(join(targetRoot, acceptanceProofWorkflowPath));
   const branchName = renderBranchTemplate(config.branches.scopedIssue, { issueNumber: options.issueNumber });
   const worktreePath = join(targetRoot, config.runner.workspaceRoot, `issue-${options.issueNumber}`);
-  const codexTimeoutMs = selectCodexTimeoutMs(config, issue);
   let promptPath = '';
   let reportPath = '';
   let logPath = '';
@@ -178,16 +181,21 @@ async function runScopedAutoCommandInternal(
   const store = new RunnerStateStore(targetRoot, config);
   const events = new RunnerLifecycleEventStore(targetRoot, config);
 
-  if (!recovery) {
-    await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
-    await safeAppendEvent(events, {
-      timestamp: now,
-      issueNumber: options.issueNumber,
-      mode: 'scoped-issue',
-      phase: 'scoped-issue',
-      status: 'started',
-      summary: 'Issue claimed for scoped autonomous work.',
-    });
+  try {
+    if (!recovery) {
+      await claimIssue(issueAdapter, config, options.issueNumber, 'scoped-issue', now);
+      await safeAppendEvent(events, {
+        timestamp: now,
+        issueNumber: options.issueNumber,
+        mode: 'scoped-issue',
+        phase: 'scoped-issue',
+        status: 'started',
+        summary: 'Issue claimed for scoped autonomous work.',
+      });
+    }
+  } catch (error) {
+    await retainedOwner?.close('preclaim-failed');
+    throw error;
   }
 
   try {
@@ -199,10 +207,6 @@ async function runScopedAutoCommandInternal(
       requiredBaseSha: resolvedBase.sha,
       allowResume: true,
     });
-    const maxReworkAttempts = Math.max(
-      config.loopPolicy.rework.maxAttempts,
-      config.reviewGates.acceptanceProof.maxIterations - 1,
-    );
     const attemptLoop = await runAgentAttemptLoop({
       targetRoot,
       config,
@@ -219,23 +223,12 @@ async function runScopedAutoCommandInternal(
       initialRework: recovery?.initialRework,
       buildSessionId: ({ attempt, attemptNow }) =>
         `issue-${options.issueNumber}-${formatSessionTimestamp(attemptNow)}${attempt === 0 ? '' : `-attempt-${attempt}`}`,
-      buildPrompt: ({ promptPath: attemptPromptPath, reportPath: attemptReportPath, rework }) => buildScopedImplementationPrompt({
-        issue,
-        config,
-        workflowPromptText,
-        promptPath: attemptPromptPath,
-        reportPath: attemptReportPath,
-        branchName,
-        worktreePath,
-        rework,
-      }),
       buildSnapshotDecision: () => 'has configured auto label and no blocking state labels',
       startedSummary: () => 'Starting scoped Codex implementation session.',
       reworkScheduledSummary: ({ nextAttempt }) => `Runner scheduled scoped rework attempt #${nextAttempt}.`,
       reworkEventPhase: 'quality-review',
       missingPublishabilityMessage: 'Runner internal error: missing publishability result',
       codexAdapter,
-      codexTimeoutMs,
       git,
       shellExecutor,
       commitMessage: `Codex: implement issue #${options.issueNumber}`,
@@ -244,7 +237,6 @@ async function runScopedAutoCommandInternal(
       localPhaseExecutor: options.localPhaseExecutor,
       acceptanceProof: {
         targetRoot,
-        workflowPromptText: acceptanceProofWorkflowText,
         codexAdapter,
       },
       onAcceptanceProofAttemptEvent: ({ sessionId: attemptSessionId, event }) => appendAcceptanceProofEvent({
@@ -373,7 +365,7 @@ async function runScopedAutoCommandInternal(
       issue,
       codexAdapter,
       worktreePath,
-      isolatedSessionId: `issue-${options.issueNumber}-${formatSessionTimestamp(new Date(now.getTime() + maxReworkAttempts + 1))}-fresh-review`,
+      isolatedSessionId: `issue-${options.issueNumber}-${formatSessionTimestamp(new Date(attemptLoop.lastAttemptStartedAt.getTime() + 1))}-fresh-review`,
       branchName,
       publishability,
     });
@@ -491,6 +483,7 @@ async function runScopedAutoCommandInternal(
       reportComment: handoff.reportComment,
     };
   } catch (error) {
+    await retainedOwner?.close('runner-shutdown');
     const message = error instanceof Error ? error.message : 'scoped execution failed';
     if (pullRequest) {
       await safeAppendEvent(events, {
@@ -582,17 +575,6 @@ async function appendAcceptanceProofEvent(input: {
       ...evidence.artifactPaths.map((path) => ({ kind: 'other' as const, path, description: 'Acceptance proof artifact' })),
     ] : undefined,
   });
-}
-
-async function readWorkflowPrompt(path: string): Promise<string> {
-  try {
-    return await readFile(path, 'utf8');
-  } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-      throw new Error(`Scoped implementation workflow prompt not found at ${path}`);
-    }
-    throw error;
-  }
 }
 
 async function finishBlocked(
@@ -775,20 +757,4 @@ function baseResult(
 
 function renderTemplate(template: string, issueNumber: number): string {
   return template.replaceAll('${issueNumber}', String(issueNumber));
-}
-
-function selectCodexTimeoutMs(config: CodexOrchestratorConfig, issue: GitHubIssue): number | undefined {
-  if (config.codex.profiles?.['scoped-issue']?.timeoutMs) {
-    return undefined;
-  }
-  if (!config.codex.mobileTimeoutMs || !isMobileIssue(issue)) {
-    return undefined;
-  }
-  return config.codex.mobileTimeoutMs;
-}
-
-function isMobileIssue(issue: GitHubIssue): boolean {
-  const labels = issue.labels.map((label) => label.name).join('\n');
-  const text = `${issue.title}\n${issue.body}\n${labels}`;
-  return /\b(?:android|flutter|ios|iphone|ipad|mobile|emulator|apk|aab|dart)\b/iu.test(text);
 }

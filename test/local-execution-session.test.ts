@@ -16,7 +16,6 @@ import {
   IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
-  REQUIRED_FIGMA_MCP_FAILURE_REASON,
 } from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { fallbackWorkflows } from './fixtures/config.js';
@@ -321,7 +320,6 @@ test('implementation publishability repairs a missing completion report once for
       targetRoot,
       sessionId: 'session-1',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         repairInputs.push(input);
         await writeScopedReport(input.reportPath, { changes: ['README.md'] });
@@ -334,9 +332,9 @@ test('implementation publishability repairs a missing completion report once for
   assert.equal(repairInputs.length, 1);
   assert.equal(repairInputs[0]?.sessionId, 'session-1-completion-report-repair');
   assert.equal(repairInputs[0]?.reportPath, reportPath);
-  assert.match(repairInputs[0]?.promptPath ?? '', /issue-155-session-1-completion-report-repair\.md$/);
+  assert.match(repairInputs[0]?.contextArtifactPath ?? '', /session-1-completion-report-repair.*\.json$/);
   assert.match(repairInputs[0]?.logPath ?? '', /issue-155-session-1-completion-report-repair\.log$/);
-  assert.match(repairInputs[0]?.promptText ?? '', /repair only the completion report JSON/i);
+  assert.match(await readFile(repairInputs[0]!.contextArtifactPath, 'utf8'), /missing-report/i);
   assert.deepEqual(result.status === 'publish-ready' ? result.changedFiles : [], ['README.md']);
   assert.deepEqual(result.status === 'publish-ready' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['completion-report']);
 });
@@ -347,7 +345,7 @@ test('implementation publishability repairs invalid completion report JSON for s
   const beforeHead = await git.getHead(repo);
   const reportPath = join(await mkdtemp(join(tmpdir(), 'codex-orchestrator-report-')), 'report.json');
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-target-'));
-  const prompts: string[] = [];
+  const contexts: string[] = [];
 
   await writeFile(join(repo, 'README.md'), '# fixture\ninvalid repaired\n', 'utf8');
   await mkdir(join(reportPath, '..'), { recursive: true });
@@ -369,9 +367,8 @@ test('implementation publishability repairs invalid completion report JSON for s
       targetRoot,
       sessionId: 'session-2',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
-        prompts.push(input.promptText);
+        contexts.push(await readFile(input.contextArtifactPath, 'utf8'));
         await writeScopedReport(input.reportPath, { changes: ['README.md'] });
         return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
       }),
@@ -379,8 +376,8 @@ test('implementation publishability repairs invalid completion report JSON for s
   });
 
   assert.equal(result.status, 'publish-ready');
-  assert.match(prompts[0] ?? '', /report must be valid JSON/);
-  assert.match(prompts[0] ?? '', /\{ invalid json/);
+  assert.match(contexts[0] ?? '', /report must be valid JSON/);
+  assert.match(contexts[0] ?? '', /\{ invalid json/);
 });
 
 test('implementation publishability preserves completion report repair evidence when rerun checks warn', async () => {
@@ -408,7 +405,6 @@ test('implementation publishability preserves completion report repair evidence 
       targetRoot,
       sessionId: 'session-rerun-block',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeScopedReport(input.reportPath, { changes: ['README.md'] });
         return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
@@ -445,7 +441,6 @@ test('implementation publishability does not repair missing report when no files
       targetRoot,
       sessionId: 'session-3',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async () => {
         repairCalls += 1;
         return { stdout: '', stderr: '', exitCode: 0 };
@@ -492,7 +487,6 @@ test('implementation publishability does not run completion report repair for ha
       targetRoot,
       sessionId: 'session-hard',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async () => {
         repairCalls += 1;
         return { stdout: '', stderr: '', exitCode: 0 };
@@ -525,7 +519,6 @@ test('implementation publishability does not run completion report repair for ha
       targetRoot,
       sessionId: 'session-hard-published',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async () => {
         repairCalls += 1;
         return { stdout: '', stderr: '', exitCode: 0 };
@@ -563,7 +556,6 @@ test('implementation publishability allows completion report repair to write onl
       targetRoot,
       sessionId: 'session-in-worktree-report',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeScopedReport(input.reportPath, { changes: ['README.md'] });
         return { stdout: '{"status":"completed"}', stderr: '', exitCode: 0 };
@@ -602,7 +594,6 @@ test('implementation publishability terminal-blocks completion report repair fai
       targetRoot,
       sessionId: 'session-4',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async () => ({ stdout: '', stderr: 'repair failed', exitCode: 1 })),
     },
   });
@@ -637,7 +628,6 @@ test('implementation publishability blocks completion report repair that mutates
       targetRoot,
       sessionId: 'session-5',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "repair mutation";\n', 'utf8');
         await writeScopedReport(input.reportPath, { changes: ['src/feature.ts'] });
@@ -678,7 +668,6 @@ test('implementation publishability blocks completion report repair that creates
       targetRoot,
       sessionId: 'session-6',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeScopedReport(input.reportPath, { changes: ['README.md'] });
         await execFileAsync('git', ['-C', repo, 'add', 'README.md']);
@@ -733,7 +722,6 @@ test('implementation publishability repairs missing review-gate evidence once an
       targetRoot,
       sessionId: 'session-evidence',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         repairInputs.push(input);
         await writeScopedReport(input.reportPath, {
@@ -755,7 +743,7 @@ test('implementation publishability repairs missing review-gate evidence once an
   assert.equal(result.status, 'publish-ready');
   assert.equal(repairInputs.length, 1);
   assert.equal(repairInputs[0]?.sessionId, 'session-evidence-evidence-repair');
-  assert.match(repairInputs[0]?.promptText ?? '', /repair only missing review-gate evidence/i);
+  assert.match(await readFile(repairInputs[0]!.contextArtifactPath, 'utf8'), /reviewGate/);
   assert.deepEqual(result.status === 'publish-ready' ? (result.repairAttempts ?? []).map((attempt) => attempt.kind) : [], ['evidence']);
 });
 
@@ -799,7 +787,6 @@ test('implementation publishability blocks evidence repair that changes completi
       targetRoot,
       sessionId: 'session-evidence-status',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeScopedReport(input.reportPath, {
           status: 'needs-promotion',
@@ -862,7 +849,6 @@ test('implementation publishability blocks evidence repair that mutates existing
       targetRoot,
       sessionId: 'session-evidence-mutates',
       branchName: 'codex/issue-155',
-      workflowPromptText: 'Implement issue.',
       codexAdapter: repairAdapter(async (input) => {
         await writeFile(join(repo, 'src', 'feature.ts'), 'export const feature = "evidence repair mutation";\n', 'utf8');
         await writeScopedReport(input.reportPath, {
@@ -976,7 +962,7 @@ test('implementation publishability preserves hard blockers for exact idle timeo
   assert.deepEqual(publicationViolation.status === 'blocked' ? publicationViolation.changedFiles : [], []);
 });
 
-test('implementation publishability keeps required Figma MCP failure stronger than exact idle retry', async () => {
+test('implementation publishability ignores legacy Figma MCP metadata in v2 runtime results', async () => {
   const repo = await tempGitProject();
   const git = new GitWorktreeManager();
   const beforeHead = await git.getHead(repo);
@@ -1003,7 +989,7 @@ test('implementation publishability keeps required Figma MCP failure stronger th
   });
 
   assert.equal(result.status, 'blocked');
-  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [REQUIRED_FIGMA_MCP_FAILURE_REASON]);
+  assert.deepEqual(result.status === 'blocked' ? result.reasons : [], [INCOMPLETE_AFTER_PROGRESS_REASON]);
 });
 
 test('implementation publishability accepts structured TDD red evidence without treating it as a failed check', async () => {

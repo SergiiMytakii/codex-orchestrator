@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-import { validateConfig, type CheckExecutionPhase, type CodexOrchestratorConfig } from '../config/schema.js';
+import { validateConfig, validateConfigV2, type CheckExecutionPhase, type CodexOrchestratorConfig } from '../config/schema.js';
 import { globMatches } from '../path-policy.js';
 import type { ShellCommandExecutor } from '../process/command.js';
 import {
@@ -19,7 +19,13 @@ export interface RunConfiguredChecksOptions {
 
 export async function readRunnerConfig(targetRoot: string): Promise<CodexOrchestratorConfig> {
   const content = await readFile(projectConfigPath(targetRoot), 'utf8');
-  const withDefaults = withRuntimeConfigDefaults(JSON.parse(content) as unknown);
+  const raw = JSON.parse(content) as unknown;
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && (raw as Record<string, unknown>).version === 2) {
+    const validation = validateConfigV2(raw);
+    if (!validation.ok) throw new Error(`Invalid config: ${validation.errors.join('; ')}`);
+    return validation.value as unknown as CodexOrchestratorConfig;
+  }
+  const withDefaults = withRuntimeConfigDefaults(raw);
   const preValidation = validateConfig(withDefaults);
   if (!preValidation.ok) {
     throw new Error(`Invalid config: ${preValidation.errors.join('; ')}`);

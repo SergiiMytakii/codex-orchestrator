@@ -305,6 +305,7 @@ test('daemon removes clean merged worktrees after polling', async () => {
     issueAdapter: new InMemoryGitHubIssueAdapter([]),
     pullRequestAdapter,
     once: true,
+    executeIssue: async () => ({ reportComment: 'unused' }),
     now: () => new Date('2026-05-08T10:00:00.000Z'),
   });
 
@@ -327,6 +328,7 @@ test('daemon removes stale review labels from closed issues with completion evid
     targetRoot,
     issueAdapter: adapter,
     once: true,
+    executeIssue: async () => ({ reportComment: 'unused' }),
     now: () => new Date('2026-05-08T10:00:00.000Z'),
   });
 
@@ -387,6 +389,7 @@ test('daemon preserves active and dirty merged worktrees', async () => {
     issueAdapter: new InMemoryGitHubIssueAdapter([]),
     pullRequestAdapter,
     once: true,
+    executeIssue: async () => ({ reportComment: 'unused' }),
     now: () => new Date('2026-05-08T10:00:00.000Z'),
   });
 
@@ -437,6 +440,7 @@ test('daemon automatically prunes stale runner state for missing workspaces', as
     targetRoot,
     issueAdapter: new InMemoryGitHubIssueAdapter([]),
     once: true,
+    executeIssue: async () => ({ reportComment: 'unused' }),
     now: () => new Date('2026-05-08T10:00:00.000Z'),
   });
 

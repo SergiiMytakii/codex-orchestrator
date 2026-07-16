@@ -13,7 +13,7 @@ This document holds repo-specific execution rules that are too detailed for
   policy, rework bounds, durable memory, and publication remain runner-owned.
 - `.codex-orchestrator/config.json` is this repository's live runner policy for
   checks, review gates, acceptance proof, deny rules, branches, issue labels,
-  and workflow prompt paths.
+  and target execution-policy ceilings.
 - `package.json` is the source of truth for local npm scripts.
 - `tsconfig.json` is the source of truth for TypeScript strictness and module
   resolution.
@@ -30,8 +30,7 @@ branch policy, or publication behavior.
    - `docs/adr/0001-runner-owned-loop-policy.md` for loop ownership and
      publication authority.
    - `.codex-orchestrator/config.json` for configured checks, review gates,
-     acceptance proof, deny paths, branch templates, and workflow prompt
-     routing.
+     acceptance proof, deny paths, branch templates, and runtime policy.
    - `package.json` before adding, removing, or relying on npm scripts.
    - `tsconfig.json` before changing TypeScript module or import behavior.
 2. Confirm whether the change affects runtime paths covered by
@@ -79,8 +78,9 @@ when live smoke is skipped and give the concrete reason.
   changed-path safety.
 - Target repository policy belongs under `.codex-orchestrator/`; reusable
   orchestration behavior belongs in `src/`.
-- Package-bundled prompts live in `prompts/`; setup copies them into target
-  repositories and tracks local edits through the prompt manifest.
+- Package-owned skills, operation graphs, schemas, tools, and catalog fixtures
+  live in `runtime-skills/`. Config v2 targets cannot replace them; target
+  policy can only narrow signed node authority.
 
 ## Validation Routing
 
@@ -109,6 +109,12 @@ when live smoke is skipped and give the concrete reason.
 - `setup --prepare-skill-runtime-v2` is a real consumer migration action. Run it
   only after the target's daemon and targeted runs are stopped; GitHub read or
   process-identity ambiguity is an expected fail-closed blocker.
+- `auth login` writes only the package-owned runtime home. Structural
+  `setup --activate-skill-runtime-v2` is a separate exclusive-fence action and
+  must pass candidate bundle/CLI/app-server/auth preflight before config/state
+  writes.
+- Production `run` and `daemon` require config/state v2. Legacy target prompts
+  are inactive rollback artifacts after activation and must not be read.
 - Local bridge validation does not authorize commit, push, npm publication,
   consumer preparation, structural migration, or live smoke.
 

@@ -530,11 +530,11 @@ test('retries stale missing completion report as next scoped attempt before bloc
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
   const phases: string[] = [];
-  const prompts: string[] = [];
+  const contexts: string[] = [];
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       phases.push(input.phase ?? '');
-      prompts.push(input.promptText);
+      contexts.push(await readFile(input.contextArtifactPath, 'utf8'));
       await writeFile(join(input.worktreePath, 'feature.txt'), 'retried\n', 'utf8');
       await writeCompletedReport(input.reportPath);
       return { stdout: 'retry completed', stderr: '', exitCode: 0 };
@@ -554,8 +554,8 @@ test('retries stale missing completion report as next scoped attempt before bloc
 
   assert.equal(result.status, 'review-ready');
   assert.deepEqual(phases, ['scoped-issue']);
-  assert.match(prompts[0] ?? '', /automatic rework attempt \(#1\)/);
-  assert.match(prompts[0] ?? '', /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/);
+  assert.match(contexts[0] ?? '', /"attempt": 1/);
+  assert.match(contexts[0] ?? '', /Codex did not write CODEX_ORCHESTRATOR_REPORT_FILE/);
   assert.equal(issueAdapter.postedComments.some((comment) => comment.body.includes('claimed #155')), false);
   assert.equal(issueAdapter.postedComments.some((comment) => comment.body.includes('recovery-blocked')), false);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);

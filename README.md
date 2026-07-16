@@ -62,7 +62,7 @@ worktrees keep runs separate, and the runner owns validation and publication.
 ```mermaid
 flowchart TD
   A["Target repo"] --> B["codex-orchestrator setup"]
-  B --> C[".codex-orchestrator/config.json + prompts"]
+  B --> C[".codex-orchestrator/config.json"]
   C --> D["GitHub Issue gets agent:auto or agent:plan-auto"]
   D --> E["status / daemon / run"]
   E --> R{"Recover interrupted handoff?"}
@@ -71,8 +71,8 @@ flowchart TD
   F -- "no" --> G["Skipped with reason"]
   F -- "yes" --> H["Runner claims issue: agent:running"]
   H --> I["Create isolated branch + worktree"]
-  I --> J["Build Codex prompt from issue + repo policy"]
-  J --> K["Run Codex CLI"]
+  I --> J["Pin package skill graph + context artifact"]
+  J --> K["Run exact Codex app-server node"]
   K --> AAP{"Adaptive Acceptance Proof required?"}
   AAP -- "no" --> L["Runner validates the full changeset"]
   AAP -- "yes" --> AP["Run proof phase and collect artifacts"]
@@ -180,7 +180,7 @@ npm run smoke:live -- --scenario tree-child-quality-rework --cleanup
 
 Repo-local Dreaming-lite memory lives in `docs/agents/memory/`. It is a small
 curated lessons cache for repeated runner/debug/agent-workflow patterns, not a
-replacement for `AGENTS.md`, ADRs, `docs/deep-dive.md`, or package prompts.
+replacement for `AGENTS.md`, ADRs, `docs/deep-dive.md`, or package skills.
 
 ## Install
 
@@ -189,7 +189,8 @@ Requirements:
 - Node.js 18 or newer;
 - `git`;
 - GitHub CLI `gh`, authenticated for the target repository;
-- Codex CLI, installed and authenticated;
+- Codex CLI `0.144.4` on `PATH`;
+- a package-owned Codex login created with `codex-orchestrator auth login`;
 - write access to the target GitHub repository.
 
 Install globally:
@@ -225,6 +226,10 @@ Run setup and create missing labels:
 codex-orchestrator setup --prepare-labels
 ```
 
+On a new repository, setup durably writes config v2 and its empty runner-state
+v2 envelope under the target activity fence. It does not authenticate
+Codex or start a run; use `auth login` and `doctor` before execution.
+
 ### Prepare A Consumer For Skill Runtime V2
 
 The bridge release adds a fail-closed activity fence without changing prompt
@@ -244,9 +249,32 @@ command does not migrate config, switch the Codex transport, publish a package,
 or start work; those actions belong to a separately authorized structural
 release.
 
-For normal setup, commit the repository-owned config and prompt policy files
-under `.codex-orchestrator/`. Do not commit `prepared-generation.json`; it is
-runtime migration evidence beneath the ignored runner state directory.
+After installing a reviewed structural package, authenticate its isolated
+runtime home and atomically activate the prepared target:
+
+```sh
+codex-orchestrator auth login
+codex-orchestrator setup --target . --activate-skill-runtime-v2
+codex-orchestrator doctor --target .
+```
+
+Activation rechecks the prepared generation, empty local and GitHub drain,
+accepted bridge hash, package bundle, exact CLI, app-server capability, and
+package-home account before writing anything. It writes an exact
+`config.json.v1.backup`, commits empty state v2 first, and renames config v2
+last. A crash before the config rename remains retryable. Production `run` and
+`daemon` refuse config v1 instead of falling back to target prompts.
+
+Rollback is an operator action: stop all runners, restore the exact v1 backup
+and its compatible empty state under the exclusive activity fence, then use
+the released bridge package. Publication, push, live smoke, and consumer
+activation are separate authorizations; this document does not imply that an
+unreleased structural candidate has been published or rolled out.
+
+For bridge setup, commit the repository-owned config under
+`.codex-orchestrator/`. Existing v1 prompt files are rollback artifacts, not
+v2 runtime policy. Do not commit `prepared-generation.json`; it is runtime
+migration evidence beneath the ignored runner state directory.
 
 By default, setup reads the GitHub owner and repo from `git remote origin`. Use
 `--target`, `--github-owner`, or `--github-repo` only when you need to override
@@ -304,9 +332,9 @@ If needed, the agent can discover the exact setup behavior from:
 codex-orchestrator --help
 ```
 
-The package also ships a setup prompt in `prompts/setup-skill.md`. Setup copies
-that prompt into `.codex-orchestrator/prompts/setup-skill.md`, so future agents
-working in the repository can find repository-local setup guidance.
+Bridge-era target prompt files may remain after activation, but config v2 does
+not read them. Treat them as report-only rollback artifacts and remove them in
+a separate repository cleanup after rollback is no longer needed.
 
 Use `--dry-run` only when you want a preview without writing files or creating
 labels.
@@ -345,7 +373,9 @@ Every installed repository owns its automation policy in:
 ```
 
 That config controls labels, branch names, checks, review gates, blocked paths,
-prompt files, child concurrency, and PR titles. The package provides defaults;
+node authority, child concurrency, and PR titles. Package skills and signed
+operation graphs are immutable package content; target policy can only narrow
+their authority. The package provides defaults;
 the target repository decides how strict they should be.
 
 For the full config surface and technical behavior, see
@@ -387,9 +417,11 @@ Default labels:
 codex-orchestrator --help
 codex-orchestrator --version
 codex-orchestrator health
+codex-orchestrator auth login
 codex-orchestrator doctor --target <path> [--json]
 codex-orchestrator setup [--target <path>] [--github-owner <owner>] \
-  [--github-repo <repo>] [--dry-run] [--prepare-labels]
+  [--github-repo <repo>] [--dry-run] [--prepare-labels] \
+  [--prepare-skill-runtime-v2 | --activate-skill-runtime-v2]
 codex-orchestrator status --target <path> [--dry-run] [--json]
 codex-orchestrator run --target <path> --issue <number>
 codex-orchestrator visual-proof auto --issue <number> [--target <path>]

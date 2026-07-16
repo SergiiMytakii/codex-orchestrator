@@ -61,6 +61,7 @@ test('prints help', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /codex-orchestrator/);
   assert.match(result.stdout, /health/);
+  assert.match(result.stdout, /auth login/);
   assert.match(result.stdout, /doctor/);
   assert.match(result.stdout, /status/);
   assert.match(result.stdout, /daemon/);
@@ -69,7 +70,7 @@ test('prints help', async () => {
   assert.match(result.stdout, /agent:plan-auto/);
   assert.match(result.stdout, /--prepare-labels/);
   assert.match(result.stdout, /--prepare-skill-runtime-v2/);
-  assert.match(result.stdout, /--sync-prompts/);
+  assert.doesNotMatch(result.stdout, /--sync-prompts/);
   assert.match(result.stdout, /--version/);
   assert.match(result.stdout, /--help/);
 });
@@ -169,7 +170,7 @@ test('runs setup dry-run without launching Codex', async () => {
   assert.equal(result.stderr, '');
   assert.match(result.stdout, /.codex-orchestrator\/config.json/);
   assert.match(result.stdout, /labels: report-only/);
-  assert.match(result.stdout, /prd: package-bundled-prompt/);
+  assert.match(result.stdout, /skill runtime: package-owned v2/);
   assert.match(result.stdout, /Codex will not be launched/);
   assert.match(result.stdout, /setup will not commit or open a pull request/);
 });
@@ -338,7 +339,7 @@ test('runs status dry-run without launching Codex', async () => {
   assert.match(result.stdout, /eligible:\n  - none/);
 });
 
-test('runs daemon once without eligible work', async () => {
+test('daemon refuses bridge config v1 before issue discovery', async () => {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cli-daemon-target-'));
   await mkdir(join(targetRoot, '.codex-orchestrator'), { recursive: true });
   await writeFile(
@@ -356,9 +357,7 @@ test('runs daemon once without eligible work', async () => {
     PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
   });
 
-  assert.equal(result.status, 0);
-  assert.equal(result.stderr, '');
-  assert.match(result.stdout, /codex-orchestrator daemon/);
-  assert.match(result.stdout, /intervalMs: 300000/);
-  assert.match(result.stdout, /no eligible issues/);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /orchestrator-skill-runtime-v2-required/);
+  assert.equal(result.stdout, '');
 });

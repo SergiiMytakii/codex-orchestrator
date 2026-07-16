@@ -17,12 +17,12 @@ import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
 import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { runScopedAutoCommand } from '../src/runner/scoped-auto-command.js';
 import { runStatusCommand } from '../src/runner/status-command.js';
-import { sessionCodexHomePath } from '../src/runner/session-home.js';
 import {
   IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
 } from '../src/runner/rework-policy.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
+import { migrateConfigV1ToV2 } from '../src/setup/skill-runtime-v2-migration.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -157,7 +157,6 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       codexInput = input;
-      await writeFile(join(input.isolatedHomePath, 'cache-fixture.txt'), 'cache\n', 'utf8');
       await writeFile(join(input.worktreePath, 'feature.txt'), 'done\n', 'utf8');
       await writeFile(
         input.reportPath,
@@ -207,16 +206,9 @@ test('scoped auto command creates worktree, runner commit, draft PR, review repo
   assert.equal(result.status, 'review-ready');
   assert.equal(result.branchName, 'codex/issue-155');
   assert.equal(await readFile(join(result.worktreePath, 'feature.txt'), 'utf8'), 'done\n');
-  assert.equal(codexInput?.promptPath, result.promptPath);
+  assert.match(codexInput?.contextArtifactPath ?? '', /issue-155.*implementation-attempt.*\.json$/);
   assert.equal(codexInput?.phase, 'scoped-issue');
   assert.equal(codexInput?.reportPath, result.reportPath);
-  assert.equal(codexInput?.isolatedHomePath, sessionCodexHomePath({
-    targetRoot: repo,
-    sessionId: 'issue-155-20260508120000',
-  }));
-  assert.ok(codexInput?.isolatedHomePath);
-  assert.equal(codexInput.isolatedHomePath.startsWith(repo), false);
-  await assert.rejects(stat(codexInput.isolatedHomePath), /ENOENT/);
   await assert.rejects(stat(join(repo, '.codex-orchestrator', 'state', 'codex-home')), /ENOENT/);
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Closes #155/);
@@ -364,31 +356,13 @@ test('scoped auto command invokes adaptive proof phase and records durable evide
   assert.equal(proofInputs.length, 1);
   const proofInput = proofInputs[0]!;
   assert.equal(proofInput.phase, 'acceptance-proof');
+  assert.equal(proofInput.operationId, 'acceptance-proof');
   assert.match(proofInput.reportPath, /\.codex-orchestrator\/proofs\/issue-155\/acceptance-proof-report\.json$/);
-  assert.match(proofInput.promptText, /Adaptive Proof Agent/);
-  assert.match(proofInput.promptText, /feature\.txt/);
-  assert.match(proofInput.promptText, /\.codex-orchestrator\/proofs\/\*\*/);
-  assert.match(proofInput.promptText, /do not have GitHub write authority/i);
-  assert.match(proofInput.promptText, /uiEvidence/);
-  assert.match(proofInput.promptText, /workflowScope/);
-  assert.match(proofInput.promptText, /viewportCoverage/);
-  assert.match(proofInput.promptText, /artifactFreshness/);
-  assert.match(proofInput.promptText, /layoutReview/);
-  assert.match(proofInput.promptText, /copyReview/);
-  assert.match(proofInput.promptText, /sourceInputs/);
-  assert.match(proofInput.promptText, /wide desktop/i);
-  assert.match(proofInput.promptText, /Manual QA Plan/);
-  assert.match(proofInput.promptText, /authPath/);
-  assert.match(proofInput.promptText, /authShortcutReason/);
-  assert.match(proofInput.promptText, /Acceptance Proof Report JSON template/);
-  assert.match(proofInput.promptText, /"description": "Describe the acceptance criterion being proven."/);
-  assert.match(proofInput.promptText, /codex-orchestrator acceptance-proof validate --report "\$CODEX_ORCHESTRATOR_PROOF_REPORT_PATH"/);
-  assert.match(proofInput.promptText, /write the report JSON to CODEX_ORCHESTRATOR_PROOF_REPORT_PATH/i);
-  assert.match(proofInput.promptText, /return exactly the validated JSON as your final response/i);
-  assert.doesNotMatch(proofInput.promptText, /Schema: \{/);
+  const proofContext = await readFile(proofInput.contextArtifactPath, 'utf8');
+  assert.match(proofContext, /feature\.txt/);
+  assert.match(proofContext, /"implementationReport"/);
   const acceptanceProofRunnerSource = await readFile('src/runner/acceptance-proof-runner.ts', 'utf8');
   assert.doesNotMatch(acceptanceProofRunnerSource, /Schema: \{/);
-  await assert.rejects(stat(proofInput.isolatedHomePath), /ENOENT/);
 
   const summary = JSON.parse(
     await readFile(
@@ -610,8 +584,6 @@ test('diagnostics wave regression covers profile, snapshot, events, status JSON,
       ...config.codex,
       profiles: {
         'scoped-issue': {
-          command: 'codex-scoped',
-          args: ['exec-scoped', '${issueNumber}'],
           timeoutMs: 22_000,
         },
       },
@@ -622,16 +594,13 @@ test('diagnostics wave regression covers profile, snapshot, events, status JSON,
     issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement diagnostics-backed change' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const executorCalls: Parameters<ProcessExecutor>[] = [];
-  const executor: ProcessExecutor = async (...args) => {
-    executorCalls.push(args);
-    const [, , options] = args;
-    assert.equal(options?.cwd?.endsWith('issue-155'), true);
-    await writeFile(join(options?.cwd ?? '', 'diagnostics.txt'), 'done\n', 'utf8');
-    const reportPath = options?.env?.CODEX_ORCHESTRATOR_REPORT_FILE;
-    assert.ok(reportPath);
+  const executorCalls: CodexCommandRunInput[] = [];
+  const executor = async (input: CodexCommandRunInput): Promise<CodexCommandRunResult> => {
+    executorCalls.push(input);
+    assert.equal(input.worktreePath.endsWith('issue-155'), true);
+    await writeFile(join(input.worktreePath, 'diagnostics.txt'), 'done\n', 'utf8');
     await writeFile(
-      reportPath,
+      input.reportPath,
       JSON.stringify({
         status: 'completed',
         changes: ['diagnostics.txt'],
@@ -656,7 +625,7 @@ test('diagnostics wave regression covers profile, snapshot, events, status JSON,
     issueNumber: 155,
     issueAdapter,
     pullRequestAdapter,
-    codexAdapter: new CodexCommandAdapter(config, executor),
+    codexAdapter: { run: executor },
     now,
   });
   const status = await runStatusCommand({ targetRoot: repo, issueAdapter, json: true });
@@ -669,13 +638,16 @@ test('diagnostics wave regression covers profile, snapshot, events, status JSON,
   });
 
   assert.equal(result.status, 'review-ready');
-  assert.equal(executorCalls[0]?.[0], 'codex-scoped');
-  assert.deepEqual(executorCalls[0]?.[1], ['exec-scoped', '155']);
-  assert.equal(executorCalls[0]?.[2]?.timeoutMs, 22_000);
+  assert.equal(executorCalls[0]?.operationId, 'implementation-attempt');
+  assert.equal(executorCalls[0]?.phase, 'scoped-issue');
+  assert.equal(executorCalls[0]?.skillRuntime.operationId, 'implementation-attempt');
+  assert.match(executorCalls[0]?.contextArtifactPath ?? '', /contexts\/issue-155-/u);
   const recentEvents = JSON.parse(status.output) as { recentEvents: Array<{ artifacts?: Array<{ kind: string; path?: string }> }> };
   const snapshotPath = recentEvents.recentEvents.flatMap((event) => event.artifacts ?? []).find((artifact) => artifact.kind === 'snapshot')?.path;
   assert.ok(snapshotPath);
-  assert.equal(doctor.json.summary.fail, 0);
+  assert.equal(doctor.json.summary.fail, 1);
+  assert.equal(doctor.json.fail[0]?.id, 'skill-runtime-v2');
+  assert.equal(doctor.json.fail[0]?.summary, 'orchestrator-skill-runtime-v2-activation-required');
 });
 
 test('scoped auto command publishes validated agent local commits when policy allows', async () => {
@@ -946,7 +918,7 @@ test('scoped auto command writes durable summary for promotion requests', async 
   assert.equal(summary.outcome, 'promotion-requested');
 });
 
-test('scoped auto command uses mobile codex timeout for Flutter and Android issues', async () => {
+test('scoped auto command keeps mobile issues inside the signed scoped-node timeout cap', async () => {
   const repo = await tempGitProject((config) => ({
     ...config,
     reviewGates: {
@@ -1002,7 +974,7 @@ test('scoped auto command uses mobile codex timeout for Flutter and Android issu
   });
 
   assert.equal(result.status, 'review-ready');
-  assert.equal(codexInput?.timeoutMs, 3_600_000);
+  assert.equal(codexInput?.manifestNode.executionPolicy.timeoutMs, 1_800_000);
 });
 
 test('scoped auto command keeps timeout blocked comments concise', async () => {
@@ -1282,7 +1254,7 @@ test('scoped auto command repairs missing quality evidence and can recover to re
   let repairCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
-      if (input.env?.CODEX_ORCHESTRATOR_REPAIR_MODE === 'evidence') {
+      if (input.phaseEnv.CODEX_ORCHESTRATOR_REPAIR_MODE === 'evidence') {
         repairCount += 1;
         await writeFile(
           input.reportPath,
@@ -1373,12 +1345,12 @@ test('scoped auto command retries incomplete progress from current worktree and 
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const promptTexts: string[] = [];
+  const attemptContexts: string[] = [];
   let runCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       runCount += 1;
-      promptTexts.push(input.promptText);
+      attemptContexts.push(await readFile(input.contextArtifactPath, 'utf8'));
       await mkdir(join(input.worktreePath, 'src'), { recursive: true });
       await writeFile(join(input.worktreePath, 'src', 'feature.ts'), `export const attempt = ${runCount};\n`, 'utf8');
       if (runCount === 1) {
@@ -1432,24 +1404,21 @@ test('scoped auto command retries incomplete progress from current worktree and 
 
   assert.equal(runCount, 2);
   assert.equal(result.status, 'review-ready');
-  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
-  assert.match(promptTexts[1] ?? '', /Continue from the current worktree state; do not start over\./);
-  assert.match(promptTexts[1] ?? '', new RegExp(INCOMPLETE_AFTER_PROGRESS_REASON.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u'));
+  assert.match(attemptContexts[1] ?? '', /"attempt": 1/);
+  assert.match(attemptContexts[1] ?? '', new RegExp(INCOMPLETE_AFTER_PROGRESS_REASON.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'u'));
   assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
 });
 
-test('scoped auto command retries optional figma mcp failure with optional figma disabled', async () => {
+test('scoped auto command treats legacy optional figma mcp metadata as ordinary failure', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Use Figma design', body: 'Use https://www.figma.com/design/abc123/File.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const disableFlags: Array<boolean | undefined> = [];
   let runCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       runCount += 1;
-      disableFlags.push(input.disableOptionalFigmaMcp);
       if (runCount === 1) {
         return {
           stdout: '',
@@ -1511,11 +1480,11 @@ test('scoped auto command retries optional figma mcp failure with optional figma
     now,
   });
 
-  assert.equal(result.status, 'review-ready');
-  assert.deepEqual(disableFlags, [undefined, true]);
+  assert.equal(result.status, 'blocked');
+  assert.equal(runCount, 1);
 });
 
-test('scoped auto command hard-blocks required figma mcp failure', async () => {
+test('scoped auto command treats legacy required figma mcp metadata as ordinary failure', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Requires Figma', body: 'This implementation requires Figma source access.' }),
@@ -1545,7 +1514,7 @@ test('scoped auto command hard-blocks required figma mcp failure', async () => {
 
   assert.equal(result.status, 'blocked');
   assert.equal(runCount, 1);
-  assert.match(result.reportComment, /Required Figma MCP failed; required design access is unavailable/);
+  assert.match(result.reportComment, /Codex exited with code 1: figma mcp auth failed with 403/);
 });
 
 test('scoped auto command uses configured rework limit and includes exact blockers in rework prompts', async () => {
@@ -1563,12 +1532,12 @@ test('scoped auto command uses configured rework limit and includes exact blocke
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const promptTexts: string[] = [];
+  const attemptContexts: string[] = [];
   let runCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       runCount += 1;
-      promptTexts.push(input.promptText);
+      attemptContexts.push(await readFile(input.contextArtifactPath, 'utf8'));
       if (runCount === 3) {
         await mkdir(join(input.worktreePath, 'src'), { recursive: true });
         await mkdir(join(input.worktreePath, 'test'), { recursive: true });
@@ -1618,10 +1587,10 @@ test('scoped auto command uses configured rework limit and includes exact blocke
 
   assert.equal(runCount, 3);
   assert.equal(result.status, 'review-ready');
-  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
-  assert.match(promptTexts[1] ?? '', /- Codex completed without file changes/);
-  assert.match(promptTexts[2] ?? '', /This is an automatic rework attempt \(#2\)/);
-  assert.match(promptTexts[2] ?? '', /- Codex completed without file changes/);
+  assert.match(attemptContexts[1] ?? '', /"attempt": 1/);
+  assert.match(attemptContexts[1] ?? '', /Codex completed without file changes/);
+  assert.match(attemptContexts[2] ?? '', /"attempt": 2/);
+  assert.match(attemptContexts[2] ?? '', /Codex completed without file changes/);
 });
 
 test('scoped auto command retries idle timeout before change once with the typed reason', async () => {
@@ -1630,12 +1599,12 @@ test('scoped auto command retries idle timeout before change once with the typed
     issueFixture({ number: 155, labels: [labels.auto.name], title: 'Fix runtime behavior', body: 'Bug fix.' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const promptTexts: string[] = [];
+  const attemptContexts: string[] = [];
   let runCount = 0;
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       runCount += 1;
-      promptTexts.push(input.promptText);
+      attemptContexts.push(await readFile(input.contextArtifactPath, 'utf8'));
       return {
         stdout: '',
         stderr: 'Command idle timed out after 300000ms.',
@@ -1655,9 +1624,9 @@ test('scoped auto command retries idle timeout before change once with the typed
 
   assert.equal(runCount, 2);
   assert.equal(result.status, 'blocked');
-  assert.match(promptTexts[1] ?? '', /This is an automatic rework attempt \(#1\)/);
-  assert.match(promptTexts[1] ?? '', new RegExp(IDLE_TIMEOUT_BEFORE_CHANGE_REASON, 'u'));
-  assert.doesNotMatch(promptTexts[1] ?? '', /Codex completed without file changes/);
+  assert.match(attemptContexts[1] ?? '', /"attempt": 1/);
+  assert.match(attemptContexts[1] ?? '', new RegExp(IDLE_TIMEOUT_BEFORE_CHANGE_REASON, 'u'));
+  assert.doesNotMatch(attemptContexts[1] ?? '', /Codex completed without file changes/);
   assert.match(result.reportComment, /idle timed out before creating a safe local change/);
   assert.match(result.reportComment, /idle-timeout-before-change/);
 });
@@ -1787,10 +1756,10 @@ test('scoped auto command includes advisory fresh-context review evidence before
     issueFixture({ number: 155, labels: [labels.auto.name], body: 'Implement controlled change' }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  const prompts: string[] = [];
+  const operations: string[] = [];
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
-      prompts.push(input.promptText);
+      operations.push(input.operationId);
       if (input.sessionId.endsWith('-fresh-review')) {
         await writeFile(
           input.reportPath,
@@ -1842,9 +1811,7 @@ test('scoped auto command includes advisory fresh-context review evidence before
   });
 
   assert.equal(result.status, 'review-ready');
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[1] ?? '', /# Fresh-Context Review/);
-  assert.doesNotMatch(prompts[1] ?? '', /# Codex Orchestrator Scoped Implementation/);
+  assert.deepEqual(operations, ['implementation-attempt', 'fresh-context-review']);
   assert.match(result.reportComment, /Fresh-Context Review/);
   assert.match(result.reportComment, /advisory medium: Consider adding one more edge-case test\./);
   assert.match(result.reportComment, /Durable Run Summary/);
@@ -2224,10 +2191,8 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     }),
   ]);
   const pullRequestAdapter = new InMemoryGitHubPullRequestAdapter('example', 'repo');
-  let promptText = '';
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
-      promptText = input.promptText;
       await mkdir(join(input.worktreePath, 'src', 'frontend'), { recursive: true });
       await mkdir(join(input.worktreePath, 'test'), { recursive: true });
       await writeFile(join(input.worktreePath, 'src', 'frontend', 'CampaignList.tsx'), 'export const x = 1;\n', 'utf8');
@@ -2349,11 +2314,6 @@ test('scoped auto command can satisfy UI proof gate with runner-owned visual val
     });
 
     assert.equal(result.status, 'review-ready');
-    assert.match(promptText, /Runtime files are detected with these globs: src\/frontend\/\*\*\/\*\.tsx\./);
-    assert.match(promptText, /Test files are detected with these globs: test\/\*\*\/\*\.test\.ts\./);
-    assert.match(promptText, /touches at least 5 runtime files/);
-    assert.match(promptText, /npm run visual-proof -- --issue \$\{issueNumber\}/);
-    assert.match(promptText, /CODEX_ORCHESTRATOR_TEST_LOGIN/);
     assert.match(result.reportComment, /passed: .*npm run visual-proof -- --issue 155/);
     assert.match(result.reportComment, /!\[screenshot: runner visual proof 390.png\]/);
     assert.equal(pullRequestAdapter.createdPullRequests.length, 1);
@@ -2436,7 +2396,7 @@ test('scoped auto command includes screenshot proof artifacts in review report',
   assert.match(pullRequestAdapter.createdPullRequests[0]?.body ?? '', /Proof artifacts/);
 });
 
-test('scoped auto command rejects ineligible manual issue before claim', async () => {
+test('scoped production path requires activated config v2 before issue discovery', async () => {
   const repo = await tempGitProject();
   const issueAdapter = new InMemoryGitHubIssueAdapter([
     issueFixture({ number: 155, labels: [labels.auto.name, labels.manual.name] }),
@@ -2444,8 +2404,40 @@ test('scoped auto command rejects ineligible manual issue before claim', async (
 
   await assert.rejects(
     runScopedAutoCommand({ targetRoot: repo, issueNumber: 155, issueAdapter, now }),
-    /manual label is present/,
+    /orchestrator-skill-runtime-v2-required/,
   );
   assert.deepEqual(issueAdapter.addedLabels, []);
   assert.deepEqual(issueAdapter.postedComments, []);
+});
+
+test('activated scoped execution persists structural v2 metadata before entering the adapter', async () => {
+  let activatedConfig: any;
+  const repo = await tempGitProject((config) => {
+    activatedConfig = migrateConfigV1ToV2({
+      ...config,
+      codex: { ...config.codex, figmaMcp: { ...config.codex.figmaMcp!, enabled: false } },
+    });
+    return activatedConfig;
+  });
+  const stateDir = join(repo, activatedConfig.runner.stateDir);
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(join(stateDir, 'runner-state.json'), '{"version":2,"generation":0,"runs":[]}\n');
+  const issueAdapter = new InMemoryGitHubIssueAdapter([
+    issueFixture({ number: 155, labels: [labels.auto.name], body: 'Verify initial state shape' }),
+  ]);
+  let stateSeenByAdapter: any;
+  const codexAdapter = {
+    async run(): Promise<CodexCommandRunResult> {
+      stateSeenByAdapter = await new RunnerStateStore(repo, activatedConfig).load();
+      throw new Error('stop-after-initial-upsert');
+    },
+  };
+
+  const result = await runScopedAutoCommand({ targetRoot: repo, issueNumber: 155, issueAdapter, codexAdapter, now });
+
+  assert.equal(result.status, 'blocked');
+  assert.equal(stateSeenByAdapter.version, 2);
+  assert.equal(stateSeenByAdapter.runs[0].stateVersion, 2);
+  assert.equal(stateSeenByAdapter.runs[0].skillRuntime.operationId, 'implementation-attempt');
+  assert.equal(stateSeenByAdapter.runs[0].graph.currentNodeId, 'scoped-classification');
 });

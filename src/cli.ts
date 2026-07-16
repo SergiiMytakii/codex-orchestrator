@@ -18,9 +18,9 @@ import { parseBrowserVisualProofArgs, runBrowserVisualProofCommand } from './run
 import { parseIosVisualProofArgs, runIosVisualProofCommand } from './runner/ios-visual-proof-command.js';
 import { parseMobileVisualProofArgs, runMobileVisualProofCommand } from './runner/mobile-visual-proof-command.js';
 import { runSetupCommand } from './setup/setup-command.js';
-import { promptSyncModes, type PromptSyncMode } from './setup/prompt-sync.js';
 import { runAutoVisualProofCommand } from './runner/auto-visual-proof-command.js';
 import { formatAcceptanceProofShapeErrors, validateAcceptanceProofReportShape } from './runner/acceptance-proof.js';
+import { runAuthLoginCommand } from './codex/auth-command.js';
 
 const helpText = `codex-orchestrator
 
@@ -28,8 +28,9 @@ Usage:
   codex-orchestrator --help
   codex-orchestrator --version
   codex-orchestrator health
+  codex-orchestrator auth login
   codex-orchestrator doctor --target <path> [--json]
-  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--prepare-skill-runtime-v2] [--sync-prompts <mode>]
+  codex-orchestrator setup [--target <path>] [--github-owner <owner>] [--github-repo <repo>] [--dry-run] [--prepare-labels] [--prepare-skill-runtime-v2 | --activate-skill-runtime-v2]
   codex-orchestrator status --target <path> [--dry-run] [--json]
   codex-orchestrator run --target <path> --issue <number>
   codex-orchestrator daemon --target <path> [--interval-seconds <number>] [--once] [--max-runs <number>] [--concurrency <number>]
@@ -42,6 +43,7 @@ Usage:
 
 Commands:
   health       Run a no-op local health check.
+  auth         Authenticate the package-owned Codex runtime home.
   doctor       Run read-only runner readiness diagnostics.
   setup        Create or dry-run project-local orchestrator config. Use --prepare-labels to create missing agent labels.
   status       Show eligible/skipped issue work and local recovery state.
@@ -54,11 +56,6 @@ Options:
   --help, -h      Show this help.
   --version, -v   Show package version.
 
-Prompt sync modes:
-  --sync-prompts auto      Update untouched prompts and report locally edited conflicts.
-  --sync-prompts keep      Keep existing prompts and install only missing prompts.
-  --sync-prompts replace   Replace prompts with bundled package versions.
-  --sync-prompts merge     Append bundled updates to locally edited prompts.
 `;
 
 interface SetupCliArgs {
@@ -67,9 +64,8 @@ interface SetupCliArgs {
   githubRepo?: string;
   dryRun: boolean;
   prepareLabels: boolean;
-  replacePackageSkills: boolean;
-  promptSyncMode?: PromptSyncMode;
   prepareSkillRuntimeV2: boolean;
+  activateSkillRuntimeV2: boolean;
 }
 
 interface StatusCliArgs {
@@ -119,6 +115,27 @@ async function main(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (command === 'auth') {
+    const [kind, ...rest] = args.slice(1);
+    if (kind !== 'login' || rest.length > 0) {
+      process.stderr.write('auth requires exactly: auth login\nRun codex-orchestrator --help for usage.\n');
+      return 2;
+    }
+    try {
+      const result = await runAuthLoginCommand({
+        onAuthUrl: (url) => process.stdout.write(`Open this URL to authenticate Codex:\n${url}\n`),
+      });
+      process.stdout.write(result.status === 'already-authenticated'
+        ? 'Codex package runtime is already authenticated.\n'
+        : 'Codex package runtime authentication completed.\n');
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'auth login failed';
+      process.stderr.write(`${message}\n`);
+      return 1;
+    }
+  }
+
   if (command === 'setup') {
     const parsed = parseSetupArgs(args.slice(1));
 
@@ -134,9 +151,8 @@ async function main(args: string[]): Promise<number> {
         githubRepo: parsed.value.githubRepo,
         dryRun: parsed.value.dryRun,
         prepareLabels: parsed.value.prepareLabels,
-        replacePackageSkills: parsed.value.replacePackageSkills,
-        promptSyncMode: parsed.value.promptSyncMode,
         prepareSkillRuntimeV2: parsed.value.prepareSkillRuntimeV2,
+        activateSkillRuntimeV2: parsed.value.activateSkillRuntimeV2,
       });
       process.stdout.write(`${result.output}\n`);
       return 0;
@@ -580,8 +596,8 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
   const parsed: SetupCliArgs = {
     dryRun: false,
     prepareLabels: false,
-    replacePackageSkills: false,
     prepareSkillRuntimeV2: false,
+    activateSkillRuntimeV2: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
@@ -619,24 +635,8 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
       case '--prepare-skill-runtime-v2':
         parsed.prepareSkillRuntimeV2 = true;
         break;
-      case '--sync-prompts':
-        if (!next || next.startsWith('--')) {
-          return { ok: false, error: `${arg} requires a value` };
-        }
-        if (!isPromptSyncMode(next)) {
-          return { ok: false, error: `${arg} must be one of ${promptSyncModes.join(', ')}` };
-        }
-        parsed.promptSyncMode = next;
-        index += 1;
-        break;
-      case '--sync-prompts=auto':
-      case '--sync-prompts=keep':
-      case '--sync-prompts=replace':
-      case '--sync-prompts=merge':
-        parsed.promptSyncMode = arg.replace('--sync-prompts=', '') as PromptSyncMode;
-        break;
-      case '--replace-package-skills':
-        parsed.replacePackageSkills = true;
+      case '--activate-skill-runtime-v2':
+        parsed.activateSkillRuntimeV2 = true;
         break;
       default:
         return { ok: false, error: `Unknown setup option: ${arg ?? ''}` };
@@ -644,10 +644,6 @@ function parseSetupArgs(args: string[]): { ok: true; value: SetupCliArgs & { tar
   }
 
   return { ok: true, value: { ...parsed, target: parsed.target ?? process.cwd() } };
-}
-
-function isPromptSyncMode(value: string): value is PromptSyncMode {
-  return (promptSyncModes as readonly string[]).includes(value);
 }
 
 main(process.argv.slice(2))

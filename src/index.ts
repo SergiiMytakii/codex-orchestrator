@@ -1,7 +1,9 @@
-export type { CodexOrchestratorConfig, ConfigValidationResult, CodexPhase, CodexProfileConfig } from './config/schema.js';
-export { validateConfig, codexPhaseKeys } from './config/schema.js';
-export { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from './codex/command-adapter.js';
-export type { CodexCommandRunInput, CodexCommandRunResult, EffectiveCodexProfile } from './codex/command-adapter.js';
+export type { CodexOrchestratorConfig, CodexOrchestratorConfigV2, ConfigValidationResult, CodexPhase, CodexProfileConfig, CodexProfileConfigV2 } from './config/schema.js';
+export { validateConfig, validateConfigV2, codexPhaseKeys } from './config/schema.js';
+export { CodexCommandAdapter } from './codex/command-adapter.js';
+export type { CodexCommandRunInput, CodexCommandRunResult } from './codex/command-adapter.js';
+export { runAuthLoginCommand } from './codex/auth-command.js';
+export type { AuthLoginCommandOptions, AuthLoginCommandResult } from './codex/auth-command.js';
 export { GhCliPullRequestAdapter } from './github/gh-pull-request-adapter.js';
 export type {
   CloseIssueEvidenceInput,
@@ -81,15 +83,9 @@ export type {
   ScopedCompletionReport,
 } from './runner/completion-report.js';
 export {
-  buildPlanAutoPrompt,
-  buildScopedImplementationPrompt,
   sessionPromptPath,
   sessionReportPath,
   writeDurablePrompt,
-} from './runner/prompt.js';
-export type {
-  PlanAutoPromptInput,
-  ScopedPromptInput,
 } from './runner/prompt.js';
 export { runDaemonCommand } from './runner/daemon-command.js';
 export type { DaemonCommandOptions, DaemonCommandResult } from './runner/daemon-command.js';

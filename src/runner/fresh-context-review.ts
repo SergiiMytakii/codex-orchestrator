@@ -10,7 +10,7 @@ import type { FreshContextReviewEvidence } from './handoff-evidence.js';
 import type { runImplementationPublishabilityCheck } from './local-execution-session.js';
 import { sessionPromptPath, sessionReportPath, writeDurablePrompt } from './prompt.js';
 import { sessionLogPath } from './run-log.js';
-import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
+import { prepareSkillRuntimeExecution } from './skill-runtime-execution.js';
 
 type PublishReadyResult = Extract<
   Awaited<ReturnType<typeof runImplementationPublishabilityCheck>>,
@@ -49,17 +49,7 @@ export async function runFreshContextReviewIfEnabled(input: {
     issueNumber: input.issue.number,
     sessionId: input.isolatedSessionId,
   });
-  const isolatedHomePath = sessionCodexHomePath({ targetRoot: input.targetRoot, sessionId: input.isolatedSessionId });
   await mkdir(dirname(reviewReportPath), { recursive: true });
-  await mkdir(isolatedHomePath, { recursive: true });
-  const promptText = buildFreshContextReviewPrompt(input);
-  await writeDurablePrompt({
-    targetRoot: input.targetRoot,
-    config: input.config,
-    issueNumber: input.issue.number,
-    sessionId: input.isolatedSessionId,
-    promptText,
-  });
   const snapshot = await writeContextSnapshot({
     targetRoot: input.targetRoot,
     config: input.config,
@@ -77,24 +67,34 @@ export async function runFreshContextReviewIfEnabled(input: {
   });
 
   let codexResult: CodexCommandRunResult;
-  try {
-    codexResult = await input.codexAdapter.run({
+  const execution = await prepareSkillRuntimeExecution({
       targetRoot: input.targetRoot,
       config: input.config,
       worktreePath: input.worktreePath,
-      promptPath: reviewPromptPath,
-      promptText,
-      reportPath: reviewReportPath,
-      isolatedHomePath,
+      runId: `issue-${input.issue.number}-${input.isolatedSessionId}`,
       issueNumber: input.issue.number,
+      reportPath: reviewReportPath,
       sessionId: input.isolatedSessionId,
       branchName: input.branchName,
       phase: 'fresh-context-review',
       logPath: reviewLogPath,
+      operationId: 'fresh-context-review',
+      attemptId: `${input.isolatedSessionId}-fresh-context-review`,
+      context: {
+        issue: input.issue,
+        publishability: input.publishability,
+        promptPath: reviewPromptPath,
+        reportPath: reviewReportPath,
+      },
     });
-  } finally {
-    await cleanupSessionCodexHome(isolatedHomePath);
-  }
+  await writeDurablePrompt({
+    targetRoot: input.targetRoot,
+    config: input.config,
+    issueNumber: input.issue.number,
+    sessionId: input.isolatedSessionId,
+    contextArtifactPath: execution.contextArtifactPath,
+  });
+  codexResult = await input.codexAdapter.run(execution.input);
 
   if (codexResult.exitCode !== 0) {
     return {
@@ -130,29 +130,6 @@ export async function runFreshContextReviewIfEnabled(input: {
     logPath: reviewLogPath,
     snapshotPath: snapshot.path,
   };
-}
-
-function buildFreshContextReviewPrompt(input: {
-  issue: GitHubIssue;
-  publishability: PublishReadyResult;
-}): string {
-  return [
-    '# Fresh-Context Review',
-    `Issue: #${input.issue.number}`,
-    `Title: ${input.issue.title}`,
-    `Body:\n${input.issue.body}`,
-    'Review the implementation evidence without relying on the implementation session transcript.',
-    'Focus on high-confidence safety, policy, and handoff blockers. Do not edit files and do not publish to GitHub.',
-    'Changed files:',
-    ...input.publishability.changedFiles.map((file) => `- ${file}`),
-    'Validation:',
-    ...input.publishability.validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
-    'Skipped checks:',
-    ...input.publishability.skippedChecks.map((check) => `- ${check}`),
-    'Residual risks:',
-    ...input.publishability.residualRisks.map((risk) => `- ${risk}`),
-    'Return only raw JSON: { "status": "completed", "findings": { "severity": "advisory" | "policy-violation", "confidence": "low" | "medium" | "high", "summary": string, "evidence": string }[], "residualRisks": string[] }.',
-  ].join('\n\n');
 }
 
 interface FreshContextReviewReport {

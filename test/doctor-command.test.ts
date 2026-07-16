@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ShellCommandExecutor } from '../src/process/command.js';
 import { runDoctorCommand } from '../src/runner/doctor-command.js';
 import { InMemoryGitHubLabelAdapter } from '../src/setup/labels.js';
-import { runSetupCommand } from '../src/setup/setup-command.js';
 import { validConfig } from './fixtures/config.js';
+import { migrateConfigV1ToV2 } from '../src/setup/skill-runtime-v2-migration.js';
 
 async function tempRepo(config = validConfig): Promise<string> {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-doctor-'));
@@ -156,25 +155,8 @@ test('doctor command fails when a configured phase profile command is unavailabl
   assert.equal(result.json.fail.some((check) => check.id === 'codex-profile-fresh-context-review'), true);
 });
 
-test('doctor warns when package prompt updates are available', async () => {
-  const targetRoot = await mkdtemp(join(tmpdir(), 'codex-orchestrator-doctor-prompts-'));
-  await runSetupCommand({
-    targetRoot,
-    githubOwner: 'SergiiMytakii',
-    githubRepo: 'IntelleReach',
-    labelAdapter: new InMemoryGitHubLabelAdapter(),
-  });
-  const promptRoot = join(targetRoot, '.codex-orchestrator', 'prompts');
-  const manifestPath = join(promptRoot, 'manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
-    prompts: Record<string, { installedHash: string; packageHash: string }>;
-  };
-  const oldPrdPrompt = 'old package prd prompt\n';
-  await writeFile(join(promptRoot, 'workflows', 'prd.md'), oldPrdPrompt, 'utf8');
-  manifest.prompts['workflows/prd.md'].installedHash = sha256(oldPrdPrompt);
-  manifest.prompts['workflows/prd.md'].packageHash = sha256(oldPrdPrompt);
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-
+test('doctor fails closed for config v1 and requires explicit activation', async () => {
+  const targetRoot = await tempRepo(validConfig);
   const result = await runDoctorCommand({
     targetRoot,
     shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
@@ -182,15 +164,23 @@ test('doctor warns when package prompt updates are available', async () => {
     labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(validConfig.github.labels).map((label) => ({ name: label.name }))),
     json: true,
   });
-  const promptSync = result.json.warn.find((check) => check.id === 'prompt-sync');
+  const runtime = result.json.fail.find((check) => check.id === 'skill-runtime-v2');
 
-  assert.match(promptSync?.summary ?? '', /1 safe update/);
-  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=auto/);
-  assert.match(promptSync?.details?.join('\n') ?? '', /If conflicts are reported, ask the user to choose keep, merge, or replace/);
-  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=merge/);
-  assert.match(promptSync?.details?.join('\n') ?? '', /codex-orchestrator setup --sync-prompts=replace/);
+  assert.match(runtime?.summary ?? '', /orchestrator-skill-runtime-v2-activation-required/);
 });
 
-function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
-}
+test('doctor validates package skill runtime for config v2 without prompt sync', async () => {
+  const config = migrateConfigV1ToV2(validConfig);
+  const targetRoot = await tempRepo(config as any);
+  await writeFile(join(targetRoot, config.runner.stateDir, 'runner-state.json'), '{"version":2,"generation":0,"runs":[]}\n');
+  const result = await runDoctorCommand({
+    targetRoot,
+    shellExecutor: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    commandResolver: async (command: string) => `/usr/local/bin/${command}`,
+    labelAdapter: new InMemoryGitHubLabelAdapter(Object.values(config.github.labels).map((label) => ({ name: label.name }))),
+    json: true,
+  });
+
+  assert.equal(result.json.pass.some((item) => item.id === 'skill-runtime-v2'), true);
+  assert.equal([...result.json.pass, ...result.json.warn, ...result.json.fail].some((item) => item.id === 'prompt-sync'), false);
+});

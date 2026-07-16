@@ -34,11 +34,9 @@ import {
   IDLE_TIMEOUT_BEFORE_CHANGE_REASON,
   INCOMPLETE_AFTER_PROGRESS_REASON,
   MISSING_COMPLETION_REPORT_REASON,
-  OPTIONAL_FIGMA_MCP_FAILURE_REASON,
-  REQUIRED_FIGMA_MCP_FAILURE_REASON,
   type RunnerBlocker,
 } from './rework-policy.js';
-import { cleanupSessionCodexHome, sessionCodexHomePath } from './session-home.js';
+import { prepareSkillRuntimeExecution } from './skill-runtime-execution.js';
 
 export interface LocalExecutionPhaseInput {
   phaseId: string;
@@ -87,7 +85,6 @@ export interface ImplementationPublishabilityInput {
     targetRoot: string;
     sessionId: string;
     branchName: string;
-    workflowPromptText: string;
     codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
     onAttemptEvent?: (event: {
       status: 'started' | 'passed' | 'needs-rework' | 'blocked';
@@ -98,7 +95,6 @@ export interface ImplementationPublishabilityInput {
     targetRoot: string;
     sessionId: string;
     branchName: string;
-    workflowPromptText: string;
     codexAdapter: { run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> };
   };
 }
@@ -347,7 +343,6 @@ export async function runImplementationPublishabilityCheck(
             codexAdapter: input.acceptanceProof!.codexAdapter,
             sessionId: input.acceptanceProof!.sessionId,
             branchName: input.acceptanceProof!.branchName,
-            workflowPromptText: input.acceptanceProof!.workflowPromptText,
           });
         }
       : undefined,
@@ -362,7 +357,6 @@ export async function runImplementationPublishabilityCheck(
           codexAdapter: input.acceptanceProof!.codexAdapter,
           sessionId: input.acceptanceProof!.sessionId,
           branchName: input.acceptanceProof!.branchName,
-          workflowPromptText: input.acceptanceProof!.workflowPromptText,
           repairSchemaErrors: schemaErrors,
         })
       : undefined,
@@ -734,45 +728,38 @@ async function maybeRunCompletionReportRepair(
   };
   const preRepairHead = await input.git.getHead(input.worktreePath);
   const protectedBefore = await captureRepairProtectedFingerprint(input, changeSet);
-  const promptText = buildCompletionReportRepairPrompt({
-    input,
-    reportIssue,
-    changedFiles,
-  });
+  let repairResult: CodexCommandRunResult;
+  const execution = await prepareSkillRuntimeExecution({
+      targetRoot: input.reportRepair.targetRoot,
+      config: input.config,
+      worktreePath: input.worktreePath,
+      runId: `issue-${input.issue.number}-${repairSessionId}`,
+      issueNumber: input.issue.number,
+      reportPath: input.reportPath,
+      sessionId: repairSessionId,
+      branchName: input.reportRepair.branchName,
+      phase: 'scoped-issue',
+      logPath,
+      operationId: 'completion-report-repair',
+      attemptId: `${repairSessionId}-completion-report-repair`,
+      phaseEnv: {
+        CODEX_ORCHESTRATOR_REPAIR_MODE: 'completion-report',
+      },
+      context: {
+        reportIssue,
+        changedFiles,
+        promptPath,
+        reportPath: input.reportPath,
+      },
+    });
   await writeDurablePrompt({
     targetRoot: input.reportRepair.targetRoot,
     config: input.config,
     issueNumber: input.issue.number,
     sessionId: repairSessionId,
-    promptText,
+    contextArtifactPath: execution.contextArtifactPath,
   });
-  const isolatedHomePath = sessionCodexHomePath({
-    targetRoot: input.reportRepair.targetRoot,
-    sessionId: repairSessionId,
-  });
-
-  let repairResult: CodexCommandRunResult;
-  try {
-    repairResult = await input.reportRepair.codexAdapter.run({
-      targetRoot: input.reportRepair.targetRoot,
-      config: input.config,
-      worktreePath: input.worktreePath,
-      promptPath,
-      promptText,
-      reportPath: input.reportPath,
-      isolatedHomePath,
-      issueNumber: input.issue.number,
-      sessionId: repairSessionId,
-      branchName: input.reportRepair.branchName,
-      phase: 'scoped-issue',
-      logPath,
-      env: {
-        CODEX_ORCHESTRATOR_REPAIR_MODE: 'completion-report',
-      },
-    });
-  } finally {
-    await cleanupSessionCodexHome(isolatedHomePath);
-  }
+  repairResult = await input.reportRepair.codexAdapter.run(execution.input);
 
   if (repairResult.exitCode !== 0) {
     const reason = `Completion report repair failed: ${formatCodexExitReason(repairResult)}`;
@@ -911,46 +898,39 @@ async function maybeRunEvidenceReportRepair(
   };
   const preRepairHead = await input.git.getHead(input.worktreePath);
   const protectedBefore = await captureRepairProtectedFingerprint(input, context.changeSet);
-  const promptText = buildEvidenceReportRepairPrompt({
-    input,
-    changedFiles: context.changedFiles,
-    reviewGate: context.reviewGate,
-    validation: context.validation,
-  });
+  let repairResult: CodexCommandRunResult;
+  const execution = await prepareSkillRuntimeExecution({
+      targetRoot: input.reportRepair.targetRoot,
+      config: input.config,
+      worktreePath: input.worktreePath,
+      runId: `issue-${input.issue.number}-${repairSessionId}`,
+      issueNumber: input.issue.number,
+      reportPath: input.reportPath,
+      sessionId: repairSessionId,
+      branchName: input.reportRepair.branchName,
+      phase: 'scoped-issue',
+      logPath,
+      operationId: 'proof-evidence-repair',
+      attemptId: `${repairSessionId}-proof-evidence-repair`,
+      phaseEnv: {
+        CODEX_ORCHESTRATOR_REPAIR_MODE: 'evidence',
+      },
+      context: {
+        changedFiles: context.changedFiles,
+        reviewGate: context.reviewGate,
+        validation: context.validation,
+        promptPath,
+        reportPath: input.reportPath,
+      },
+    });
   await writeDurablePrompt({
     targetRoot: input.reportRepair.targetRoot,
     config: input.config,
     issueNumber: input.issue.number,
     sessionId: repairSessionId,
-    promptText,
+    contextArtifactPath: execution.contextArtifactPath,
   });
-  const isolatedHomePath = sessionCodexHomePath({
-    targetRoot: input.reportRepair.targetRoot,
-    sessionId: repairSessionId,
-  });
-
-  let repairResult: CodexCommandRunResult;
-  try {
-    repairResult = await input.reportRepair.codexAdapter.run({
-      targetRoot: input.reportRepair.targetRoot,
-      config: input.config,
-      worktreePath: input.worktreePath,
-      promptPath,
-      promptText,
-      reportPath: input.reportPath,
-      isolatedHomePath,
-      issueNumber: input.issue.number,
-      sessionId: repairSessionId,
-      branchName: input.reportRepair.branchName,
-      phase: 'scoped-issue',
-      logPath,
-      env: {
-        CODEX_ORCHESTRATOR_REPAIR_MODE: 'evidence',
-      },
-    });
-  } finally {
-    await cleanupSessionCodexHome(isolatedHomePath);
-  }
+  repairResult = await input.reportRepair.codexAdapter.run(execution.input);
 
   if (repairResult.exitCode !== 0) {
     const reason = `Evidence repair failed: ${formatCodexExitReason(repairResult)}`;
@@ -1144,78 +1124,6 @@ function relativeReportPathInsideWorktree(input: ImplementationPublishabilityInp
   return relativePath.split(/[\\/]+/u).join('/');
 }
 
-function buildCompletionReportRepairPrompt(input: {
-  input: ImplementationPublishabilityInput;
-  reportIssue: Exclude<ScopedCompletionReportDetailedReadResult, { kind: 'valid' }>;
-  changedFiles: string[];
-}): string {
-  const issue = input.input.issue;
-  const reportIssueText = input.reportIssue.kind === 'missing'
-    ? 'The completion report is missing.'
-    : [
-        input.reportIssue.message,
-        ...input.reportIssue.errors,
-        input.reportIssue.rawContent ? `Raw invalid report content (truncated):\n${input.reportIssue.rawContent}` : undefined,
-      ].filter(Boolean).join('\n');
-
-  return [
-    '# Completion Report Repair',
-    '',
-    'Repair only the completion report JSON at CODEX_ORCHESTRATOR_REPORT_FILE.',
-    'Do not edit product files. Do not edit GitHub. Do not create commits.',
-    'Use the changed files, issue text, schema errors/raw content, and validation/check evidence to write the corrected scoped completion report.',
-    'Final response raw JSON only.',
-    '',
-    `Issue #${issue.number}: ${issue.title}`,
-    issue.body,
-    '',
-    'Changed files:',
-    ...input.changedFiles.map((file) => `- ${file}`),
-    '',
-    'Report problem:',
-    reportIssueText,
-    '',
-    'Original workflow prompt:',
-    input.input.reportRepair?.workflowPromptText ?? '',
-  ].join('\n');
-}
-
-function buildEvidenceReportRepairPrompt(input: {
-  input: ImplementationPublishabilityInput;
-  changedFiles: string[];
-  reviewGate: ReviewGateResult;
-  validation: RunnerValidationLine[];
-}): string {
-  const issue = input.input.issue;
-  return [
-    '# Evidence Repair',
-    '',
-    'Repair only missing review-gate evidence in the completion report JSON at CODEX_ORCHESTRATOR_REPORT_FILE.',
-    'Do not edit product files. Do not edit GitHub. Do not create commits.',
-    'Only correct completion report JSON evidence fields such as validation, skippedChecks, residualRisks, and reviewHandoff.',
-    'You may run read-only review commands or review skills if needed, but final publication still depends on the runner rerunning gates.',
-    'Final response raw JSON only.',
-    '',
-    `Issue #${issue.number}: ${issue.title}`,
-    issue.body,
-    '',
-    'Changed files:',
-    ...input.changedFiles.map((file) => `- ${file}`),
-    '',
-    'Review gate reasons to repair:',
-    ...input.reviewGate.reasons.map((reason) => `- ${reason}`),
-    '',
-    'Typed blocker keys:',
-    ...(input.reviewGate.blockers ?? []).map((blocker) => `- ${blocker.key}: ${blocker.reason}`),
-    '',
-    'Current validation evidence:',
-    ...input.validation.map((line) => `- ${line.command}: ${line.status} - ${line.summary}`),
-    '',
-    'Original workflow prompt:',
-    input.input.reportRepair?.workflowPromptText ?? '',
-  ].join('\n');
-}
-
 function runnerBlocker(
   key: RunnerBlocker['key'],
   reason: string,
@@ -1348,18 +1256,8 @@ function isIdleTimeoutResult(result: CodexCommandRunResult): boolean {
 }
 
 function formatFigmaMcpFailureReason(result: CodexCommandRunResult): string | undefined {
-  if (result.exitCode === 0 || result.figmaMcp?.enabled !== true) {
-    return undefined;
-  }
-  const output = `${result.stderr}\n${result.stdout}`;
-  const looksLikeFigmaMcpFailure = /\bfigma\b[\s\S]{0,120}\b(?:mcp|server|tool|connection|connect|timeout|timed out|401|403|auth|unauthorized|forbidden|unavailable|failed)\b/iu.test(output)
-    || /mcp_servers\.figma/iu.test(output);
-  if (!looksLikeFigmaMcpFailure) {
-    return undefined;
-  }
-  return result.figmaMcp.requirement === 'required'
-    ? REQUIRED_FIGMA_MCP_FAILURE_REASON
-    : OPTIONAL_FIGMA_MCP_FAILURE_REASON;
+  void result;
+  return undefined;
 }
 
 function truncate(value: string, maxLength: number): string {

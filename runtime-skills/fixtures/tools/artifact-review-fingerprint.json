@@ -1,0 +1,5 @@
+{
+  "input": "---\ntitle: \"Example\"\nstatus: \"ready\"\nreview_profile: \"medium\"\nreview_outcome: \"Approved\"\n---\n\n## Goal\nDeliver the behavior.\n",
+  "canonical": "---\ntitle: \"Example\"\nreview_profile: \"medium\"\n---\n\n## Goal\nDeliver the behavior.\n",
+  "sha256": "daca7f118fa3037036108915ac764874813b2d51074da5e92c1ff76f0bd30056"
+}

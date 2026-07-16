@@ -4,8 +4,6 @@ import {
   InMemoryGitHubIssueAdapter,
   InMemoryGitHubPullRequestAdapter,
   RunnerStateStore,
-  buildPlanAutoPrompt,
-  buildScopedImplementationPrompt,
   closeIssueWithEvidence,
   runScopedAutoCommand,
   runPlanAutoCommand,
@@ -39,8 +37,6 @@ test('exports runner contracts from the package entrypoint', () => {
   assert.equal(typeof RunnerStateStore, 'function');
   assert.equal(typeof InMemoryGitHubPullRequestAdapter, 'function');
   assert.equal(typeof discoverIssueWork, 'function');
-  assert.equal(typeof buildScopedImplementationPrompt, 'function');
-  assert.equal(typeof buildPlanAutoPrompt, 'function');
   assert.equal(typeof runScopedAutoCommand, 'function');
   assert.equal(typeof runPlanAutoCommand, 'function');
   assert.equal(typeof runLocalExecutionSession, 'function');

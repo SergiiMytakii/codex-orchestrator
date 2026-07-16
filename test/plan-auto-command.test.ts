@@ -16,7 +16,7 @@ import { RunnerLifecycleEventStore } from '../src/runner/lifecycle-events.js';
 import { RunnerStateStore } from '../src/runner/local-state.js';
 import { SCOPED_RECOVERY_LEASE_STALE_MS } from '../src/runner/scoped-recovery.js';
 import { runPlanAutoCommand } from '../src/runner/plan-auto-command.js';
-import type { PlanAutoCompletionReport } from '../src/runner/prompt.js';
+import type { PlanAutoCompletionReport } from '../src/runner/completion-report.js';
 import { buildProjectConfig } from '../src/setup/project-config.js';
 import { fallbackWorkflows, validConfig } from './fixtures/config.js';
 import { issueFixture } from './fixtures/issues.js';
@@ -158,14 +158,17 @@ function codexAdapterForReport(
 }
 
 async function writeChildOwnedChange(input: CodexCommandRunInput, content = 'done\n'): Promise<string> {
-  const changedPath = childOwnedPath(input);
+  const changedPath = await childOwnedPath(input);
   await mkdir(dirname(join(input.worktreePath, changedPath)), { recursive: true });
   await writeFile(join(input.worktreePath, changedPath), content, 'utf8');
   return changedPath;
 }
 
-function childOwnedPath(input: CodexCommandRunInput): string {
-  const ownership = /^Ownership Scope:\s*(.+)$/mu.exec(input.promptText)?.[1]?.split(',')[0]?.trim();
+async function childOwnedPath(input: CodexCommandRunInput): Promise<string> {
+  const artifact = JSON.parse(await readFile(input.contextArtifactPath, 'utf8')) as {
+    context?: { childMetadata?: { ownershipScope?: string[] } };
+  };
+  const ownership = artifact.context?.childMetadata?.ownershipScope?.[0];
   if (!ownership) {
     return `child-${input.issueNumber}.txt`;
   }
@@ -205,10 +208,9 @@ test('plan-auto command plans parent, executes marked children, and opens one in
   assert.equal(result.status, 'review-ready');
   assert.equal(result.branchName, 'codex/tree-156');
   assert.equal(result.childIssues.length, 2);
-  assert.match(codexInput?.promptText ?? '', /PRD workflow/);
-  assert.match(codexInput?.promptText ?? '', /Issue breakdown workflow/);
-  assert.match(codexInput?.promptText ?? '', /Breakdown review workflow/);
-  assert.match(codexInput?.promptText ?? '', /Triage workflow/);
+  assert.equal(codexInput?.operationId, 'plan-parent');
+  assert.equal(codexInput?.nodeId, 'to-spec');
+  assert.match(await readFile(codexInput!.contextArtifactPath, 'utf8'), /"parentIssue"/);
   assert.deepEqual(issueAdapter.updatedIssues[0]?.issueNumber, 156);
   assert.equal((await issueAdapter.getIssue(156))?.title, 'Updated parent');
   assert.equal(issueAdapter.createdIssues.length, 2);
@@ -542,13 +544,13 @@ test('plan-auto command resumes retryable blocked child rework from existing tre
   const report = completedReport();
   report.graph.nodes = [{ ...report.graph.nodes[0]!, issueNumber: 157 }];
   report.graph.edges = [];
-  let reworkPrompt = '';
+  let reworkContext = '';
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
       if (input.sessionId.startsWith('plan-')) {
         await writeFile(input.reportPath, JSON.stringify(report), 'utf8');
       } else {
-        reworkPrompt = input.promptText;
+        reworkContext = await readFile(input.contextArtifactPath, 'utf8');
         const changedPath = await writeChildOwnedChange(input);
         await writeFile(
           input.reportPath,
@@ -595,8 +597,8 @@ test('plan-auto command resumes retryable blocked child rework from existing tre
   });
 
   assert.equal(result.status, 'review-ready');
-  assert.match(reworkPrompt, /automatic rework attempt \(#1\)/);
-  assert.match(reworkPrompt, /Codex completed without file changes/);
+  assert.match(reworkContext, /"attempt": 1/);
+  assert.match(reworkContext, /Codex completed without file changes/);
   assert.deepEqual(issueAdapter.removedLabels.find((entry) => entry.issueNumber === 157)?.labels, [labels.blocked.name]);
 });
 
@@ -765,7 +767,7 @@ test('plan-auto command applies configured child rework loop before parent integ
   report.graph.nodes = [report.graph.nodes[0]!];
   report.graph.edges = [];
   let childRuns = 0;
-  let reworkPrompt = '';
+  let reworkContext = '';
   const childInputs: CodexCommandRunInput[] = [];
   const codexAdapter = {
     async run(input: CodexCommandRunInput): Promise<CodexCommandRunResult> {
@@ -774,7 +776,7 @@ test('plan-auto command applies configured child rework loop before parent integ
       } else {
         childRuns += 1;
         childInputs.push(input);
-        reworkPrompt = input.promptText;
+        reworkContext = await readFile(input.contextArtifactPath, 'utf8');
         const changedPath = childRuns === 2 ? await writeChildOwnedChange(input) : undefined;
         await writeFile(
           input.reportPath,
@@ -812,11 +814,11 @@ test('plan-auto command applies configured child rework loop before parent integ
 
   assert.equal(result.status, 'review-ready');
   assert.equal(childRuns, 2);
-  assert.equal(new Set(childInputs.map((input) => input.promptPath)).size, 2);
+  assert.equal(new Set(childInputs.map((input) => input.contextArtifactPath)).size, 2);
   assert.equal(new Set(childInputs.map((input) => input.reportPath)).size, 2);
   assert.equal(new Set(childInputs.map((input) => input.logPath)).size, 2);
-  assert.match(reworkPrompt, /This is an automatic rework attempt \(#1\)/);
-  assert.match(reworkPrompt, /Codex completed without file changes/);
+  assert.match(reworkContext, /"attempt": 1/);
+  assert.match(reworkContext, /Codex completed without file changes/);
   const childReviewComment = [...issueAdapter.postedComments].reverse()
     .find((entry) => entry.issueNumber === 157 && entry.body.includes('codex-orchestrator child review report'))?.body ?? '';
   assert.match(childReviewComment, /rework attempts: 1/);
@@ -1433,7 +1435,7 @@ test('plan-auto command blocks on child merge conflict without pushing or openin
   );
 });
 
-test('plan-auto command throws before claim when workflow prompts are missing', async () => {
+test('plan-auto production path requires activated config v2 before claim', async () => {
   const repo = await tempGitProject();
   await unlink(join(repo, '.codex-orchestrator', 'prompts', 'workflows', 'triage.md'));
   const issueAdapter = new InMemoryGitHubIssueAdapter([
@@ -1442,7 +1444,7 @@ test('plan-auto command throws before claim when workflow prompts are missing', 
 
   await assert.rejects(
     runPlanAutoCommand({ targetRoot: repo, issueNumber: 156, issueAdapter, now }),
-    /Plan-auto workflow prompt not found/,
+    /orchestrator-skill-runtime-v2-required/,
   );
   await assert.rejects(stat(join(repo, '.codex-orchestrator', 'workspaces')), /ENOENT/);
   assert.deepEqual(issueAdapter.addedLabels, []);

@@ -2,9 +2,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { forbiddenRuntimeKeys } from '../config/constants.js';
-import type { BaseBranchConfig, CodexFigmaMcpConfig, CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy } from '../config/schema.js';
-import { validateConfig } from '../config/schema.js';
-import type { WorkflowConfigMap } from './workflows.js';
+import type { BaseBranchConfig, CodexFigmaMcpConfig, CodexOrchestratorConfig, LabelDefinition, LabelPreparationPolicy, RunnerConfig } from '../config/schema.js';
+import { validateConfig, validateConfigV2 } from '../config/schema.js';
+import type { LegacyWorkflowConfigMap as WorkflowConfigMap } from './legacy-workflow-migration.js';
 
 export interface BuildProjectConfigInput {
   owner: string;
@@ -34,7 +34,7 @@ export const packageOwnedAutoVisualProofCommand = 'codex-orchestrator visual-pro
 
 export function defaultFigmaMcpConfig(): CodexFigmaMcpConfig {
   return {
-    enabled: true,
+    enabled: false,
     url: 'https://mcp.figma.com/mcp',
     httpHeaders: {
       'X-Figma-Region': 'us-east-1',
@@ -534,9 +534,9 @@ export function assertNoRuntimeState(value: Record<string, unknown> | undefined)
   }
 }
 
-export async function writeProjectConfig(targetRoot: string, config: CodexOrchestratorConfig): Promise<string> {
+export async function writeProjectConfig(targetRoot: string, config: RunnerConfig): Promise<string> {
   const configPath = projectConfigPath(targetRoot);
-  const validation = validateConfig(config);
+  const validation = config.version === 2 ? validateConfigV2(config) : validateConfig(config);
 
   if (!validation.ok) {
     throw new Error(`Generated config is invalid: ${validation.errors.join('; ')}`);

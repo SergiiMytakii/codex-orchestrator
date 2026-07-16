@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "acceptedBridgePackageHashes": [
+    "4556aaafaf8a9657f0239b49572f3842426dcd50f070b5ef87f2c69153d2153a"
+  ],
+  "skills": [
+    "cleanup-review",
+    "code-review",
+    "domain-modeling",
+    "grilling",
+    "implementation-spec-maker",
+    "implementation-spec-review",
+    "improve-codebase-architecture",
+    "small-task-implementer",
+    "spec-implementer",
+    "tdd",
+    "tickets-breakdown-review",
+    "tickets-orchestrator",
+    "to-spec",
+    "to-tickets",
+    "triage",
+    "ui-evidence-proof"
+  ],
+  "transformations": [
+    "personal-root-to-bundle-root",
+    "shared-docs-to-bundle-shared",
+    "automatic-skill-markers-to-plain-names",
+    "native-delegation-to-runner-graph",
+    "publication-and-commit-ownership-to-runner",
+    "python-helper-references-to-node-tools"
+  ],
+  "approvedPlanAdaptations": [
+    {
+      "id": "high-artifact-review-topology",
+      "reason": "The approved product plan requires parallel A/B full reviews, affected closures, a reserved fresh C integrator, and one optional C closure within six reviews.",
+      "sourcePolicy": "Current personal review policy is retained only as source evidence and cannot replace the signed package graph.",
+      "graphTemplate": "artifact-review-high"
+    }
+  ],
+  "helperBlobs": [
+    {
+      "revision": "8ff0f17f73713b9cee3e7d1da35ebeb06898c6d5",
+      "path": "skills/_shared/scripts/review_context.py",
+      "sha256": "785ed1df91af2b5e4010c6b04f9cb560fbaf150980565faf9119d7ff195e7c3f"
+    },
+    {
+      "revision": "8ff0f17f73713b9cee3e7d1da35ebeb06898c6d5",
+      "path": "skills/_shared/scripts/detect_test_command.py",
+      "sha256": "28b4244a7077c2cd4b143e1e341cac11dc6992ba79017f37cb704bf2eb3a4c33"
+    },
+    {
+      "revision": "1c8a637009401fadd2b05bad0eb39ea2e8ecf5e8",
+      "path": "scripts/artifact_review_fingerprint.py",
+      "sha256": "cd092e22f67c6dcc0fc90e2d6885aac5c86f94c32a735313335050dff5f8bd59"
+    },
+    {
+      "revision": "1c8a637009401fadd2b05bad0eb39ea2e8ecf5e8",
+      "path": "scripts/test_artifact_review_fingerprint.py",
+      "sha256": "2b8658d0d798bc9beeea9a19e602e765e0fba80add09237681e838332d631260"
+    }
+  ]
+}

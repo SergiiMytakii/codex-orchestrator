@@ -1,6 +1,6 @@
 import type { CodexOrchestratorConfig } from '../../src/config/schema.js';
 import { buildProjectConfig } from '../../src/setup/project-config.js';
-import { workflowDefinitions, type WorkflowConfigMap } from '../../src/setup/workflows.js';
+import { legacyWorkflowDefinitions as workflowDefinitions, type LegacyWorkflowConfigMap as WorkflowConfigMap } from '../../src/setup/legacy-workflow-migration.js';
 
 export const fallbackWorkflows = Object.fromEntries(
   workflowDefinitions.map((definition) => [

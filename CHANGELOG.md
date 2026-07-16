@@ -6,6 +6,28 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Added the immutable package-owned skill bundle, signed operation/review
+  graphs, exact Codex `0.144.4` app-server transport, pinned tool catalog, and
+  package-only auth/runtime home.
+- Added `auth login` and atomic prepared-consumer config/state v2 activation
+  with candidate preflight, exact v1 backup, and interrupted-activation retry.
+- Added durable graph attempts with process/thread/report/cleanup evidence,
+  bounded baseline-aware recovery, and mandatory A/B/C review joins.
+
+### Changed
+- Production `run` and `daemon` now require activated config/state v2 and fail
+  before issue discovery when bundle, CLI, app-server, auth, config, or state
+  proof is unavailable.
+- Planning, implementation, proof, repair, and fresh review select only package
+  graph nodes; config v2 stores no workflow prompt or raw exec routing.
+
+### Security
+- App-server runs with package `HOME`/`CODEX_HOME`, approval `never`, disabled
+  ambient apps/plugins/native agents, empty initial MCP policy, fail-closed
+  server-request responses, supervised process-group cleanup, and per-thread
+  background-terminal quiescence before report acceptance.
+
 ## [0.1.51] - 2026-07-15
 
 ### Fixed

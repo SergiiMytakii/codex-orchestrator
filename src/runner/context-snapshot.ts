@@ -2,15 +2,14 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import type { CodexOrchestratorConfig, CodexPhase } from '../config/schema.js';
+import type { CodexOrchestratorConfig, CodexOrchestratorConfigV2, CodexPhase } from '../config/schema.js';
 import type { ResolvedBaseBranch } from '../git/base-branch.js';
-import { resolveCodexProfile } from '../codex/command-adapter.js';
 import type { GitHubIssue } from '../github/issues.js';
 import type { RunnerMode } from './issue-state-machine.js';
 
 export interface WriteContextSnapshotInput {
   targetRoot: string;
-  config: CodexOrchestratorConfig;
+  config: CodexOrchestratorConfig | CodexOrchestratorConfigV2;
   issue: GitHubIssue;
   mode: RunnerMode;
   phase: CodexPhase;
@@ -36,7 +35,7 @@ export interface ContextSnapshotEvidence {
 
 export async function writeContextSnapshot(input: WriteContextSnapshotInput): Promise<ContextSnapshotEvidence> {
   const snapshotPath = contextSnapshotPath(input);
-  const selectedProfile = resolveCodexProfile(input.config, input.phase);
+  const selectedProfile = selectedProfileSnapshot(input.config, input.phase);
   const snapshot = {
     version: 1,
     createdAt: (input.createdAt ?? new Date()).toISOString(),
@@ -58,8 +57,6 @@ export async function writeContextSnapshot(input: WriteContextSnapshotInput): Pr
       decision: input.decision,
       selectedProfile: {
         phase: selectedProfile.phase,
-        command: selectedProfile.command,
-        args: selectedProfile.args,
         timeoutMs: selectedProfile.timeoutMs,
         idleTimeoutMs: selectedProfile.idleTimeoutMs,
         envKeys: Object.keys(selectedProfile.env).sort(),
@@ -130,4 +127,17 @@ function summarize(value: string): string {
     return normalized;
   }
   return `${normalized.slice(0, 497)}...`;
+}
+
+function selectedProfileSnapshot(
+  config: CodexOrchestratorConfig | CodexOrchestratorConfigV2,
+  phase: CodexPhase,
+): { phase: CodexPhase; timeoutMs?: number; idleTimeoutMs?: number; env: Record<string, string> } {
+  const profile = config.codex.profiles?.[phase] ?? {};
+  return {
+    phase,
+    timeoutMs: profile.timeoutMs ?? config.codex.timeoutMs,
+    idleTimeoutMs: profile.idleTimeoutMs ?? config.codex.idleTimeoutMs,
+    env: profile.env ?? {},
+  };
 }

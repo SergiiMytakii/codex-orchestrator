@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { validateConfig } from '../src/config/schema.js';
+import { validateConfig, validateConfigV2 } from '../src/config/schema.js';
 import { validConfig } from './fixtures/config.js';
 
 test('accepts the expanded valid config contract', () => {
@@ -18,7 +18,7 @@ test('accepts the expanded valid config contract', () => {
     assert.equal(result.value.codex.mobileTimeoutMs, 3_600_000);
     assert.equal(result.value.codex.idleTimeoutMs, 300_000);
     assert.equal(result.value.codex.ignoreUserConfig, true);
-    assert.equal(result.value.codex.figmaMcp?.enabled, true);
+    assert.equal(result.value.codex.figmaMcp?.enabled, false);
     assert.equal(result.value.codex.figmaMcp?.url, 'https://mcp.figma.com/mcp');
     assert.deepEqual(result.value.codex.figmaMcp?.httpHeaders, { 'X-Figma-Region': 'us-east-1' });
     assert.deepEqual(result.value.codex.figmaMcp?.optionalIssueTextPatterns, [
@@ -99,6 +99,20 @@ test('accepts the expanded valid config contract', () => {
     assert.deepEqual(result.value.branches.base, { mode: 'explicit', remote: 'origin', branch: 'main' });
     assert.equal(result.value.branches.scopedIssue, 'codex/issue-${issueNumber}');
   }
+});
+
+test('config v2 accepts only the pinned app-server and empty initial MCP policy', () => {
+  const { workflows: _workflows, ...withoutWorkflows } = validConfig;
+  const { promptsDir: _promptsDir, ...project } = validConfig.project;
+  const candidate = {
+    ...withoutWorkflows, version: 2, project,
+    codex: { adapter: 'codex-app-server', command: 'codex', serverArgs: [], requiredVersion: '0.144.4', timeoutMs: 1_800_000, idleTimeoutMs: 300_000, profiles: {}, targetPolicy: { network: 'deny', networkHosts: [], writableRootClasses: ['proof-artifacts', 'target-state', 'worktree'], mcpServers: {} } },
+  };
+  const result = validateConfigV2(candidate);
+  assert.equal(result.ok, true, result.ok ? undefined : result.errors.join('\n'));
+  const widened = validateConfigV2({ ...candidate, codex: { ...candidate.codex, targetPolicy: { ...candidate.codex.targetPolicy, mcpServers: { figma: {} } } } });
+  assert.equal(widened.ok, false);
+  if (!widened.ok) assert.match(widened.errors.join('\n'), /mcp-catalog-fixture-missing/);
 });
 
 test('resolution mission accepts enabled mode after the compatibility gate', () => {

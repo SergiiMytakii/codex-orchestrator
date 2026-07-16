@@ -12,7 +12,7 @@ the main control points are.
 - GitHub Issues as the work queue;
 - GitHub labels as the authorization and state model;
 - git worktrees as isolated implementation workspaces;
-- Codex CLI as the implementation agent.
+- pinned Codex app-server as the implementation agent transport.
 
 The runner does not replace human review. It prepares work for review. A
 successful run ends with a pushed branch, a draft pull request, issue comments,
@@ -26,7 +26,7 @@ The npm package contains reusable orchestration logic:
 - config schema and validation;
 - GitHub issue and PR operations;
 - worktree and branch management;
-- Codex prompt execution;
+- immutable package skill graphs and app-server execution;
 - validation and review-gate evaluation;
 - durable local state and recovery reports.
 
@@ -34,7 +34,7 @@ Each target repository owns its policy under `.codex-orchestrator/`:
 
 - `config.json` for labels, branches, checks, gates, deny rules, and runner
   behavior;
-- `prompts/` for repo-local prompts used by Codex workflows;
+- target execution-policy ceilings that can narrow package node authority;
 - proof and artifact directories created during runs.
 
 This split keeps the package generic while letting each repository choose how
@@ -49,7 +49,8 @@ quick sanity check after installation.
 
 ### `setup`
 
-Creates project-local config and prompt files under `.codex-orchestrator/`.
+Creates bridge-era project config and migration inputs under
+`.codex-orchestrator/`; prepared consumers activate config v2 separately.
 
 Important behavior:
 
@@ -57,7 +58,7 @@ Important behavior:
 - can override owner, repo, or target path with flags;
 - can create missing GitHub labels with `--prepare-labels`;
 - can preview changes with `--dry-run`;
-- copies package-owned fallback prompts when local skills are missing;
+- supports explicit bridge preparation and structural activation modes;
 - does not launch Codex, commit files, or open pull requests.
 
 ### `status`
@@ -133,13 +134,15 @@ AFK/HITL metadata.
 
 For an `agent:auto` issue, the runner follows this lifecycle:
 
-1. Load config and validate policy.
+1. Load config v2 and prove bundle, catalog, exact CLI, app-server account, and
+   runner state before issue discovery.
 2. Fetch the issue from GitHub.
 3. Check labels and state.
 4. Claim the issue with the running label.
 5. Create a runner-owned branch and git worktree.
-6. Build a prompt from the issue, config, and scoped implementation workflow.
-7. Run Codex CLI in the issue worktree.
+6. Write a literal Runner-owned context artifact and select the signed
+   implementation graph entry.
+7. Run exact package graph nodes through Codex app-server.
 8. Read the Codex completion report.
 9. Collect the full local change set.
 10. Run configured validation checks.
@@ -754,22 +757,30 @@ worktree, starts with the normal automatic rework prompt, and still passes
 through the usual publishability, quality, acceptance-proof, durable-summary,
 and parent integration gates.
 
-## Prompt and Workflow System
+## Package Skill Runtime
 
-Workflows are configured in `config.json`.
+Config v2 does not route target prompts or raw `codex exec` arguments. The
+package ships an immutable content-addressed `runtime-skills/` closure with
+strict operation graphs, result schemas, review templates, Node-only helper
+tools, and the pinned Codex `0.144.4` tool-catalog fixture. The runner
+materializes that exact bundle below target state, intersects each signed node
+policy with target and phase restrictions, and sends only a Runner-owned
+context-file path plus structured package skill items to app-server.
 
-The default workflow set includes:
+Planning is the signed `to-spec -> to-tickets -> tickets-breakdown-review ->
+triage` graph. Implementation begins with read-only classification, admits
+write authority only for small/spec implementation nodes, then requires
+cleanup, bounded A/B/C code review, and final aggregation. Acceptance proof,
+report repair, evidence repair, and fresh-context review are separate signed
+operations without implementation authority.
 
-- PRD creation or update;
-- issue breakdown;
-- breakdown review;
-- triage;
-- scoped implementation;
-- issue-tree orchestration.
-
-Each workflow points to either a package-owned fallback prompt or a compatible
-local skill/prompt copied during setup. This lets the package work out of the
-box while still allowing repositories to customize agent behavior.
+One supervised app-server process is reused per run. Parallel reviewers use
+separate threads in that process. Every logical attempt persists its baseline,
+PID/PGID, thread/turn, report hash, terminal cleanup proof, and transition in
+runner state v2. A successor cannot start until the completed turn has cleaned
+its background terminals and an empty list is observed. Recovery is bounded to
+one unchanged-baseline clean retry and one write-node partial continuation with
+unchanged HEAD/index ownership; ambiguous or read-only mutation blocks.
 
 ## Skill Runtime V2 Bridge Fence
 
@@ -798,6 +809,19 @@ The structural phase must start later from an actually released bridge commit
 and must verify the canonical prepared generation and exact package hash before
 any config-v2 write.
 
+Structural activation revalidates that evidence and the current drain, runs
+package bundle/catalog/CLI/app-server/auth candidate preflight, writes
+`config.json.v1.backup`, commits empty state v2, and atomically publishes config
+v2 as the product commit point. Interrupted activation before config rename is
+retryable. Production `run` and `daemon` reject config v1; they never silently
+migrate it in memory.
+
+Authentication belongs to the package runtime home at
+`${CODEX_ORCHESTRATOR_HOME:-$HOME/.codex-orchestrator}/codex-home/v1`, not the
+personal Codex tree. `codex-orchestrator auth login` uses app-server
+`account/read` and correlated ChatGPT browser login. Persisted auth owns an
+exclusive supervised-process lease; each run has a distinct SQLite home.
+
 ## Config Surface
 
 The top-level config areas are:
@@ -805,9 +829,9 @@ The top-level config areas are:
 - `github` for owner, repo, label preparation, and label definitions;
 - `runner` for workspace root, child concurrency, state directory, local commit
   policy, and worktree cleanup;
-- `codex` for Codex CLI command, args, timeouts, and prompt/report env vars;
-- `project` for config and prompt directories;
-- `workflows` for prompt or skill routing;
+- `codex` for the pinned app-server command/version, timeouts, phase profiles,
+  and target authority ceilings;
+- `project` for the config directory;
 - `checks` and `checksPolicy` for validation commands;
 - `reviewGates` for quality, risk-routing, and acceptance proof requirements;
 - `loopPolicy` for issue selection, rework, review, summaries, and suggestions;
@@ -828,7 +852,7 @@ The package currently focuses on local runner workflows:
 - project-local config;
 - runner-owned worktree cleanup;
 - GitHub Issues and Pull Requests;
-- Codex CLI as the agent backend.
+- pinned Codex app-server as the agent backend.
 
 Hosted infrastructure, non-GitHub issue trackers, and non-Codex agents are not
 part of the current package, although the code keeps adapter boundaries for

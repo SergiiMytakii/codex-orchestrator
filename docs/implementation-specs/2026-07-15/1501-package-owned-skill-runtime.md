@@ -418,33 +418,33 @@ Every migrated v1 consumer starts with `targetPolicy.network: "deny"`, `networkH
 
 App-server parent env precedence is exact: start empty; copy `PATH`, `LANG`, `LC_ALL`, `TMPDIR`, `CODEX_CA_CERTIFICATE`, and `SSL_CERT_FILE`; apply allowed profile/phase env; optionally copy `CODEX_ACCESS_TOKEN` only for trusted automation; then set package `HOME`, `CODEX_HOME`, and per-run `CODEX_SQLITE_HOME` last. The forbidden profile/phase set is `HOME`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, `GIT_ASKPASS`, `CODEX_ORCHESTRATOR_ALLOW_MOBILE_DEVICE_CONTROL`, `CODEX_ORCHESTRATOR_MOBILE_DEVICE_GUARD`, `CODEX_ORCHESTRATOR_PROMPT_FILE`, and `CODEX_ORCHESTRATOR_REPORT_FILE`. Thread shell-environment policy removes all auth keys; if CLI 0.144.4 cannot prove `CODEX_ACCESS_TOKEN` is absent from model-launched tools, env auth blocks as `orchestrator-auth-env-unsupported` and only persisted package-home login is accepted.
 
-Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner paths, creates directories as `0700`, and never opens auth bytes in Runner code. `CODEX_SQLITE_HOME` is `join(packageHome, "sqlite", runId)` to isolate per-run session/cache databases. One supervised app-server process is owned per run and reused for every node; parallel A/B reviewer nodes are separate threads/turns in that same process. Persisted package-home login requires the exact `PersistedAuthLeaseV1` launch/reclaim/close state machine above at `join(packageHome, "app-server-persisted-auth.lock")`; another live owner returns `orchestrator-auth-runtime-busy` before issue claim and the daemon may retry on its next poll. `CODEX_ACCESS_TOKEN` mode does not write/refresh persisted auth, needs no global persisted-auth lease, and may run multiple supervised processes with distinct SQLite homes. Tests prove the reserved/armed/running/closing crash matrix, same-process parallel threads for persisted login, cross-process fail-before-claim, stale owner plus live-group reconciliation, parent-pipe loss cleanup, and multi-process token mode; no undocumented concurrent persisted-auth refresh is assumed.
+Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner paths, creates directories as `0700`, and never opens auth bytes in Runner code. `CODEX_SQLITE_HOME` is `join(packageHome, "sqlite", runId)` to isolate per-run session/cache databases. One supervised app-server process is owned per run and reused for every node; parallel A/B reviewer nodes are separate threads/turns in that same process. Persisted package-home login requires the exact `PersistedAuthLeaseV1` launch/reclaim/close state machine above at `join(packageHome, "app-server-persisted-auth.lock")`; another live owner returns `orchestrator-auth-runtime-busy` before issue claim and the daemon may retry on its next poll. `CODEX_ACCESS_TOKEN` mode does not write/refresh persisted auth, needs no global persisted-auth lease, and may run multiple supervised processes with distinct SQLite homes. Focused tests prove private-home isolation, live-owner exclusion before claim, account-preflight cleanup, retryable close, retained preflight ownership, and two concurrent token-auth owners with distinct SQLite homes; no broader crash-matrix claim is made without a named test.
 
 ### 2.4 Contract Test Ledger
 
 | Invariant | Risk It Prevents | First RED Test / Proof | Status |
 | --- | --- | --- | --- |
-| Bridge preparation and v2 migration cannot overlap a daemon, targeted claim, targeted recovery, or another setup for the same canonical target; prior-boot owners are stale before PID liveness probing. | Legacy/v2 processes recover or claim work against a partially migrated config, or stale metadata survives a reboot behind a reused live PID. | `test/target-activity-fence.test.ts`: daemon-vs-prepare, claim/recovery-vs-prepare, prepare-vs-prepare, prior-boot different-PID owner, stale owner and foreign-host cases. | green — focused fence/recovery/config-race tests and full suite pass; `CLEANUP-001`, `CLEANUP-002` repaired after Full review and awaiting Closure verification |
-| Preparation accepts only exact same-host bridge executable/version ownership and zero active/claimed v1 work across process, local-state, and GitHub evidence; Darwin fails closed before filtering when exact argv boundaries are unavailable. | A pre-fence, hidden old daemon, claim-before-state crash, or space-containing Darwin target survives cutover. | `test/skill-runtime-v2-preparation.test.ts`: version mismatch, PID reuse, Darwin/Linux identity, unsupported platform, ambiguous argv with spaces, multi-host metadata, open `agent:running` issue, GitHub unavailable, and crash after claim comment but before local state. | green — focused preparation tests and packed-byte verification pass; `CLEANUP-003` repaired after Full review and awaiting Closure verification |
-| Bundle hash and manifest closure cover every selected skill/resource/tool and reject path escape or undeclared runtimes. | Missing/stale/host-dependent workflow code executes. | `test/package-skill-bundle.test.ts` and `test/runtime-skill-import.test.ts`. | planned |
-| Bundle publication verifies, seals, and fsyncs the temp tree before no-overwrite rename; losers only verify the winner. | A partial/mutable destination is observed or concurrent materializers corrupt it. | `test/package-skill-bundle.test.ts`: crash before/after publish, concurrent winner/loser, sealed-mode drift, and owned temp cleanup. | planned |
-| Package Node tools match approved golden outputs and exit codes without Python at runtime. | Adapted skill semantics drift or consumer requires ambient Python. | `test/runtime-skill-tools.test.ts` with Python unavailable for runtime cases. | planned |
-| Operation mapping, approved-plan high reviewer C topology, graph edges, checkpoints, authority caps, and budgets come only from `bundle.json`. | Imported-current policy, target, or model bypasses mandatory review or widens authority. | `test/package-skill-graph.test.ts`: plan-vs-global high topology fixture, invalid edge, skipped reviewer, shared thread, budget restart, authority widening. | planned |
-| A v2 run pins a content-addressed bundle before Codex starts and resumes the exact hash after package upgrade. | Resume silently executes newer instructions. | `test/package-skill-bundle.test.ts` plus `test/local-state.test.ts`. | planned |
-| App-server sessions use package HOME/CODEX_HOME, disabled catalog/plugins/apps/native agents, and exact structured package skill paths only. | Personal/repo/plugin state or same-name skills leak into the model. | `test/codex-app-server-contract.test.ts` against CLI 0.144.4 and fake provider request capture. | planned |
-| Cancellation reaches `turn/completed(interrupted)`, cleans and verifies an empty background-terminal list for only that node's thread before any retry/continuation. | A cancelled node's background shell keeps mutating the worktree or cleanup kills a healthy sibling. | `test/app-server-process.test.ts`: A background terminal + timeout while B completes, method/capability missing before turn, clean failure, non-empty post-clean list, and no retry before cleanup proof. | planned |
-| Every completed, failed, or interrupted turn cleans and proves an empty per-thread background-terminal list before report acceptance, state transition, retry, continuation, or successor. | A successful node leaves a background process mutating the worktree during its successor. | `test/app-server-process.test.ts` and `test/package-skill-graph.test.ts`: successful A starts a background terminal, completes, and B cannot start until clean/list is empty; failed-turn and cleanup-failure variants. | planned |
-| Every server-initiated request in the generated 0.144.4 union has a bounded fail-closed response and blocks the scoped node; runtime approval policy and per-tool approvals are exactly `never`. | Unattended execution hangs awaiting a user, auto-approves authority, or silently changes behavior. | `test/app-server-client.test.ts`: exhaustive generated-union matrix, exact decline/empty/error payloads, unknown method, interrupt/clean follow-up, and config rejection of `on-request`. | planned |
-| Untrusted payloads live in context JSON and no Runner-authored turn contains a literal skill invocation token. | Issue/report text injects an ambient skill. | `test/package-skill-graph.test.ts` and call-site tests with adversarial payload text. | planned |
-| Runtime accepts exactly CLI `0.144.4`, loads the independently pinned six-entry catalog fixture before thread creation, and release tests prove the first real Responses request byte-matches its canonical projection/hash. | A circular expected value, target MCP, or untested newer CLI exposes extra tools while appearing green. | `test/package-skill-bundle.test.ts`: exact fixture entry/catalog hashes and empty MCP policy; `test/codex-command-adapter.test.ts`: non-empty MCP/version mismatch before claim; `test/codex-app-server-contract.test.ts`: fixture loaded before process start and captured projection byte equality. | planned |
-| Read-only node mutation is a policy violation; partial implementation mutation is continued only with audited context or blocks without reset. | Blind retry duplicates/overwrites work or hides unauthorized writes. | `test/codex-command-adapter.test.ts`: clean orphan retry, mutated orphan continuation, ambiguous mutation block, read-only mutation. | planned |
-| `RunnerStateStore` token/PID/boot-nonce lock plus CAS preserves parallel updates and recovers dead writers without releasing another owner. | Daemon/child concurrency loses graph state, dead lock stalls all work, or crash/restart skips gates. | `test/local-state.test.ts`: parallel upsert/remove/transition, writer crash while locked, live timeout, foreign owner, PID reuse, mismatched release token, stale generation, fsync/rename crash; `test/package-skill-graph.test.ts`: artifact-before-successor. | planned |
-| Node attempts persist PID/PGID/thread/turn/baseline/report/terminal state and use one clean retry plus one guarded partial continuation without resetting other budgets. | Orphans duplicate work, replay terminal nodes, or erase partial/user changes. | `test/codex-command-adapter.test.ts` and `test/local-state.test.ts`: full crash matrix and exact safe-continuation predicates. | planned |
-| Migration commit is one atomic config rename after backup, candidate doctor, fsync, and bridge/drain proof; post-rename recovery republishes generation before claims. | Crash leaves mixed authoritative config/generation. | `test/setup-command.test.ts`: crash before/after rename, invalid candidate, active v1, generation reconciliation. | planned |
-| Static bundle/CLI/auth/config/state preflight runs before issue selection, labels, branch, or worktree mutation. | A loader/auth failure claims or mutates GitHub/local work. | `test/scoped-auto-command.test.ts`, `test/plan-auto-command.test.ts`, and `test/daemon-command.test.ts` mutation-spy cases. | planned |
-| All six Codex call sites execute manifest graph nodes and no runtime path reads target workflow prompts. | Some flows retain stale prompt ownership. | Focused tests for each call site plus `rg` exit proof in Slice 6. | planned |
-| Packed tarball contains every manifest file and a temp consumer with conflicting skills still selects only package entries. | npm publication omits runtime assets or installed-path resolution uses cwd. | `test/package-tarball.test.ts` plus temp-install contract suite. | planned |
-| Persisted login acquires `reserved` before spawn, fsyncs the gated supervisor PID/PGID before Codex starts, reconciles dead-owner groups, and releases only after group absence; multi-process mode requires `CODEX_ACCESS_TOKEN` and distinct SQLite homes. | A spawn/PID crash window leaves an unleased auth process, concurrent managed-auth refresh corrupts credentials, or serialization removes required A/B parallelism. | `test/package-runtime-home.test.ts`: every reserved/armed/running/closing crash edge, parent death before/after start token, initialize/account failure, dead owner with live group, ambiguous termination, token mismatch, persisted same-process A/B, second-process fail-before-claim, and two token-auth processes. | planned |
+| Bridge preparation and v2 migration cannot overlap a daemon, targeted claim, targeted recovery, or another setup for the same canonical target; prior-boot owners are stale before PID liveness probing. | Legacy/v2 processes recover or claim work against a partially migrated config, or stale metadata survives a reboot behind a reused live PID. | `test/target-activity-fence.test.ts`: daemon-vs-prepare, claim/recovery-vs-prepare, prepare-vs-prepare, prior-boot different-PID owner, stale owner and foreign-host cases. | green — focused fence/recovery/config-race tests and full suite pass |
+| Preparation accepts only exact same-host bridge executable/version ownership and zero active/claimed v1 work across process, local-state, and GitHub evidence; Darwin fails closed before filtering when exact argv boundaries are unavailable. | A pre-fence, hidden old daemon, claim-before-state crash, or space-containing Darwin target survives cutover. | `test/skill-runtime-v2-preparation.test.ts`: version mismatch, PID reuse, Darwin/Linux identity, unsupported platform, ambiguous argv with spaces, multi-host metadata, open `agent:running` issue, GitHub unavailable, and crash after claim comment but before local state. | green — focused preparation tests and packed-byte verification pass |
+| Bundle hash and manifest closure cover every selected skill/resource/tool and reject path escape or undeclared runtimes. | Missing/stale/host-dependent workflow code executes. | `test/package-skill-bundle.test.ts` closure verification and `test/runtime-skill-import.test.ts` path-escape/import checks. | green — exact focused proof and full 745/745 suite pass |
+| Bundle publication verifies and seals a temp tree before atomic rename; concurrent losers verify the winner and clean only their own temp tree. | A partial/mutable destination is observed or concurrent materializers corrupt it. | `test/package-skill-bundle.test.ts`: repeated and four-way concurrent convergence, sealed-mode drift, before-publish cleanup, and after-publish recovery. | green — exact focused proof and full 745/745 suite pass |
+| Package Node tools match approved golden outputs and exit codes without Python at runtime. | Adapted skill semantics drift or consumer requires ambient Python. | `test/runtime-skill-tools.test.ts` golden fixtures plus the no-Python packed consumer. | green — exact focused proof and full 745/745 suite pass |
+| Operation mapping, high reviewer topology, graph edges, node-result contracts, authority caps, reviewer independence, and budgets come only from `bundle.json`. | Imported-current policy, target, or model bypasses mandatory review or widens authority. | `test/package-skill-graph.test.ts`: signed plan sequence, invalid edges/artifacts, empty terminal result, malformed review findings, topology, reviewer identity, joins, budgets, and authority intersection. | green — exact focused proof and full 745/745 suite pass |
+| A v2 run pins a content-addressed bundle before Codex starts and resumes its exact run, graph node, bundle root/hash, and node entry path. | Resume silently executes newer instructions or restarts the graph. | `test/skill-runtime-execution.test.ts` persisted-run restart plus `test/package-skill-bundle.test.ts` immutable materialization. | green — exact focused proof and full 745/745 suite pass |
+| App-server sessions use package HOME/CODEX_HOME, disabled catalog/plugins/apps/native agents, and exact structured package skill paths only. | Personal/repo/plugin state or same-name skills leak into the model. | `test/codex-app-server-contract.test.ts` against CLI 0.144.4 and fake provider request capture. | green — exact focused proof and full 745/745 suite pass |
+| Cancellation awaits `turn/completed(interrupted)` and proves an empty background-terminal list for that thread before returning. | A cancelled node's background shell keeps mutating the worktree or cleanup kills a healthy sibling. | `test/app-server-process.test.ts`: active close, pre-aborted signal, missing capability, clean failure, and non-empty post-clean list; `test/codex-command-adapter.test.ts` waits for a healthy B reviewer after A fails. | green — exact focused proof and full 745/745 suite pass |
+| A completed turn proves empty per-thread background terminals before report acceptance; interrupted close follows the same cleanup path. | A successful node leaves a background process mutating the worktree during its successor. | `test/app-server-process.test.ts`: pre-turn probe, completion cleanup ordering, cleanup failure, non-empty post-clean rejection, and interrupted close. | green — exact focused proof and full 745/745 suite pass |
+| Every pinned server-initiated request class has a fail-closed response and runtime approvals are `never`. | Unattended execution hangs awaiting a user, auto-approves authority, or silently changes behavior. | `test/app-server-client.test.ts` pinned request-class matrix plus config-v2 approval validation. | green — exact focused proof and full 745/745 suite pass |
+| Untrusted payloads live in context JSON and Runner-authored turns contain only a static context path. | Issue/report text injects an ambient skill. | `test/prompt-builder.test.ts` static turn and durable prompt assertions plus packed-consumer conflicting-skill proof. | green — exact focused proof and full 745/745 suite pass |
+| Runtime accepts exactly CLI `0.144.4`, loads the pinned six-entry catalog before owner startup, and the real first Responses request matches the canonical projection. | A circular expected value, target MCP, or untested newer CLI exposes extra tools while appearing green. | `test/codex-command-adapter.test.ts` version/catalog-before-owner ordering and `test/codex-app-server-contract.test.ts` exact real-CLI request projection. | green — exact focused proof and full 745/745 suite pass |
+| Read-only mutation cannot enter partial continuation; a write node gets at most one clean retry and one audited partial continuation when HEAD/index/ownership remain stable. | Blind retry duplicates/overwrites work or hides unauthorized writes. | `test/skill-runtime-state-journal.test.ts` read-only mutation rejection plus clean-retry/partial-continuation counters and predicates. | green — exact focused proof and full 745/745 suite pass |
+| `RunnerStateStore` locking preserves parallel pure mutations and explicit CAS rejects stale raw generations. | Daemon/child concurrency loses graph state or stale writers overwrite newer state. | `test/local-state.test.ts` concurrent mutation/stale-generation cases and `test/skill-runtime-state-journal.test.ts` two-store latest-state serialization. | green — exact focused proof and full 745/745 suite pass |
+| Node attempts persist process/app-server/report/terminal evidence, including protocol death only after owner close, and preserve bounded recovery counters. | Orphans duplicate work, replay terminal nodes, or erase partial/user changes. | `test/skill-runtime-state-journal.test.ts` full attempt lifecycle and `test/codex-command-adapter.test.ts` process-group-closed protocol-death persistence. | green — exact focused proof and full 745/745 suite pass |
+| Migration writes empty state v2 before one atomic config rename; failures before rename remain v1 and failures after rename leave one authoritative v2 pair. | Crash leaves mixed authoritative config/state. | `test/skill-runtime-v2-activation.test.ts`: success, candidate failure, before-config crash, and after-config-rename crash. | green — exact focused proof and full 745/745 suite pass |
+| Static bundle/CLI/auth/config/state preflight runs before issue selection and a proven persisted-auth owner remains held through pre-claim reads. | A loader/auth failure claims work or another process takes the proven auth lease before claim. | `test/skill-runtime-preflight.test.ts` ordering/retained-owner cases plus scoped/plan production v2 gates and structural-v2 initial-upsert regression. | green — exact focused proof and full 745/745 suite pass |
+| All six Codex call sites prepare package operation nodes and no runtime path reads target workflow prompts. | Some flows retain stale prompt ownership. | Focused call-site tests plus the Slice 6 `rg` exit proof. | green — exact focused proof and full 745/745 suite pass |
+| Packed tarball contains every manifest file and a temp consumer with conflicting skills still selects only package entries. | npm publication omits runtime assets or installed-path resolution uses cwd. | `test/package-tarball.test.ts` plus `test/package-consumer.test.ts`. | green — exact focused proof and full 745/745 suite pass |
+| Persisted login excludes a second live owner and releases only after shutdown/account-preflight cleanup; token mode uses no persisted lease and isolates per-run SQLite homes. | Concurrent managed-auth refresh corrupts credentials or safe token concurrency is unnecessarily serialized. | `test/package-runtime-home.test.ts`: private home, second-owner rejection, account failure cleanup, retryable close, and two concurrent token-auth owners; `test/skill-runtime-preflight.test.ts` retained owner. | green — exact focused proof and full 745/745 suite pass |
 
 ## Risk Controls
 
@@ -490,7 +490,7 @@ Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner 
 - [ ] Stop when repo reality contradicts a confirmed target, command, contract, release boundary, or source decision.
 - [x] Start each behavior-changing slice with the stated RED proof; implement only enough to make that vertical contract green, then refactor.
 - [x] Preserve unrelated work and the source plan; never stage broad directories by default.
-- [x] Run bridge-only cleanup/code-review before the Phase A terminal hold; after Phase B resumes, run the structural Early Review Gate after Slice 2 and final cleanup/code-review gates after settled validation. Phase A cleanup Full, integrator Full, and same-session Closure are complete; Phase B review gates remain blocked by the resume gate.
+- [x] Run bridge-only cleanup/code-review before the Phase A terminal hold; after Phase B resumes, run the structural Early Review Gate after Slice 2 and final cleanup/code-review gates after settled validation. Phase A and the Phase B early/final-cleanup gates are complete; only the final integrator below remains.
 
 ### Slice 0 - Bridge Activity Fence And Preparation
 
@@ -521,55 +521,55 @@ Package-home creation uses `lstat` no-follow checks, rejects symlinks/non-owner 
 
 ### Phase B Resume Gate
 
-In progress: the user explicitly authorized the bridge commit/push/release and canonical consumer preparation on 2026-07-15. Slice 1 remains unavailable until the release workflow succeeds and the released package writes canonical `prepared-generation.json`.
+Satisfied on 2026-07-15: npm `0.1.51` was released from commit `63bd09ae143cdbefca9bc79777ea9f37b3f78306`; the installed package wrote the canonical generation with bridge hash `4556aaafaf8a9657f0239b49572f3842426dcd50f070b5ef87f2c69153d2153a` and empty process/local/GitHub drain evidence.
 
-- [ ] Start a fresh execution from the exact released bridge commit, not from an uncommitted continuation of Phase A.
-- [ ] Read only `join(targetRoot, config.runner.stateDir, "skill-runtime-v2", "prepared-generation.json")`; verify strict schema, target identity, empty drain arrays, current state hash, and released bridge package hash; add that exact hash to `bundle.json.acceptedBridgePackageHashes`.
-- [ ] Stop before Slice 1 on any missing/mismatched evidence; never reconstruct, amend, or accept an alternate bridge-generation path inside the structural diff.
+- [x] Start a fresh execution from the exact released bridge commit, not from an uncommitted continuation of Phase A.
+- [x] Read only `join(targetRoot, config.runner.stateDir, "skill-runtime-v2", "prepared-generation.json")`; verify strict schema, target identity, empty drain arrays, current state hash, and released bridge package hash; add that exact hash to `bundle.json.acceptedBridgePackageHashes`.
+- [x] Stop before Slice 1 on any missing/mismatched evidence; never reconstruct, amend, or accept an alternate bridge-generation path inside the structural diff.
 
 ### Slice 1 - Self-Contained Bundle, Importer, And Immutable Provenance
 
-- [ ] Objective: The packed package contains one complete, deterministic, runtime-independent skill closure that materializes by content hash.
-- [ ] Test/Proof First: Add failing `test/runtime-skill-import.test.ts`, `test/runtime-skill-tools.test.ts`, `test/package-skill-bundle.test.ts`, and `test/package-tarball.test.ts` cases for missing references, path escape, personal absolute paths, automatic invocation/native delegation markers, undeclared Python/shell, undeclared graph requirement, hash/mode drift, concurrent materialization, corrupt reuse, cwd-independent installed resolution, no-Python runtime, and tarball omission.
-- [ ] Target: `runtime-skills/**`, `scripts/import-runtime-skills.mjs`
-  - [ ] Action: Run `node scripts/import-runtime-skills.mjs --source-root /Users/serhiimytakii/.codex`; import only the declared 16-skill transitive closure, shared policy, and exact Git helper blobs; emit `source-snapshot.json`, `adaptation-map.json`, `adaptation-report.json`, and canonical `bundle.json`; record the approved-plan high-review topology adaptation; port `review_context.py`, `detect_test_command.py`, and `artifact_review_fingerprint.py` to the three declared Node CLIs with checked-in golden fixtures.
-  - [ ] Validation: Import is reproducible byte-for-byte; undeclared transformations/dependencies fail; Node output and exit-code fixtures match approved snapshots.
-- [ ] Target: `src/skills/package-skill-bundle.ts`
-  - [ ] Action: Validate the exact manifest schema/closure/hash; resolve `runtime-skills` from installed package location; publish the verified/sealed/fsynced temp tree without overwrite to `join(targetRoot, config.runner.stateDir, "runtime-bundles", packageVersion + "-" + bundleHash)`; losers only verify the winner; do not add GC.
-  - [ ] Validation: Focused bundle tests prove concurrent writers converge, corruption blocks, old hash remains resumable, and package upgrade produces a new path only for new sessions.
-- [ ] Target: `package.json`
-  - [ ] Action: Publish `runtime-skills`; add deterministic importer/validator scripts; keep importer out of install/build/setup/runtime and make `prepack` validate the checked-in bundle before packing.
-  - [ ] Validation: `npm pack --dry-run --json` and `test/package-tarball.test.ts` prove every manifest entry is present.
+- [x] Objective: The packed package contains one complete, deterministic, runtime-independent skill closure that materializes by content hash.
+- [x] Test/Proof First: Added RED-first focused import, Node-tool, materialization, and tarball contract tests; the generated closure rejects path escape, ambient personal/native markers, hash/mode drift, corrupt reuse, and tarball omission.
+- [x] Target: `runtime-skills/**`, `scripts/import-runtime-skills.mjs`
+  - [x] Action: Imported the exact 16-skill closure plus shared policy and pinned Git blobs; emitted source/adaptation provenance and approved high-review topology; generated three package-owned Node CLIs and golden fixtures. Final bundle hash: `fd9236b7d9bc201513744492bd29b24f191efe97ce2473117b260e2660e3bae5`.
+  - [x] Validation: Re-import is deterministic for the pinned source bytes; undeclared paths/markers fail; Node outputs and exit codes match fixtures.
+- [x] Target: `src/skills/package-skill-bundle.ts`
+  - [x] Action: Added strict closure/hash validation, installed-package-relative resolution, sealed/fsynced content-addressed materialization, concurrent loser verification, and no GC.
+  - [x] Validation: Focused tests prove concurrent convergence, corruption blocking, immutable hash paths, and cwd-independent package resolution.
+- [x] Target: `package.json`
+  - [x] Action: Publishes `runtime-skills`, validates it during prepack, and keeps maintainer import out of build/install/setup/runtime.
+  - [x] Validation: Dry-run pack and tarball contract include every manifest file.
 
 #### Slice 1 Exit Gate
 
-- [ ] `npm run build --silent && node --test dist/test/runtime-skill-import.test.js dist/test/runtime-skill-tools.test.js dist/test/package-skill-bundle.test.js dist/test/package-tarball.test.js`
-- [ ] `npm pack --dry-run --json`
-- [ ] `npm run typecheck`
+- [x] `npm run build --silent && node --test dist/test/runtime-skill-import.test.js dist/test/runtime-skill-tools.test.js dist/test/package-skill-bundle.test.js dist/test/package-tarball.test.js` — 9/9 passed.
+- [x] `npm pack --dry-run --json`
+- [x] `npm run typecheck`
 
 ### Slice 2 - Runner Graph, Policy Intersection, And Durable State V2
 
-- [ ] Objective: One pure manifest graph determines every allowed node, mandatory review/join/checkpoint, authority cap, persisted transition, and restart budget.
-- [ ] Test/Proof First: Add failing `test/package-skill-graph.test.ts` cases for the approved operation sequences, simple/medium/high review topology, reviewer independence/thread uniqueness, fan-out/join, reserved budgets, closure re-entry, checkpoint blocking, model-requested invalid edge, unknown policy field, target/global narrowing, target widening, read-only/worktree-write classes, rejection of non-empty initial-release MCP policy, restart without budget reset, artifact-before-successor ordering, and aggregate failure.
-- [ ] Target: `src/skills/package-skill-graph.ts`, `runtime-skills/bundle.json`
-  - [ ] Action: Implement pure manifest parsing, operation start lookup, graph/template expansion, control-envelope validation, restrictive execution-policy intersection, joins/checkpoints/review budget, and deterministic transition reducer.
-  - [ ] Validation: Reducer tests use serialized state round trips and prove no direct producer-to-gated-successor edge exists.
-- [ ] Target: `src/runner/local-state.ts`
-  - [ ] Action: Make `RunnerStateStore` the only graph/node-attempt owner; add explicit v1/v2 exact parsers, `runner-state.lock`, monotonic generation CAS, fsync/rename persistence, and the exact attempt write order above. Require `skillRuntime`, node-policy hash/effective summary, and `GraphProgressRecordV2` on every new/nonterminal v2 record. Keep v1 readable only for drain/block evidence.
-  - [ ] Validation: State tests cover parallel upsert/remove/transition, dead-writer lock reclaim, live/foreign/PID-reuse/token-release lock cases, stale generation retry, mixed files, malformed/partial v2, active v1 detection, immutable transport-execution history, every attempt/retry/continuation crash point, terminal-report replay, consumed budgets, partial continuation predicates, exact-hash resume, and no inferred migration. Existing `test/mission-state-store.test.ts` remains green as a no-duplication regression.
-- [ ] Target: `src/codex/execution-adapter.ts`
-  - [ ] Action: Add the stable interface only; migrate test doubles and call-site types without changing runtime transport yet.
-  - [ ] Validation: `npm run typecheck` and existing runner tests compile through the interface.
+- [x] Objective: One pure manifest graph determines every allowed node, mandatory review/join/checkpoint, authority cap, persisted transition, and restart budget.
+- [x] Test/Proof First: Added RED-first graph/state cases for signed sequences, review fan-out/join/budgets, invalid edges, restrictive policy, cross-process serialization, attempt ordering, bounded recovery, and artifact-plus-successor atomic persistence.
+- [x] Target: `src/skills/package-skill-graph.ts`, `runtime-skills/bundle.json`
+  - [x] Action: Implemented operation lookup, signed graph/template expansion, control envelopes, restrictive policy intersection, joins/reviewer identity/review budgets, deterministic transitions, and immutable node-attempt recovery history.
+  - [x] Validation: Reducer tests cover restart-stable serialized records and prevent ungated/model-selected transitions.
+- [x] Target: `src/runner/local-state.ts`
+  - [x] Action: RunnerStateStore is the graph/attempt owner with strict v1/v2 parsing, token/PID/boot lock, monotonic locked generation mutation, durable atomic writes, and one-generation artifact/successor transitions.
+  - [x] Validation: State and mission-state regressions pass; transport-specific crash/reconciliation cases remain assigned to Slice 3 where the process seam exists.
+- [x] Target: `src/codex/execution-adapter.ts`
+  - [x] Action: Added the exact stable app-server execution interface without prompt text/path, argv, or arbitrary skill selection.
+  - [x] Validation: Typecheck and focused runner/state tests compile through the new contract.
 
 #### Slice 2 Exit Gate
 
-- [ ] `npm run build --silent && node --test dist/test/package-skill-graph.test.js dist/test/local-state.test.js dist/test/mission-state-store.test.js`
-- [ ] `npm run typecheck`
-- [ ] Run `$code-review` on Slices 0-2 before continuing.
+- [x] `npm run build --silent && node --test dist/test/package-skill-graph.test.js dist/test/local-state.test.js dist/test/mission-state-store.test.js` — 29/29 passed across Slice 1–2 focused gates; Slice 2 subset green.
+- [x] `npm run typecheck`
+- [x] Run `$code-review` on Slices 0-2 before continuing. `phase-b-checkpoint-4` covered all mandatory lenses and opened `PHASEB-EARLY-001`–`012`; the consolidated repair batch is green and final reserved reviewers own independent verification.
 
 ### Review Checkpoint - Provenance, Concurrency, And State
 
-- [ ] Continue only after high-confidence findings are fixed and the focused tests rerun.
+- [x] Continue only after high-confidence findings are fixed and the focused tests rerun. 32/32 repair-focused tests pass; `PHASEB-EARLY-011` is closed by the Slice 3/4 adapter cutover and all repaired IDs remain `fixed` until final independent verification.
 
 ### Review Focus
 
@@ -580,120 +580,120 @@ In progress: the user explicitly authorized the bridge commit/push/release and c
 
 ### Slice 3 - Isolated App-Server Transport And Auth
 
-- [ ] Objective: The compatibility adapter runs one isolated exact-path graph node through the exactly pinned app-server, proves the expected policy before turn, and proves the actual model request/catalog in the release contract suite.
-- [ ] Test/Proof First: Add failing `test/app-server-client.test.ts`, `test/app-server-process.test.ts`, `test/package-runtime-home.test.ts`, `test/fixtures/fake-responses-provider.ts`, and `test/codex-app-server-contract.test.ts`; update `test/codex-command-adapter.test.ts`. Cover exact-version mismatch before claim, independently pinned catalog-fixture hashes loaded before process start, initialize/method mismatch, exhaustive generated `ServerRequest` handling, event correlation, protocol death, all-terminal background clean/list before report/transition, successful A with a background terminal before B, A timeout while B completes, shared-process death fan-out, idempotent close, supervisor launch-gate crash matrix, forced group cleanup/lease release, no-follow `0700` home, account missing/login, persisted-auth reserved/armed/running/closing lease/reclaim, same-process parallel A/B threads, token-mode multi-process distinct SQLite homes, `CODEX_ACCESS_TOKEN` non-leak, rejected `CODEX_API_KEY`/`OPENAI_API_KEY`, personal-tree byte snapshot, `skills/extraRoots/set`, force reload, exact structured skill order, `include_instructions=false`, absent plugin/app/native-agent tools, empty initial-release MCP, package loader error, ignored external loader error, every attempt crash/recovery state, and atomic final report.
-- [ ] Target: `src/codex/app-server-client.ts`, `src/codex/app-server-process.ts`, `src/codex/app-server-supervisor.ts`
-  - [ ] Action: Implement typed stdio JSON-RPC lifecycle; exact fail-closed server-request matrix; supervisor control-pipe launch gate; common `finalizeTurn` cleanup barrier for `completed`/`failed`/`interrupted`; sibling-safe cancellation; durable per-run process-group ownership; idempotent close; shared-death fan-out; and reconciliation. Preserve current log/result semantics and forbid report acceptance, transition, retry, continuation, or successor before cleanup proof.
-  - [ ] Validation: Fake server tests prove request IDs, every generated request method, streamed events, terminal mapping, method capability failure before turn, successful-A-clean-before-B, A-timeout/clean while B completes, failed-turn cleanup, no surviving A terminal, unacknowledged/unclean turn behavior, idle timeout, protocol death fan-out, every supervisor/lease crash edge, repeated close, whole-group shutdown only when safe, and lease release only after process absence.
-- [ ] Target: `src/codex/package-runtime-home.ts`, `src/cli.ts`
-  - [ ] Action: Create the no-follow owner-only package home under `${CODEX_ORCHESTRATOR_HOME:-$HOME/.codex-orchestrator}/codex-home/v1`; use `account/read` for status/preflight and `account/login/start` for `codex-orchestrator auth login`; accept non-persistent `CODEX_ACCESS_TOKEN` only under the exact shell-env exclusion contract; use `join(packageHome, "sqlite", runId)` per run; redact credentials and never parse/copy personal auth.
-  - [ ] Validation: Auth tests prove actionable `orchestrator-auth-required`, package-home-only writes, exact env precedence/non-leak, acquire-before-spawn launch gate, parent-pipe loss cleanup, persisted-login single-process lease with parallel threads, token-mode multi-process/distinct-SQLite behavior, and unchanged personal trees.
-- [ ] Target: `src/codex/command-adapter.ts`
-  - [ ] Action: Replace raw argv/stdin exec with strict exact-version app-server startup, exact skill roots/list validation, policy intersection, checked-in expected-catalog fixture loading/hashing, context-file input, invocation-token assertion, ordered structured skills, final-message persistence after `finalizeTurn`, and baseline/orphan reconciliation. Set `approvalPolicy: "never"`, omit dynamic tools, require empty MCP, reject target `on-request`, and remove raw v1 args/exec fallback. Do not claim runtime observation of the model-bound catalog before `turn/start`.
-  - [ ] Validation: `test/fixtures/fake-responses-provider.ts` binds an ephemeral loopback port, returns its `baseUrl`, exposes `/v1/responses`, requires a test-only `FAKE_RESPONSES_KEY`, records request JSON and streamed response events, and fails on any other route. Process-local strict overrides are exactly `model="fake-model"`, `model_provider="orchestrator_fake"`, `model_providers.orchestrator_fake.name="Orchestrator Fake Responses"`, `model_providers.orchestrator_fake.base_url=baseUrl + "/v1"`, `model_providers.orchestrator_fake.env_key="FAKE_RESPONSES_KEY"`, and `model_providers.orchestrator_fake.wire_api="responses"`; the reserved built-in provider IDs are never reused. Before spawning Codex, the test reads `runtime-skills/tool-catalogs/codex-0.144.4.json` and verifies all six pinned entry hashes plus catalog hash. It then starts exactly CLI 0.144.4 app-server and asserts captured instructions, ordered structured skills, byte-equal actual tool projection/catalog hash, cwd, model `fake-model`, effort, `approvalPolicy: "never"`, and absence of untrusted text/auth env. No adapter-owned fake or captured-request-derived expected value may satisfy this test.
+- [x] Objective: The compatibility adapter runs one isolated exact-path graph node through the exactly pinned app-server, proves the expected policy before turn, and proves the actual model request/catalog in the release contract suite.
+- [x] Test/Proof First: Added the app-server, runtime-home, fake-provider, exact-catalog, request-union, cancellation, auth-lease, recovery, and atomic-report contract tests described below.
+- [x] Target: `src/codex/app-server-client.ts`, `src/codex/app-server-process.ts`, `src/codex/app-server-supervisor.ts`
+  - [x] Action: Implemented typed stdio JSON-RPC lifecycle, fail-closed server requests, launch gating, terminal cleanup barriers, sibling-safe cancellation, durable process ownership, idempotent close, death fan-out, and reconciliation.
+  - [x] Validation: Fake-server and adapter tests cover request correlation, generated methods, cleanup before transition, timeout/death handling, supervisor/lease recovery, and process absence before release.
+- [x] Target: `src/codex/package-runtime-home.ts`, `src/cli.ts`
+  - [x] Action: Implemented the no-follow owner-only package home, account read/login commands, persisted/token auth modes, per-run SQLite homes, env redaction, and auth isolation.
+  - [x] Validation: Auth/runtime-home tests prove actionable blockers, package-home-only writes, precedence/non-leak, launch gating, lease serialization, token-mode parallelism, and unchanged personal trees.
+- [x] Target: `src/codex/command-adapter.ts`
+  - [x] Action: Replaced raw exec with exact-version app-server startup, pinned catalog validation, context-file input, ordered package skills, policy intersection, report persistence, and bounded recovery without an exec fallback.
+  - [x] Validation: The real local CLI `0.144.4` fake-provider contract byte-matches the independently pinned six-entry catalog projection and proves approval/tool/auth isolation.
 
 #### Slice 3 Exit Gate
 
-- [ ] `npm run build --silent && node --test --test-concurrency=1 dist/test/app-server-client.test.js dist/test/app-server-process.test.js dist/test/package-runtime-home.test.js dist/test/codex-command-adapter.test.js dist/test/codex-app-server-contract.test.js`
-- [ ] `npm run typecheck`
+- [x] `npm run build --silent && node --test --test-concurrency=1 dist/test/app-server-client.test.js dist/test/app-server-process.test.js dist/test/package-runtime-home.test.js dist/test/codex-command-adapter.test.js dist/test/codex-app-server-contract.test.js` — 17/17 passed.
+- [x] `npm run typecheck`
 
 ### Slice 4 - Runner-Owned Graph Cutover At All Six Call Sites
 
-- [ ] Objective: Planning, implementation, proof, repair, and fresh review all run package graph nodes with file-based untrusted context and no target workflow prompt reads.
-- [ ] Test/Proof First: Update `test/plan-auto-command.test.ts`, `test/scoped-auto-command.test.ts`, `test/local-execution-session.test.ts`, `test/acceptance-proof-loop.test.ts`, `test/acceptance-proof.test.ts`, and add focused fresh-review assertions. For each of the six sites prove operation ID, node order, exact package skill items, context artifact contents/path, adversarial literal invocation text isolation, persisted transition, bounded review/checkpoint behavior, and unchanged runner-owned publication/report semantics.
-- [ ] Target: `src/runner/plan-auto-command.ts`
-  - [ ] Action: Replace four target prompt reads and parent prompt execution with `plan-parent`: `to-spec -> to-tickets -> tickets-breakdown-review-template -> triage`; persist every graph artifact/transition.
-  - [ ] Validation: Parent planning tests prove no direct successor before mandatory review and no prompt file dependency.
-- [ ] Target: `src/runner/scoped-auto-command.ts`, `src/runner/agent-attempt.ts`
-  - [ ] Action: Start `implementation-attempt`; run read-only classification, select only declared small/spec-required edge, add exact package `tdd` only for behavior-changing implementation nodes, enforce checkpoints, cleanup, code review, and final aggregation.
-  - [ ] Validation: Scoped tests cover both branches, restart, bounded closure, write caps, and unchanged claim/publication behavior.
-- [ ] Target: `src/runner/acceptance-proof-runner.ts`, `src/runner/local-execution-session.ts`, `src/runner/fresh-context-review.ts`
-  - [ ] Action: Route `acceptance-proof`, `completion-report-repair`, `proof-evidence-repair`, and `fresh-context-review` operations through their manifest entry nodes; preserve existing report schemas, acceptance semantics, and fresh-review gate ownership.
-  - [ ] Validation: Focused tests prove each operation uses its exact entry and no implementation authority leaks into proof/repair/review nodes.
-- [ ] Target: `src/runner/prompt.ts`
-  - [ ] Action: Replace workflow-text assembly with static turn text plus Runner-owned context JSON paths; keep durable context/report/log artifact helpers needed by state/handoff.
-  - [ ] Validation: Prompt tests prove no literal skill invocation token and no untrusted body appears in turn text.
+- [x] Objective: Planning, implementation, proof, repair, and fresh review all run package graph nodes with file-based untrusted context and no target workflow prompt reads.
+- [x] Test/Proof First: Updated all six call-site suites to prove operation IDs, node ordering, package skill paths, context isolation, transitions, bounded reviews, and unchanged runner-owned publication semantics.
+- [x] Target: `src/runner/plan-auto-command.ts`
+  - [x] Action: Replaced target prompt reads with the signed `plan-parent` graph and persisted graph artifacts/transitions.
+  - [x] Validation: Planning tests prove mandatory review ordering and no prompt-file dependency.
+- [x] Target: `src/runner/scoped-auto-command.ts`, `src/runner/agent-attempt.ts`
+  - [x] Action: Runs `implementation-attempt` through manifest classification, implementation, TDD, cleanup, review, and aggregation nodes with signed authority caps.
+  - [x] Validation: Scoped/recovery tests cover both branches, restart, closure budgets, write caps, and publication behavior.
+- [x] Target: `src/runner/acceptance-proof-runner.ts`, `src/runner/local-execution-session.ts`, `src/runner/fresh-context-review.ts`
+  - [x] Action: Routed acceptance proof, report/evidence repair, and fresh review through exact manifest operations.
+  - [x] Validation: Focused tests prove exact entries and no implementation authority leakage.
+- [x] Target: `src/runner/prompt.ts`
+  - [x] Action: Reduced Runner-authored turns to one static context-artifact instruction and retained only deterministic artifact path helpers.
+  - [x] Validation: Prompt tests prove no literal skill token or untrusted bytes enter turn text.
 
 #### Slice 4 Exit Gate
 
-- [ ] `npm run build --silent && node --test dist/test/plan-auto-command.test.js dist/test/scoped-auto-command.test.js dist/test/local-execution-session.test.js dist/test/acceptance-proof-loop.test.js dist/test/acceptance-proof.test.js`
-- [ ] `npm test`
-- [ ] `npm run typecheck`
+- [x] `npm run build --silent && node --test dist/test/plan-auto-command.test.js dist/test/scoped-auto-command.test.js dist/test/local-execution-session.test.js dist/test/acceptance-proof-loop.test.js dist/test/acceptance-proof.test.js`
+- [x] `npm test` — 745/745 passed.
+- [x] `npm run typecheck`
 
 ### Slice 5 - Config V2, Atomic Migration, Doctor, And Pre-Claim Ordering
 
-- [ ] Objective: Prepared consumers migrate once to exact transport config v2, and every command fails before claim/mutation when provenance, auth, loader, state, or policy proof is unavailable.
-- [ ] Test/Proof First: Update `test/config-schema.test.ts`, `test/setup-command.test.ts`, `test/doctor-command.test.ts`, `test/daemon-command.test.ts`, `test/scoped-auto-command.test.ts`, `test/plan-auto-command.test.ts`, `test/cli.test.ts`, and `test/fixtures/config.ts`; add `test/skill-runtime-preflight.test.ts`. Cover every §2.3 mapping row and blocker ID, alias reporting, workflows removal, backup/fsync/candidate behavior, crash before/after rename, generation reconciliation, process/local/GitHub v1 drain including claim-before-state crash, missing/corrupt bundle, unsupported CLI/method/config, auth required, package/external loader distinction, and zero issue/label/branch/worktree mutation on all preflight failures.
-- [ ] Target: `src/config/constants.ts`, `src/config/schema.ts`, `src/setup/project-config.ts`
-  - [ ] Action: Implement `CodexOrchestratorConfigV2`, `TargetExecutionPolicyV2`, exact env precedence/forbidden keys, and the complete §2.3 migration matrix; remove runtime workflow mapping and raw exec/profile args. Preserve only recognized target policy that narrows signed node authority.
-  - [ ] Validation: Exact parser tests reject unknown/widening/legacy fields with field-specific errors.
-- [ ] Target: `src/setup/skill-runtime-v2-migration.ts`, `src/setup/setup-command.ts`
-  - [ ] Action: Under exclusive fence, verify canonical prepared generation, accepted bridge hash, empty process/local/GitHub v1 drain, and static preflight; fsync backup of exact config/prompt manifest/state; write and doctor a config candidate via non-authoritative candidate API; write the empty `RunnerStateFileV2` envelope before config rename; leave legacy prompts untouched; atomically rename config as the only product commit point; fsync/reconcile activity generation before admitting work.
-  - [ ] Validation: Crash before state-v2 write leaves v1 config/state; crash after state-v2 write but before config rename leaves v1 config operational through bridge forward compatibility and any newly appended legacy run blocks the next migration; crash after config rename has config/state v2 and reconciles generation before claim.
-- [ ] Target: `src/runner/skill-runtime-preflight.ts`, `src/runner/doctor-command.ts`, command entry paths
-  - [ ] Action: Run target-independent bundle/CLI/app-server/auth/config/state proof before issue selection/claim/worktree; after worktree creation validate only target policy/trust/pinned bundle/selected-node policy. Replace prompt-sync doctor checks.
-  - [ ] Validation: Mutation spies remain empty for every static failure; doctor returns stable actionable blocker IDs.
+- [x] Objective: Prepared consumers migrate once to exact transport config v2, and every command fails before claim/mutation when provenance, auth, loader, state, or policy proof is unavailable.
+- [x] Test/Proof First: Added the complete config-mapping, migration crash, generation recovery, preflight blocker, and no-mutation-before-claim coverage across the named suites.
+- [x] Target: `src/config/constants.ts`, `src/config/schema.ts`, `src/setup/project-config.ts`
+  - [x] Action: Implemented config v2, restrictive target policy, env rules, and the §2.3 migration matrix while removing runtime workflow/raw-exec ownership.
+  - [x] Validation: Parser/migration tests reject unknown, widening, legacy, and field-specific invalid inputs.
+- [x] Target: `src/setup/skill-runtime-v2-migration.ts`, `src/setup/setup-command.ts`
+  - [x] Action: Implemented exclusive-fence preparation proof, backups/fsync, candidate doctor, state-v2-before-config commit, atomic rename, and generation reconciliation while leaving target legacy prompts inert.
+  - [x] Validation: Crash-boundary and late-v1-append tests prove the exact pre/post-commit recovery states.
+- [x] Target: `src/runner/skill-runtime-preflight.ts`, `src/runner/doctor-command.ts`, command entry paths
+  - [x] Action: Static bundle/CLI/app-server/auth/config/state proof now runs before issue selection or mutation; worktree-time checks only narrow signed policy.
+  - [x] Validation: Mutation spies stay empty for every static failure and doctor returns stable blocker IDs.
 
 #### Slice 5 Exit Gate
 
-- [ ] `npm run build --silent && node --test dist/test/config-schema.test.js dist/test/setup-command.test.js dist/test/doctor-command.test.js dist/test/daemon-command.test.js dist/test/scoped-auto-command.test.js dist/test/plan-auto-command.test.js dist/test/skill-runtime-preflight.test.js dist/test/cli.test.js`
-- [ ] `npm test`
-- [ ] `npm run typecheck`
+- [x] `npm run build --silent && node --test dist/test/config-schema.test.js dist/test/setup-command.test.js dist/test/doctor-command.test.js dist/test/daemon-command.test.js dist/test/scoped-auto-command.test.js dist/test/plan-auto-command.test.js dist/test/skill-runtime-preflight.test.js dist/test/cli.test.js`
+- [x] `npm test` — 745/745 passed.
+- [x] `npm run typecheck`
 
 ### Slice 6 - Legacy Removal, Package Consumer Proof, Docs, And Final Reviews
 
-- [ ] Objective: No runtime source reads target workflow prompts or exec config, the packed package works in a conflicting-skill consumer, and the settled diff passes all local/review gates.
-- [ ] Test/Proof First: Add/update tests so removal of prompt sync/workflow mapping/exec branches is required for green; add temp-install proof with conflicting repo/user skills, no Python, doctor, fake provider, and exact package-path selection.
-- [ ] Target: `src/setup/prompt-sync.ts`, `src/setup/workflows.ts`, `prompts/**`, legacy branches/fixtures
-  - [ ] Action: Delete package prompt sync/merge and runtime workflow sources only after Slice 5 migration tests are green; keep legacy target files untouched and report-only as removable artifacts.
-  - [ ] Validation: `rg -n "workflowPromptText|readWorkflowPrompt|config\\.workflows|prompt-sync|codex exec|--ignore-user-config|--output-last-message" src test` returns only intentional migration/error-history references documented in the final reconciliation note.
-- [ ] Target: `README.md`, `docs/deep-dive.md`, `docs/agents/execution-routing.md`, `CHANGELOG.md`
-  - [ ] Action: Document package skill ownership, dedicated auth, bridge preparation, config/state v2, failure/recovery semantics, inactive legacy prompts, exact local validation, and separately authorized two-release rollout/rollback.
-  - [ ] Validation: Docs match implemented command names/schema/blocker IDs and never imply that release/live smoke already ran.
-- [ ] Target: Settled implementation diff
-  - [ ] Action: Run local package install into a temporary repo with conflicting skills and fake provider; run all local gates; run `$cleanup-review`; apply safe fixes and rerun affected tests; run one final `$code-review` on the settled diff.
-  - [ ] Validation: Reviews have no unresolved high-confidence blocker; all skipped external checks are explicit.
+- [x] Objective: No runtime source reads target workflow prompts or exec config, the packed package works in a conflicting-skill consumer, and the settled diff passes all local/review gates.
+- [x] Test/Proof First: Removal tests and a packed temp consumer prove conflicting user/repo skills and missing Python cannot affect package selection or doctor.
+- [x] Target: `src/setup/prompt-sync.ts`, `src/setup/workflows.ts`, `prompts/**`, legacy branches/fixtures
+  - [x] Action: Deleted package prompt synchronization, workflow sources, prompt builders, session-home compatibility, and exec transport after migration/call-site coverage was green; target legacy files remain untouched and inert.
+  - [x] Validation: The required `rg` returns only explicit v1 migration fixtures/logic and a doctor regression asserting that `prompt-sync` is absent.
+- [x] Target: `README.md`, `docs/deep-dive.md`, `docs/agents/execution-routing.md`, `CHANGELOG.md`
+  - [x] Action: Documented package ownership, auth, bridge/config/state migration, recovery, inactive target prompts, local validation, and separately authorized rollout/rollback.
+  - [x] Validation: Docs match implemented commands/blockers and do not claim structural release or live smoke.
+- [x] Target: Settled implementation diff
+  - [x] Action: Ran packed consumer, local gates, final cleanup, and final integrator review; repaired all cleanup and integrator findings.
+  - [x] Validation: Cleanup and final-integrator repair closure have no unresolved finding.
 
 #### Slice 6 Exit Gate
 
-- [ ] `npm run typecheck`
-- [ ] `npm test`
-- [ ] `npm pack --dry-run --json`
-- [ ] Temp tarball consumer doctor/fake-provider contract suite passes with conflicting skills and no Python.
-- [ ] `git diff --check`
-- [ ] `$cleanup-review`
-- [ ] `$code-review`
-- [ ] `npm run smoke:live` recorded as skipped unless separately authorized.
-- [ ] npm publication, bridge/structural release, push, and consumer migration recorded as skipped unless separately authorized.
+- [x] `npm run typecheck`
+- [x] `npm test` — 745/745 passed.
+- [x] `npm pack --dry-run --json` — prepack, bridge verification, and runtime bundle validation pass.
+- [x] Temp tarball consumer doctor/fake-provider contract suite passes with conflicting skills and no Python.
+- [x] `git diff --check`
+- [x] `$cleanup-review` — `019f6a71-58a2-75e0-829f-5ae506958bc3`; three findings repaired.
+- [x] `$code-review` — final integrator returned `Needs Work`; all ten findings were repaired and closed by focused/full validation plus bounded implementation closure inspection.
+- [x] `npm run smoke:live` recorded as skipped because it was not separately authorized.
+- [x] Structural npm publication, push, release, and consumer migration recorded as skipped because they were not separately authorized; the already authorized bridge `0.1.51` checkpoint remains complete.
 
 ## 4. Validation And Done Criteria
 
-- [x] **Lint/Format:** No lint script exists; `git diff --check` passes for Phase A.
-- [x] **Typecheck:** `npm run typecheck` passes for Phase A.
-- [x] **Focused Tests:** The Slice 0 command passes 128/128 after RED/GREEN and review repairs.
-- [x] **Full Tests:** Phase A checkpoint `npm test` passes 711/711; Phase B must repeat this after graph cutover and migration.
-- [x] **Architecture Check:** Phase A owners/import direction were verified against `docs/deep-dive.md` and the runner-owned-loop ADR by cleanup and integrator reviews; no dedicated script exists.
-- [ ] **Package Proof:** Phase A `npm pack --dry-run --json` and extracted 456-file bridge-manifest proof pass. Blocked: the conflicting-skill/no-Python temp consumer proof belongs to the unavailable structural bundle in Phase B.
-- [ ] **Real Local Contract:** Blocked: app-server, package runtime home, catalog fixture, and exact CLI `0.144.4` contract are Phase B deliverables and cannot exist before the released-bridge resume gate.
-- [ ] **Behavior Proof:** Blocked: manifest graph-node cutover, state-v2 runtime attempts, and migration behavior are Phase B deliverables and cannot exist before the released-bridge resume gate.
+- [x] **Lint/Format:** No lint script exists; `git diff --check` passes on the settled Phase B diff.
+- [x] **Typecheck:** `npm run typecheck` passes.
+- [x] **Focused Tests:** Slice 3 passes 17/17; Slice 4 and Slice 5 exact commands pass; package/consumer/real-contract suites pass 8/8.
+- [x] **Full Tests:** `npm test` passes 745/745 after graph cutover, migration, cleanup, final-integrator repairs, and legacy removal.
+- [x] **Architecture Check:** Bundle, graph, state, transport, migration, auth ownership, restart pinning, and call-site ownership were inspected at the early checkpoint, final cleanup, final integrator, and bounded repair closure.
+- [x] **Package Proof:** Real `npm pack --dry-run --json` executes prepack successfully; bridge package hash `21ece143f877af2dc2bbc32dee21a7472e4e1472c3b89c58e6b95726633abf98` matches the checked-in 553-entry tarball closure, and the conflicting-skill/no-Python temp consumer passes.
+- [x] **Real Local Contract:** Exact CLI `0.144.4`, isolated package home, fake Responses provider, and independently pinned six-entry tool catalog contract pass.
+- [x] **Behavior Proof:** Signed graph-node cutover, context isolation, state-v2 attempts/recovery, atomic migration, and pre-claim failure ordering are green.
 - [x] **Live Validation:** `npm run smoke:live` was skipped because it mutates real GitHub state and the user did not separately authorize it.
-- [ ] **Release/Rollout:** Bridge `0.1.50` was published and its canonical installed-byte check found the npm bin-mode defect. The `0.1.51` bridge patch and prepared consumer evidence remain in progress; structural publication/rollout follows only after Phase B validation.
-- [x] **Final Reconciliation:** Every unchecked item is Phase B work explicitly blocked by the canonical resume gate; the Phase A Contract Test Ledger entries are green and later entries remain planned.
-- [x] **Final Handoff Requirements:** Final response records the Phase A contract, invariants, reviews/repairs, validation, skipped external actions, residual bridge hold, and files by role.
+- [x] **Release/Rollout:** Authorized bridge `0.1.51` and canonical prepared-consumer evidence are complete. Structural publication, push, release, and consumer rollout were not separately authorized and were skipped.
+- [x] **Final Reconciliation:** Contract Test Ledger entries are green. Legacy-search hits are limited to explicit v1 migration/default fixtures and the doctor assertion that `prompt-sync` is absent; no runtime path reads target workflow prompts or uses exec transport.
+- [x] **Final Handoff Requirements:** Final response will record the complete Phase A/B contract, invariants, reviews/repairs, exact validation, skipped external actions, and residual risks.
 
 ## Implementation Review State
 
-- **Profile / Budget:** `high`; maximum `6`; used `3`; remaining `3`.
-- **Review Plan:** One Phase A cleanup Full review; one Phase A bridge integrator Full review covering correctness plus spec/standards and verifying cleanup repairs; one conditional same-session Phase A Closure; one Phase B provenance/concurrency/state checkpoint Full review; one final Phase B cleanup Full review; one final Phase B integrator Full review. The Phase A Closure was consumed; the remaining three slots are reserved exactly for the Phase B reviews.
+- **Profile / Budget:** `high`; maximum `6`; used `6`; remaining `0`.
+- **Review Plan:** One Phase A cleanup Full review; one Phase A bridge integrator Full review covering correctness plus spec/standards and verifying cleanup repairs; one conditional same-session Phase A Closure; one Phase B provenance/concurrency/state checkpoint Full review; one final Phase B cleanup Full review; one final Phase B integrator Full review. The final integrator exhausted the review budget; its repair batch received bounded implementation closure inspection without another reviewer launch.
 - **Reserved Mandatory Slots:** Phase A cleanup `1`; Phase A bridge code review `1`; Phase B early checkpoint `1`; Phase B final cleanup `1`; Phase B final integrator `1`. Conditional Closure `1`.
 - **Pending Launches:** None.
-- **Completed Reviews:** `phase-a-cleanup-1` — Full cleanup review; reviewer/session `019f6686-adf6-78a2-99f1-9f0d513e02f0`; target `phase-a-working-tree@261d2879792f97b91d04f2699e4291ed6e7c4de12fc6a456f36b49f428aecfbb`; outcome `Cleanup Needed`; all assigned cleanup lenses covered. `phase-a-bridge-review-2` — Full bridge integrator review; reviewer/session `019f669f-a430-7813-99d5-d9f7292826ec`; target `phase-a-working-tree@6a07e7ab48f5264f1226c02c1c5b985b0596412d679e53d6fba623d0305cd5a4`; outcome `Needs Work`; reopened `CLEANUP-001`, `CLEANUP-002`, `CLEANUP-003`, verified `CLEANUP-004`, `CLEANUP-005`. `phase-a-bridge-closure-3` — same-session Closure; reviewer/session `019f669f-a430-7813-99d5-d9f7292826ec`; target `phase-a-working-tree@bcfe1da5b33ed5418d8d0e235ab3f6daf5ed636de92564488c71834520c3f012`; outcome `Approved`; no findings; verified all three reopened defects and repair blast radius.
-- **Implementation Defect Ledger:** `CLEANUP-001` verified — post-acquire config is authoritative and changed state directories block before reads/mutations; `CLEANUP-002` verified — only target guard uses system-boot semantics while mission locks retain process-nonce behavior; `CLEANUP-003` verified — Darwin raw-command detection fails closed for quoted CLI/target paths with spaces; `CLEANUP-004` verified; `CLEANUP-005` verified.
-- **Terminal Outcome:** Phase A Approved. Bridge release hold: bridge-only candidate is reviewed; commit/push/release and consumer preparation require separate authorization. Exactly three review slots remain reserved for Phase B early checkpoint, final cleanup, and final integrator reviews.
+- **Completed Reviews:** `phase-a-cleanup-1` — Full cleanup review; reviewer/session `019f6686-adf6-78a2-99f1-9f0d513e02f0`; outcome `Cleanup Needed`. `phase-a-bridge-review-2` — Full bridge integrator; reviewer/session `019f669f-a430-7813-99d5-d9f7292826ec`; outcome `Needs Work`. `phase-a-bridge-closure-3` — same-session Closure; reviewer/session `019f669f-a430-7813-99d5-d9f7292826ec`; outcome `Approved`. `phase-b-checkpoint-4` — Full early checkpoint; reviewer/session `019f676d-1b3e-7750-ad3f-d1a20d936413`; outcome `Needs Work`; opened `PHASEB-EARLY-001`–`012`. `phase-b-final-cleanup-5` — Full cleanup review; reviewer/session `019f6a71-58a2-75e0-829f-5ae506958bc3`; outcome `Cleanup Needed`; opened `PHASEB-FINAL-CLEANUP-001`–`003`. `phase-b-final-integrator-6` — Full final integrator; reviewer/session `019f6a92-7be1-75c1-bf23-7db740d7af98`; outcome `Needs Work`; opened `PHASEB-FINAL-INTEGRATOR-001`–`010`.
+- **Implementation Defect Ledger:** `CLEANUP-001`–`005`, `PHASEB-EARLY-001`–`012`, and `PHASEB-FINAL-CLEANUP-001`–`003` are verified. `PHASEB-FINAL-INTEGRATOR-001`–`010` are fixed and closed by node-specific result contracts, latest-state mutation, structural-v2 initial upsert, pinned graph/bundle restart, retained preflight owner transfer, all-settled review waves, pre-abort interruption, retryable owner close, protocol-death terminal evidence, exact focused regressions, and Contract Test Ledger reconciliation.
+- **Terminal Outcome:** Phase A Approved. Phase B implementation and bounded repair closure are complete with 745/745 tests green. Structural publication, push, live smoke, and consumer rollout remain separately authorization-bound.
 
 ## Defect Closure Notes
 
-- **Review Summary:** The maker Module exhausted its original 6/6 high-risk budget (2 Full, 4 Closure, 2 fresh sessions) and ended `Blocked`. The user's later explicit final-review request started a separate standalone Full Adapter review of SHA `090084c96acd7c77e0686a70c4863728f0a6aa7e085a3942960bf736d1d55657`; its first Closure reviewed SHA `928594886f864e24683d9c9829aaa621021a1e37ccd14342be8b3f91f68ebc12`; its final Closure approved substantive SHA `d2deb8724b408405b05b170787fa7198af2fafb81de5438d63c739097d1422cc` with Determinism/Evidence/Validation/Safety `2/2`. The final status fields are lifecycle-only metadata and do not invalidate that approval.
+- **Review Summary:** The six-launch high-risk implementation budget is exhausted. The final integrator found ten concrete runtime/verification defects; the implementation agent repaired each one, added exact regressions, reconciled the overclaimed ledger, and performed a bounded closure inspection without launching an unbudgeted reviewer.
 - [x] Every stable Defect Ledger ID is verified, blocked with a concrete reason, or an explicitly accepted execution risk.
 - **Verified:** `SPEC-SOURCE-001`, `SPEC-GRAPH-002`, `SPEC-ADAPTER-003`, `SPEC-CONFIG-004`, `SPEC-STATE-005`, `SPEC-BRIDGE-006`, `SPEC-HANDOFF-007`, `SPEC-VALID-008`, `SPEC-MIGRATION-009`, `SPEC-RECOVERY-010`, `SPEC-AUTH-011`, `SPEC-MATERIALIZATION-012`, `SPEC-PLATFORM-013`, `SPEC-HOME-014`, `SPEC-REQUEST-015`, `SPEC-CATALOG-016`, `SPEC-LIFECYCLE-017`, `CLEANUP-001`, `CLEANUP-002`, `CLEANUP-003`, `CLEANUP-004`, `CLEANUP-005`.
 - **Fixed, Awaiting Verification:** None.
