@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -18,6 +18,7 @@ test('packed install and update keep V2 skills/schema package-owned without muta
     const consumerState = join(consumer, '.codex-orchestrator', 'state', 'sentinel.json');
     const localAgentSkill = join(consumer, '.codex', 'skills', 'agent-auto', 'SKILL.md');
     const localProofSkill = join(consumer, '.codex', 'skills', 'acceptance-proof', 'SKILL.md');
+    const consumerGitHubMarker = join(consumer, '.github-state-marker.json');
     await Promise.all([
       mkdir(packDir, { recursive: true }),
       mkdir(dirname(consumerConfig), { recursive: true }),
@@ -40,6 +41,7 @@ test('packed install and update keep V2 skills/schema package-owned without muta
     await writeFile(consumerState, '{"consumer":"state"}\n');
     await writeFile(localAgentSkill, 'CONFLICTING LOCAL AGENT SKILL\n');
     await writeFile(localProofSkill, 'CONFLICTING LOCAL PROOF SKILL\n');
+    await writeFile(consumerGitHubMarker, '{"issues":"unchanged","pullRequests":"unchanged"}\n');
 
     const protectedBefore = await snapshotFiles([
       join(consumer, 'package.json'),
@@ -48,7 +50,9 @@ test('packed install and update keep V2 skills/schema package-owned without muta
       consumerState,
       localAgentSkill,
       localProofSkill,
+      consumerGitHubMarker,
     ]);
+    const unmanagedBefore = await snapshotUnmanagedTree(consumer);
 
     const packed = await packProject(packDir);
     const packedPaths = packed.files.map((file) => file.path).sort();
@@ -56,11 +60,23 @@ test('packed install and update keep V2 skills/schema package-owned without muta
     assert.equal(packedPaths.includes('internal-skills/acceptance-proof/SKILL.md'), true);
     assert.equal(packedPaths.includes('dist/src/v2/implementation-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
+    for (const module of [
+      'acceptance-proof', 'atomic-store', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
+      'implementation-report', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+    ]) {
+      assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
+    }
 
     await installTarball(consumer, join(packDir, packed.filename));
     const installed = join(consumer, 'node_modules', 'codex-orchestrator');
     await assertInstalledContract(installed, 'Implement one issue');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
+    assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
+
+    const runtimeRoot = join(root, 'runtime');
+    await mkdir(runtimeRoot, { mode: 0o700 });
+    const versionASnapshot = await publishSnapshot(installed, runtimeRoot, 'runs/run-a/attempts/attempt-a/snapshot');
+    const versionABytes = await snapshotFiles([versionASnapshot.skillPath, versionASnapshot.schemaPath]);
 
     const updateDir = join(root, 'update-source');
     const updatePackDir = join(root, 'update-pack');
@@ -76,6 +92,12 @@ test('packed install and update keep V2 skills/schema package-owned without muta
 
     assert.match(await readFile(join(installed, 'internal-skills', 'agent-auto', 'SKILL.md'), 'utf8'), /UPDATED PACKAGE SKILL/u);
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
+    assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
+    assert.deepEqual(await snapshotFiles([...versionABytes.keys()]), versionABytes);
+    const versionBSnapshot = await publishSnapshot(installed, runtimeRoot, 'runs/run-b/attempts/attempt-b/snapshot', 'b');
+    assert.equal(versionBSnapshot.packageVersion, '0.1.52-fixture.0');
+    assert.notEqual(versionBSnapshot.files[0]?.sha256, versionASnapshot.files[0]?.sha256);
+    assert.match(await readFile(versionBSnapshot.skillPath, 'utf8'), /UPDATED PACKAGE SKILL/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -100,6 +122,28 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
   };
   assert.equal(Array.isArray(implementation.implementationReportOutputSchema().oneOf), true);
   assert.equal(Array.isArray(proof.proofReportOutputSchema().oneOf), true);
+}
+
+async function publishSnapshot(installed: string, runtimeRoot: string, snapshotRelativePath: string, cacheKey = 'a') {
+  const runtimeAssets = await import(`${pathToFileURL(join(installed, 'dist', 'src', 'v2', 'runtime-assets.js')).href}?fixture=${cacheKey}`) as {
+    publishRuntimeAssetSnapshot(input: {
+      packageRoot: string;
+      runtimeRoot: string;
+      snapshotRelativePath: string;
+      skill: 'agent-auto';
+    }): Promise<{
+      packageVersion: string;
+      skillPath: string;
+      schemaPath: string;
+      files: Array<{ sha256: string }>;
+    }>;
+  };
+  return runtimeAssets.publishRuntimeAssetSnapshot({
+    packageRoot: installed,
+    runtimeRoot,
+    snapshotRelativePath,
+    skill: 'agent-auto',
+  });
 }
 
 async function packProject(destination: string, cwd = process.cwd()): Promise<{ filename: string; files: Array<{ path: string }> }> {
@@ -128,4 +172,21 @@ async function installTarball(consumer: string, tarball: string): Promise<void> 
 
 async function snapshotFiles(paths: string[]): Promise<Map<string, string>> {
   return new Map(await Promise.all(paths.map(async (path) => [path, await readFile(path, 'utf8')] as const)));
+}
+
+async function snapshotUnmanagedTree(root: string): Promise<Map<string, string>> {
+  const output = new Map<string, string>();
+  const visit = async (directory: string, relative: string): Promise<void> => {
+    for (const name of (await readdir(directory)).sort()) {
+      const childRelative = relative ? `${relative}/${name}` : name;
+      if (childRelative === 'node_modules' || childRelative.startsWith('node_modules/') || childRelative === 'package-lock.json') continue;
+      const child = join(directory, name);
+      const stat = await lstat(child);
+      if (stat.isDirectory()) await visit(child, childRelative);
+      else if (stat.isFile()) output.set(childRelative, await readFile(child, 'utf8'));
+      else output.set(childRelative, `special:${stat.mode}`);
+    }
+  };
+  await visit(root, '');
+  return output;
 }

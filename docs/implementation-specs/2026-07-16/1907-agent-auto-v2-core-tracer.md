@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
-approved_content_sha256: "da5170aac93e0e8747ebff094801f12f7cdf1ad2ba1984cdc61956c19bb8c5ec"
+approved_content_sha256: "f780282d8861b31b015d47ba9e27e39c626dfc196e5955b11197367ce1a84fc7"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -516,34 +516,34 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Slice 6 — Packed candidate reconciliation
 
-- [ ] **Objective:** Prove the V2 candidate works from packed bytes while the installed public bin still points to V1 until final cutover.
-- [ ] **Test/Proof First:** Extend the packed-consumer fixture to install version A, record project/config/state/ignore/scripts/GitHub markers, update to fixture version B with changed skill hash, and fail if package-owned changes escape npm-managed package/lock/node_modules paths.
-- [ ] Verify packed runtime resolution uses version B for a new cycle while a materialized version-A attempt snapshot remains byte-identical.
-- [ ] Assert the tarball contains `dist/src/v2/**` and `internal-skills/**`, current bin remains `dist/src/cli.js`, and no V2 setup/postinstall/activation mutation occurs.
-- [ ] **Exit Gate:** Focused packed-consumer/tarball tests, `npm run typecheck`, full `npm test`, `npm pack --dry-run --json --ignore-scripts`, and `git diff --check` pass.
+- [x] **Objective:** Prove the V2 candidate works from packed bytes while the installed public bin still points to V1 until final cutover.
+- [x] **Test/Proof First:** Extend the packed-consumer fixture to install version A, record project/config/state/ignore/scripts/GitHub markers, update to fixture version B with changed skill hash, and fail if package-owned changes escape npm-managed package/lock/node_modules paths.
+- [x] Verify packed runtime resolution uses version B for a new cycle while a materialized version-A attempt snapshot remains byte-identical.
+- [x] Assert the tarball contains `dist/src/v2/**` and `internal-skills/**`, current bin remains `dist/src/cli.js`, and no V2 setup/postinstall/activation mutation occurs.
+- [x] **Exit Gate:** Focused packed-consumer/tarball tests, `npm run typecheck`, full `npm test`, `npm pack --dry-run --json --ignore-scripts`, and `git diff --check` pass.
 
 ## 8. Halt Conditions
 
-- [ ] Stop if the dedicated branch/worktree or base tag differs from the precondition; do not reuse or reset an existing conflicting branch/worktree.
-- [ ] Stop if ordinary `codex exec` cannot provide the accepted shared Codex-auth/host-read behavior while withholding any tested runner/GitHub/npm/SSH/cloud authority or production command from tool subprocesses.
-- [ ] Safe-halt if a spawned process group cannot be proven absent after bounded termination attempts: retain durable PID/PGID/baseline and repository owner lock, publish nothing, and keep `runIssue` unresolved until absence is externally or subsequently confirmed. Do not misreport this as a completed terminal outcome.
-- [ ] Stop if a V2 Module needs to import old coordinator/graph/app-server/migration code rather than a proven leaf Adapter/utility.
-- [ ] Stop if proof can pass after the checked change/binding/worktree changed, or if `ProofReceipt` must expose a raw local path.
-- [ ] Stop if the tracer cannot prove checks/proof before publication or requires real GitHub mutation.
+- [x] Stop if the dedicated branch/worktree or base tag differs from the precondition; do not reuse or reset an existing conflicting branch/worktree. The precondition remained exact.
+- [x] Stop if ordinary `codex exec` cannot provide the accepted shared Codex-auth/host-read behavior while withholding any tested runner/GitHub/npm/SSH/cloud authority or production command from tool subprocesses. The revised canary remained GREEN.
+- [x] Safe-halt if a spawned process group cannot be proven absent after bounded termination attempts: retain durable PID/PGID/baseline and repository owner lock, publish nothing, and keep `runIssue` unresolved until absence is externally or subsequently confirmed. Both implementation and proof paths are executable-tested.
+- [x] Stop if a V2 Module needs to import old coordinator/graph/app-server/migration code rather than a proven leaf Adapter/utility. The architecture scan remained empty.
+- [x] Stop if proof can pass after the checked change/binding/worktree changed, or if `ProofReceipt` must expose a raw local path. Pre/post freshness and receipt-shape tests remained GREEN.
+- [x] Stop if the tracer cannot prove checks/proof before publication or requires real GitHub mutation. The tracer used only temporary Git and in-memory GitHub boundaries.
 
 ## 9. Validation And Done Criteria
 
-- [ ] **Lint/Format:** `git diff --check`.
-- [ ] **Typecheck:** `npm run typecheck`.
-- [ ] **Tests:** focused RED/GREEN reruns during each slice, then full `npm test`.
-- [ ] **Architecture Check:** `rg -n "src/(runner|codex)/(scoped-auto-command|agent-attempt|acceptance-proof-loop|skill-runtime|app-server)|runtime-skills" src/v2 test/v2-*.test.ts test/v2-containment.canary.ts` returns no V2 production import; evidence-only comments/test strings must be reviewed manually.
-- [ ] **Package Proof:** `npm pack --dry-run --json --ignore-scripts` and packed-consumer install/update tests.
-- [ ] **Containment Proof:** `npm run test:v2-containment` with Codex CLI `0.144.4`.
+- [x] **Lint/Format:** `git diff --check`.
+- [x] **Typecheck:** `npm run typecheck`.
+- [x] **Tests:** focused RED/GREEN reruns during each slice, then full `npm test` (`764/764`).
+- [x] **Architecture Check:** `rg -n "src/(runner|codex)/(scoped-auto-command|agent-attempt|acceptance-proof-loop|skill-runtime|app-server)|runtime-skills" src/v2 test/v2-*.test.ts test/v2-containment.canary.ts` returns no V2 production import; evidence-only comments/test strings were reviewed manually.
+- [x] **Package Proof:** `npm pack --dry-run --json --ignore-scripts` and packed-consumer install/update tests.
+- [x] **Containment Proof:** `npm run test:v2-containment` with Codex CLI `0.144.4`.
 - [x] **Live/Manual Validation:** No real GitHub/mobile/live-smoke run in this spec.
-- [ ] **Behavior Proof:** One fake-backed public `runIssue` returns `review-ready` with exactly one local runner commit/push, one in-memory draft PR/handoff, passed checks/proof, and durable evidence.
-- [ ] **Cleanup/Final Review:** Independent cleanup and final code review are user-waived. Perform one root self-check over the settled diff, integrate safe simplifications, and rerun affected/full validation; report the review waiver explicitly.
-- [ ] **Final Reconciliation:** Every checklist/ledger row is green, blocked with evidence, or explicitly not applicable; no unchecked work is described as complete.
-- [ ] **Final Handoff Requirements:** Report Contract implemented, High-risk checkpoints, Main invariants proved, Code-review findings, Fixes after review, Validation, Skipped checks, Residual risks, and Files by role. State explicitly that recovery, real platform proof, Setup, live smoke, and public cutover remain future specs.
+- [x] **Behavior Proof:** One fake-backed public `runIssue` returns `review-ready` with exactly one local runner commit/push, one in-memory draft PR/handoff, passed checks/proof, and durable evidence.
+- [x] **Cleanup/Final Review:** Independent cleanup and final code review are user-waived. The root self-check over the settled diff integrated safe corrections and reran affected/full validation; outcome is `Waived`.
+- [x] **Final Reconciliation:** Every checklist/ledger row is green, blocked with evidence, or explicitly not applicable; no unchecked work is described as complete.
+- [x] **Final Handoff Requirements:** The final handoff reports the contract, checkpoints, invariants, self-check fixes, validation, skipped live gates, residual risks, and files by role; recovery, real platform proof, Setup, live smoke, and public cutover remain future specs.
 
 ## 10. Defect Closure Notes
 
@@ -572,16 +572,17 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### 10.1 Implementation Execution State
 
-- **Execution Outcome:** Containment preflight, Slices 1-5, and both root self-check checkpoints are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 6 is active.
+- **Execution Outcome:** Spec 1 is complete: containment preflight, Slices 1-6, both root self-check checkpoints, packed reconciliation, and final validation are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance.
 - **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
 - **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
 - **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
 - **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
-- **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
-- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts; `ab6c2e2` records Slice 2 immutable runtime assets; `0b03200` records Slice 3 supervised Codex processes; `61cbb43` records Slice 4 bound acceptance proof. No RED implementation or failed validation state was committed.
+- **Downstream Checklist:** Spec 1's final gate passed. Spec 2 may be authored against this settled V2 core; recovery, rework loops, and complete reconciliation remain outside Spec 1.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts; `ab6c2e2` records Slice 2 immutable runtime assets; `0b03200` records Slice 3 supervised Codex processes; `61cbb43` records Slice 4 bound acceptance proof; `e371a24` records Slice 5 lifecycle/publication tracing. No RED implementation or failed validation state was committed.
 - **Root Self-Check Evidence:** Focused Slices 1-3 suite `26/26`, real Codex containment canary, strict certificate/argv-policy validation, architecture import scan, `git diff --check`, and parent-auth-path diff scan all passed. Independent review remains waived.
 - **Slice 4 Self-Check Evidence:** Focused proof/report suite `11/11`, compile-time nominal branding, runtime anti-forgery, exact binding mismatch before process launch, pre/post freshness checks, proof-only persistence, artifact/diff confinement, architecture import scan, `npm run typecheck`, and `git diff --check` all passed.
 - **Slices 4-5 Root Self-Check Evidence:** V2 suite `54/54`, full repository suite `764/764`, public temp-Git/bare-origin review-ready tracer, deferred/rejecting store/process/check/proof/Git/GitHub matrix, implementation/proof safe-halt, cancellation settlement barriers, strict CAS/crash/symlink store matrix, architecture import scan, `npm run typecheck`, and `git diff --check` passed. Independent review remains waived.
+- **Slice 6 / Final Evidence:** Packed install/update preserved every consumer-owned file and version-A snapshot byte, resolved version-B skill bytes for a new snapshot, retained `dist/src/cli.js` as the public bin, contained all required `dist/src/v2/**` and `internal-skills/**`, and introduced no postinstall/setup/activation mutation. Focused packed proof, `npm pack --dry-run --json --ignore-scripts`, real containment canary, and full `764/764` suite passed.
 
 ## 11. Final Action
 
