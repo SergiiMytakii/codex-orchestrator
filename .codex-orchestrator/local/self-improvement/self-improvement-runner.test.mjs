@@ -11,10 +11,15 @@ import {
   dailyPhase,
   fingerprintCandidate,
   fingerprintFinding,
+  parseV2RunResult,
   reportContracts,
   validateDiscoveryReport,
   validateReviewReport,
 } from './runner.mjs';
+
+function v2RunResult(result) {
+  return JSON.stringify({ schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result });
+}
 
 function commandKey(command, args = []) {
   return [command, ...args].join('\0');
@@ -487,7 +492,9 @@ test('invalid discovery report creates no issue', () => {
 test('implement command builds then runs targeted issue and never calls daemon', async () => {
   const exec = makeExecStub({
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
-    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '123'])]: { code: 0, stdout: 'done' },
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123'])]: {
+      code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' }),
+    },
   });
   const { runner, cleanup } = await makeRunner({ exec });
   try {
@@ -495,7 +502,7 @@ test('implement command builds then runs targeted issue and never calls daemon',
     assert.equal(result.status, 'passed');
     assert.deepEqual(exec.calls.map((call) => [call.command, call.args]), [
       ['npm', ['run', 'build', '--silent']],
-      ['node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '123']],
+      ['node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123']],
     ]);
     assert.equal(exec.calls.some((call) => call.args.includes('daemon')), false);
   } finally {
@@ -503,12 +510,25 @@ test('implement command builds then runs targeted issue and never calls daemon',
   }
 });
 
-test('implement treats blocked handoff output as blocked even when the CLI exits zero', async () => {
+test('typed V2 result parser rejects misleading prose and maps every result status', () => {
+  assert.throws(() => parseV2RunResult('review-ready status: blocked'));
+  for (const result of [
+    { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' },
+    { status: 'not-eligible', reason: 'closed', evidencePath: 'evidence.json' },
+    { status: 'blocked', kind: 'safety', resumable: false, evidencePath: 'evidence.json' },
+    { status: 'transport-failed', resumable: true, evidencePath: 'evidence.json' },
+    { status: 'cancelled', evidencePath: 'evidence.json' },
+    { status: 'internal-error', evidencePath: 'evidence.json' },
+  ]) assert.deepEqual(parseV2RunResult(v2RunResult(result)), result);
+});
+
+test('implement trusts typed blocked result instead of misleading successful prose', async () => {
   const exec = makeExecStub({
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
-    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '123'])]: {
-      code: 0,
-      stdout: 'codex-orchestrator blocked scoped execution for #123\n- outcome: blocked\n',
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123'])]: {
+      code: 20,
+      stdout: v2RunResult({ status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' }),
+      stderr: 'review-ready passed',
     },
   });
   const { runner, cleanup } = await makeRunner({ exec });
@@ -516,7 +536,7 @@ test('implement treats blocked handoff output as blocked even when the CLI exits
     const result = await runner.implement({ issue: 123 });
     assert.equal(result.status, 'blocked');
     assert.equal(result.issueNumber, 123);
-    assert.match(result.reason, /blocked scoped execution/);
+    assert.equal(result.exitCode, 20);
   } finally {
     await cleanup();
   }
@@ -539,7 +559,9 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       return { code: 0, stdout: '', stderr: '' };
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '222'])]: { code: 0, stdout: '' },
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '222'])]: {
+      code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/2', evidencePath: 'evidence.json' }),
+    },
     [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
   });
   const { runner, cleanup } = await makeRunner({ exec });
@@ -572,7 +594,9 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       return { code: 0, stdout: '', stderr: '' };
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '223'])]: { code: 1, stdout: '', stderr: 'failed' },
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '223'])]: {
+      code: 70, stdout: v2RunResult({ status: 'internal-error', evidencePath: 'evidence.json' }), stderr: 'failed',
+    },
   });
   const second = await makeRunner({ exec: failingExec });
   try {
@@ -600,7 +624,9 @@ test('daily reuses an open auto self-improvement issue instead of discovering an
       throw new Error(`unexpected gh call ${args.join(' ')}`);
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', '310'])]: { code: 0, stdout: 'review-ready' },
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '310'])]: {
+      code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/3', evidencePath: 'evidence.json' }),
+    },
     [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
   });
   const { runner, cleanup } = await makeRunner({ exec });

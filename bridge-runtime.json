@@ -1,7 +1,7 @@
 {
   "version": 1,
   "packageVersion": "0.1.51",
-  "packageHash": "5d86dd5d82e8d13195c2a5d2342440554ab2baa734710583353ffce37c59fd86",
+  "packageHash": "cde38bdb71f2b731c7fa050a06dd66f6b639ac879178079a2e4924440d4aed3c",
   "files": [
     {
       "path": "CHANGELOG.md",
@@ -2704,6 +2704,30 @@
       "sha256": "31912f00494fe951a1a1e1fbf77b1489e28c2ab452b89ece0baaa84c41fc4b48"
     },
     {
+      "path": "dist/src/v2/candidate-cli.d.ts",
+      "mode": 420,
+      "size": 648,
+      "sha256": "e787712ace85319de3743e783396d4e794f51fa100fd5f042410b15f9b60a21d"
+    },
+    {
+      "path": "dist/src/v2/candidate-cli.d.ts.map",
+      "mode": 420,
+      "size": 699,
+      "sha256": "de637d0f88d69ddccd0bef9067541c19d04a6e27324a06bd903d4de23ab57b93"
+    },
+    {
+      "path": "dist/src/v2/candidate-cli.js",
+      "mode": 420,
+      "size": 5691,
+      "sha256": "fca0848c12eda50096d802bbbe6857ee1481cbdd4c0c3ac67b6d4fd8b1688fdd"
+    },
+    {
+      "path": "dist/src/v2/candidate-cli.js.map",
+      "mode": 420,
+      "size": 5618,
+      "sha256": "5559f091a7fda6effbff4e19e6dfc2978c9bda73b9338d9d2f197ceadfc90bf0"
+    },
+    {
       "path": "dist/src/v2/checked-change.d.ts",
       "mode": 420,
       "size": 1605,
@@ -3062,6 +3086,30 @@
       "mode": 420,
       "size": 3189,
       "sha256": "665d625736ec2b2b2f6293536af3d40481093443e8d9ce8dac8d663ee78a7039"
+    },
+    {
+      "path": "dist/src/v2/setup-runtime.d.ts",
+      "mode": 420,
+      "size": 195,
+      "sha256": "b51dcfca33d535707d3710236593755e647dee4ccc3ab9253e43b6528f2998ef"
+    },
+    {
+      "path": "dist/src/v2/setup-runtime.d.ts.map",
+      "mode": 420,
+      "size": 278,
+      "sha256": "752f3a11b58a7d021d69f605eab66f27e38703a41381723624aa9f51b9729852"
+    },
+    {
+      "path": "dist/src/v2/setup-runtime.js",
+      "mode": 420,
+      "size": 9927,
+      "sha256": "b90c1a51cb08047b32bc439c81b6370c4e8fc6f63a0744ce4c59018012235687"
+    },
+    {
+      "path": "dist/src/v2/setup-runtime.js.map",
+      "mode": 420,
+      "size": 10115,
+      "sha256": "063ae72cee453be3ab7a5b7d4dcca01fe4e40a292e754f6034acbaaddd067166"
     },
     {
       "path": "dist/src/v2/setup-store.d.ts",

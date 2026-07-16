@@ -199,6 +199,37 @@ function parseJson(stdout, fallback) {
   return JSON.parse(text || 'null');
 }
 
+export function parseV2RunResult(stdout) {
+  const envelope = JSON.parse(String(stdout));
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+    || envelope.schema !== 'codex-orchestrator.agent-auto-run-result' || envelope.version !== 1
+    || Object.keys(envelope).sort().join(',') !== 'result,schema,version') {
+    throw new Error('V2 run result envelope is invalid');
+  }
+  const result = envelope.result;
+  if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.status !== 'string') {
+    throw new Error('V2 run result is invalid');
+  }
+  const shapes = {
+    'review-ready': ['evidencePath', 'pullRequestUrl', 'status'],
+    'not-eligible': ['evidencePath', 'reason', 'status'],
+    blocked: ['evidencePath', 'kind', 'resumable', 'status'],
+    'transport-failed': ['evidencePath', 'resumable', 'status'],
+    cancelled: ['evidencePath', 'status'],
+    'internal-error': ['evidencePath', 'status'],
+  };
+  const expected = shapes[result.status];
+  if (!expected || Object.keys(result).sort().join(',') !== [...expected].sort().join(',')
+    || !nonEmptyString(result.evidencePath)) throw new Error('V2 run result shape is invalid');
+  if (result.status === 'review-ready' && !nonEmptyString(result.pullRequestUrl)) throw new Error('V2 review-ready result is invalid');
+  if (result.status === 'not-eligible' && !nonEmptyString(result.reason)) throw new Error('V2 not-eligible result is invalid');
+  if (result.status === 'blocked' && (!['external', 'safety', 'exhausted'].includes(result.kind) || typeof result.resumable !== 'boolean')) {
+    throw new Error('V2 blocked result is invalid');
+  }
+  if (result.status === 'transport-failed' && typeof result.resumable !== 'boolean') throw new Error('V2 transport result is invalid');
+  return result;
+}
+
 function issueNumberFromUrl(value) {
   const match = String(value).match(/\/issues\/(\d+)/);
   return match ? Number(match[1]) : undefined;
@@ -639,13 +670,17 @@ export function createRunner(options = {}) {
     if (!Number.isInteger(Number(issue))) return { status: 'skipped', reason: 'missing issue number' };
     const build = await exec('npm', ['run', 'build', '--silent'], { cwd });
     if (build.code !== 0) return { status: 'failed', exitCode: build.code, reason: `build failed: ${summarizeOutput(build)}` };
-    const result = await exec('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', String(issue)], { cwd });
-    const summary = summarizeOutput(result);
-    if (result.code === 0 && /blocked scoped execution|outcome:\s*blocked|status:\s*blocked/iu.test(summary)) {
-      return { status: 'blocked', exitCode: 0, reason: summary, issueNumber: Number(issue) };
-    }
-    if (result.code === 0) return { status: 'passed', exitCode: 0, summary, issueNumber: Number(issue) };
-    return { status: 'failed', exitCode: result.code, reason: summarizeOutput(result), issueNumber: Number(issue) };
+    const result = await exec('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', String(issue)], { cwd });
+    let typed;
+    try { typed = parseV2RunResult(result.stdout); }
+    catch { return { status: 'failed', exitCode: result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }
+    const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, 'internal-error': 70, cancelled: 130 }[typed.status];
+    if (result.code !== expectedExit) return { status: 'failed', exitCode: result.code, reason: 'candidate CLI exit did not match typed V2 result', issueNumber: Number(issue) };
+    if (typed.status === 'review-ready') return { status: 'passed', exitCode: 0, summary: typed, issueNumber: Number(issue) };
+    if (typed.status === 'blocked') return { status: 'blocked', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    if (typed.status === 'not-eligible') return { status: 'skipped', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    if (typed.status === 'cancelled') return { status: 'cancelled', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    return { status: 'failed', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
   }
 
   async function runLiveSmoke({ implementation } = {}) {
