@@ -154,7 +154,7 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 7 — Operational consumers — local implementation complete at `1f829c3`; blocked on `S7-LIVE-AUTH-001` before any external live mutation.
+- **Current Child:** Spec 7 — Operational consumers — local implementation complete at `1f829c3`; blocked on `S7-LIVE-AUTH-001` because the active `gh` keyring token is invalid and external mutations lack separate authorization.
 - **Execution Outcome:** Specs 1-6 are complete. Spec 6's typed Setup, config-last configure, explicit label reconciliation, read-only diagnostics, bounded Legacy reader, dual-fence copy-only fresh cutover, matching-manifest crash replay, no-follow store, package consumer, full test, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.

@@ -121,7 +121,7 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 - **Pass History:** Independent passes: none; outcome `Waived`. Root self-check covered candidate parser/renderer thinness, Setup production composition, package bytes, generated fake reports, removed-surface scans, strict cleanup recovery, typed daily consumption, and mutation authorization.
 - **Verified Defects:** Root self-check replaced the partially adapted Legacy smoke body with one V2 scenario engine; fixed untracked-file report parity, agent-commit report validity, bounded idle retry, runner-commit proof, stale owner diagnostics, paginated labels, and marker-based cleanup recovery.
 - **Accepted Risks:** `S7-REVIEW-WAIVER-001` — independent review omitted by user instruction. Shared Codex auth/user-readable host files remain accepted; GitHub publication credentials and mutations remain runner-only and separately gated.
-- **Open Defects:** `S7-LIVE-AUTH-001` — required scratch GitHub live smoke and deliberate daily self-improvement mutation are not authorized; Spec 7 remains blocked and Spec 8 may not start.
+- **Open Defects:** `S7-LIVE-AUTH-001` — required scratch GitHub live smoke and deliberate daily self-improvement mutation are not separately authorized, and read-only preflight reports the active `SergiiMytakii` keyring token as invalid. Spec 7 remains blocked and Spec 8 may not start until `gh auth login -h github.com` succeeds and the mutation scope is explicitly authorized.
 
 ### 8.1 Execution Evidence
 
@@ -130,7 +130,7 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 - **Daily Outcome:** `parseV2RunResult` validates exact envelopes and every result shape; only typed `review-ready` enables post-success smoke. Existing fingerprint, lock, one-issue-per-day, discovery, and evidence-review behavior remains intact.
 - **Safety Outcome:** Strict cleanup rediscovers issues/PRs/branches by the run marker after lost responses, deletes/closes only run-owned artifacts, and verifies no open issue/PR/branch remains. No live GitHub command was executed.
 - **Validation:** Focused operational/package Setup suite `13/13`; local self-improvement `30/30`; repository suite `836/836`; typecheck, containment canary, source/Legacy scans, `git diff --check`, bridge manifest, and 545-file package dry-run pass.
-- **Blocked Live Gates:** `npm run smoke:live` relevant profile(s) and one deliberate daily self-improvement mutation against the authorized scratch scope.
+- **Blocked Live Gates:** Re-authenticate `gh`, then separately authorize `npm run smoke:live` relevant profile(s) and one deliberate daily self-improvement mutation against the scratch scope.
 
 ## 9. Final Handoff Requirements
 
