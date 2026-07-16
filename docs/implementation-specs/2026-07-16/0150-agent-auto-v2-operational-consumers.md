@@ -5,7 +5,7 @@ source_type: "plan"
 source_plan: "/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md"
 source_issues:
   - "None"
-status: "ready"
+status: "blocked"
 execution_model: "single-agent"
 spec_mode: "full"
 review_profile: "high"
@@ -63,65 +63,74 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 ### Progress Discipline
 
-- [ ] Start each behavior slice with focused RED evidence.
-- [ ] Keep public `src/cli.ts`, `src/index.ts`, package exports/bin, and Legacy runtime unchanged.
-- [ ] Run independent reviews only if the user reverses the waiver; otherwise record root self-checks.
-- [ ] Do not run live smoke or a deliberate daily self-improvement mutation without separate explicit authorization.
+- [x] Start each behavior slice with focused RED evidence.
+- [x] Keep public `src/cli.ts`, `src/index.ts`, package exports/bin, and Legacy runtime unchanged.
+- [x] Run independent reviews only if the user reverses the waiver; otherwise record root self-checks.
+- [x] Do not run live smoke or a deliberate daily self-improvement mutation without separate explicit authorization.
 
 ### Slice 1 — V2 packaged smoke boundary and scenario deletion
 
-- [ ] **Test/Proof First:** Pin the retained/deleted scenario sets, four existing profiles plus `mobile-proof`, packaged V2 candidate argv/JSON, and absence of removed labels/commands/assertions.
-- [ ] Compose the package-contained V2 candidate through existing runtime/Setup Adapters without changing the public bin; make smoke read one versioned JSON result.
-- [ ] Delete the six plan/tree/risk scenarios and all now-dead fake-agent/fixture/cleanup branches.
-- [ ] **Checkpoint Self-Check:** Hunt source/packed fallback to Legacy CLI, multiple outcome schemas, removed labels, hidden plan graph state, stdout matching, and source-tree execution instead of package bytes.
-- [ ] **Exit Gate:** focused smoke-script tests, candidate CLI tests, package consumer test, typecheck, source scan, and diff check pass.
+- [x] **Test/Proof First:** Pin the retained/deleted scenario sets, four existing profiles plus `mobile-proof`, packaged V2 candidate argv/JSON, and absence of removed labels/commands/assertions.
+- [x] Compose the package-contained V2 candidate through existing runtime/Setup Adapters without changing the public bin; make smoke read one versioned JSON result.
+- [x] Delete the six plan/tree/risk scenarios and all now-dead fake-agent/fixture/cleanup branches.
+- [x] **Checkpoint Self-Check:** Hunt source/packed fallback to Legacy CLI, multiple outcome schemas, removed labels, hidden plan graph state, stdout matching, and source-tree execution instead of package bytes.
+- [x] **Exit Gate:** focused smoke-script tests, candidate CLI tests, package consumer test, typecheck, source scan, and diff check pass.
 
 ### Slice 2 — Retained scenario adaptation
 
-- [ ] **Test/Proof First:** Add RED scenario assertions for runner-only commit, bounded rework, report repair, diagnostics, generated browser/non-visual proof reports, configured checks, containment, and safety-negative behavior.
-- [ ] Rewrite retained scenario setup/config/fake-agent payloads to exact V2 schemas and one `runIssue` outcome; remove Fresh-Context Review, TDD/reviewer evidence, phase profiles, `allowAgentLocalCommits`, and parent/tree assertions.
-- [ ] Keep portable `core-release`, `extended-policy`, `proof-matrix`, and `full`; add deterministic `mobile-proof` routing and help.
-- [ ] **Exit Gate:** all non-live smoke helper/profile/fake-agent tests and packed local smoke prerequisites pass with no GitHub mutation.
+- [x] **Test/Proof First:** Add RED scenario assertions for runner-only commit, bounded rework, report repair, diagnostics, generated browser/non-visual proof reports, configured checks, containment, and safety-negative behavior.
+- [x] Rewrite retained scenario setup/config/fake-agent payloads to exact V2 schemas and one `runIssue` outcome; remove Fresh-Context Review, TDD/reviewer evidence, phase profiles, `allowAgentLocalCommits`, and parent/tree assertions.
+- [x] Keep portable `core-release`, `extended-policy`, `proof-matrix`, and `full`; add deterministic `mobile-proof` routing and help.
+- [x] **Exit Gate:** all non-live smoke helper/profile/fake-agent tests and packed local smoke prerequisites pass with no GitHub mutation.
 
 ### Slice 3 — Typed local self-improvement consumer
 
-- [ ] **Test/Proof First:** Replace the existing blocked-prose test with a total V2 result matrix proving misleading stdout cannot affect status and only typed `review-ready` enables smoke.
-- [ ] Invoke the packaged/candidate V2 run command with explicit JSON output, validate the exact schema/version, map terminal/resumable outcomes to durable daily phases, and preserve existing discovery/review/fingerprint/lock contracts.
-- [ ] Keep the runner local-only and one-issue-per-day; do not create a package skill, scheduler, second execution loop, or regex fallback.
-- [ ] **Exit Gate:** the complete local self-improvement suite passes; source scan finds no execution stdout regex or Legacy command.
+- [x] **Test/Proof First:** Replace the existing blocked-prose test with a total V2 result matrix proving misleading stdout cannot affect status and only typed `review-ready` enables smoke.
+- [x] Invoke the packaged/candidate V2 run command with explicit JSON output, validate the exact schema/version, map terminal/resumable outcomes to durable daily phases, and preserve existing discovery/review/fingerprint/lock contracts.
+- [x] Keep the runner local-only and one-issue-per-day; do not create a package skill, scheduler, second execution loop, or regex fallback.
+- [x] **Exit Gate:** the complete local self-improvement suite passes; source scan finds no execution stdout regex or Legacy command.
 
 ### Slice 4 — Authorized operational proof and closure
 
-- [ ] Run full local tests, typecheck, containment, package install/update, package dry-run, architecture/source scans, and `git diff --check` first.
+- [x] Run full local tests, typecheck, containment, package install/update, package dry-run, architecture/source scans, and `git diff --check` first.
 - [ ] If separate live authorization is present, run the approved relevant profile(s) against the scratch repository with strict cleanup, preserve the report, and run one deliberate daily self-improvement flow only when its exact mutation scope is authorized.
-- [ ] If authorization is absent, stop before remote mutation and record the exact unmet Spec 8 predecessor gate; do not claim Spec 7 complete or switch the public CLI.
+- [x] If authorization is absent, stop before remote mutation and record the exact unmet Spec 8 predecessor gate; do not claim Spec 7 complete or switch the public CLI.
 - [ ] Reconcile this spec/master and authorize Spec 8 only after all required authorized live evidence is GREEN.
 
 ## 6. Halt Conditions
 
-- [ ] Stop if operational code needs a second lifecycle owner, reads raw run state to infer success, routes on prose/error text, or reintroduces a removed command/label/schema.
-- [ ] Stop if smoke would test source files instead of the packed candidate or cleanup cannot prove exact run-owned artifacts.
-- [ ] Stop if `mobile-proof` would skip changed Android/iOS proof code or touch a user-owned mobile session.
-- [ ] Stop before any GitHub mutation when separate live-smoke/daily-run authorization is absent.
+- [x] Stop if operational code needs a second lifecycle owner, reads raw run state to infer success, routes on prose/error text, or reintroduces a removed command/label/schema.
+- [x] Stop if smoke would test source files instead of the packed candidate or cleanup cannot prove exact run-owned artifacts.
+- [x] Stop if `mobile-proof` would skip changed Android/iOS proof code or touch a user-owned mobile session.
+- [x] Stop before any GitHub mutation when separate live-smoke/daily-run authorization is absent.
 
 ## 7. Validation And Done Criteria
 
 - [ ] Every ledger row and checklist item is GREEN.
-- [ ] Removed scenarios and their compatibility code are absent; retained profiles cover the approved V2 behavior.
-- [ ] Live smoke and self-improvement consume one versioned CLI JSON/runIssue path with no stdout regex.
-- [ ] The local self-improvement suite proves one-issue daily idempotency and smoke-after-review-ready ordering.
-- [ ] Full tests, typecheck, containment, package consumer/dry-run, architecture/source scans, and diff check pass.
-- [ ] Required live scratch/daily evidence is recorded under explicit authorization, or Spec 7 remains open with that exact gate.
-- [ ] Independent review remains `Waived`; root self-check findings and reruns are recorded.
+- [x] Removed scenarios and their compatibility code are absent; retained profiles cover the approved V2 behavior.
+- [x] Live smoke and self-improvement consume one versioned CLI JSON/runIssue path with no stdout regex.
+- [x] The local self-improvement suite proves one-issue daily idempotency and smoke-after-review-ready ordering.
+- [x] Full tests, typecheck, containment, package consumer/dry-run, architecture/source scans, and diff check pass.
+- [x] Required live scratch/daily evidence is recorded under explicit authorization, or Spec 7 remains open with that exact gate.
+- [x] Independent review remains `Waived`; root self-check findings and reruns are recorded.
 
 ## 8. Implementation Review State
 
 - **Profile:** high.
 - **Plan:** Independent artifact/checkpoint/cleanup/final review waived. Root performs executable single-path, removed-surface, packed-byte, typed-result, cleanup, and mutation-boundary self-checks.
-- **Pass History:** None; outcome `Waived`.
-- **Verified Defects:** None.
+- **Pass History:** Independent passes: none; outcome `Waived`. Root self-check covered candidate parser/renderer thinness, Setup production composition, package bytes, generated fake reports, removed-surface scans, strict cleanup recovery, typed daily consumption, and mutation authorization.
+- **Verified Defects:** Root self-check replaced the partially adapted Legacy smoke body with one V2 scenario engine; fixed untracked-file report parity, agent-commit report validity, bounded idle retry, runner-commit proof, stale owner diagnostics, paginated labels, and marker-based cleanup recovery.
 - **Accepted Risks:** `S7-REVIEW-WAIVER-001` — independent review omitted by user instruction. Shared Codex auth/user-readable host files remain accepted; GitHub publication credentials and mutations remain runner-only and separately gated.
-- **Open Defects:** None.
+- **Open Defects:** `S7-LIVE-AUTH-001` — required scratch GitHub live smoke and deliberate daily self-improvement mutation are not authorized; Spec 7 remains blocked and Spec 8 may not start.
+
+### 8.1 Execution Evidence
+
+- **Implementation Outcome:** Local GREEN at checkpoint `1f829c3`. Packed candidate supports thin `setup`/`doctor`/`status`/direct `run` dispatch; public bin/export remains Legacy.
+- **Scenario Outcome:** Retained scenario/profile matrix is V2-only. Removed plan/tree/risk scenarios and fake branches are absent. Generated fake Codex self-test emits exact implementation, non-visual proof, and browser visual-proof reports without GitHub access.
+- **Daily Outcome:** `parseV2RunResult` validates exact envelopes and every result shape; only typed `review-ready` enables post-success smoke. Existing fingerprint, lock, one-issue-per-day, discovery, and evidence-review behavior remains intact.
+- **Safety Outcome:** Strict cleanup rediscovers issues/PRs/branches by the run marker after lost responses, deletes/closes only run-owned artifacts, and verifies no open issue/PR/branch remains. No live GitHub command was executed.
+- **Validation:** Focused operational/package Setup suite `13/13`; local self-improvement `30/30`; repository suite `836/836`; typecheck, containment canary, source/Legacy scans, `git diff --check`, bridge manifest, and 545-file package dry-run pass.
+- **Blocked Live Gates:** `npm run smoke:live` relevant profile(s) and one deliberate daily self-improvement mutation against the authorized scratch scope.
 
 ## 9. Final Handoff Requirements
 
@@ -130,4 +139,4 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 ## 10. Final Action
 
-Reconcile this spec and master only after packaged smoke, typed self-improvement consumption, required authorized live evidence, strict cleanup, and all local gates are GREEN. Then author Spec 8; otherwise preserve the exact live-authorization blocker.
+Local implementation is checkpointed and all non-mutating gates are GREEN. Preserve `S7-LIVE-AUTH-001`; do not author Spec 8 or switch the public CLI until the separately authorized scratch live smoke and daily mutation both pass with strict cleanup.
