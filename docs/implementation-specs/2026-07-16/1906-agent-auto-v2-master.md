@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "63e20d903c430f5b176889e4ef615feed7416b0b4448e1309211beb369830483"
+approved_content_sha256: "47499a6b04c5b873e046c881a83b766ce2d7b02c3a302467b45abde45435e03d"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -77,10 +77,10 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
-| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 2 |
-| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 2 |
-| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green through Spec 2 |
-| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 2 |
+| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 3 |
+| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 3 |
+| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green through Spec 3 |
+| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 3 |
 | Final tarball contains one runtime path and no plan-auto/graph/app-server/migration compatibility surface. | Cutover ships two authorities or preserves the complexity the rewrite is intended to remove. | Spec 8 tarball inventory and public CLI/export snapshots | planned |
 
 ## 6. Master Execution Checklist
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 3 — Browser proof — authored and authorized for execution.
-- **Execution Outcome:** Specs 1-2 completed on 2026-07-16. Spec 2's crash/idempotency, bounded repair/rework, CLI JSON, full test, package, and containment gates are GREEN under the independent-review waiver.
+- **Current Child:** Spec 3 — Browser proof — complete. Spec 4 is not yet authored.
+- **Execution Outcome:** Specs 1-3 completed on 2026-07-16. Spec 3's generated visual contract, artifact custody/redaction, immutable package procedure, real Chrome fixture, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 2's terminal gate is satisfied and Spec 3 is linked above. Specs 4-8 remain gated until each predecessor completes.
+- **Sequencing Decision:** Spec 3's terminal gate is satisfied. Spec 4 may now be authored for runner-leased Android proof without changing the public `AcceptanceProof` Interface; Specs 5-8 remain gated.
 
 ## 10. Final Action
 
