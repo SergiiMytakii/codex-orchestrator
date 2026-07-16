@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
-approved_content_sha256: "de1239bdb7f74c2d9d66c579b0d0f80a15fe0457550281d6082ce6b027f22c29"
+approved_content_sha256: "9b954851c225ebf384dcc4fc212b9cb32d6c728173fa771e08e59c8bab38aa06"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -413,13 +413,13 @@ No additional runtime file is authorized without first recording why one of thes
 
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
-| V2 accepts only exact clean config/state schema IDs and exposes no plan-auto/tree/graph/auth/skill-runtime command or label field. | Legacy policy or removed product surfaces silently enter the new runtime. | RED `test/v2-config-contract.test.ts` exact-key and candidate CLI/label snapshots | planned |
-| Installed package bytes, not local same-name skills, own both agent workflows and generated schemas. | Local skills alter behavior or package updates leave stale target workflow copies. | RED packed-consumer conflicting-skill test in `test/v2-package-consumer.test.ts` | planned |
+| V2 accepts only exact clean config/state schema IDs and exposes no plan-auto/tree/graph/auth/skill-runtime command or label field. | Legacy policy or removed product surfaces silently enter the new runtime. | RED `test/v2-config-contract.test.ts` exact-key and candidate CLI/label snapshots | in progress — config/CLI/labels verified; state schema remains Slice 5 |
+| Installed package bytes, not local same-name skills, own both agent workflows and generated schemas. | Local skills alter behavior or package updates leave stale target workflow copies. | RED packed-consumer conflicting-skill test in `test/v2-package-consumer.test.ts` | in progress — tarball install/update verified; immutable runtime selection remains Slice 2 |
 | Every attempt executes one private symlink-free, exact-file, exact-mode, hash-verified snapshot; package changes cannot mutate active bytes. | Update/crash/symlink races change instructions after evidence is recorded. | RED corruption/update/race matrix in `test/v2-runtime-assets.test.ts` | planned |
-| Generated output schema and runtime validation come from the same TypeScript owner for each report. | Skill prose, schema file, and parser accept different report shapes. | RED parity fixtures in `test/v2-report-contracts.test.ts` | planned |
+| Generated output schema and runtime validation come from the same TypeScript owner for each report. | Skill prose, schema file, and parser accept different report shapes. | RED parity fixtures in `test/v2-report-contracts.test.ts` | verified |
 | Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability and binding-mismatch cases in `test/v2-report-contracts.test.ts` | planned |
-| `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | planned |
-| Root and native-child tool shells can read/use shared Codex auth and user-readable host files without emitting credential/path material, but cannot use runner/GitHub/npm/SSH/cloud credentials or launch the production sentinel. | Accepted local-read exposure silently expands into publication authority or secret exfiltration. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; any external capability leak blocks the design | red — prior stricter expectations failed as expected; revised accepted-risk V2 certificate proof pending |
+| `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | verified |
+| Root and native-child tool shells can read/use shared Codex auth and user-readable host files without emitting credential/path material, but cannot use runner/GitHub/npm/SSH/cloud credentials or launch the production sentinel. | Accepted local-read exposure silently expands into publication authority or secret exfiltration. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; any external capability leak blocks the design | verified — V2 certificate GREEN for root and native child |
 | Every Codex terminal path reaches process-group/descendant absence plus stream/report quiescence before lifecycle/proof/publication/return/lock release. | An orphan mutates a supposedly settled worktree or races validation. | RED detached-descendant tests in `test/v2-codex-process.test.ts` | planned |
 | Stale/concurrent run/proof generations cannot overwrite committed state; pre/post-rename/fsync ambiguity is reread and classified deterministically. | Durable state is lost or two owners both believe they committed. | RED CAS/crash matrix in `test/v2-run-store.test.ts` | planned |
 | `claimed -> implementing -> checking -> proving -> publishing -> review-ready` and each intent are durably CAS-persisted before the next owner/effect. | A terminal snapshot hides skipped stages or publication without durable intent. | RED gated-transition event trace in `test/v2-run-issue.test.ts` | planned |
@@ -427,7 +427,7 @@ No additional runtime file is authorized without first recording why one of thes
 | Every store/process/check/proof/Git/GitHub Promise is awaited; rejection prevents later effects and review-ready. | Fire-and-forget code passes immediate fakes and publishes false success. | RED deferred/rejecting Adapter matrix in `test/v2-run-issue.test.ts` | planned |
 | `RunIssue` performs no real claim/publication mutation until the separately recorded containment feasibility gate is green, and no commit/push/PR/comment/review label before checks plus passed proof. | Unverified work is claimed/published or the candidate is used despite failed containment. | Feasibility artifact check plus RED event-trace assertions in `test/v2-run-issue.test.ts` | planned |
 | One fake-backed eligible issue yields one runner commit, one push, one draft PR, one handoff comment, `agent:review`, and durable evidence through the public Interface. | Layer tests pass while the real Module flow is disconnected. | RED temp-Git/in-memory-Adapter tracer in `test/v2-run-issue.test.ts` | planned |
-| npm pack/install/update adds package-owned V2 assets but causes no orchestrator-induced config/state/ignore/package-script/GitHub mutation in the consumer. | Package updates unexpectedly reconfigure projects or external state. | RED before/after ownership fixture in `test/v2-package-consumer.test.ts` | planned |
+| npm pack/install/update adds package-owned V2 assets but causes no orchestrator-induced config/state/ignore/package-script/GitHub mutation in the consumer. | Package updates unexpectedly reconfigure projects or external state. | RED before/after ownership fixture in `test/v2-package-consumer.test.ts` | verified |
 
 ## 7. Execution Slices
 
@@ -450,11 +450,11 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Slice 1 — Isolated package contract
 
-- [ ] **Objective:** The packed candidate owns exact internal skill/report-schema bytes and rejects removed/Legacy surface before any issue flow exists.
-- [ ] **Test/Proof First:** Add failing config, report parity, package tarball, conflicting local-skill, and candidate CLI/label snapshot tests named in ledger rows 1-4.
-- [ ] Create strict `src/v2/config.ts`, both report owners, `src/v2/cli-contract.ts`, and the two minimal package skills.
-- [ ] Add `internal-skills` to `package.json.files`; do not change bin/exports/prepack or consumer project files.
-- [ ] **Exit Gate:** `npm run typecheck`; focused compiled tests for `v2-config-contract`, `v2-report-contracts`, and `v2-package-consumer`; `npm pack --dry-run --json --ignore-scripts` inventory includes both skills and generated-schema code and retains the old bin.
+- [x] **Objective:** The packed candidate owns exact internal skill/report-schema bytes and rejects removed/Legacy surface before any issue flow exists.
+- [x] **Test/Proof First:** Add failing config, report parity, package tarball, conflicting local-skill, and candidate CLI/label snapshot tests named in ledger rows 1-4.
+- [x] Create strict `src/v2/config.ts`, both report owners, `src/v2/cli-contract.ts`, and the two minimal package skills.
+- [x] Add `internal-skills` to `package.json.files`; do not change bin/exports/prepack or consumer project files.
+- [x] **Exit Gate:** `npm run typecheck`; focused compiled tests for `v2-config-contract`, `v2-report-contracts`, and `v2-package-consumer`; `npm pack --dry-run --json --ignore-scripts` inventory includes both skills and generated-schema code and retains the old bin.
 
 ### Slice 2 — Immutable attempt snapshot
 
@@ -566,13 +566,13 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### 10.1 Implementation Execution State
 
-- **Execution Outcome:** Containment preflight is GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 1 is active.
+- **Execution Outcome:** Containment preflight and Slice 1 are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 2 is active.
 - **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
 - **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
 - **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
 - **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
 - **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
-- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap. No RED containment implementation or failed validation state was committed.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract. No RED implementation or failed validation state was committed.
 
 ## 11. Final Action
 

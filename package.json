@@ -21,6 +21,7 @@
   },
   "files": [
     "dist/src",
+    "internal-skills",
     "bridge-runtime.json",
     "prompts",
     "docs/deep-dive.md",
