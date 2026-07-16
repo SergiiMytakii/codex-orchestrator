@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
-approved_content_sha256: "588a0ad2877ed0ea884940124269e7765cef52411c01d6b42395a93827695a54"
+approved_content_sha256: "365646f102c04aed729a51671559fe06e9908c71f7882ff62bbb5b6f370fcaf3"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -336,6 +336,7 @@ interface SpawnSpec { file: string; args: string[]; cwd: string; env: Record<str
 interface SupervisedChild {
   pid: number;
   processGroupId: number;
+  lastActivityAt(): number;
   writeStdinAndClose(value: string): Promise<void>;
   waitForExit(): Promise<{ exitCode: number | null; signal: string | null }>;
   terminateGroup(signal: 'SIGTERM' | 'SIGKILL'): Promise<void>;
@@ -344,6 +345,8 @@ interface SupervisedChild {
 }
 type SpawnSupervisedProcess = (spec: SpawnSpec) => Promise<SupervisedChild>;
 ```
+
+Root self-check found that the original private seam could not implement the required resettable idle timeout because it exposed no stdout/stderr activity observation. `lastActivityAt()` is the minimal read-only correction; it adds no application capability or public Interface surface and keeps output bytes inside the supervised child.
 
 `src/v2/runtime.ts` owns one root `AbortController`, binds it to candidate-command `SIGINT`/`SIGTERM`, and passes the same signal through `RunIssue`, `AcceptanceProof`, and every `CodexProcess.run(input, signal)` call; tests inject and abort the controller directly. `CodexProcess` owns process cancellation after the signal fires. Stdout and stderr are each capped at 1 MiB while still draining; the report file uses the Section 3.1 1 MiB cap; timeout and idle timeout come from strict config. On abort/timeout it sends SIGTERM, waits 5 seconds, sends SIGKILL if needed, then waits at most 10 seconds for group absence and stream closure. The production implementation uses Node `spawn` with `detached: true`, bounded stream collectors, and process-group signaling; tests inject the seam. Every normal exit, spawn failure, timeout, idle timeout, and cancellation awaits exit, descendant/group absence, stream closure, and atomic report read before returning. If normal parent exit leaves a descendant, the owner terminates the group and proves absence; no lifecycle/proof/publication/return or lock release precedes that barrier.
 
@@ -420,7 +423,7 @@ No additional runtime file is authorized without first recording why one of thes
 | Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability and binding-mismatch cases in `test/v2-report-contracts.test.ts` | planned |
 | `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | verified |
 | Root and native-child tool shells can read/use shared Codex auth and user-readable host files without emitting credential/path material, but cannot use runner/GitHub/npm/SSH/cloud credentials or launch the production sentinel. | Accepted local-read exposure silently expands into publication authority or secret exfiltration. | Pre-runtime boolean-only `npm run test:v2-containment` feasibility canary; any external capability leak blocks the design | verified — V2 certificate GREEN for root and native child |
-| Every Codex terminal path reaches process-group/descendant absence plus stream/report quiescence before lifecycle/proof/publication/return/lock release. | An orphan mutates a supposedly settled worktree or races validation. | RED detached-descendant tests in `test/v2-codex-process.test.ts` | planned |
+| Every Codex terminal path reaches process-group/descendant absence plus stream/report quiescence before lifecycle/proof/publication/return/lock release. | An orphan mutates a supposedly settled worktree or races validation. | RED detached-descendant tests in `test/v2-codex-process.test.ts` | verified |
 | Stale/concurrent run/proof generations cannot overwrite committed state; pre/post-rename/fsync ambiguity is reread and classified deterministically. | Durable state is lost or two owners both believe they committed. | RED CAS/crash matrix in `test/v2-run-store.test.ts` | planned |
 | `claimed -> implementing -> checking -> proving -> publishing -> review-ready` and each intent are durably CAS-persisted before the next owner/effect. | A terminal snapshot hides skipped stages or publication without durable intent. | RED gated-transition event trace in `test/v2-run-issue.test.ts` | planned |
 | OPEN+auto+run-marker authorization is reread before agent start and before commit, push, PR, comment, and terminal labels. | Revoked work continues to mutate Git/GitHub. | RED mutable-issue revocation matrix in `test/v2-run-issue.test.ts` | planned |
@@ -466,17 +469,17 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Slice 3 — Contained ordinary Codex process
 
-- [ ] **Objective:** Produce exact ordinary-`codex exec` argv/environment/process results without ambient tool authority.
-- [ ] **Test/Proof First:** Add failing fake-process tests for exact flags, isolated HOME/env allowlist, absent credentials/config, local-skill/app/web-search suppression without native-subagent suppression, bounded stdout/stderr, spawn/exit/timeout/idle/cancel classifications, detached descendants after normal exit and timeout/cancel, process-group termination, and output/report flush before return.
-- [ ] Implement the exact V2-local supervised-process seam from Section 3.7 inside `src/v2/codex-process.ts`; do not reuse or widen the final-result-only old `ProcessExecutor`, and do not add a transport/provider framework.
-- [ ] Keep `test/v2-containment.canary.ts` byte-for-byte aligned with the production argv/environment builder and rerun its root/native-child parent-auth and capability probes.
-- [ ] Add `test:v2-containment` as `npm run build --silent && node dist/test/v2-containment.canary.js`.
-- [ ] **Exit Gate:** Focused `v2-codex-process` tests and `npm run test:v2-containment` pass with Codex CLI `0.144.4`; any exposed authority invalidates ordinary-exec and blocks further implementation.
+- [x] **Objective:** Produce exact ordinary-`codex exec` argv/environment/process results without ambient tool authority.
+- [x] **Test/Proof First:** Add failing fake-process tests for exact flags, isolated HOME/env allowlist, absent credentials/config, local-skill/app/web-search suppression without native-subagent suppression, bounded stdout/stderr, spawn/exit/timeout/idle/cancel classifications, detached descendants after normal exit and timeout/cancel, process-group termination, and output/report flush before return.
+- [x] Implement the exact V2-local supervised-process seam from Section 3.7 inside `src/v2/codex-process.ts`; do not reuse or widen the final-result-only old `ProcessExecutor`, and do not add a transport/provider framework.
+- [x] Keep `test/v2-containment.canary.ts` byte-for-byte aligned with the production argv/environment builder and rerun its root/native-child parent-auth and capability probes.
+- [x] Add `test:v2-containment` as `npm run build --silent && node dist/test/v2-containment.canary.js`.
+- [x] **Exit Gate:** Focused `v2-codex-process` tests and `npm run test:v2-containment` pass with Codex CLI `0.144.4`; any exposed authority invalidates ordinary-exec and blocks further implementation.
 
 ### Review Checkpoint 1 — Containment
 
-- [ ] Run the user-authorized root self-check on Slices 1-3 before implementing the issue tracer; independent `$code-review` is waived.
-- [ ] Continue only when self-check findings are fixed, focused tests and the real canary rerun green, and no raw credential value or auth/secret path was written to logs/artifacts.
+- [x] Run the user-authorized root self-check on Slices 1-3 before implementing the issue tracer; independent `$code-review` is waived.
+- [x] Continue only when self-check findings are fixed, focused tests and the real canary rerun green, and no raw credential value or auth/secret path was written to logs/artifacts.
 
 ### Review Focus
 
@@ -563,16 +566,18 @@ No additional runtime file is authorized without first recording why one of thes
 | `S1-STORE-012` | Added side-effect-free identity read, host-global owner lock, config reread, exact first-write CAS/ambiguous-commit rules, and crash/concurrency tests. | verified |
 | `S1-LIFECYCLE-013` | Added durable lifecycle/intent CAS, process/check/terminal evidence, and non-terminal safe-halt before every next owner/effect. | verified |
 | `S1-AUTH-014` | Added exact trusted UUID-v4 claim marker and mutable authorization rereads before agent and every publication effect. | verified |
+| `S1-PROCESS-ACTIVITY-016` | Root self-check added the missing private activity clock required for a resettable idle timeout, moved production listeners before fast child exit/output, typed stream-quiescence failure as safe-halt evidence, and kept source-package ownership outside snapshot ownership policy. | verified |
 
 ### 10.1 Implementation Execution State
 
-- **Execution Outcome:** Containment preflight and Slices 1-2 are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 3 is active.
+- **Execution Outcome:** Containment preflight, Slices 1-3, and root containment self-check are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 4 is active.
 - **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
 - **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
 - **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
 - **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
 - **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
-- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts. No RED implementation or failed validation state was committed.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts; `ab6c2e2` records Slice 2 immutable runtime assets. No RED implementation or failed validation state was committed.
+- **Root Self-Check Evidence:** Focused Slices 1-3 suite `26/26`, real Codex containment canary, strict certificate/argv-policy validation, architecture import scan, `git diff --check`, and parent-auth-path diff scan all passed. Independent review remains waived.
 
 ## 11. Final Action
 
