@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original architecture reviews remain recorded; the 2026-07-16 risk revision and continued Spec 1 execution use user-authorized self-check only"
-approved_content_sha256: "47499a6b04c5b873e046c881a83b766ce2d7b02c3a302467b45abde45435e03d"
+approved_content_sha256: "6e30a1d1ce6d65dd68261b70317188ac19ad41275ae799bba9ae2e4dda3178d0"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -43,7 +43,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **Spec 1 — Core tracer** | 1-2 | Isolated V2 source root, package-owned skills/schemas, immutable attempt snapshots, ordinary `codex exec` containment, and fake-backed `runIssue -> AcceptanceProof -> draft PR`. | Reviewed with this master; may start after the dedicated worktree is created from `v0.1.51`. |
 | **Spec 2 — Autonomous recovery** | 3 | Same-worktree rework, bounded transport/report repair, capability-separated durable state, crash resume, exact publication intents, and duplicate-effect prevention. [Spec](./2253-agent-auto-v2-autonomous-recovery.md) | Spec 1 is fully complete: checklist/ledger, containment canary, all validation, waived reviews, and final handoff are reconciled. Author from its settled Interfaces. |
 | **[Spec 3 — Browser proof](2330-agent-auto-v2-browser-proof.md)** | 4 | Real browser workflow evidence and production-readiness analysis behind the unchanged `AcceptanceProof` Interface. | Spec 2 is fully complete, including crash/idempotency review and final validation; browser fixture/runtime are confirmed. |
-| **Spec 4 — Android proof** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
+| **[Spec 4 — Android proof](2359-agent-auto-v2-android-proof.md)** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
 | **Spec 5 — iOS proof** | 6 | Runner-leased iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and final review; iOS toolchain/safe lease fixture are confirmed. |
 | **Spec 6 — Setup** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and final review; config/state roots are settled. |
 | **Spec 7 — Operational consumers** | 8-9 | Relevant live-smoke scenario migration and local self-improvement consumption of the single CLI JSON/runIssue path. | Spec 6 is fully complete, including Setup crash matrix and final review; live smoke still requires separate explicit authorization. |
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 3 — Browser proof — complete. Spec 4 is not yet authored.
+- **Current Child:** Spec 4 — Android proof — authored and authorized for execution.
 - **Execution Outcome:** Specs 1-3 completed on 2026-07-16. Spec 3's generated visual contract, artifact custody/redaction, immutable package procedure, real Chrome fixture, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 3's terminal gate is satisfied. Spec 4 may now be authored for runner-leased Android proof without changing the public `AcceptanceProof` Interface; Specs 5-8 remain gated.
+- **Sequencing Decision:** Spec 3's terminal gate is satisfied and Spec 4 is linked above. Specs 5-8 remain gated until each predecessor completes.
 
 ## 10. Final Action
 
