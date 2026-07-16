@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 4 — Android proof — authored and authorized for execution.
-- **Execution Outcome:** Specs 1-3 completed on 2026-07-16. Spec 3's generated visual contract, artifact custody/redaction, immutable package procedure, real Chrome fixture, full test, package, and containment gates are GREEN under the independent-review waiver.
+- **Current Child:** Spec 5 — iOS proof — authorized for authoring after Spec 4 reconciliation.
+- **Execution Outcome:** Specs 1-4 completed on 2026-07-16. Spec 4's exact Android visual contract, runner lease, artifact custody/redaction, immutable package procedure/helper, real isolated emulator fixture, safe release, full test, package, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 3's terminal gate is satisfied and Spec 4 is linked above. Specs 5-8 remain gated until each predecessor completes.
+- **Sequencing Decision:** Spec 4's terminal gate is satisfied and linked above. Spec 5 is authorized for deterministic authoring; Specs 6-8 remain gated until each predecessor completes.
 
 ## 10. Final Action
 

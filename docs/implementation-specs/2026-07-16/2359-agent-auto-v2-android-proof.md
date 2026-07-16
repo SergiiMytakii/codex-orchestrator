@@ -51,77 +51,87 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 | Invariant | First RED proof | Status |
 | --- | --- | --- |
-| The proof agent can select Android, but evidence cannot pass without an exact active runner lease created before mobile actions. | public `AcceptanceProof` Android report without/mismatched lease | planned |
-| Lease acquisition selects one online emulator, pins serial/app/proof/owner/expiry, and rejects physical, offline, ambiguous, or user-owned live sessions. | lease Adapter matrix | planned |
-| Release and stale recovery are token-safe; active/live foreign leases cannot be reclaimed. | lease crash/expiry/owner matrix | planned |
-| Android pass requires screenshot, UI hierarchy, scoped device log, final state, criterion mapping, and evidence-linked layout/copy review. | generated schema/runtime visual matrix | planned |
-| Screenshot alone, wrong serial/app/PID, stale hierarchy/log, unredacted secret/path text, or missing lease cannot pass or enter the receipt. | artifact/lease negative matrix | planned |
-| Immutable package snapshot contains Android procedure/helper and detects source races. | runtime-asset snapshot test | planned |
-| A real runner-owned emulator executes the changed fixture workflow with exact `ANDROID_SERIAL`, stable fixture PID, UI-tree-derived interaction, screenshot, hierarchy, and redacted logcat. | explicit real Android proof gate | planned |
-| Public `proveChange` and sanitized `ProofReceipt` shapes remain unchanged. | Interface-shape test | planned |
+| The proof agent can select Android, but evidence cannot pass without an exact active runner lease created before mobile actions. | public `AcceptanceProof` Android report without/mismatched lease | green |
+| Lease acquisition selects one online emulator, pins serial/app/proof/owner/expiry, and rejects physical, offline, ambiguous, or user-owned live sessions. | lease Adapter matrix | green |
+| Release and stale recovery are token-safe; active/live foreign leases cannot be reclaimed. | lease crash/expiry/owner matrix | green |
+| Android pass requires screenshot, UI hierarchy, scoped device log, final state, criterion mapping, and evidence-linked layout/copy review. | generated schema/runtime visual matrix | green |
+| Screenshot alone, wrong serial/app/PID, stale hierarchy/log, unredacted secret/path text, or missing lease cannot pass or enter the receipt. | artifact/lease negative matrix | green |
+| Immutable package snapshot contains Android procedure/helper and detects source races. | runtime-asset snapshot test | green |
+| A real runner-owned emulator executes the changed fixture workflow with exact `ANDROID_SERIAL`, stable fixture PID, UI-tree-derived interaction, screenshot, hierarchy, and redacted logcat. | explicit real Android proof gate | green |
+| Public `proveChange` and sanitized `ProofReceipt` shapes remain unchanged. | Interface-shape test | green |
 
 ## 5. Execution Slices
 
 ### Progress Discipline
 
-- [ ] Begin every behavior slice with a focused RED test and preserve its observed reason.
-- [ ] Use `flutter-android-debug` plus `test-android-apps:android-emulator-qa` for actual emulator lifecycle/navigation/evidence.
-- [ ] Keep emulator serial, PID, app ID, lease token, raw logs, and local artifact paths out of public results and committed docs.
-- [ ] Never push; commit only after the real gate and full validation pass.
+- [x] Begin every behavior slice with a focused RED test and preserve its observed reason.
+- [x] Use `flutter-android-debug` plus `test-android-apps:android-emulator-qa` for actual emulator lifecycle/navigation/evidence.
+- [x] Keep emulator serial, PID, app ID, lease token, raw logs, and local artifact paths out of public results and committed docs.
+- [x] Never push; commit only after the real gate and full validation pass.
 
 ### Slice 1 — Lease authority and immutable package procedure
 
-- [ ] **Test/Proof First:** Add RED matrices for one emulator, ambiguous/offline/physical targets, user-owned app PID, active foreign lease, stale owner, expiry, token-safe release, and helper source race.
-- [ ] Implement the narrow lease record/store and executable package helper; persist intent before target use and verify exact target state on acquire/reuse/release.
-- [ ] Add Android procedure/tool to the atomically published acceptance-proof snapshot and pass only proof-bound lease root/identity to the contained process.
-- [ ] **Exit Gate:** lease/runtime-asset focused tests, typecheck, architecture scan, and diff check pass.
+- [x] **Test/Proof First:** Add RED matrices for one emulator, ambiguous/offline/physical targets, user-owned app PID, active foreign lease, stale owner, expiry, token-safe release, and helper source race.
+- [x] Implement the narrow lease record/store and executable package helper; persist intent before target use and verify exact target state on acquire/reuse/release.
+- [x] Add Android procedure/tool to the atomically published acceptance-proof snapshot and pass only proof-bound lease root/identity to the contained process.
+- [x] **Exit Gate:** lease/runtime-asset focused tests, typecheck, architecture scan, and diff check pass.
 
 ### Slice 2 — Android visual report and custody
 
-- [ ] **Test/Proof First:** Add RED Android reports for missing/mismatched lease, wrong app/serial/PID, screenshot-only, missing hierarchy/log/layout/copy, stale evidence, secret-bearing logs, and raw lease data in receipt.
-- [ ] Extend the one generated visual schema with an exact Android branch and local-only `ui-hierarchy`, `device-log`, and `lease-record` artifact kinds.
-- [ ] Verify the active lease and evidence metadata inside `AcceptanceProof`; release matching lease only after durable terminal state and no pending proof process/artifact writes.
-- [ ] Preserve the browser and non-visual branches and the public Module Interface.
-- [ ] **Exit Gate:** generated-schema parity, focused proof/lease/artifact tests, browser regression fixture, and Interface-shape tests pass.
+- [x] **Test/Proof First:** Add RED Android reports for missing/mismatched lease, wrong app/serial/PID, screenshot-only, missing hierarchy/log/layout/copy, stale evidence, secret-bearing logs, and raw lease data in receipt.
+- [x] Extend the one generated visual schema with an exact Android branch and local-only `ui-hierarchy`, `device-log`, and `lease-record` artifact kinds.
+- [x] Verify the active lease and evidence metadata inside `AcceptanceProof`; release matching lease only after durable terminal state and no pending proof process/artifact writes.
+- [x] Preserve the browser and non-visual branches and the public Module Interface.
+- [x] **Exit Gate:** generated-schema parity, focused proof/lease/artifact tests, browser regression fixture, and Interface-shape tests pass.
 
 ### Self-Check Checkpoint — unleased or destructive mobile path
 
-- [ ] Root hunts direct/unleased adb fallback, device auto-selection after acquire, physical-device acceptance, lifecycle replacement, stale lease theft, token leakage, broad logcat, missing PID checks, report-repair custody bypass, and release before settlement. Independent review remains `Waived`.
+- [x] Root hunts direct/unleased adb fallback, device auto-selection after acquire, physical-device acceptance, lifecycle replacement, stale lease theft, token leakage, broad logcat, missing PID checks, report-repair custody bypass, and release before settlement. Independent review remains `Waived`.
 
 ### Slice 3 — Real runner-owned Android fixture
 
-- [ ] Launch the unused installed AVD as a runner-owned cold-start session on an isolated serial; record emulator PID and verify no prior app/runtime owner.
-- [ ] Copy the fixture source to a temporary directory, generate Android platform files, build/install only the fixture, resolve its activity, launch it, and record package PID/variant.
-- [ ] Acquire the package lease, dump/summarize the UI tree, derive the interaction target from the tree, interact, and re-check the same fixture PID.
-- [ ] Capture final UI hierarchy, screenshot, and PID-scoped logcat; redact/scan and visually inspect the screenshot.
-- [ ] Submit exact evidence through `AcceptanceProof`, release the matching lease, then shut down only the runner-owned emulator process and remove temporary fixture/artifacts.
-- [ ] **Exit Gate:** real proof GREEN with no skipped branch, focused/full tests, typecheck, pack dry-run, architecture scan, containment canary, and diff check pass.
+- [x] Launch the unused installed AVD as a runner-owned cold-start session on an isolated serial; record emulator PID and verify no prior app/runtime owner.
+- [x] Copy the fixture source to a temporary directory, generate Android platform files, build/install only the fixture, resolve its activity, launch it, and record package PID/variant.
+- [x] Acquire the package lease, dump/summarize the UI tree, derive the interaction target from the tree, interact, and re-check the same fixture PID.
+- [x] Capture final UI hierarchy, screenshot, and PID-scoped logcat; redact/scan and visually inspect the screenshot.
+- [x] Submit exact evidence through `AcceptanceProof`, release the matching lease, then shut down only the runner-owned emulator process and remove temporary fixture/artifacts.
+- [x] **Exit Gate:** real proof GREEN with no skipped branch, focused/full tests, typecheck, pack dry-run, architecture scan, containment canary, and diff check pass.
 
 ## 6. Halt Conditions
 
-- [ ] Stop before mutation if any target/app/runtime appears user-owned or discovery is ambiguous.
-- [ ] Stop if only a physical device, mocked screenshot, guessed coordinate, broad unredacted log, or unleased adb path is available.
-- [ ] Stop if exact Android support requires changing `proveChange`, exposing raw lease/platform fields in `ProofReceipt`, or importing the old runtime into `src/v2`.
-- [ ] Stop if the runner-owned emulator PID/serial or fixture PID changes unexpectedly; do not silently relaunch.
+- [x] Stop before mutation if any target/app/runtime appears user-owned or discovery is ambiguous.
+- [x] Stop if only a physical device, mocked screenshot, guessed coordinate, broad unredacted log, or unleased adb path is available.
+- [x] Stop if exact Android support requires changing `proveChange`, exposing raw lease/platform fields in `ProofReceipt`, or importing the old runtime into `src/v2`.
+- [x] Stop if the runner-owned emulator PID/serial or fixture PID changes unexpectedly; do not silently relaunch.
 
 ## 7. Validation And Done Criteria
 
-- [ ] Every ledger row is GREEN.
-- [ ] Actual runner-owned emulator evidence exists and the final screenshot is visually inspected; no mobile gate is skipped.
-- [ ] Browser/non-visual regressions and unchanged Interface-shape tests remain GREEN.
-- [ ] Focused V2 tests, full tests, `npm run typecheck`, package dry-run, architecture scan, containment canary, and `git diff --check` pass.
-- [ ] Independent review is recorded as `Waived`; root self-check defects are fixed and affected/full validation rerun.
-- [ ] Master links this spec and authorizes Spec 5 only after reconciliation.
+- [x] Every ledger row is GREEN.
+- [x] Actual runner-owned emulator evidence exists and the final screenshot is visually inspected; no mobile gate is skipped.
+- [x] Browser/non-visual regressions and unchanged Interface-shape tests remain GREEN.
+- [x] Focused V2 tests, full tests, `npm run typecheck`, package dry-run, architecture scan, containment canary, and `git diff --check` pass.
+- [x] Independent review is recorded as `Waived`; root self-check defects are fixed and affected/full validation rerun.
+- [x] Master links this spec and authorizes Spec 5 only after reconciliation.
 
 ## 8. Implementation Review State
 
 - **Profile:** high.
 - **Plan:** Independent artifact/checkpoint/cleanup/final review waived. Root executes lease/destructive-path self-check and actual emulator proof.
-- **Pass History:** None; outcome `Waived`.
-- **Verified Defects:** None.
+- **Pass History:** Independent passes: none; outcome `Waived`. Root self-check covered lease ownership, current-write custody, release ordering, crash replay, receipt redaction, immutable package assets, and the actual emulator lifecycle.
+- **Verified Defects:** Root self-check closed exact-target verification on helper release, deterministic local-record cleanup after malformed reports, and idempotent recovery after local release publication but before external lease removal.
 - **Accepted Risks:** `S4-REVIEW-WAIVER-001` — independent review omitted by user instruction. Shared Codex auth/user-readable host files remain accepted; mobile lifecycle and publication authority do not.
 - **Open Defects:** None.
 
+### 8.1 Execution Evidence
+
+- **Implementation Outcome:** GREEN. The generated proof contract has exact non-visual, browser, and Android branches. Android pass requires a verified active lease, screenshot plus UI hierarchy, process-scoped device log, post-interaction freshness, criterion mapping, and evidence-linked layout/copy review while `proveChange(...)` remains unchanged.
+- **Lease Outcome:** GREEN. One-emulator selection, physical/offline/ambiguous/live-app refusal, exact identity binding, expiry/dead-owner reclaim, token-safe release, malformed-report cleanup, and release crash replay are executable and fail closed. Lease, hierarchy, and device-log artifacts remain local-only.
+- **Real Android Outcome:** GREEN. A fresh isolated runner-owned emulator was cold-started with no prior app, Flutter, VM Service, or IDE owner. The temporary Flutter fixture built and passed analyze/widget tests, the interaction point was derived from the live UI hierarchy, the same fixture process reached the final state, and fresh PNG/XML/process-scoped log evidence passed production `AcceptanceProof`. The screenshot was visually inspected, the lease was durably released, only the runner-owned emulator was shut down, and all temporary gate data was removed.
+- **Immutable Package Outcome:** GREEN. The atomic acceptance-proof snapshot contains and verifies `references/android.md`, `references/browser.md`, `tools/android-lease.mjs`, the skill, and generated schema; procedure/helper source races fail before publication. Package dry-run contains all Android assets and V2 modules while retaining the existing public bin.
+- **Validation:** Focused affected suite `30/30`; V2 declarations `82`; repository declarations/tests `792/792`; no skip. `npm run typecheck`, `git diff --check`, architecture import scan, 519-file package dry-run inventory, and real `npm run test:v2-containment` all exit `0`.
+- **Skipped Live Gates:** Live GitHub mutation, daemon operation, external authenticated services, package publication, iOS, Setup, and public cutover remain outside Spec 4.
+- **Checkpoint Commit:** `d12d4c1` — Android report/lease custody, immutable procedure/helper, real fixture harness, runtime composition, and self-check fixes.
+
 ## 9. Final Action
 
-Reconcile this spec and master with exact lease/real-emulator/test evidence and commits. Author Spec 5 only after Android proof is GREEN and the runner-owned emulator has been safely released.
+Completed: runner-leased Android proof, exact evidence custody, real emulator execution, safe release, immutable package assets, and the unchanged public Interface are GREEN. The master may authorize Spec 5 next.
