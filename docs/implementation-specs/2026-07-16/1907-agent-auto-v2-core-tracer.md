@@ -15,7 +15,7 @@ review_reasons:
 review_outcome: "Waived"
 review_verdict: "Shared-Codex-auth risk revision self-checked; independent re-review waived by user"
 review_coverage: "Original Architecture/Execution and Failure/Contracts reviews remain recorded; the 2026-07-16 shared-auth revision and continued execution use user-authorized self-check only"
-approved_content_sha256: "9b954851c225ebf384dcc4fc212b9cb32d6c728173fa771e08e59c8bab38aa06"
+approved_content_sha256: "588a0ad2877ed0ea884940124269e7765cef52411c01d6b42395a93827695a54"
 source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d2f6aa"
 ---
 
@@ -414,8 +414,8 @@ No additional runtime file is authorized without first recording why one of thes
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
 | V2 accepts only exact clean config/state schema IDs and exposes no plan-auto/tree/graph/auth/skill-runtime command or label field. | Legacy policy or removed product surfaces silently enter the new runtime. | RED `test/v2-config-contract.test.ts` exact-key and candidate CLI/label snapshots | in progress — config/CLI/labels verified; state schema remains Slice 5 |
-| Installed package bytes, not local same-name skills, own both agent workflows and generated schemas. | Local skills alter behavior or package updates leave stale target workflow copies. | RED packed-consumer conflicting-skill test in `test/v2-package-consumer.test.ts` | in progress — tarball install/update verified; immutable runtime selection remains Slice 2 |
-| Every attempt executes one private symlink-free, exact-file, exact-mode, hash-verified snapshot; package changes cannot mutate active bytes. | Update/crash/symlink races change instructions after evidence is recorded. | RED corruption/update/race matrix in `test/v2-runtime-assets.test.ts` | planned |
+| Installed package bytes, not local same-name skills, own both agent workflows and generated schemas. | Local skills alter behavior or package updates leave stale target workflow copies. | RED packed-consumer conflicting-skill test in `test/v2-package-consumer.test.ts` | verified |
+| Every attempt executes one private symlink-free, exact-file, exact-mode, hash-verified snapshot; package changes cannot mutate active bytes. | Update/crash/symlink races change instructions after evidence is recorded. | RED corruption/update/race matrix in `test/v2-runtime-assets.test.ts` | verified |
 | Generated output schema and runtime validation come from the same TypeScript owner for each report. | Skill prose, schema file, and parser accept different report shapes. | RED parity fixtures in `test/v2-report-contracts.test.ts` | verified |
 | Raw objects cannot construct `CheckedChange`; `proofId` binds exact issue/criteria/change/package/schema/check policy and stale worktree input fails before proof effects. | Old or forged proof is accepted for new code. | RED compile/runtime capability and binding-mismatch cases in `test/v2-report-contracts.test.ts` | planned |
 | `ProofReceipt` exposes no raw local paths/platform/lease/repair fields and only sanitized publishable references may reach publication. | `RunIssue` must understand proof storage or leaks local/secret evidence. | RED Interface-shape and redaction fixture in `test/v2-report-contracts.test.ts` | verified |
@@ -458,11 +458,11 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### Slice 2 — Immutable attempt snapshot
 
-- [ ] **Objective:** Resolve exact installed skill/schema bytes and atomically publish one private immutable snapshot consumed by an attempt.
-- [ ] **Test/Proof First:** Add failing tests for resolve/update/spawn race, temp-tree crash, fsync-before-rename failure, rename-before-return, partial/corrupt destination, extra file, mode/ownership drift, and symlink substitution at every level.
-- [ ] Implement `src/v2/runtime-assets.ts` directly over package-relative resolution and durable filesystem primitives; no shared cache, graph, provider, or target copy.
-- [ ] Persist package version, exact file list/hashes/modes, snapshot root, and generated schema hash in attempt evidence.
-- [ ] **Exit Gate:** Focused `v2-runtime-assets` tests pass and prove active snapshot bytes remain unchanged when the installed fixture package is replaced.
+- [x] **Objective:** Resolve exact installed skill/schema bytes and atomically publish one private immutable snapshot consumed by an attempt.
+- [x] **Test/Proof First:** Add failing tests for resolve/update/spawn race, temp-tree crash, fsync-before-rename failure, rename-before-return, partial/corrupt destination, extra file, mode/ownership drift, and symlink substitution at every level.
+- [x] Implement `src/v2/runtime-assets.ts` directly over package-relative resolution and durable filesystem primitives; no shared cache, graph, provider, or target copy.
+- [x] Persist package version, exact file list/hashes/modes, snapshot root, and generated schema hash in attempt evidence.
+- [x] **Exit Gate:** Focused `v2-runtime-assets` tests pass and prove active snapshot bytes remain unchanged when the installed fixture package is replaced.
 
 ### Slice 3 — Contained ordinary Codex process
 
@@ -566,13 +566,13 @@ No additional runtime file is authorized without first recording why one of thes
 
 ### 10.1 Implementation Execution State
 
-- **Execution Outcome:** Containment preflight and Slice 1 are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 2 is active.
+- **Execution Outcome:** Containment preflight and Slices 1-2 are GREEN under the user's explicit shared-Codex-auth and host-read risk acceptance; Slice 3 is active.
 - **Authority Artifact:** This revised Spec 1 is the execution authority; independent artifact/code reviews are waived, so root self-check and executable proof are the only revision gates.
 - **TDD Activation:** The old all-false contract is historical RED. The revised V2 certificate is GREEN, so Slice 1 now proceeds one behavior proof at a time with RED before production implementation.
 - **Implementation Reviews:** Waived by the user on 2026-07-16. Review Checkpoints 1/2 and final cleanup/code review are replaced by root self-check plus the same focused/full validation commands; outcome remains `Waived`, not independently approved.
 - **Accepted Execution Risk:** `S1-EXEC-CONTAIN-015` — root/native-child tool shells may read/use user-owned Codex auth and any file readable by the current macOS user. Authority: two explicit user decisions on 2026-07-16. Scope excludes credential/path output and every GitHub/npm/SSH/cloud/production capability.
 - **Downstream Checklist:** The revised containment canary and V2 certificate passed. Slice 1 is eligible; later slices remain gated by their predecessor exits.
-- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract. No RED implementation or failed validation state was committed.
+- **Checkpoint Commits:** `b0c9e53` is the required docs-only bootstrap; `4ac31aa` records the revised GREEN containment contract; `7c5f7ee` records Slice 1 package contracts. No RED implementation or failed validation state was committed.
 
 ## 11. Final Action
 
