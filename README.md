@@ -47,10 +47,10 @@ All commands require an absolute target. `doctor`, `status`, `run`, and `daemon`
 
 1. Read the issue and confirm the exact `auto` authorization label.
 2. Acquire runner ownership and create or resume one issue worktree.
-3. Invoke the package-owned `agent-auto` skill in a contained Codex process.
+3. Pin one verified package-owned workflow generation and invoke its `implementation` operation in a contained Codex process.
 4. Validate the structured implementation report and the complete worktree diff.
 5. Run the configured finite checks.
-6. Freeze the checked change and invoke package-owned `acceptance-proof` in a separate contained process.
+6. Freeze the checked change and invoke the pinned generation's `acceptance-proof` operation in a separate contained process.
 7. Validate fresh proof artifacts and criterion coverage.
 8. Publish through runner-owned Git and GitHub adapters, then mark the issue review-ready.
 
@@ -69,15 +69,17 @@ Browser and mobile proof additionally require current workflow evidence. Mobile 
 The npm package ships only:
 
 - the compiled V2 runtime and adapter closure;
-- package-owned `agent-auto` and `acceptance-proof` skills;
+- one generated `internal-workflow` inventory containing declared skills, profiles, schemas, operation wrappers, and their exact manifest;
 - this README, the architecture deep dive, changelog, and license.
 
-There are no bundled workflow prompts, compatibility bridge, alternate public runtime, parent-planning mode, or Legacy CLI export.
+The runtime materializes an immutable generation from that manifest before a new run and persists its receipt through every retry and proof attempt. Consumer `CODEX_HOME` skills and profiles are never workflow authority. There is no compatibility bridge, alternate public runtime, or Legacy CLI export.
 
 ## Development
 
 ```sh
 npm run typecheck
+npm run check:workflow
+npm run verify:workflow
 npm test
 npm pack --dry-run --json
 ```

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Profile-routed correctness and standards review"
+  default_prompt: "Use $code-review for one final profile-selected wave; high risk uses two parallel reviewers and the spec/standards lens includes bounded cleanup."

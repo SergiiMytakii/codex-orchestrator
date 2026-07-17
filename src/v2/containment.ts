@@ -4,6 +4,7 @@ import { homedir, platform } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
+import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
 export const CONTAINMENT_CODEX_VERSION = '0.144.4' as const;
 export const CONTAINMENT_PLATFORM = 'darwin' as const;
@@ -64,14 +65,18 @@ export function buildContainmentCodexArgs(input: {
   toolHome: string;
   tmpDir: string;
   safePath: string;
+  operationPolicy?: WorkflowOperationPolicy;
+  executionProfile?: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
 }): string[] {
+  const operationPolicy = input.operationPolicy ?? defaultContainmentOperationPolicy();
+  validateContainmentOperationPolicy(operationPolicy);
   return [
     'exec',
     '--strict-config',
     '--ignore-user-config',
     '--ignore-rules',
     '--sandbox',
-    'workspace-write',
+    operationPolicy.sandboxMode,
     '--output-schema',
     input.schemaPath,
     '--output-last-message',
@@ -86,6 +91,10 @@ export function buildContainmentCodexArgs(input: {
     'features.apps=false',
     '-c',
     'sandbox_workspace_write.network_access=false',
+    ...(input.executionProfile ? [
+      '-c', `model=${tomlString(input.executionProfile.model)}`,
+      '-c', `model_reasoning_effort=${tomlString(input.executionProfile.reasoningEffort)}`,
+    ] : []),
     '-c',
     'shell_environment_policy.inherit="none"',
     '-c',
@@ -104,6 +113,34 @@ export function buildContainmentCodexArgs(input: {
     ]),
     '-',
   ];
+}
+
+export function validateContainmentOperationPolicy(policy: WorkflowOperationPolicy): void {
+  if (!['read-only', 'workspace-write'].includes(policy.sandboxMode)
+    || !['worktree', 'target-state'].includes(policy.cwdClass)
+    || !['read-only', 'write'].includes(policy.worktreeAccess)
+    || policy.network !== 'deny' || policy.networkHosts.length !== 0 || policy.mcpTools.length !== 0
+    || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) {
+    throw new Error('operation policy exceeds containment authority');
+  }
+  if (policy.sandboxMode === 'read-only') {
+    if (policy.worktreeAccess !== 'read-only' || policy.writableRootClasses.length !== 0 || policy.runnerPostcondition !== 'report-only') {
+      throw new Error('read-only operation policy is inconsistent');
+    }
+    return;
+  }
+  if (policy.worktreeAccess !== 'write' || policy.writableRootClasses.length !== 1
+    || policy.writableRootClasses[0] !== policy.cwdClass
+    || !['change-set', 'proof-only', 'spec-only'].includes(policy.runnerPostcondition)) {
+    throw new Error('write operation policy is inconsistent');
+  }
+}
+
+export function defaultContainmentOperationPolicy(): WorkflowOperationPolicy {
+  return {
+    sandboxMode: 'workspace-write', cwdClass: 'worktree', worktreeAccess: 'write', writableRootClasses: ['worktree'],
+    runnerPostcondition: 'change-set', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+  };
 }
 
 export function buildContainmentCodexEnvironment(input: {

@@ -1,326 +1,129 @@
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { join } from 'node:path';
+import test from 'node:test';
 
-import {
-  publishRuntimeAssetSnapshot,
-  verifyRuntimeAssetSnapshot,
-  type RuntimeAssetPublishStep,
-} from '../src/v2/runtime-assets.js';
+import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
+import { materializeWorkflowGeneration, parseWorkflowExecutionProfile } from '../src/v2/workflow-assets.js';
 
-test('publishes exact private skill/schema bytes and records package, hashes, modes, owner, and paths', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const snapshot = await publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/attempt-1/snapshot',
-      skill: 'agent-auto',
+const packageRoot = join(import.meta.dirname, '..', '..');
+
+test('operation snapshot copies one pinned generation closure and concurrent publishers reuse it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-generation-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const input = {
+    workflowGeneration,
+    runtimeRoot: join(root, 'runtime'),
+    snapshotRelativePath: 'runs/run-a/attempts/attempt-a/snapshot',
+    operation: 'acceptance-proof',
+    bootId: 'boot-a',
+  };
+  const snapshots = await Promise.all(Array.from({ length: 16 }, async () => publishRuntimeAssetSnapshot(input)));
+  const [left, right] = snapshots;
+  assert.ok(left && right);
+  assert.equal(left.snapshotRoot, right.snapshotRoot);
+  assert.equal(new Set(snapshots.map((snapshot) => snapshot.snapshotRoot)).size, 1);
+  assert.equal(left.generationHash, workflowGeneration.generationHash);
+  assert.equal(left.operation, 'acceptance-proof');
+  assert.equal(left.policy.runnerPostcondition, 'proof-only');
+  assert.match(left.operationPath, /operations\/acceptance-proof\/SKILL\.md$/u);
+  assert.match(left.schemaPath, /schemas\/proof-report-v1\.json$/u);
+  assert.ok(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')));
+  const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
+  assert.equal(profile.name, 'proof_agent');
+  assert.equal(profile.model, 'gpt-5.6-sol');
+  assert.equal(profile.reasoningEffort, 'high');
+  await verifyRuntimeAssetSnapshot(left);
+});
+
+test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-negative-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const common = { workflowGeneration, runtimeRoot: join(root, 'runtime'), bootId: 'boot-a' };
+  await assert.rejects(publishRuntimeAssetSnapshot({
+    ...common, snapshotRelativePath: '../snapshot', operation: 'implementation',
+  }), /snapshotRelativePath|invalid/iu);
+  await assert.rejects(publishRuntimeAssetSnapshot({
+    ...common, snapshotRelativePath: 'runs/a/attempts/a/snapshot', operation: 'unknown',
+  }), /unavailable/iu);
+  const snapshot = await publishRuntimeAssetSnapshot({
+    ...common, snapshotRelativePath: 'runs/b/attempts/b/snapshot', operation: 'implementation',
+  });
+  const entry = snapshot.operationPath;
+  await chmod(entry, 0o600);
+  await writeFile(entry, '# tampered\n');
+  await chmod(entry, 0o400);
+  await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /hash|evidence|drift/iu);
+});
+
+test('operation snapshot rejects a runtime root below a symlinked ancestor', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-ancestor-symlink-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const outside = join(root, 'outside');
+  await mkdir(outside);
+  await symlink(outside, join(root, 'linked-parent'), 'dir');
+  await assert.rejects(publishRuntimeAssetSnapshot({
+    workflowGeneration,
+    runtimeRoot: join(root, 'linked-parent', 'runtime'),
+    snapshotRelativePath: 'runs/run-a/attempts/attempt-a/snapshot',
+    operation: 'implementation',
+    bootId: 'boot-a',
+  }), /root is unsafe/iu);
+  await assert.rejects(lstat(join(outside, 'runtime')), { code: 'ENOENT' });
+});
+
+test('operation snapshot converges after publisher process death at every ready boundary', { timeout: 180_000 }, async () => {
+  const modulePath = join(packageRoot, 'dist', 'src', 'v2', 'runtime-assets.js');
+  for (const step of [
+    'before-claim-link', 'after-claim-link', 'after-content-mkdir', 'after-first-content-file',
+    'before-content-parent-sync', 'after-content-parent-sync', 'before-ready-link',
+    'after-ready-link', 'after-ready-parent-sync',
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), `runtime-assets-kill-${step}-`));
+    const workflowGeneration = await materializeWorkflowGeneration({
+      packageRoot, runtimeRoot: join(root, 'orchestrator'), packageVersion: '2.0.1', bootId: 'parent',
     });
-
-    assert.equal(snapshot.packageVersion, '1.0.0');
-    assert.equal(snapshot.skill, 'agent-auto');
-    assert.equal(snapshot.reused, false);
-    assert.equal(snapshot.ownerUid, process.getuid?.());
-    assert.equal(snapshot.rootMode, 0o700);
-    assert.deepEqual(snapshot.files.map((file) => [file.relativePath, file.mode]), [
-      ['SKILL.md', 0o400],
-      ['output-schema.json', 0o400],
-    ]);
-    assert.equal(snapshot.generatedSchemaSha256, snapshot.files[1]?.sha256);
-    await verifyRuntimeAssetSnapshot(snapshot);
-    assert.match(await readFile(snapshot.skillPath, 'utf8'), /PACKAGE AGENT A/u);
-    assert.equal((await readFile(snapshot.schemaPath, 'utf8')).endsWith('\n'), true);
-  });
-});
-
-test('creates a missing repository runtime root on the first contained attempt', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    await rm(runtimeRoot, { recursive: true });
-
-    const snapshot = await publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'runs/run-first/attempts/attempt-first/snapshot',
-      skill: 'agent-auto',
-    });
-
-    assert.equal((await lstat(runtimeRoot)).mode & 0o777, 0o700);
-    await verifyRuntimeAssetSnapshot(snapshot);
-  });
-});
-
-test('fails closed when package bytes change during resolution and publishes no snapshot', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const snapshotRelativePath = 'v2/repo/runs/run-1/attempts/attempt-race/snapshot';
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath,
-      skill: 'agent-auto',
-      onStep: async (step) => {
-        if (step === 'after-source-resolve') {
-          await writeFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'), 'PACKAGE AGENT B\n');
-        }
-      },
-    }), /package assets changed during resolution/u);
-    await assert.rejects(lstat(join(runtimeRoot, snapshotRelativePath)), /ENOENT/u);
-  });
-});
-
-test('fails closed when acceptance-proof procedure bytes change during resolution', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/procedure-race/snapshot',
-      skill: 'acceptance-proof',
-      onStep: async (step) => {
-        if (step === 'after-source-resolve') {
-          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'browser.md'), 'BROWSER PROCEDURE B\n');
-        }
-      },
-    }), /package assets changed during resolution/u);
-  });
-});
-
-test('fails closed when acceptance-proof lease helper bytes change during resolution', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/helper-race/snapshot',
-      skill: 'acceptance-proof',
-      onStep: async (step) => {
-        if (step === 'after-source-resolve') {
-          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'android-lease.mjs'), 'HELPER B\n');
-        }
-      },
-    }), /package assets changed during resolution/u);
-  });
-});
-
-test('fails closed when acceptance-proof iOS procedure bytes change during resolution', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/ios-procedure-race/snapshot',
-      skill: 'acceptance-proof',
-      onStep: async (step) => {
-        if (step === 'after-source-resolve') {
-          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'ios.md'), 'IOS PROCEDURE B\n');
-        }
-      },
-    }), /package assets changed during resolution/u);
-  });
-});
-
-test('fails closed when acceptance-proof iOS lease helper bytes change during resolution', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/ios-helper-race/snapshot',
-      skill: 'acceptance-proof',
-      onStep: async (step) => {
-        if (step === 'after-source-resolve') {
-          await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'ios-lease.mjs'), 'IOS HELPER B\n');
-        }
-      },
-    }), /package assets changed during resolution/u);
-  });
-});
-
-test('keeps version-A attempt bytes immutable while a new attempt snapshots version B', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const first = await publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/attempt-a/snapshot',
-      skill: 'agent-auto',
-    });
-    const firstBytes = await readFile(first.skillPath);
-    await writeFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'), 'PACKAGE AGENT B\n');
-    const packageJson = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as { version: string };
-    packageJson.version = '2.0.0';
-    await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify(packageJson)}\n`);
-
-    const second = await publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/attempt-b/snapshot',
-      skill: 'agent-auto',
-    });
-
-    assert.deepEqual(await readFile(first.skillPath), firstBytes);
-    assert.match(await readFile(second.skillPath, 'utf8'), /PACKAGE AGENT B/u);
-    assert.equal(second.packageVersion, '2.0.0');
-    await verifyRuntimeAssetSnapshot(first);
-    await verifyRuntimeAssetSnapshot(second);
-  });
-});
-
-test('never publishes a partial tree when temp write or pre-rename fsync fails', async () => {
-  for (const failureStep of ['after-first-file-sync', 'before-temp-directory-sync'] as RuntimeAssetPublishStep[]) {
-    await withFixture(async ({ packageRoot, runtimeRoot }) => {
-      const snapshotRelativePath = `v2/repo/runs/run-1/attempts/${failureStep}/snapshot`;
-      await assert.rejects(publishRuntimeAssetSnapshot({
-        packageRoot,
-        runtimeRoot,
-        snapshotRelativePath,
-        skill: 'agent-auto',
-        onStep: async (step) => {
-          if (step === failureStep) throw new Error(`injected ${failureStep}`);
-        },
-      }), new RegExp(`injected ${failureStep}`, 'u'));
-      const attemptRoot = dirname(join(runtimeRoot, snapshotRelativePath));
-      await assert.rejects(lstat(join(runtimeRoot, snapshotRelativePath)), /ENOENT/u);
-      assert.deepEqual((await readdir(attemptRoot)).filter((name) => name.includes('.snapshot.tmp-')), []);
-    });
-  }
-});
-
-test('reuses a fully verified destination after rename-before-return failure', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
     const input = {
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/after-rename/snapshot',
-      skill: 'agent-auto' as const,
+      workflowGeneration,
+      runtimeRoot: join(root, 'runtime'),
+      snapshotRelativePath: 'runs/run-a/attempts/attempt-a/snapshot',
+      operation: 'implementation',
+      bootId: 'killed-child',
     };
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      ...input,
-      onStep: async (step) => {
-        if (step === 'after-rename') throw new Error('injected after rename');
-      },
-    }), /injected after rename/u);
-
-    const recovered = await publishRuntimeAssetSnapshot(input);
-    assert.equal(recovered.reused, true);
-    await verifyRuntimeAssetSnapshot(recovered);
-  });
-});
-
-test('rejects partial, corrupt, extra-file, mode, owner-evidence, and symlink destinations', async () => {
-  for (const corruption of ['partial', 'content', 'extra', 'mode', 'owner', 'file-symlink', 'root-symlink'] as const) {
-    await withFixture(async ({ packageRoot, runtimeRoot }) => {
-      const relative = `v2/repo/runs/run-1/attempts/corrupt-${corruption}/snapshot`;
-      const snapshot = await publishRuntimeAssetSnapshot({ packageRoot, runtimeRoot, snapshotRelativePath: relative, skill: 'agent-auto' });
-      if (corruption === 'partial') await rm(snapshot.schemaPath);
-      if (corruption === 'content') {
-        await chmod(snapshot.skillPath, 0o600);
-        await writeFile(snapshot.skillPath, 'CORRUPT\n');
-        await chmod(snapshot.skillPath, 0o400);
-      }
-      if (corruption === 'extra') {
-        const extra = join(snapshot.snapshotRoot, 'extra.txt');
-        await writeFile(extra, 'extra\n', { mode: 0o400 });
-      }
-      if (corruption === 'mode') await chmod(snapshot.skillPath, 0o600);
-      if (corruption === 'owner') snapshot.ownerUid += 1;
-      if (corruption === 'file-symlink') {
-        await rm(snapshot.skillPath);
-        await symlink('/dev/null', snapshot.skillPath);
-      }
-      if (corruption === 'root-symlink') {
-        await rm(snapshot.snapshotRoot, { recursive: true });
-        await symlink('/tmp', snapshot.snapshotRoot);
-      }
-      await assert.rejects(verifyRuntimeAssetSnapshot(snapshot));
-      if (corruption === 'owner') {
-        const reread = await publishRuntimeAssetSnapshot({ packageRoot, runtimeRoot, snapshotRelativePath: relative, skill: 'agent-auto' });
-        assert.equal(reread.reused, true);
-      } else {
-        await assert.rejects(publishRuntimeAssetSnapshot({ packageRoot, runtimeRoot, snapshotRelativePath: relative, skill: 'agent-auto' }));
-      }
-    });
+    const script = `
+      import { publishRuntimeAssetSnapshot } from ${JSON.stringify(new URL(`file://${modulePath}`).href)};
+      await publishRuntimeAssetSnapshot({ ...${JSON.stringify(input)},
+        onStep(value) { if (value === ${JSON.stringify(step)}) process.kill(process.pid, 'SIGKILL'); }
+      });
+    `;
+    const killed = await spawnResult(process.execPath, ['--input-type=module', '--eval', script]);
+    assert.equal(killed.signal, 'SIGKILL', step);
+    const snapshot = await publishRuntimeAssetSnapshot({ ...input, bootId: 'recovery-parent' });
+    await verifyRuntimeAssetSnapshot(snapshot);
   }
 });
 
-test('rejects symlink substitution in package assets and managed runtime parents', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const source = join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md');
-    const target = join(packageRoot, 'agent-target.md');
-    await writeFile(target, 'SYMLINK TARGET\n');
-    await rm(source);
-    await symlink(target, source);
-    await assert.rejects(publishRuntimeAssetSnapshot({
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/source-link/snapshot',
-      skill: 'agent-auto',
-    }), /symbolic link/u);
+async function spawnResult(file: string, args: string[]): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolveExit, rejectExit) => {
+    const child = spawn(file, args, { stdio: 'ignore' });
+    child.once('error', rejectExit);
+    child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
-
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const outside = await mkdtemp(join(tmpdir(), 'runtime-assets-outside-'));
-    try {
-      await mkdir(join(runtimeRoot, 'v2'));
-      await symlink(outside, join(runtimeRoot, 'v2', 'repo'));
-      await assert.rejects(publishRuntimeAssetSnapshot({
-        packageRoot,
-        runtimeRoot,
-        snapshotRelativePath: 'v2/repo/runs/run-1/attempts/parent-link/snapshot',
-        skill: 'agent-auto',
-      }), /symbolic link/u);
-    } finally {
-      await rm(outside, { recursive: true, force: true });
-    }
-  });
-});
-
-test('serializes concurrent publishers and reuses the one exact committed snapshot', async () => {
-  await withFixture(async ({ packageRoot, runtimeRoot }) => {
-    const input = {
-      packageRoot,
-      runtimeRoot,
-      snapshotRelativePath: 'v2/repo/runs/run-1/attempts/concurrent/snapshot',
-      skill: 'acceptance-proof' as const,
-    };
-    const [left, right] = await Promise.all([
-      publishRuntimeAssetSnapshot(input),
-      publishRuntimeAssetSnapshot(input),
-    ]);
-    assert.equal([left.reused, right.reused].filter(Boolean).length, 1);
-    assert.deepEqual(left.files, right.files);
-    assert.deepEqual(left.files.map((file) => file.relativePath), [
-      'SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'references/ios.md',
-      'tools/android-lease.mjs', 'tools/ios-lease.mjs',
-    ]);
-    assert.match(await readFile(join(left.snapshotRoot, 'references', 'android.md'), 'utf8'), /ANDROID PROCEDURE/u);
-    assert.match(await readFile(join(left.snapshotRoot, 'references', 'browser.md'), 'utf8'), /BROWSER PROCEDURE/u);
-    assert.match(await readFile(join(left.snapshotRoot, 'references', 'ios.md'), 'utf8'), /IOS PROCEDURE/u);
-    assert.match(await readFile(join(left.snapshotRoot, 'tools', 'android-lease.mjs'), 'utf8'), /ANDROID LEASE HELPER/u);
-    assert.match(await readFile(join(left.snapshotRoot, 'tools', 'ios-lease.mjs'), 'utf8'), /IOS LEASE HELPER/u);
-    await verifyRuntimeAssetSnapshot(left);
-  });
-});
-
-async function withFixture(
-  run: (fixture: { packageRoot: string; runtimeRoot: string }) => Promise<void>,
-): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-assets-'));
-  try {
-    const packageRoot = join(root, 'package');
-    const runtimeRoot = join(root, 'runtime');
-    await Promise.all([
-      mkdir(join(packageRoot, 'internal-skills', 'agent-auto'), { recursive: true }),
-      mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools'), { recursive: true }),
-      mkdir(runtimeRoot, { recursive: true, mode: 0o700 }),
-    ]);
-    await writeFile(join(packageRoot, 'package.json'), '{"name":"codex-orchestrator","version":"1.0.0"}\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'), 'PACKAGE AGENT A\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'SKILL.md'), 'PACKAGE PROOF A\n');
-    await mkdir(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references'), { recursive: true });
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'android.md'), 'ANDROID PROCEDURE A\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'browser.md'), 'BROWSER PROCEDURE A\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'references', 'ios.md'), 'IOS PROCEDURE A\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'android-lease.mjs'), 'ANDROID LEASE HELPER A\n');
-    await writeFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'tools', 'ios-lease.mjs'), 'IOS LEASE HELPER A\n');
-    await run({ packageRoot, runtimeRoot });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 }

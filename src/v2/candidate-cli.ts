@@ -8,9 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
 import { parseAgentAutoConfig } from './config.js';
-import { sha256 } from './containment.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
 import { createV2Runtime } from './runtime.js';
+import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
 import { parseSetupArgs, renderSetupResultJson, setupOutcomeExitCode } from './setup-cli.js';
 import { createProductionSetup } from './setup-runtime.js';
 import type { SetupIntent, SetupOutcome } from './setup.js';
@@ -96,19 +96,19 @@ async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssu
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const packageVersion = await readPackageVersion();
   const config = await readTargetConfig(intent.targetRoot);
-  const skillHashes = {
-    'agent-auto': sha256(await readFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'))),
-    'acceptance-proof': sha256(await readFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'SKILL.md'))),
-  };
+  const orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator'));
+  const bootId = await readBootId();
   const runtime = createV2Runtime({
     targetRoot: intent.targetRoot,
-    orchestratorHome: resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator')),
-    bootId: await readBootId(),
+    orchestratorHome,
+    bootId,
     packageVersion,
-    skillHashes,
+    createWorkflowGeneration: async () => {
+      const receipt = await materializeWorkflowGeneration({ packageRoot, runtimeRoot: orchestratorHome, packageVersion, bootId });
+      return { receipt, skillHashes: await workflowSkillHashes(receipt) };
+    },
     issues: new GhCliIssueAdapter(config.github.owner, config.github.repo),
     pullRequests: new GhCliPullRequestAdapter(config.github.owner, config.github.repo),
-    packageRoot,
     parentCodexHome: resolve(process.env.CODEX_HOME ?? join(homedir(), '.codex')),
     safePath: process.env.CODEX_ORCHESTRATOR_SAFE_PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
   });

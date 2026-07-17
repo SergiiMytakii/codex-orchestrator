@@ -17,7 +17,7 @@
   },
   "files": [
     "dist/src",
-    "internal-skills",
+    "internal-workflow",
     "docs/deep-dive.md",
     "CHANGELOG.md",
     "README.md",
@@ -40,8 +40,11 @@
     "test": "npm run build && node --test dist/test/*.test.js",
     "test:v2-containment": "npm run build --silent && node dist/test/v2-containment.canary.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sync:workflow": "node scripts/sync-agent-auto-workflow.mjs sync --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
+    "check:workflow": "node scripts/sync-agent-auto-workflow.mjs check --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
+    "verify:workflow": "node scripts/sync-agent-auto-workflow.mjs verify --output-root internal-workflow",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "prepack": "npm run build --silent"
+    "prepack": "npm run verify:workflow --silent && npm run build --silent"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

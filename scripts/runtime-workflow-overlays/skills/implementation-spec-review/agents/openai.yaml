@@ -1,0 +1,6 @@
+interface:
+  display_name: "Implementation Spec Review"
+  short_description: "Review one implementation spec"
+  default_prompt: "Review the supplied spec through the assigned package-owned operation and return its exact JSON report."
+policy:
+  allow_implicit_invocation: false

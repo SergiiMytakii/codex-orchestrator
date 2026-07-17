@@ -1,517 +1,352 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { O_NOFOLLOW, O_RDONLY } from 'node:constants';
+import { chmod, lstat, mkdir, open, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
+
 import {
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-} from 'node:fs/promises';
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
+  resolveWorkflowOperation,
+  sealedWorkflowContentSha256,
+  sealedWorkflowMode,
+  verifyWorkflowGeneration,
+  type WorkflowFileRecord,
+  type WorkflowGenerationReceipt,
+  type WorkflowOperationPolicy,
+} from './workflow-assets.js';
+import { publishImmutableWorkflow, type ImmutableWorkflowPublishStep } from './immutable-workflow-publisher.js';
 
-import { canonicalJson, sha256 } from './containment.js';
-import { implementationReportOutputSchema } from './implementation-report.js';
-import { proofReportOutputSchema } from './proof-report.js';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
-const SNAPSHOT_ROOT_MODE = 0o700;
-const SNAPSHOT_FILE_MODE = 0o400;
-const LOCK_WAIT_MS = 5_000;
-const LOCK_POLL_MS = 25;
-
-export type InternalSkillName = 'agent-auto' | 'acceptance-proof';
-export type RuntimeAssetPublishStep =
-  | 'after-source-resolve'
-  | 'after-first-file-sync'
-  | 'before-temp-directory-sync'
-  | 'after-temp-directory-sync'
-  | 'before-rename'
-  | 'after-rename'
-  | 'after-parent-sync';
-
-export interface RuntimeAssetFileEvidence {
-  relativePath: string;
-  sha256: string;
-  size: number;
-  mode: number;
+export interface RuntimeAssetFileEvidence extends WorkflowFileRecord {
+  sealedMode: number;
   ownerUid: number;
 }
 
 export interface RuntimeAssetSnapshot {
   packageVersion: string;
-  skill: InternalSkillName;
+  generationHash: string;
+  operation: string;
   runtimeRoot: string;
   snapshotRoot: string;
-  skillPath: string;
+  operationPath: string;
+  sourceSkillPath?: string;
   schemaPath: string;
-  rootMode: number;
+  profilePath: string;
+  policy: WorkflowOperationPolicy;
   ownerUid: number;
   files: RuntimeAssetFileEvidence[];
-  generatedSchemaSha256: string;
+  contentSha256: string;
   reused: boolean;
+}
+
+export type RuntimeAssetPublishStep = ImmutableWorkflowPublishStep;
+
+interface OwnerRecord {
+  version: 1;
+  status: 'building';
+  bootId: string;
+  pid: number;
+  token: string;
+  parentToken: string | null;
+  processStartIdentity: string;
+}
+
+interface ReadyRecord {
+  version: 1;
+  status: 'ready';
+  token: string;
+  generationHash: string;
+  operation: string;
+  contentSha256: string;
 }
 
 export async function publishRuntimeAssetSnapshot(input: {
-  packageRoot: string;
+  workflowGeneration: WorkflowGenerationReceipt;
   runtimeRoot: string;
   snapshotRelativePath: string;
-  skill: InternalSkillName;
+  operation: string;
+  bootId: string;
   onStep?: (step: RuntimeAssetPublishStep) => Promise<void> | void;
 }): Promise<RuntimeAssetSnapshot> {
-  const expectedUid = runnerUid();
-  const packageRoot = resolve(input.packageRoot);
-  const runtimeRoot = resolve(input.runtimeRoot);
-  const snapshotRelativePath = validateRelativeSnapshotPath(input.snapshotRelativePath);
-  const snapshotRoot = resolve(runtimeRoot, ...snapshotRelativePath.split('/'));
-  assertContained(runtimeRoot, snapshotRoot, 'snapshot root');
-  const attemptRoot = dirname(snapshotRoot);
-  const source = await resolveSourceAssets(packageRoot, input.skill);
-  await input.onStep?.('after-source-resolve');
-  await assertSourceUnchanged(source);
-
-  await ensureManagedDirectoryPath(runtimeRoot, attemptRoot, expectedUid);
-  const attemptStat = await lstat(attemptRoot);
-  assertDirectory(attemptStat, attemptRoot);
-  assertOwner(attemptStat.uid, expectedUid, attemptRoot);
-  assertMode(attemptStat.mode, SNAPSHOT_ROOT_MODE, attemptRoot);
-
-  const lockPath = join(attemptRoot, '.snapshot.publish.lock');
-  const lock = await acquirePublishLock(lockPath);
-  let tempRoot: string | undefined;
-  let published = false;
-  try {
-    await assertSourceUnchanged(source);
-    if (await pathExists(snapshotRoot)) {
-      const existing = expectedSnapshot({ source, runtimeRoot, snapshotRoot, expectedUid, reused: true });
-      await verifyRuntimeAssetSnapshot(existing);
-      await assertSourceUnchanged(source);
-      return existing;
-    }
-
-    tempRoot = join(attemptRoot, `.snapshot.tmp-${process.pid}-${randomUUID()}`);
-    await mkdir(tempRoot, { mode: SNAPSHOT_ROOT_MODE });
-    const expectedFiles = sourceSnapshotFiles(source, expectedUid);
-    for (const [index, file] of expectedFiles.entries()) {
-      const bytes = sourceFileBytes(source, file.relativePath);
-      if (file.relativePath.includes('/')) {
-        await mkdir(dirname(join(tempRoot, file.relativePath)), { recursive: true, mode: SNAPSHOT_ROOT_MODE });
+  await verifyWorkflowGeneration(input.workflowGeneration);
+  const operation = await resolveWorkflowOperation(input.workflowGeneration, input.operation);
+  const requestedRuntimeRoot = resolve(input.runtimeRoot);
+  const requested = validateRelativePath(input.snapshotRelativePath);
+  const requestedLogicalRoot = resolve(requestedRuntimeRoot, ...requested.split('/'));
+  assertContained(requestedRuntimeRoot, requestedLogicalRoot);
+  await ensureManagedPath(requestedRuntimeRoot, dirname(requestedLogicalRoot));
+  const runtimeRoot = await realpath(requestedRuntimeRoot);
+  const logicalRoot = resolve(runtimeRoot, ...requested.split('/'));
+  const parent = dirname(logicalRoot);
+  const stem = basename(logicalRoot);
+  return publishImmutableWorkflow<OwnerRecord, ReadyRecord, string, RuntimeAssetSnapshot>({
+    parent,
+    identity: stem,
+    bootId: input.bootId,
+    createOwner: (parentToken, processStartIdentity) => newOwner(input.bootId, parentToken, processStartIdentity),
+    parseOwner,
+    createReady: (owner, contentSha256): ReadyRecord => ({
+      version: 1,
+      status: 'ready',
+      token: owner.token,
+      generationHash: input.workflowGeneration.generationHash,
+      operation: input.operation,
+      contentSha256,
+    }),
+    parseReady,
+    serializeRecord: (value) => Buffer.from(`${canonicalJson(value)}\n`),
+    readControl: readRegular,
+    writeContent: async (contentRoot, onStep) => {
+      for (const [index, file] of operation.files.entries()) {
+        const source = join(input.workflowGeneration.generationRoot, ...file.path.split('/'));
+        const target = join(contentRoot, ...file.path.split('/'));
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+        await writeSynced(target, await readRegular(source), sealedWorkflowMode(file.mode));
+        if (index === 0) await onStep('after-first-content-file');
       }
-      const handle = await open(join(tempRoot, file.relativePath), 'wx', SNAPSHOT_FILE_MODE);
-      try {
-        await handle.writeFile(bytes);
-        await handle.sync();
-      } finally {
-        await handle.close();
+      for (const directory of (await listDirectories(contentRoot)).sort((left, right) => right.length - left.length)) {
+        await chmod(directory, 0o555);
+        await syncDirectory(directory);
       }
-      await syncDirectory(dirname(join(tempRoot, file.relativePath)));
-      if (index === 0) await input.onStep?.('after-first-file-sync');
-    }
-
-    const tempEvidence = expectedSnapshot({
-      source,
-      runtimeRoot,
-      snapshotRoot: tempRoot,
-      expectedUid,
-      reused: false,
-    });
-    await verifyRuntimeAssetSnapshot(tempEvidence);
-    await input.onStep?.('before-temp-directory-sync');
-    await syncDirectory(tempRoot);
-    await input.onStep?.('after-temp-directory-sync');
-    await assertSourceUnchanged(source);
-    await input.onStep?.('before-rename');
-
-    if (await pathExists(snapshotRoot)) {
-      const raced = expectedSnapshot({ source, runtimeRoot, snapshotRoot, expectedUid, reused: true });
-      await verifyRuntimeAssetSnapshot(raced);
-      await assertSourceUnchanged(source);
-      return raced;
-    }
-
-    await rename(tempRoot, snapshotRoot);
-    published = true;
-    await input.onStep?.('after-rename');
-    await syncDirectory(attemptRoot);
-    await input.onStep?.('after-parent-sync');
-    const snapshot = expectedSnapshot({ source, runtimeRoot, snapshotRoot, expectedUid, reused: false });
-    await verifyRuntimeAssetSnapshot(snapshot);
-    await assertSourceUnchanged(source);
-    return snapshot;
-  } finally {
-    if (tempRoot && !published) await rm(tempRoot, { recursive: true, force: true });
-    await releasePublishLock(lockPath, lock.token);
-  }
+      return contentDigest(await evidence(contentRoot, operation.files));
+    },
+    resultFromReady: ({ ready, contentRoot, reused }) => snapshotFromReady(
+      input, operation, runtimeRoot, ready, contentRoot, reused,
+    ),
+    activePublisherError: 'runtime asset publisher is still active',
+    recoveryChainError: 'runtime asset recovery chain is invalid',
+    onStep: input.onStep,
+  });
 }
 
 export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot): Promise<void> {
-  const expectedUid = runnerUid();
-  if (snapshot.ownerUid !== expectedUid) throw new Error('snapshot evidence owner does not match the runner');
-  if (snapshot.rootMode !== SNAPSHOT_ROOT_MODE) throw new Error('snapshot evidence root mode is invalid');
-  const runtimeRoot = resolve(snapshot.runtimeRoot);
-  const snapshotRoot = resolve(snapshot.snapshotRoot);
-  assertContained(runtimeRoot, snapshotRoot, 'snapshot evidence root');
-  await assertExistingManagedPath(runtimeRoot, snapshotRoot, expectedUid);
-
-  const rootStat = await lstat(snapshotRoot);
-  assertDirectory(rootStat, snapshotRoot);
-  assertOwner(rootStat.uid, expectedUid, snapshotRoot);
-  assertMode(rootStat.mode, SNAPSHOT_ROOT_MODE, snapshotRoot);
-
-  const expectedNames = snapshot.skill === 'acceptance-proof'
-    ? [
-      'SKILL.md', 'output-schema.json', 'references/android.md', 'references/browser.md', 'references/ios.md',
-      'tools/android-lease.mjs', 'tools/ios-lease.mjs',
-    ]
-    : ['SKILL.md', 'output-schema.json'];
-  const actualNames = await snapshotFilePaths(snapshotRoot, expectedUid);
-  if (actualNames.length !== expectedNames.length || actualNames.some((name, index) => name !== expectedNames[index])) {
-    throw new Error('snapshot has missing or extra entries');
+  if (snapshot.ownerUid !== runnerUid()) throw new Error('runtime asset owner drift');
+  const root = resolve(snapshot.snapshotRoot);
+  assertContained(resolve(snapshot.runtimeRoot), root);
+  if (await realpath(root) !== root) throw new Error('runtime asset snapshot contains a symbolic link');
+  for (const directory of await listDirectories(root)) {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== runnerUid() || (info.mode & 0o777) !== 0o555) {
+      throw new Error('runtime asset directory mode or owner drift');
+    }
   }
-  if (snapshot.files.length !== expectedNames.length) throw new Error('snapshot evidence file list is invalid');
-  const evidenceNames = snapshot.files.map((file) => file.relativePath);
-  if (evidenceNames.some((name, index) => name !== expectedNames[index])) throw new Error('snapshot evidence file order is invalid');
-
-  for (const file of snapshot.files) {
-    if (file.ownerUid !== expectedUid) throw new Error(`snapshot evidence owner drift: ${file.relativePath}`);
-    if (file.mode !== SNAPSHOT_FILE_MODE) throw new Error(`snapshot evidence mode drift: ${file.relativePath}`);
-    const path = join(snapshotRoot, file.relativePath);
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`snapshot contains a symbolic link: ${file.relativePath}`);
-    if (!info.isFile()) throw new Error(`snapshot entry is not a regular file: ${file.relativePath}`);
-    assertOwner(info.uid, expectedUid, path);
-    assertMode(info.mode, SNAPSHOT_FILE_MODE, path);
-    const bytes = await readFile(path);
-    if (bytes.length !== file.size) throw new Error(`snapshot size mismatch: ${file.relativePath}`);
-    if (sha256(bytes) !== file.sha256) throw new Error(`snapshot hash mismatch: ${file.relativePath}`);
-  }
-  const skillPath = join(snapshotRoot, 'SKILL.md');
-  const schemaPath = join(snapshotRoot, 'output-schema.json');
-  if (resolve(snapshot.skillPath) !== skillPath || resolve(snapshot.schemaPath) !== schemaPath) {
-    throw new Error('snapshot evidence paths are invalid');
-  }
-  if (snapshot.generatedSchemaSha256 !== snapshot.files.find((file) => file.relativePath === 'output-schema.json')?.sha256) {
-    throw new Error('generated schema hash does not match snapshot evidence');
+  const actual = await listFiles(root);
+  const expected = snapshot.files.map((file) => file.path);
+  if (!same(actual, expected)) throw new Error('runtime asset file closure drift');
+  const current = await evidence(root, snapshot.files);
+  if (canonicalJson(current) !== canonicalJson(snapshot.files)) throw new Error('runtime asset evidence drift');
+  if (contentDigest(current) !== snapshot.contentSha256) throw new Error('runtime asset content digest drift');
+  for (const [path, expectedPath] of [
+    [snapshot.operationPath, `operations/${snapshot.operation}/SKILL.md`],
+    [snapshot.schemaPath, snapshot.files.find((file) => resolve(root, ...file.path.split('/')) === resolve(snapshot.schemaPath))?.path],
+    [snapshot.profilePath, snapshot.files.find((file) => resolve(root, ...file.path.split('/')) === resolve(snapshot.profilePath))?.path],
+  ]) {
+    if (typeof path !== 'string' || typeof expectedPath !== 'string'
+      || resolve(path) !== resolve(root, ...expectedPath.split('/'))) throw new Error('runtime asset authority path drift');
   }
 }
 
-interface SourceAssets {
-  packageRoot: string;
-  packageJsonPath: string;
-  packageJsonBytes: Buffer;
-  packageVersion: string;
-  skill: InternalSkillName;
-  skillSourcePath: string;
-  skillBytes: Buffer;
-  schemaBytes: Buffer;
-  supplementalAssets: Array<{ sourcePath: string; relativePath: string; bytes: Buffer }>;
-}
-
-async function resolveSourceAssets(packageRoot: string, skill: InternalSkillName): Promise<SourceAssets> {
-  const packageJsonPath = join(packageRoot, 'package.json');
-  const skillSourcePath = join(packageRoot, 'internal-skills', skill, 'SKILL.md');
-  const supplementalPaths = skill === 'acceptance-proof'
-    ? [
-      { relativePath: 'references/android.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'android.md') },
-      { relativePath: 'references/browser.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'browser.md') },
-      { relativePath: 'references/ios.md', sourcePath: join(packageRoot, 'internal-skills', skill, 'references', 'ios.md') },
-      { relativePath: 'tools/android-lease.mjs', sourcePath: join(packageRoot, 'internal-skills', skill, 'tools', 'android-lease.mjs') },
-      { relativePath: 'tools/ios-lease.mjs', sourcePath: join(packageRoot, 'internal-skills', skill, 'tools', 'ios-lease.mjs') },
-    ]
-    : [];
-  await assertSourcePath(packageRoot, packageJsonPath, true);
-  await assertSourcePath(packageRoot, skillSourcePath, true);
-  await Promise.all(supplementalPaths.map((asset) => assertSourcePath(packageRoot, asset.sourcePath, true)));
-  const [packageJsonBytes, skillBytes, supplementalBytes] = await Promise.all([
-    readFile(packageJsonPath),
-    readFile(skillSourcePath),
-    Promise.all(supplementalPaths.map((asset) => readFile(asset.sourcePath))),
-  ]);
-  const packageJson = JSON.parse(packageJsonBytes.toString('utf8')) as { name?: unknown; version?: unknown };
-  if (packageJson.name !== 'codex-orchestrator' || typeof packageJson.version !== 'string' || packageJson.version.length === 0) {
-    throw new Error('package.json does not identify a versioned codex-orchestrator package');
+async function snapshotFromReady(
+  input: Parameters<typeof publishRuntimeAssetSnapshot>[0],
+  operation: Awaited<ReturnType<typeof resolveWorkflowOperation>>,
+  runtimeRoot: string,
+  ready: ReadyRecord,
+  contentRoot: string,
+  reused: boolean,
+): Promise<RuntimeAssetSnapshot> {
+  if (ready.generationHash !== input.workflowGeneration.generationHash || ready.operation !== input.operation) {
+    throw new Error('runtime asset ready identity mismatch');
   }
-  const schema = skill === 'agent-auto' ? implementationReportOutputSchema() : proofReportOutputSchema();
-  return {
-    packageRoot,
-    packageJsonPath,
-    packageJsonBytes,
-    packageVersion: packageJson.version,
-    skill,
-    skillSourcePath,
-    skillBytes,
-    schemaBytes: Buffer.from(`${canonicalJson(schema)}\n`, 'utf8'),
-    supplementalAssets: supplementalPaths.map((asset, index) => ({ ...asset, bytes: supplementalBytes[index] })),
-  };
-}
-
-async function assertSourceUnchanged(source: SourceAssets): Promise<void> {
-  await assertSourcePath(source.packageRoot, source.packageJsonPath, true);
-  await assertSourcePath(source.packageRoot, source.skillSourcePath, true);
-  await Promise.all(source.supplementalAssets.map((asset) => assertSourcePath(source.packageRoot, asset.sourcePath, true)));
-  const [packageJsonBytes, skillBytes, supplementalBytes] = await Promise.all([
-    readFile(source.packageJsonPath),
-    readFile(source.skillSourcePath),
-    Promise.all(source.supplementalAssets.map((asset) => readFile(asset.sourcePath))),
-  ]);
-  if (!packageJsonBytes.equals(source.packageJsonBytes) || !skillBytes.equals(source.skillBytes)) {
-    throw new Error('package assets changed during resolution');
-  }
-  if (supplementalBytes.some((bytes, index) => !bytes.equals(source.supplementalAssets[index].bytes))) {
-    throw new Error('package assets changed during resolution');
-  }
-}
-
-function expectedSnapshot(input: {
-  source: SourceAssets;
-  runtimeRoot: string;
-  snapshotRoot: string;
-  expectedUid: number;
-  reused: boolean;
-}): RuntimeAssetSnapshot {
-  const files = sourceSnapshotFiles(input.source, input.expectedUid);
-  return {
-    packageVersion: input.source.packageVersion,
-    skill: input.source.skill,
-    runtimeRoot: input.runtimeRoot,
-    snapshotRoot: input.snapshotRoot,
-    skillPath: join(input.snapshotRoot, 'SKILL.md'),
-    schemaPath: join(input.snapshotRoot, 'output-schema.json'),
-    rootMode: SNAPSHOT_ROOT_MODE,
-    ownerUid: input.expectedUid,
+  const snapshotRoot = await realpath(contentRoot);
+  const files = await evidence(snapshotRoot, operation.files);
+  const remap = (path: string) => join(snapshotRoot, ...relative(operation.workflowRoot, path).split(sep));
+  const snapshot: RuntimeAssetSnapshot = {
+    packageVersion: input.workflowGeneration.packageVersion,
+    generationHash: input.workflowGeneration.generationHash,
+    operation: input.operation,
+    runtimeRoot,
+    snapshotRoot,
+    operationPath: remap(operation.entryPath),
+    sourceSkillPath: operation.sourceSkillPath ? remap(operation.sourceSkillPath) : undefined,
+    schemaPath: remap(operation.schemaPath),
+    profilePath: remap(operation.profilePath),
+    policy: structuredClone(operation.policy),
+    ownerUid: runnerUid(),
     files,
-    generatedSchemaSha256: files.find((file) => file.relativePath === 'output-schema.json')!.sha256,
-    reused: input.reused,
+    contentSha256: ready.contentSha256,
+    reused,
   };
+  await verifyRuntimeAssetSnapshot(snapshot);
+  return snapshot;
 }
 
-function sourceSnapshotFiles(source: SourceAssets, ownerUid: number): RuntimeAssetFileEvidence[] {
-  const files: RuntimeAssetFileEvidence[] = [
-    {
-      relativePath: 'SKILL.md',
-      sha256: sha256(source.skillBytes),
-      size: source.skillBytes.length,
-      mode: SNAPSHOT_FILE_MODE,
-      ownerUid,
-    },
-    {
-      relativePath: 'output-schema.json',
-      sha256: sha256(source.schemaBytes),
-      size: source.schemaBytes.length,
-      mode: SNAPSHOT_FILE_MODE,
-      ownerUid,
-    },
-  ];
-  for (const asset of source.supplementalAssets) {
-    files.push({
-      relativePath: asset.relativePath,
-      sha256: sha256(asset.bytes),
-      size: asset.bytes.length,
-      mode: SNAPSHOT_FILE_MODE,
-      ownerUid,
-    });
-  }
-  return files;
-}
-
-function sourceFileBytes(source: SourceAssets, relativePath: string): Buffer {
-  if (relativePath === 'SKILL.md') return source.skillBytes;
-  if (relativePath === 'output-schema.json') return source.schemaBytes;
-  const supplemental = source.supplementalAssets.find((asset) => asset.relativePath === relativePath);
-  if (supplemental) return supplemental.bytes;
-  throw new Error(`unknown runtime asset: ${relativePath}`);
-}
-
-async function snapshotFilePaths(snapshotRoot: string, expectedUid: number): Promise<string[]> {
-  const paths: string[] = [];
-  const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
-      const path = join(directory, entry.name);
-      const info = await lstat(path);
-      if (entry.isSymbolicLink() || info.isSymbolicLink()) throw new Error(`snapshot contains a symbolic link: ${relativePath}`);
-      assertOwner(info.uid, expectedUid, path);
-      if (entry.isDirectory()) {
-        assertMode(info.mode, SNAPSHOT_ROOT_MODE, path);
-        await visit(path, relativePath);
-      } else if (entry.isFile()) {
-        paths.push(relativePath);
-      } else {
-        throw new Error(`snapshot contains a special entry: ${relativePath}`);
-      }
+async function evidence(root: string, records: Array<Pick<WorkflowFileRecord, 'path' | 'sha256' | 'size'>>): Promise<RuntimeAssetFileEvidence[]> {
+  const output: RuntimeAssetFileEvidence[] = [];
+  for (const record of records) {
+    const path = join(root, ...record.path.split('/'));
+    const { bytes, mode, uid } = await readRegularEvidence(path);
+    const sealedMode = sealedWorkflowMode((record as WorkflowFileRecord).mode);
+    if ((mode & 0o777) !== sealedMode || uid !== runnerUid()) {
+      throw new Error(`runtime asset mode or owner drift: ${record.path}`);
     }
-  };
-  await visit(snapshotRoot, '');
-  return paths.sort((left, right) => expectedAssetOrder(left) - expectedAssetOrder(right) || left.localeCompare(right));
-}
-
-function expectedAssetOrder(path: string): number {
-  if (path === 'SKILL.md') return 0;
-  if (path === 'output-schema.json') return 1;
-  return 2;
-}
-
-async function ensureManagedDirectoryPath(runtimeRoot: string, target: string, expectedUid: number): Promise<void> {
-  await ensureManagedRuntimeRoot(runtimeRoot, expectedUid);
-  assertContained(runtimeRoot, target, 'managed directory');
-  const relativeTarget = relative(runtimeRoot, target);
-  let current = runtimeRoot;
-  for (const segment of relativeTarget.split(sep).filter(Boolean)) {
-    current = join(current, segment);
-    try {
-      const info = await lstat(current);
-      if (info.isSymbolicLink()) throw new Error(`managed runtime path contains a symbolic link: ${current}`);
-      assertDirectory(info, current);
-      assertOwner(info.uid, expectedUid, current);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      try {
-        await mkdir(current, { mode: SNAPSHOT_ROOT_MODE });
-      } catch (mkdirError) {
-        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError;
-      }
-      const created = await lstat(current);
-      if (created.isSymbolicLink()) throw new Error(`managed runtime path contains a symbolic link: ${current}`);
-      assertDirectory(created, current);
-      assertOwner(created.uid, expectedUid, current);
-      assertMode(created.mode, SNAPSHOT_ROOT_MODE, current);
-    }
+    if (bytes.length !== record.size || sha(bytes) !== record.sha256) throw new Error(`runtime asset hash drift: ${record.path}`);
+    output.push({ ...record as WorkflowFileRecord, sealedMode, ownerUid: uid });
   }
+  return output;
 }
 
-async function ensureManagedRuntimeRoot(runtimeRoot: string, expectedUid: number): Promise<void> {
-  try {
-    await mkdir(runtimeRoot, { mode: SNAPSHOT_ROOT_MODE });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-  }
-  const info = await lstat(runtimeRoot);
-  if (info.isSymbolicLink()) throw new Error(`managed runtime path contains a symbolic link: ${runtimeRoot}`);
-  assertDirectory(info, runtimeRoot);
-  assertOwner(info.uid, expectedUid, runtimeRoot);
-  assertMode(info.mode, SNAPSHOT_ROOT_MODE, runtimeRoot);
+function contentDigest(files: RuntimeAssetFileEvidence[]): string {
+  return sealedWorkflowContentSha256(files.map(({ path, sealedMode, size, sha256 }) => ({ path, sealedMode, size, sha256 })));
 }
 
-async function assertExistingManagedPath(runtimeRoot: string, target: string, expectedUid: number): Promise<void> {
-  assertContained(runtimeRoot, target, 'managed snapshot');
-  const paths = [runtimeRoot];
-  let current = runtimeRoot;
-  for (const segment of relative(runtimeRoot, target).split(sep).filter(Boolean)) {
-    current = join(current, segment);
-    paths.push(current);
-  }
-  for (const path of paths) {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`managed runtime path contains a symbolic link: ${path}`);
-    if (path !== target) assertDirectory(info, path);
-    assertOwner(info.uid, expectedUid, path);
-  }
+function newOwner(bootId: string, parentToken: string | null, processStartIdentity: string): OwnerRecord {
+  if (!bootId) throw new Error('runtime asset boot identity is invalid');
+  return { version: 1, status: 'building', bootId, pid: process.pid, token: randomUUID(), parentToken, processStartIdentity };
 }
 
-async function assertSourcePath(root: string, target: string, finalMustBeFile: boolean): Promise<void> {
-  assertContained(root, target, 'package asset');
-  const paths = [root];
+function parseOwner(value: unknown): OwnerRecord {
+  exact(value, ['version', 'status', 'bootId', 'pid', 'token', 'parentToken', 'processStartIdentity']);
+  if (value.version !== 1 || value.status !== 'building' || typeof value.bootId !== 'string' || !value.bootId
+    || !Number.isSafeInteger(value.pid) || Number(value.pid) <= 0 || typeof value.token !== 'string' || !UUID.test(value.token)
+    || !(value.parentToken === null || (typeof value.parentToken === 'string' && UUID.test(value.parentToken)))) throw new Error('runtime asset owner is invalid');
+  if (typeof value.processStartIdentity !== 'string' || !value.processStartIdentity) throw new Error('runtime asset owner is invalid');
+  return value as unknown as OwnerRecord;
+}
+
+function parseReady(value: unknown): ReadyRecord {
+  exact(value, ['version', 'status', 'token', 'generationHash', 'operation', 'contentSha256']);
+  if (value.version !== 1 || value.status !== 'ready' || typeof value.token !== 'string' || !UUID.test(value.token)
+    || typeof value.generationHash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.generationHash)
+    || typeof value.operation !== 'string' || !value.operation || typeof value.contentSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(value.contentSha256)) throw new Error('runtime asset ready record is invalid');
+  return value as unknown as ReadyRecord;
+}
+
+async function ensureManagedPath(root: string, target: string): Promise<void> {
+  await createManagedRoot(root);
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || rootInfo.uid !== runnerUid() || (rootInfo.mode & 0o777) !== 0o700) {
+    throw new Error('runtime asset root is unsafe');
+  }
   let current = root;
   for (const segment of relative(root, target).split(sep).filter(Boolean)) {
     current = join(current, segment);
-    paths.push(current);
-  }
-  for (const [index, path] of paths.entries()) {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) throw new Error(`package asset path contains a symbolic link: ${path}`);
-    const isFinal = index === paths.length - 1;
-    if (isFinal && finalMustBeFile) {
-      if (!info.isFile()) throw new Error(`package asset is not a regular file: ${path}`);
-    } else {
-      assertDirectory(info, path);
-    }
+    await mkdir(current, { mode: 0o700 }).catch((error: unknown) => { if (!isCode(error, 'EEXIST')) throw error; });
+    const info = await lstat(current);
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== runnerUid() || (info.mode & 0o777) !== 0o700) throw new Error('runtime asset managed path is unsafe');
   }
 }
 
-async function acquirePublishLock(path: string): Promise<{ token: string }> {
-  const token = randomUUID();
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  while (true) {
+async function createManagedRoot(path: string): Promise<void> {
+  const chain: string[] = [];
+  let current = resolve(path);
+  while (dirname(current) !== current) {
+    chain.push(current);
+    current = dirname(current);
+  }
+  for (const segment of chain.reverse()) {
+    let info;
     try {
-      const handle = await open(path, 'wx', 0o600);
-      try {
-        await handle.writeFile(`${token}\n`);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      return { token };
+      info = await lstat(segment);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (Date.now() >= deadline) throw new Error('timed out waiting for runtime asset snapshot publisher');
-      await new Promise((resolveWait) => setTimeout(resolveWait, LOCK_POLL_MS));
+      if (!isCode(error, 'ENOENT')) throw error;
+      try { await mkdir(segment, { mode: 0o700 }); }
+      catch (mkdirError) { if (!isCode(mkdirError, 'EEXIST')) throw mkdirError; }
+      info = await lstat(segment);
+    }
+    if (info.isSymbolicLink()) {
+      if (info.uid === runnerUid() || !(await stat(segment)).isDirectory()) throw new Error('runtime asset root is unsafe');
+    } else if (!info.isDirectory()) {
+      throw new Error('runtime asset root is unsafe');
     }
   }
 }
 
-async function releasePublishLock(path: string, token: string): Promise<void> {
-  try {
-    const current = await readFile(path, 'utf8');
-    if (current === `${token}\n`) await rm(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
+async function listFiles(root: string): Promise<string[]> {
+  const output: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error('runtime asset symlink rejected');
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) output.push(relative(root, path).split(sep).join('/'));
+      else throw new Error('runtime asset special entry rejected');
+    }
+  };
+  await visit(root);
+  return output.sort(compareUtf8);
+}
+
+async function listDirectories(root: string): Promise<string[]> {
+  const output = [root];
+  for (const entry of await readdir(root, { withFileTypes: true })) if (entry.isDirectory()) output.push(...await listDirectories(join(root, entry.name)));
+  return output;
+}
+
+async function writeSynced(path: string, bytes: Buffer, mode: number): Promise<void> {
+  await writeFile(path, bytes, { mode });
+  await chmod(path, mode);
+  const handle = await open(path, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 async function syncDirectory(path: string): Promise<void> {
   const handle = await open(path, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function readRegular(path: string): Promise<Buffer> {
+  return (await readRegularEvidence(path)).bytes;
+}
+
+async function readRegularEvidence(path: string): Promise<{ bytes: Buffer; mode: number; uid: number }> {
+  let handle;
   try {
-    await handle.sync();
+    handle = await open(path, O_RDONLY | O_NOFOLLOW);
+  } catch (error) {
+    throw new Error('runtime asset control path is invalid', { cause: error });
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new Error('runtime asset control path is invalid');
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (!after.isFile() || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeNs !== after.mtimeNs
+      || BigInt(bytes.length) !== after.size) throw new Error('runtime asset control path changed while reading');
+    return { bytes, mode: Number(after.mode), uid: Number(after.uid) };
   } finally {
     await handle.close();
   }
 }
 
-function validateRelativeSnapshotPath(value: string): string {
-  if (value.length === 0 || isAbsolute(value) || value.includes('\\') || posix.normalize(value) !== value) {
-    throw new Error('snapshotRelativePath must be a normalized relative POSIX path');
+function validateRelativePath(value: string): string {
+  if (!value || isAbsolute(value) || value.includes('\\') || posix.normalize(value) !== value
+    || value.split('/').some((part) => !part || part === '.' || part === '..') || basename(value) !== 'snapshot') {
+    throw new Error('snapshotRelativePath is invalid');
   }
-  const segments = value.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    throw new Error('snapshotRelativePath contains an unsafe segment');
-  }
-  if (segments.at(-1) !== 'snapshot') throw new Error('snapshotRelativePath must end in snapshot');
   return value;
 }
 
-function assertContained(root: string, target: string, field: string): void {
-  const relation = relative(resolve(root), resolve(target));
-  if (relation === '' && resolve(root) === resolve(target)) return;
-  if (relation.startsWith(`..${sep}`) || relation === '..' || isAbsolute(relation)) {
-    throw new Error(`${field} escapes its trusted root`);
-  }
+function assertContained(root: string, target: string): void {
+  const rel = relative(resolve(root), resolve(target));
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('runtime asset path escapes root');
 }
 
-function assertDirectory(info: Awaited<ReturnType<typeof lstat>>, path: string): void {
-  if (info.isSymbolicLink()) throw new Error(`path is a symbolic link: ${path}`);
-  if (!info.isDirectory()) throw new Error(`path is not a directory: ${path}`);
+function exact(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
+  if (!isRecord(value) || !same(Object.keys(value).sort(compareUtf8), [...keys].sort(compareUtf8))) throw new Error('runtime asset record shape is invalid');
 }
 
-function assertOwner(actualUid: number, expectedUid: number, path: string): void {
-  if (actualUid !== expectedUid) throw new Error(`path owner drift: ${path}`);
+function canonicalJson(value: unknown): string {
+  if (value === null || ['boolean', 'string', 'number'].includes(typeof value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (isRecord(value)) return `{${Object.keys(value).sort(compareUtf8).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  throw new Error('runtime asset value is not canonicalizable');
 }
 
-function assertMode(rawMode: number, expectedMode: number, path: string): void {
-  const mode = rawMode & 0o777;
-  if (mode !== expectedMode) throw new Error(`path mode drift at ${path}: expected ${expectedMode.toString(8)}, got ${mode.toString(8)}`);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
-function runnerUid(): number {
-  const uid = process.getuid?.();
-  if (uid === undefined) throw new Error('runtime asset snapshots require POSIX ownership checks');
-  return uid;
-}
+function runnerUid(): number { const uid = process.getuid?.(); if (uid === undefined) throw new Error('POSIX ownership is required'); return uid; }
+function sha(bytes: Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
+function compareUtf8(left: string, right: string): number { return Buffer.compare(Buffer.from(left), Buffer.from(right)); }
+function same(left: string[], right: string[]): boolean { return left.length === right.length && left.every((value, index) => value === right[index]); }
+function isRecord(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+function isCode(error: unknown, code: string): boolean { return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === code; }
+async function exists(path: string): Promise<boolean> { try { await lstat(path); return true; } catch (error) { if (isCode(error, 'ENOENT')) return false; throw error; } }

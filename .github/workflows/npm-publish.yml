@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify packaged workflow closure
+        run: npm run verify:workflow
+
       - name: Test
         run: npm test
 

@@ -6,6 +6,8 @@ The package bin is `dist/src/v2/candidate-cli.js`; `candidate-cli` is only the h
 
 The runtime is split into a policy core under `src/v2/` and a small package-owned adapter closure under `src/v2/adapters/`. No earlier runner implementation is shipped or executed.
 
+`internal-workflow/manifest.json` is the sole workflow inventory. Release-time sync imports an explicit skill/profile/doc closure and assigns each operation one entrypoint, schema, profile, file closure, and authority policy. At runtime the Runner verifies the full package tree, publishes one immutable generation with a no-replace receipt, pins that receipt in the run record, and creates operation-scoped attempt snapshots only from the pin. Package updates and conflicting user skills cannot change an active run.
+
 ## Trust boundary
 
 The Runner is trusted. It owns:
@@ -49,6 +51,8 @@ Implementation findings return to the same worktree for at most five cycles. A m
 Every external or non-idempotent operation uses intent-before-effect and confirmation-after-observation. On restart, the Runner inspects the durable intent and remote/local postcondition before deciding whether to retry. It does not infer failure merely from a lost response.
 
 Atomic files use write, flush, rename, and directory synchronization where supported. Locks and leases carry fencing tokens and process/boot identity. Unknown ownership or inability to prove process-group absence is a safe halt, not permission to continue.
+
+Workflow generation and attempt publication use hard-link claims, recovery chains, sealed file evidence, and ready receipts. Existing content is reused only after full path, mode, owner, size, and hash verification; active pre-generation V1 state fails closed while terminal V1 history remains readable.
 
 ## Checks and publication
 

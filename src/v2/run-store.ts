@@ -1,4 +1,5 @@
 import type { ProofReceipt } from './proof-report.js';
+import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import { posix } from 'node:path';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
 
@@ -66,6 +67,7 @@ export interface RunRecordV1 {
   frozenCriteria: PersistedFrozenCriterionV1[];
   reworkFindings: string[];
   packageVersion: string;
+  workflowGeneration: WorkflowGenerationReceipt;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -102,6 +104,13 @@ export type RunStateBodyV1 = Omit<RunStateFileV1, 'generation'>;
 export interface RunRecordWriter {
   read(): Promise<RunStateFileV1>;
   compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1>;
+}
+
+export class WorkflowGenerationUnrecoverableError extends Error {
+  constructor() {
+    super('workflow-generation-unrecoverable');
+    this.name = 'WorkflowGenerationUnrecoverableError';
+  }
 }
 
 export class FileRunRecordWriter implements RunRecordWriter {
@@ -169,6 +178,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'intent',
     'outcomeEvidenceId',
     'terminalOutcome',
+    'workflowGeneration',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -193,6 +203,13 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
   validateStringList(value.reworkFindings, `${field}.reworkFindings`);
   assertNonEmptyString(value.packageVersion, `${field}.packageVersion`);
+  if (hasOwn(value, 'workflowGeneration')) {
+    const workflowGeneration = value.workflowGeneration;
+    validateWorkflowGeneration(workflowGeneration, `${field}.workflowGeneration`);
+    if (workflowGeneration.packageVersion !== value.packageVersion) {
+      throw new Error(`${field}.workflowGeneration package version mismatch`);
+    }
+  }
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   validateChecks(value.checks, `${field}.checks`);
   if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
@@ -206,6 +223,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
   const terminal = ['review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(value.lifecycle);
+  if (!terminal && !hasOwn(value, 'workflowGeneration')) throw new WorkflowGenerationUnrecoverableError();
   if (terminal !== hasOwn(value, 'terminalOutcome')) throw new Error(`${field} terminal lifecycle requires terminalOutcome`);
   if (terminal && (value.terminalOutcome as RunTerminalOutcome).status !== value.lifecycle) throw new Error(`${field} terminalOutcome does not match lifecycle`);
   if (value.lifecycle === 'proving' && (!hasOwn(value, 'checkedChangeSha256') || !hasOwn(value, 'proofId') || value.checks.some((check) => check.status !== 'passed'))) {
@@ -222,6 +240,19 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain intent`);
   }
+}
+
+function validateWorkflowGeneration(value: unknown, field: string): asserts value is WorkflowGenerationReceipt {
+  assertExactObject(value, [
+    'generationHash', 'manifestSha256', 'packageVersion', 'generationRoot', 'contentSha256',
+  ], field);
+  assertSha256(value.generationHash, `${field}.generationHash`);
+  assertSha256(value.manifestSha256, `${field}.manifestSha256`);
+  assertNonEmptyString(value.packageVersion, `${field}.packageVersion`);
+  if (typeof value.generationRoot !== 'string' || !value.generationRoot.startsWith('/') || posix.normalize(value.generationRoot) !== value.generationRoot) {
+    throw new Error(`${field}.generationRoot is invalid`);
+  }
+  assertSha256(value.contentSha256, `${field}.contentSha256`);
 }
 
 function validateProcess(value: unknown, field: string): void {

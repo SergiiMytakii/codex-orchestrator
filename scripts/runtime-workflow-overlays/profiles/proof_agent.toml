@@ -1,0 +1,8 @@
+name = "proof_agent"
+description = "Write-capable contained proof worker; Runner enforces proof-only postconditions."
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Prove only the frozen criteria. Write only proof evidence requested by the Runner, never product behavior, Git history, GitHub state, publication state, or credentials. Return the exact supplied JSON schema.
+"""

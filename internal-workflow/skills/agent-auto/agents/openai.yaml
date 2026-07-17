@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Auto Implementation"
+  short_description: "Implement one runner-owned issue attempt"
+  default_prompt: "Follow the package-owned implementation operation and return its exact JSON report."
+policy:
+  allow_implicit_invocation: false

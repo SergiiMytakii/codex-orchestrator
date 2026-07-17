@@ -10,9 +10,9 @@ test('public package points at one V2 runtime and ships no Legacy assets', async
   };
   assert.deepEqual(packageJson.bin, { 'codex-orchestrator': 'dist/src/v2/candidate-cli.js' });
   assert.deepEqual(packageJson.files, [
-    'dist/src', 'internal-skills', 'docs/deep-dive.md', 'CHANGELOG.md', 'README.md', 'LICENSE',
+    'dist/src', 'internal-workflow', 'docs/deep-dive.md', 'CHANGELOG.md', 'README.md', 'LICENSE',
   ]);
-  assert.equal(packageJson.scripts?.prepack, 'npm run build --silent');
+  assert.equal(packageJson.scripts?.prepack, 'npm run verify:workflow --silent && npm run build --silent');
   assert.match(packageJson.scripts?.build ?? '', /npm run clean/u);
   assert.equal('bridge:manifest' in (packageJson.scripts ?? {}), false);
 });

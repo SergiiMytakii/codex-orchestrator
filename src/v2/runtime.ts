@@ -29,6 +29,12 @@ import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 }
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import { OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
+import {
+  parseWorkflowExecutionProfile,
+  type WorkflowExecutionProfile,
+  type WorkflowGenerationReceipt,
+  type WorkflowOperationPolicy,
+} from './workflow-assets.js';
 
 export class LocalGitRunIssueAdapter implements RunIssueGit {
   private readonly worktrees: GitWorktreeManager;
@@ -190,11 +196,10 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
 export class ContainedImplementationAgent {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfigV1;
-    packageRoot: string;
     orchestratorHome: string;
     parentCodexHome: string;
     safePath: string;
-    packageVersion: string;
+    bootId: string;
     git: RunIssueGit;
     process?: CodexProcess;
     createAttemptId?: () => string;
@@ -209,19 +214,20 @@ export class ContainedImplementationAgent {
     cycle: number;
     reworkFindings: string[];
     repairOnly: boolean;
+    workflowGeneration: WorkflowGenerationReceipt;
     signal: AbortSignal;
   }): Promise<ImplementationAgentResult> {
     const config = this.dependencies.config();
     const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
     const attemptId = (this.dependencies.createAttemptId ?? randomUUID)();
     const attempt = await prepareContainedAttempt({
-      packageRoot: this.dependencies.packageRoot,
       orchestratorHome: this.dependencies.orchestratorHome,
       canonicalRepository,
       runId: input.runId,
       attemptId,
-      skill: 'agent-auto',
-      expectedPackageVersion: this.dependencies.packageVersion,
+      operationId: 'implementation',
+      workflowGeneration: input.workflowGeneration,
+      bootId: this.dependencies.bootId,
     });
     const baseline = await this.dependencies.git.snapshot(input.worktreePath);
     try {
@@ -236,7 +242,9 @@ export class ContainedImplementationAgent {
         parentCodexHome: this.dependencies.parentCodexHome,
         parentEnv: process.env,
         prompt: [
-          `Follow the exact skill at ${attempt.skillPath}.`,
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Implement issue #${input.issue.number}: ${input.issue.title}`,
           `Implementation cycle: ${input.cycle}.`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
@@ -246,6 +254,8 @@ export class ContainedImplementationAgent {
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
         idleTimeoutMs: config.codex.idleTimeoutMs,
+        operationPolicy: attempt.policy,
+        executionProfile: attempt.profile,
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -275,12 +285,11 @@ export class ContainedImplementationAgent {
 export class ContainedProofAgent implements ProofAgent {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfigV1;
-    packageRoot: string;
     orchestratorHome: string;
     parentCodexHome: string;
     safePath: string;
     targetRoot: string;
-    packageVersion: string;
+    bootId: string;
     androidAdbPath: string;
     iosXcrunPath: string;
     processExecutor: ProcessExecutor;
@@ -289,20 +298,21 @@ export class ContainedProofAgent implements ProofAgent {
   }) {}
 
   async run(input: Parameters<ProofAgent['run']>[0]): ReturnType<ProofAgent['run']> {
+    if (!input.workflowGeneration) throw new Error('proof workflow generation is required');
     const config = this.dependencies.config();
     const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
     const worktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
     const attempt = await prepareContainedAttempt({
-      packageRoot: this.dependencies.packageRoot,
       orchestratorHome: this.dependencies.orchestratorHome,
       canonicalRepository,
       runId: input.runId,
       attemptId: (this.dependencies.createAttemptId ?? randomUUID)(),
-      skill: 'acceptance-proof',
-      expectedPackageVersion: this.dependencies.packageVersion,
+      operationId: 'acceptance-proof',
+      workflowGeneration: input.workflowGeneration,
+      bootId: this.dependencies.bootId,
     });
     const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
-    const snapshotRoot = dirname(attempt.skillPath);
+    const snapshotRoot = dirname(attempt.sourceSkillPath ?? attempt.operationPath);
     const androidLeaseRoot = join(
       resolve(this.dependencies.orchestratorHome),
       'v2',
@@ -331,7 +341,9 @@ export class ContainedProofAgent implements ProofAgent {
         parentCodexHome: this.dependencies.parentCodexHome,
         parentEnv: process.env,
         prompt: [
-          `Follow the exact skill at ${attempt.skillPath}.`,
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Independently prove issue #${input.issue.number}.`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           `Checked change digest: ${input.checkedChangeSha256}.`,
@@ -362,6 +374,8 @@ export class ContainedProofAgent implements ProofAgent {
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
         idleTimeoutMs: config.codex.idleTimeoutMs,
+        operationPolicy: attempt.policy,
+        executionProfile: attempt.profile,
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -394,14 +408,13 @@ export function createV2Runtime(input: {
   orchestratorHome: string;
   bootId: string;
   packageVersion: string;
-  skillHashes: Record<string, string>;
+  createWorkflowGeneration: () => Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
   issues: GitHubIssueAdapter;
   pullRequests: GitHubPullRequestAdapter;
   implementationAgent?: {
     run(input: Parameters<NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent']['run']>[0]): Promise<ImplementationAgentResult>;
   };
   proofAgent?: ProofAgent;
-  packageRoot?: string;
   parentCodexHome?: string;
   safePath?: string;
   codexProcess?: CodexProcess;
@@ -439,11 +452,10 @@ export function createV2Runtime(input: {
   const iosXcrunPath = resolve(input.iosXcrunPath ?? '/usr/bin/xcrun');
   const containedDependencies = () => ({
     config: () => requireConfig(currentConfig),
-    packageRoot: requireRuntimeString(input.packageRoot, 'packageRoot'),
     orchestratorHome,
     parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
     safePath: requireRuntimeString(input.safePath, 'safePath'),
-    packageVersion: input.packageVersion,
+    bootId: input.bootId,
     process: containedProcess,
     createAttemptId: input.createAttemptId,
   });
@@ -596,7 +608,7 @@ export function createV2Runtime(input: {
       return { id: `evidence:${runId}:${code}`, path: relativePath };
     },
     packageVersion: input.packageVersion,
-    skillHashes: structuredClone(input.skillHashes),
+    createWorkflowGeneration: input.createWorkflowGeneration,
     createRunId: input.createRunId ?? randomUUID,
     createProofId: input.createProofId ?? randomUUID,
     now,
@@ -818,23 +830,40 @@ export async function releaseIosSimulator(
 }
 
 async function prepareContainedAttempt(input: {
-  packageRoot: string;
   orchestratorHome: string;
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  skill: 'agent-auto' | 'acceptance-proof';
-  expectedPackageVersion: string;
-}): Promise<{ skillPath: string; schemaPath: string; reportPath: string; toolHome: string; tmpDir: string }> {
+  operationId: 'implementation' | 'acceptance-proof';
+  workflowGeneration: WorkflowGenerationReceipt;
+  bootId: string;
+}): Promise<{
+  workflowRoot: string;
+  operationPath: string;
+  sourceSkillPath?: string;
+  schemaPath: string;
+  reportPath: string;
+  toolHome: string;
+  tmpDir: string;
+  policy: WorkflowOperationPolicy;
+  profile: WorkflowExecutionProfile;
+}> {
   const runtimeRoot = join(resolve(input.orchestratorHome), 'v2', sha256(input.canonicalRepository));
   const attemptRelativePath = `runs/${input.runId}/attempts/${input.attemptId}`;
   const snapshot = await publishRuntimeAssetSnapshot({
-    packageRoot: resolve(input.packageRoot),
+    workflowGeneration: input.workflowGeneration,
     runtimeRoot,
     snapshotRelativePath: `${attemptRelativePath}/snapshot`,
-    skill: input.skill,
+    operation: input.operationId,
+    bootId: input.bootId,
   });
-  if (snapshot.packageVersion !== input.expectedPackageVersion) throw new Error('runtime asset package version mismatch');
+  if (snapshot.policy.sandboxMode !== 'workspace-write'
+    || snapshot.policy.approvalCeiling !== 'never'
+    || snapshot.policy.network !== 'deny'
+    || snapshot.policy.externalWrite !== false) {
+    throw new Error(`workflow operation policy exceeds containment: ${input.operationId}`);
+  }
+  const profile = parseWorkflowExecutionProfile(await readFile(snapshot.profilePath, 'utf8'), snapshot.policy);
   const attemptRoot = join(runtimeRoot, attemptRelativePath);
   const toolHome = join(attemptRoot, 'tool-home');
   const tmpDir = join(attemptRoot, 'tmp');
@@ -845,11 +874,15 @@ async function prepareContainedAttempt(input: {
     if (!isErrorCode(error, 'EEXIST')) throw error;
   });
   return {
-    skillPath: snapshot.skillPath,
+    workflowRoot: snapshot.snapshotRoot,
+    operationPath: snapshot.operationPath,
+    sourceSkillPath: snapshot.sourceSkillPath,
     schemaPath: snapshot.schemaPath,
     reportPath: join(attemptRoot, 'report.json'),
     toolHome,
     tmpDir,
+    policy: structuredClone(snapshot.policy),
+    profile,
   };
 }
 

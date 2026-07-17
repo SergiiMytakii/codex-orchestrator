@@ -18,7 +18,11 @@ import {
   type RunIssueGit,
   type RunIssueResult,
 } from '../src/v2/run-issue.js';
-import { InMemoryRunRecordWriter, type RunRecordWriter } from '../src/v2/run-store.js';
+import {
+  InMemoryRunRecordWriter,
+  WorkflowGenerationUnrecoverableError,
+  type RunRecordWriter,
+} from '../src/v2/run-store.js';
 import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { mkdtemp } from './mission-test-temp.js';
 
@@ -168,6 +172,19 @@ test('malformed config and run state return typed internal error before claim ef
   const invalidState = await runFixture({ storeReadReject: true });
   assert.equal((await invalidState.runner.runIssue({ targetRoot: invalidState.targetRoot, issueNumber: 42 })).status, 'internal-error');
   assert.equal(invalidState.events.includes('effect:claim-labels'), false);
+});
+
+test('baseline active V1 migration returns dedicated workflow generation evidence', async () => {
+  const fixture = await runFixture({ storeReadError: new WorkflowGenerationUnrecoverableError() });
+  let evidenceCode = '';
+  const write = fixture.dependencies.writeEvidence;
+  fixture.dependencies.writeEvidence = async (input) => {
+    evidenceCode = input.code;
+    return write(input);
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  assert.equal(evidenceCode, 'workflow-generation-unrecoverable');
+  assert.equal(fixture.events.includes('implementation'), false);
 });
 
 test('agent-authored commit and proof external block map without publication', async () => {
@@ -372,15 +389,16 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   });
   options.implementationResult = undefined;
   fixture.dependencies.packageVersion = '0.1.52';
-  fixture.dependencies.skillHashes = { 'agent-auto': 'c'.repeat(64), 'acceptance-proof': 'd'.repeat(64) };
+  fixture.dependencies.createWorkflowGeneration = async () => { throw new Error('replacement package workflow is corrupt'); };
 
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready');
   const state = await fixture.store.read();
   assert.equal(state.runs.length, 1);
   assert.equal(state.runs[0]?.cycle, 2);
-  assert.equal(state.runs[0]?.packageVersion, '0.1.52');
-  assert.equal(state.runs[0]?.skillHashes['agent-auto'], 'c'.repeat(64));
+  assert.equal(state.runs[0]?.packageVersion, '0.1.51');
+  assert.equal(state.runs[0]?.workflowGeneration.generationHash, '1'.repeat(64));
+  assert.equal(state.runs[0]?.skillHashes['agent-auto'], 'a'.repeat(64));
   assert.equal(state.runs[0]?.worktreePath, fixture.worktreePath);
 });
 
@@ -496,6 +514,7 @@ interface FixtureOptions {
   pushGate?: Promise<void>;
   invalidConfig?: boolean;
   storeReadReject?: boolean;
+  storeReadError?: Error;
   rejectEffect?: 'claim-labels' | 'claim-comment' | 'commit' | 'push' | 'pr' | 'comment' | 'labels';
 }
 
@@ -519,8 +538,8 @@ async function runFixture(options: FixtureOptions = {}) {
   const capabilities = createCheckedChangeCapabilities();
   const rawStore = new InMemoryRunRecordWriter();
   const tracedStore = traceStore(rawStore, events, options.rejectStoreEvent, options.rejectStoreOccurrence, options.storeGate);
-  const store: RunRecordWriter = options.storeReadReject
-    ? { read: async () => { throw new Error('malformed state'); }, compareAndSwap: tracedStore.compareAndSwap }
+  const store: RunRecordWriter = options.storeReadReject || options.storeReadError
+    ? { read: async () => { throw options.storeReadError ?? new Error('malformed state'); }, compareAndSwap: tracedStore.compareAndSwap }
     : tracedStore;
   const localGit = new LocalGitRunIssueAdapter();
   const git = traceGit(localGit, events, options);
@@ -623,13 +642,26 @@ async function runFixture(options: FixtureOptions = {}) {
     runRecords: store,
     writeEvidence: async ({ runId, code }) => ({ id: `evidence:${runId}:${code}`, path: `.codex-orchestrator/evidence/${runId}.json` }),
     packageVersion: '0.1.51',
-    skillHashes: { 'agent-auto': 'a'.repeat(64), 'acceptance-proof': 'b'.repeat(64) },
+    createWorkflowGeneration: async () => ({
+      receipt: workflowGeneration('0.1.51', '1'),
+      skillHashes: { 'agent-auto': 'a'.repeat(64), 'acceptance-proof': 'b'.repeat(64) },
+    }),
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
   return { runner: new RunIssue(dependencies), dependencies, targetRoot, remoteRoot, worktreePath, baseSha, events, store: rawStore };
+}
+
+function workflowGeneration(packageVersion: string, seed: string) {
+  return {
+    generationHash: seed.repeat(64),
+    manifestSha256: 'e'.repeat(64),
+    packageVersion,
+    generationRoot: `/tmp/workflow-generations/${seed}.content.token`,
+    contentSha256: 'f'.repeat(64),
+  };
 }
 
 function traceStore(

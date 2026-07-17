@@ -12,7 +12,11 @@ import {
   type SpawnSupervisedProcess,
   type SupervisedChild,
 } from '../src/v2/codex-process.js';
-import { buildContainmentCodexArgs, buildContainmentCodexEnvironment } from '../src/v2/containment.js';
+import {
+  buildContainmentCodexArgs,
+  buildContainmentCodexEnvironment,
+  defaultContainmentOperationPolicy,
+} from '../src/v2/containment.js';
 
 test('builds the exact contained argv and allowlisted process environment without suppressing native subagents', async () => {
   await withRunFixture(async (fixture) => {
@@ -31,6 +35,8 @@ test('builds the exact contained argv and allowlisted process environment withou
       toolHome: fixture.toolHome,
       tmpDir: fixture.attemptTmp,
       safePath: fixture.safePath,
+      operationPolicy: defaultContainmentOperationPolicy(),
+      executionProfile: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
     }));
     assert.deepEqual(captured?.env, buildContainmentCodexEnvironment({
       parentEnv: fixture.parentEnv,
@@ -46,6 +52,33 @@ test('builds the exact contained argv and allowlisted process environment withou
     assert.deepEqual(Object.keys(captured?.env ?? {}).sort(), ['CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']);
     assert.equal(Object.values(captured?.env ?? {}).includes('ambient-secret'), false);
   });
+});
+
+test('contained argv rejects operation policy widening and honors a declared read-only sandbox', () => {
+  const base = {
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+  };
+  const readOnly = {
+    ...defaultContainmentOperationPolicy(),
+    sandboxMode: 'read-only' as const,
+    worktreeAccess: 'read-only' as const,
+    writableRootClasses: [],
+    runnerPostcondition: 'report-only' as const,
+  };
+  const args = buildContainmentCodexArgs({ ...base, operationPolicy: readOnly });
+  assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only');
+  assert.throws(() => buildContainmentCodexArgs({
+    ...base,
+    operationPolicy: { ...readOnly, networkHosts: ['example.com'] },
+  }), /authority/iu);
+  assert.throws(() => buildContainmentCodexArgs({
+    ...base,
+    operationPolicy: { ...readOnly, mcpTools: ['github'] },
+  }), /authority/iu);
+  assert.throws(() => buildContainmentCodexArgs({
+    ...base,
+    operationPolicy: { ...readOnly, externalWrite: true as false },
+  }), /authority/iu);
 });
 
 test('awaits stdin, exit, process-group absence, streams, and only then reads the report', async () => {
@@ -326,6 +359,8 @@ async function withRunFixture(
         prompt: 'Run the exact package skill.',
         timeoutMs: overrides.timeoutMs ?? 5_000,
         idleTimeoutMs: overrides.idleTimeoutMs ?? 5_000,
+        operationPolicy: defaultContainmentOperationPolicy(),
+        executionProfile: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
       }),
     });
   } finally {

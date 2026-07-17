@@ -17,6 +17,7 @@ import {
 } from './proof-report.js';
 import type { ProofRecordWriter, ProofStateBodyV1, ProofStateV1, ProofStatus } from './proof-store.js';
 import type { AndroidLeaseVerifier, IosLeaseVerifier } from './mobile-lease.js';
+import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 export interface IssueSnapshot {
   number: number;
@@ -57,6 +58,7 @@ export interface ProofAgent {
     checks: CheckedChangePayloadV1['checks'];
     repairOnly: boolean;
     repairFindings: string[];
+    workflowGeneration?: WorkflowGenerationReceipt;
     signal: AbortSignal;
   }): Promise<ProofAgentResult>;
 }
@@ -102,6 +104,7 @@ export class AcceptanceProof {
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     checkedChange: CheckedChange;
+    workflowGeneration?: WorkflowGenerationReceipt;
   }): Promise<ProveChangeResult> {
     let bindingSha256 = sha256(canonicalJson({ proofId: input.proofId, invalid: true }));
     try {
@@ -134,6 +137,7 @@ export class AcceptanceProof {
     payload: CheckedChangePayloadV1;
     checkedChangeSha256: string;
     bindingSha256: string;
+    workflowGeneration?: WorkflowGenerationReceipt;
   }): Promise<ProveChangeResult> {
     let state = await this.dependencies.proofRecords.read(input.proofId);
     if (state && state.bindingSha256 !== input.bindingSha256) {
@@ -204,6 +208,7 @@ export class AcceptanceProof {
           checks: structuredClone(input.payload.checks),
           repairOnly: purpose === 'report-repair',
           repairFindings: purpose === 'report-repair' ? [...reportRepairFindings] : [],
+          workflowGeneration: input.workflowGeneration ? structuredClone(input.workflowGeneration) : undefined,
           signal: this.dependencies.signal ?? new AbortController().signal,
         });
       } catch (error) {

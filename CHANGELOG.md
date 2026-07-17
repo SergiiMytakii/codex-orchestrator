@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Replaced the two-file runtime skill lookup with one generated, manifest-bound
+  package workflow containing the declared skills, profiles, operation wrappers,
+  schemas, and shared review contracts.
+- New runs pin an immutable workflow generation across implementation retries,
+  restart, and Acceptance Proof; contained attempts enforce the operation's
+  package-declared sandbox and no-external-authority policy.
+
+### Security
+- Workflow generation and attempt snapshots now fail closed on inventory,
+  path, mode, owner, hash, policy, concurrent-publication, and tamper drift.
+
 ## [2.0.1] - 2026-07-17
 
 ### Fixed

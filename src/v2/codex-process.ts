@@ -3,6 +3,7 @@ import { lstat, readFile, rm } from 'node:fs/promises';
 import { finished } from 'node:stream/promises';
 
 import { buildContainmentCodexArgs, buildContainmentCodexEnvironment } from './containment.js';
+import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
 const MAX_STREAM_BYTES = 1024 * 1024;
 const MAX_REPORT_BYTES = 1024 * 1024;
@@ -44,6 +45,8 @@ export interface CodexProcessInput {
   prompt: string;
   timeoutMs: number;
   idleTimeoutMs: number;
+  operationPolicy: WorkflowOperationPolicy;
+  executionProfile: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
 }
 
 export type CodexReportRead =
@@ -98,6 +101,8 @@ export class CodexProcess {
         toolHome: input.toolHome,
         tmpDir: input.tmpDir,
         safePath: input.safePath,
+        operationPolicy: input.operationPolicy,
+        executionProfile: input.executionProfile,
       }),
       cwd: input.cwd,
       env: buildContainmentCodexEnvironment({

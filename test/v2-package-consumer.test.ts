@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,7 +9,7 @@ import { test } from 'node:test';
 
 const execFileAsync = promisify(execFile);
 
-test('packed install and update keep V2 skills/schema package-owned without mutating consumer policy', { timeout: 120_000 }, async () => {
+test('packed install uses one package-owned workflow with empty or conflicting consumer skill state', { timeout: 120_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-consumer-'));
   try {
     const packDir = join(root, 'pack');
@@ -56,14 +56,16 @@ test('packed install and update keep V2 skills/schema package-owned without muta
 
     const packed = await packProject(packDir);
     const packedPaths = packed.files.map((file) => file.path).sort();
-    assert.equal(packedPaths.includes('internal-skills/agent-auto/SKILL.md'), true);
-    assert.equal(packedPaths.includes('internal-skills/acceptance-proof/SKILL.md'), true);
+    assert.equal(packedPaths.includes('internal-workflow/manifest.json'), true);
+    assert.equal(packedPaths.includes('internal-workflow/skills/agent-auto/SKILL.md'), true);
+    assert.equal(packedPaths.includes('internal-workflow/skills/acceptance-proof/SKILL.md'), true);
+    assert.equal(packedPaths.some((path) => path.startsWith('internal-skills/')), false);
     assert.equal(packedPaths.includes('dist/src/v2/implementation-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
       'acceptance-proof', 'atomic-store', 'candidate-cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
       'implementation-report', 'legacy-cutover', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
-      'setup', 'setup-cli', 'setup-runtime', 'setup-store',
+      'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'workflow-assets',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
     }
@@ -74,35 +76,44 @@ test('packed install and update keep V2 skills/schema package-owned without muta
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
 
-    const runtimeRoot = join(root, 'runtime');
-    await mkdir(runtimeRoot, { mode: 0o700 });
-    const versionASnapshot = await publishSnapshot(installed, runtimeRoot, 'runs/run-a/attempts/attempt-a/snapshot');
-    const versionABytes = await snapshotFiles([versionASnapshot.skillPath, versionASnapshot.schemaPath]);
-
-    const updateDir = join(root, 'update-source');
-    const updatePackDir = join(root, 'update-pack');
-    await mkdir(updateDir, { recursive: true });
-    await mkdir(updatePackDir, { recursive: true });
-    await execFileAsync('tar', ['-xzf', join(packDir, packed.filename), '--strip-components=1', '-C', updateDir]);
-    const updatePackage = JSON.parse(await readFile(join(updateDir, 'package.json'), 'utf8')) as Record<string, unknown>;
-    updatePackage.version = '0.1.52-fixture.0';
-    await writeFile(join(updateDir, 'package.json'), `${JSON.stringify(updatePackage, null, 2)}\n`);
-    await writeFile(join(updateDir, 'internal-skills', 'agent-auto', 'SKILL.md'), '# Agent Auto\n\nUPDATED PACKAGE SKILL\n');
-    const updatePacked = await packProject(updatePackDir, updateDir);
-    await installTarball(consumer, join(updatePackDir, updatePacked.filename));
-
-    assert.match(await readFile(join(installed, 'internal-skills', 'agent-auto', 'SKILL.md'), 'utf8'), /UPDATED PACKAGE SKILL/u);
+    const workflowAssets = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'workflow-assets.js')).href) as {
+      materializeWorkflowGeneration(input: {
+        packageRoot: string; runtimeRoot: string; packageVersion: string; bootId: string;
+      }): Promise<{ generationHash: string; generationRoot: string }>;
+      resolveWorkflowOperation(receipt: object, operationId: string): Promise<{ entryPath: string; schemaPath: string; workflowRoot: string }>;
+    };
+    const receipt = await workflowAssets.materializeWorkflowGeneration({
+      packageRoot: installed,
+      runtimeRoot: join(root, 'runtime'),
+      packageVersion: '2.0.1',
+      bootId: 'packed-consumer',
+    });
+    const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
+    assert.equal(implementation.workflowRoot, receipt.generationRoot);
+    assert.match(await readFile(implementation.entryPath, 'utf8'), /Implementation Operation/u);
+    assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
-    assert.deepEqual(await snapshotFiles([...versionABytes.keys()]), versionABytes);
-    const versionBSnapshot = await publishSnapshot(installed, runtimeRoot, 'runs/run-b/attempts/attempt-b/snapshot', 'b');
-    assert.equal(versionBSnapshot.packageVersion, '0.1.52-fixture.0');
-    assert.notEqual(versionBSnapshot.files[0]?.sha256, versionASnapshot.files[0]?.sha256);
-    assert.match(await readFile(versionBSnapshot.skillPath, 'utf8'), /UPDATED PACKAGE SKILL/u);
   } finally {
+    await makeTreeRemovable(root);
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function makeTreeRemovable(root: string): Promise<void> {
+  const visit = async (directory: string): Promise<void> => {
+    await chmod(directory, 0o700).catch(() => undefined);
+    for (const name of await readdir(directory).catch(() => [])) {
+      const path = join(directory, name);
+      const info = await lstat(path).catch(() => undefined);
+      if (!info) continue;
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) await visit(path);
+      else await chmod(path, 0o600).catch(() => undefined);
+    }
+  };
+  await visit(root);
+}
 
 async function assertInstalledContract(installed: string, agentText: string): Promise<void> {
   const installedPackage = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8')) as {
@@ -111,9 +122,9 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
   };
   assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/v2/candidate-cli.js' });
   assert.equal(installedPackage.scripts?.postinstall, undefined);
-  assert.match(await readFile(join(installed, 'internal-skills', 'agent-auto', 'SKILL.md'), 'utf8'), new RegExp(agentText, 'u'));
-  assert.match(await readFile(join(installed, 'internal-skills', 'acceptance-proof', 'SKILL.md'), 'utf8'), /Independently prove/u);
-  assert.doesNotMatch(await readFile(join(installed, 'internal-skills', 'agent-auto', 'SKILL.md'), 'utf8'), /CONFLICTING LOCAL/u);
+  assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), new RegExp(agentText, 'u'));
+  assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'acceptance-proof', 'SKILL.md'), 'utf8'), /Independently prove/u);
+  assert.doesNotMatch(await readFile(join(installed, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), /CONFLICTING LOCAL/u);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {
     implementationReportOutputSchema: () => Record<string, unknown>;
@@ -137,28 +148,6 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
     createProductionSetup: (input: { orchestratorHome: string; bootId: string }) => unknown;
   };
   assert.equal(typeof setupRuntime.createProductionSetup, 'function');
-}
-
-async function publishSnapshot(installed: string, runtimeRoot: string, snapshotRelativePath: string, cacheKey = 'a') {
-  const runtimeAssets = await import(`${pathToFileURL(join(installed, 'dist', 'src', 'v2', 'runtime-assets.js')).href}?fixture=${cacheKey}`) as {
-    publishRuntimeAssetSnapshot(input: {
-      packageRoot: string;
-      runtimeRoot: string;
-      snapshotRelativePath: string;
-      skill: 'agent-auto';
-    }): Promise<{
-      packageVersion: string;
-      skillPath: string;
-      schemaPath: string;
-      files: Array<{ sha256: string }>;
-    }>;
-  };
-  return runtimeAssets.publishRuntimeAssetSnapshot({
-    packageRoot: installed,
-    runtimeRoot,
-    snapshotRelativePath,
-    skill: 'agent-auto',
-  });
 }
 
 async function packProject(destination: string, cwd = process.cwd()): Promise<{ filename: string; files: Array<{ path: string }> }> {

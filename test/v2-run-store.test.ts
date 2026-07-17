@@ -77,6 +77,20 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
   }
 });
 
+test('active baseline V1 history without a generation fails closed while terminal history stays readable', async () => {
+  const active = structuredClone(record()) as unknown as Record<string, unknown>;
+  delete active.workflowGeneration;
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  await assert.rejects(writer.compareAndSwap(0, body([active as unknown as RunRecordV1])), /workflow-generation-unrecoverable/u);
+
+  const terminal = structuredClone(record()) as Record<string, any>;
+  terminal.lifecycle = 'blocked';
+  terminal.terminalOutcome = { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'legacy-evidence.json' };
+  delete terminal.workflowGeneration;
+  const saved = await writer.compareAndSwap(0, body([terminal as RunRecordV1]));
+  assert.equal(Object.hasOwn(saved.runs[0]!, 'workflowGeneration'), false);
+});
+
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
   for (const point of ['before-file-fsync', 'before-rename'] as const) {
     const root = await temporaryRoot();
@@ -209,6 +223,13 @@ function record(): RunRecordV1 {
     frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
     reworkFindings: [],
     packageVersion: '0.1.51',
+    workflowGeneration: {
+      generationHash: 'd'.repeat(64),
+      manifestSha256: 'e'.repeat(64),
+      packageVersion: '0.1.51',
+      generationRoot: '/tmp/workflow-generations/d.content.token',
+      contentSha256: 'f'.repeat(64),
+    },
     skillHashes: { 'agent-auto': 'b'.repeat(64), 'acceptance-proof': 'c'.repeat(64) },
     checks: [],
     createdAt: timestamp(),

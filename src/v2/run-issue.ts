@@ -12,6 +12,8 @@ import { canonicalJson, sha256 } from './containment.js';
 import { validateImplementationReport } from './implementation-report.js';
 import { ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
 import type { ProofReceipt } from './proof-report.js';
+import type { WorkflowGenerationReceipt } from './workflow-assets.js';
+import { WorkflowGenerationUnrecoverableError } from './run-store.js';
 import type {
   PublicationIntent,
   RunRecordV1,
@@ -86,6 +88,7 @@ export interface RunIssueDependencies {
       cycle: number;
       reworkFindings: string[];
       repairOnly: boolean;
+      workflowGeneration: WorkflowGenerationReceipt;
       signal: AbortSignal;
     }): Promise<ImplementationAgentResult>;
   };
@@ -98,13 +101,14 @@ export interface RunIssueDependencies {
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange;
+      workflowGeneration: WorkflowGenerationReceipt;
     }): Promise<ProveChangeResult>;
   };
   checkedChangeMint: CheckedChangeMintCapability;
   runRecords: RunRecordWriter;
   writeEvidence(input: { runId: string; code: string; summary: string }): Promise<{ id: string; path: string }>;
   packageVersion: string;
-  skillHashes: Record<string, string>;
+  createWorkflowGeneration(): Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
   createRunId(): string;
   createProofId(): string;
   now(): string;
@@ -474,6 +478,7 @@ export class RunIssue {
         cycle: active.record.cycle,
         reworkFindings: active.record.reworkFindings,
         repairOnly: false,
+        workflowGeneration: active.record.workflowGeneration,
       });
       if (implementation.kind === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
@@ -519,6 +524,7 @@ export class RunIssue {
           cycle: active.record.cycle,
           reworkFindings: ['The previous implementation report did not match the generated schema.'],
           repairOnly: true,
+          workflowGeneration: active.record.workflowGeneration,
         });
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
@@ -593,7 +599,7 @@ export class RunIssue {
         changedFiles: proofChangedFiles,
         checks: active.record.checks.map((check) => ({ ...check, status: 'passed' as const })),
         checkPolicySha256: sha256(canonicalJson(config.checks)),
-        packageVersion: this.dependencies.packageVersion,
+        packageVersion: active.record.packageVersion,
         proofSchemaVersion: 1,
       };
       const checkedChange = this.dependencies.checkedChangeMint.mint(payload);
@@ -604,7 +610,13 @@ export class RunIssue {
 
       let proof: ProveChangeResult;
       try {
-        proof = await this.dependencies.proof.proveChange({ proofId, issue: issueSnapshot, frozenCriteria, checkedChange });
+        proof = await this.dependencies.proof.proveChange({
+          proofId,
+          issue: issueSnapshot,
+          frozenCriteria,
+          checkedChange,
+          workflowGeneration: structuredClone(active.record.workflowGeneration),
+        });
       } catch (error) {
         if (error instanceof ProofQuiescenceError) {
           active = await this.persist(active, {
@@ -651,6 +663,9 @@ export class RunIssue {
     } catch (error) {
       if (!active && error instanceof TransportReadError) {
         return await this.preClaimTransport(input.issueNumber);
+      }
+      if (!active && error instanceof WorkflowGenerationUnrecoverableError) {
+        return await this.preClaimInternal('workflow-generation-unrecoverable', input.issueNumber);
       }
       if (active && error instanceof PostEffectStateError) {
         return await this.invokedFailure(error.active, 'post-effect-state-write-failed');
@@ -718,12 +733,14 @@ export class RunIssue {
   }): Promise<ActiveRun> {
     const state = await this.dependencies.runRecords.read();
     const now = this.timestamp();
+    const workflow = await this.dependencies.createWorkflowGeneration();
     const record: RunRecordV1 = {
       ...input,
       lifecycle: 'claimed', cycle: 1, reportRepairs: 0, transportRetries: 0,
       reworkFindings: [],
-      packageVersion: this.dependencies.packageVersion,
-      skillHashes: structuredClone(this.dependencies.skillHashes),
+      packageVersion: workflow.receipt.packageVersion,
+      workflowGeneration: structuredClone(workflow.receipt),
+      skillHashes: structuredClone(workflow.skillHashes),
       checks: [], createdAt: now, updatedAt: now,
     };
     const saved = await this.dependencies.runRecords.compareAndSwap(state.generation, {
@@ -788,9 +805,14 @@ export class RunIssue {
     cycle: number;
     reworkFindings: string[];
     repairOnly: boolean;
+    workflowGeneration: WorkflowGenerationReceipt;
   }): Promise<ImplementationAgentResult> {
     try {
-      return await this.dependencies.implementationAgent.run({ ...input, signal: this.signal });
+      return await this.dependencies.implementationAgent.run({
+        ...input,
+        workflowGeneration: structuredClone(input.workflowGeneration),
+        signal: this.signal,
+      });
     } catch {
       return { kind: 'internal-error' };
     }
@@ -801,8 +823,6 @@ export class RunIssue {
     return this.persist(active, {
       lifecycle: 'implementing',
       cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
-      packageVersion: this.dependencies.packageVersion,
-      skillHashes: structuredClone(this.dependencies.skillHashes),
       checks: [],
       checkedChangeSha256: undefined,
       proofId: undefined,
