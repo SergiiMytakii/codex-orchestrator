@@ -24,6 +24,54 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('proof freshness snapshot excludes only the configured untracked artifact root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-v2-proof-freshness-'));
+  await execFileAsync('git', ['init', '-b', 'main', root]);
+  await writeFile(join(root, 'README.md'), 'base\n');
+  await execFileAsync('git', ['-C', root, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+  await writeFile(join(root, 'feature.txt'), 'product change\n');
+
+  const git = new LocalGitRunIssueAdapter();
+  const beforeProof = await git.snapshot(root);
+  await mkdir(join(root, '.codex-orchestrator', 'proofs', 'proof-1'), { recursive: true });
+  await writeFile(join(root, '.codex-orchestrator', 'proofs', 'proof-1', 'evidence.txt'), 'evidence\n');
+
+  assert.notDeepEqual(await git.snapshot(root), beforeProof);
+  assert.deepEqual(
+    await git.snapshotIgnoringUntrackedRoot(root, '.codex-orchestrator/proofs'),
+    beforeProof,
+  );
+
+  await writeFile(join(root, '.codex-orchestrator', 'outside.txt'), 'not proof-owned\n');
+  assert.notDeepEqual(
+    await git.snapshotIgnoringUntrackedRoot(root, '.codex-orchestrator/proofs'),
+    beforeProof,
+  );
+});
+
+test('runner commit preserves the checked pre-proof index and leaves proof artifacts untracked', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-v2-proof-commit-'));
+  await execFileAsync('git', ['init', '-b', 'main', root]);
+  await writeFile(join(root, 'README.md'), 'base\n');
+  await execFileAsync('git', ['-C', root, 'add', 'README.md']);
+  await execFileAsync('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+  await writeFile(join(root, 'feature.txt'), 'product change\n');
+
+  const git = new LocalGitRunIssueAdapter();
+  await git.stageAll(root);
+  const checkedTree = await git.getTreeSha(root);
+  await mkdir(join(root, '.codex-orchestrator', 'proofs', 'proof-1'), { recursive: true });
+  await writeFile(join(root, '.codex-orchestrator', 'proofs', 'proof-1', 'evidence.txt'), 'evidence\n');
+
+  await git.commit({ worktreePath: root, message: 'feat: checked product only' });
+  const observed = await git.inspectHead(root);
+  assert.equal(observed.treeSha, checkedTree);
+  const committed = (await execFileAsync('git', ['-C', root, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])).stdout.trim();
+  assert.equal(committed, 'feature.txt');
+  assert.deepEqual(await git.listChangedFiles(root), ['.codex-orchestrator/proofs/proof-1/evidence.txt']);
+});
+
 test('public runIssue reaches review-ready only after ordered durable checks, proof, and publication', async () => {
   const fixture = await runFixture();
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -141,6 +189,16 @@ test('agent-authored commit and proof external block map without publication', a
     assert.deepEqual(pick(result, Object.keys(entry.expected)), entry.expected, entry.name);
     assert.equal(fixture.events.includes('git:push'), false, entry.name);
   }
+});
+
+test('ignored repository-relative denied path mutation blocks publication', async () => {
+  const fixture = await runFixture({ agentWritesDeniedIgnoredPath: true });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'safety', resumable: true,
+  });
+  assert.equal(fixture.events.includes('git:commit'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
 });
 
 test('failed checks and proof findings rework the same worktree until review-ready', async () => {
@@ -426,6 +484,7 @@ interface FixtureOptions {
   implementationResult?: ImplementationAgentResult;
   implementationResults?: ImplementationAgentResult[];
   agentWrites?: boolean;
+  agentWritesDeniedIgnoredPath?: boolean;
   checkReject?: boolean;
   proofReject?: boolean;
   proofError?: Error;
@@ -448,12 +507,14 @@ async function runFixture(options: FixtureOptions = {}) {
   await execFileAsync('git', ['init', '--bare', remoteRoot]);
   await execFileAsync('git', ['init', '-b', 'main', targetRoot]);
   await writeFile(join(targetRoot, 'README.md'), 'base\n');
-  await execFileAsync('git', ['-C', targetRoot, 'add', 'README.md']);
+  if (options.agentWritesDeniedIgnoredPath) await writeFile(join(targetRoot, '.gitignore'), '.env\n');
+  await execFileAsync('git', ['-C', targetRoot, 'add', 'README.md', ...(options.agentWritesDeniedIgnoredPath ? ['.gitignore'] : [])]);
   await execFileAsync('git', ['-C', targetRoot, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteRoot]);
   const baseSha = (await execFileAsync('git', ['-C', targetRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   const events: string[] = [];
   const config = configFixture();
+  if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
   const configBytes = Buffer.from(`${canonicalJson(config)}\n`);
   const capabilities = createCheckedChangeCapabilities();
   const rawStore = new InMemoryRunRecordWriter();
@@ -534,6 +595,7 @@ async function runFixture(options: FixtureOptions = {}) {
         const selected = sequenced ?? options.implementationResult;
         if (selected?.kind !== 'completed' && selected) return selected;
         if (options.agentWrites !== false) await writeFile(join(path, 'feature.txt'), 'implemented\n');
+        if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
         if (options.agentCommit) {
           await execFileAsync('git', ['-C', path, 'add', '--all']);
           await execFileAsync('git', ['-C', path, '-c', 'user.name=agent', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent commit']);
@@ -612,6 +674,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
     createWorktree: (input) => delegate.createWorktree(input),
     inspectWorktree: (input) => delegate.inspectWorktree(input),
     snapshot: (path) => delegate.snapshot(path),
+    fingerprintDeniedPaths: (path, deniedPaths) => delegate.fingerprintDeniedPaths(path, deniedPaths),
     listChangedFiles: (path) => delegate.listChangedFiles(path),
     stageAll: async (path) => { events.push('git:stage'); return delegate.stageAll(path); },
     getTreeSha: (path) => delegate.getTreeSha(path),

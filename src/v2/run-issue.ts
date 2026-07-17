@@ -43,6 +43,7 @@ export interface RunIssueGit {
   createWorktree(input: { targetRoot: string; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }): Promise<void>;
   inspectWorktree(input: { worktreePath: string; branchName: string; baseSha: string }): Promise<'absent' | 'matching' | 'diverged'>;
   snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
+  fingerprintDeniedPaths(worktreePath: string, deniedPaths: string[]): Promise<string>;
   listChangedFiles(worktreePath: string): Promise<string[]>;
   stageAll(worktreePath: string): Promise<void>;
   getTreeSha(worktreePath: string): Promise<string>;
@@ -464,6 +465,7 @@ export class RunIssue {
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
       const implementationBaseline = await this.dependencies.git.snapshot(worktreePath);
+      const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
       let implementation = await this.runImplementation({
         runId,
         worktreePath,
@@ -483,7 +485,13 @@ export class RunIssue {
             await new Promise((resolveWait) => setTimeout(resolveWait, 25));
           }
         }
+        if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
+        }
         return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+      }
+      if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
       }
       if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
         const afterTransport = await this.dependencies.git.snapshot(worktreePath);

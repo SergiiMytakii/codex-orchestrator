@@ -10,6 +10,7 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 600_000;
 const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
   ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
+const realCodexSmokeModel = 'gpt-5.6-luna';
 const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
@@ -38,9 +39,7 @@ const scenarioDefinitions = new Map([
 
 const scenarioProfiles = new Map([
   ['core-release', [
-    'baseline', 'package-install', 'discovery-matrix', 'real-codex', 'scoped-runner-commit',
-    'commit-policy', 'run-scoped', 'diagnostics', 'browser-proof',
-    'acceptance-proof-positive', 'quality-gates', 'safety-negative',
+    'package-install', 'real-codex', 'browser-proof', 'safety-negative',
   ]],
   ['extended-policy', [
     'remote-base-branch', 'loop-policy', 'incomplete-progress-rework', 'report-repair',
@@ -63,7 +62,7 @@ async function main() {
   const root = options.workDir ? resolve(options.workDir) : await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
   const context = {
     options, runId, root, sourceRoot, repo: options.repo,
-    reportPath: join(root, 'live-smoke-report.md'), targetRoot: '', cliPath: '', fakeCodexPath: '',
+    reportPath: join(root, 'live-smoke-report.md'), targetRoot: '', cliPath: '', fakeCodexPath: '', realCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
   };
   await appendReport(context, `# V2 live smoke ${runId}\n\nRepository: ${context.repo}\n\n`);
@@ -71,6 +70,7 @@ async function main() {
   try {
     context.cliPath = await preparePackagedCandidate(context);
     context.fakeCodexPath = await writeFakeCodex(context);
+    context.realCodexPath = await writeRealCodexWrapper(context);
     context.targetRoot = await prepareTarget(context);
     await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
     context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
@@ -168,7 +168,7 @@ async function preparePackagedCandidate(context) {
     ], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
   }
   const packed = await runCommand('npm', ['pack', '--json'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
-  const file = JSON.parse(packed.stdout)?.[0]?.filename;
+  const file = parseNpmPackOutput(packed.stdout)?.[0]?.filename;
   if (typeof file !== 'string') throw new Error('npm pack did not return one tarball');
   const tarball = join(sourceRoot, file);
   const extracted = join(context.root, 'packed');
@@ -180,6 +180,20 @@ async function preparePackagedCandidate(context) {
   const help = await runCommand(process.execPath, [cliPath, '--help'], { timeoutMs: context.options.timeoutMs });
   if (!help.stdout.includes('V2 candidate')) throw new Error('packed candidate help is not V2');
   return cliPath;
+}
+
+export function parseNpmPackOutput(stdout) {
+  const lines = String(stdout).split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index]?.trim() !== '[') continue;
+    try {
+      const value = JSON.parse(lines.slice(index).join('\n'));
+      if (Array.isArray(value)) return value;
+    } catch {
+      // A lifecycle script may have printed an unrelated bracketed line; keep searching.
+    }
+  }
+  throw new Error('npm pack did not return a JSON array');
 }
 
 async function prepareTarget(context) {
@@ -195,7 +209,7 @@ async function configureTarget(context, overrides = {}) {
   config.runner.workspaceRoot = `.codex-orchestrator/workspaces-v2-${context.runId}`;
   config.runner.stateDir = `.codex-orchestrator/v2/state-${context.runId}`;
   config.proof.artifactDir = `.codex-orchestrator/v2/proofs-${context.runId}`;
-  config.codex.command = overrides.realCodex ? 'codex' : context.fakeCodexPath;
+  config.codex.command = overrides.realCodex ? context.realCodexPath : context.fakeCodexPath;
   config.codex.timeoutMs = 180_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.failingCheck
@@ -205,7 +219,7 @@ async function configureTarget(context, overrides = {}) {
 }
 
 async function runReviewReadyScenario(context, scenario) {
-  await configureTarget(context, { idleTimeoutMs: scenario === 'incomplete-progress-rework' ? 100 : undefined });
+  await configureTarget(context, { idleTimeoutMs: scenario === 'incomplete-progress-rework' ? 5_000 : undefined });
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'review-ready' }, scenario);
@@ -232,8 +246,8 @@ async function runRealCodexScenario(context, scenario) {
   await configureTarget(context, { realCodex: true });
   const issue = await createIssue(context, scenario, true, [
     'Create src/live-smoke/real-codex.txt containing this issue number.',
-    'Return the exact generated implementation and proof JSON schemas; do not commit or publish.',
-  ]);
+    'Implementation and proof reports satisfy the runner-generated JSON schemas; neither agent commits nor publishes.',
+  ], false);
   assertResult(await runIssue(context, issue.number), { status: 'review-ready' }, scenario);
   await recordPublication(context, issue.number);
 }
@@ -279,11 +293,13 @@ async function runSafetyNegativeScenario(context, scenario) {
   assertResult(await runIssue(context, issue.number), { status: 'blocked', kind: 'safety' }, scenario);
 }
 
-async function createIssue(context, scenario, eligible, extraCriteria = []) {
+async function createIssue(context, scenario, eligible, extraCriteria = [], markersAsCriteria = true) {
   const title = `[live-smoke:${context.runId}] ${scenario}`;
-  const criteria = [`LIVE_SMOKE_SCENARIO=${scenario}`, `LIVE_SMOKE_RUN_ID=${context.runId}`, ...extraCriteria];
+  const markers = [`LIVE_SMOKE_SCENARIO=${scenario}`, `LIVE_SMOKE_RUN_ID=${context.runId}`];
+  const criteria = [...(markersAsCriteria ? markers : []), ...extraCriteria];
   const args = ['issue', 'create', '--repo', context.repo, '--title', title, '--body', [
-    'V2 packed live-smoke fixture.', '', '## Acceptance Criteria', ...criteria.map((value) => `- ${value}`),
+    'V2 packed live-smoke fixture.', ...markers.map((value) => `${value}`), '',
+    '## Acceptance Criteria', ...criteria.map((value) => `- ${value}`),
   ].join('\n')];
   if (eligible) args.push('--label', 'agent:auto');
   const created = await runCommand('gh', args, { timeoutMs: context.options.timeoutMs });
@@ -354,6 +370,26 @@ async function writeFakeCodex(context) {
   return path;
 }
 
+async function writeRealCodexWrapper(context) {
+  const path = join(context.root, 'real-codex');
+  await writeFile(path, realCodexWrapperSource(process.execPath));
+  await chmod(path, 0o700);
+  return path;
+}
+
+function realCodexWrapperSource(nodePath) {
+  return `#!${nodePath}
+import { spawn } from 'node:child_process';
+
+const child = spawn('codex', ['--model', '${realCodexSmokeModel}', ...process.argv.slice(2)], { stdio: 'inherit' });
+child.on('error', (error) => { process.stderr.write(\`${'${error.message}'}\\n\`); process.exitCode = 1; });
+child.on('exit', (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exitCode = code ?? 1;
+});
+`;
+}
+
 function fakeCodexSource(nodePath) {
   return `#!${nodePath}
 import { createHash } from 'node:crypto';
@@ -383,7 +419,12 @@ function writeImplementation(scenario, reportPath, prompt) {
   if (!prompt.includes('Report repair only')) {
     if (scenario === 'incomplete-progress-rework') {
       const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
-      try { readFileSync(marker); } catch { writeFileSync(marker, 'attempted\\n'); setInterval(() => {}, 1000); return; }
+      try { readFileSync(marker); } catch {
+        writeFileSync(marker, 'attempted\\n');
+        process.stderr.write('stream disconnected before completion\\n');
+        process.exitCode = 1;
+        return;
+      }
     }
     if (scenario === 'safety-negative') writeFileSync('.env', 'blocked fixture\\n');
     else writeChange(scenario);
@@ -395,37 +436,37 @@ function writeImplementation(scenario, reportPath, prompt) {
   const changedFiles = scenario === 'commit-policy'
     ? execFileSync('git', ['diff', '--name-only', 'HEAD^', 'HEAD'], { encoding: 'utf8' }).trim().split('\\n').filter(Boolean).sort()
     : execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { encoding: 'utf8' }).split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeFileSync(reportPath, JSON.stringify({ version: 1, status: 'completed', summary: 'V2 live-smoke implementation complete.', changedFiles, residualRisks: [] }));
+  writeAgentReport(reportPath, { version: 1, status: 'completed', summary: 'V2 live-smoke implementation complete.', changedFiles, residualRisks: [] });
 }
 
 function writeProof(scenario, criteria, reportPath, prompt) {
   if (scenario === 'acceptance-proof-negative') {
-    writeFileSync(reportPath, JSON.stringify({
+    writeAgentReport(reportPath, {
       version: 1, status: 'external-block', decision: { mode: 'non-visual', targets: [] },
       criteria: criteria.map((item) => ({ id: item.id, status: 'unknown', confidence: 'low', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'External proof dependency is unavailable.' })),
       checks: [], artifacts: [], findings: [], residualRisks: [],
       blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'] },
-    })); return;
+    }); return;
   }
   if (scenario === 'acceptance-proof-rework' || scenario === 'loop-policy') {
     const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-proof-rework'], { encoding: 'utf8' }).trim();
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'attempted\\n');
-      writeFileSync(reportPath, JSON.stringify({
+      writeAgentReport(reportPath, {
         version: 1, status: 'needs-rework', decision: { mode: 'non-visual', targets: [] },
         criteria: criteria.map((item) => ({ id: item.id, status: 'failed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'One bounded rework cycle is required.' })),
         checks: [], artifacts: [], findings: ['Add the rework completion marker.'], residualRisks: [],
-      })); return;
+      }); return;
     }
   }
   if (scenario === 'browser-proof') { writeBrowserProof(criteria, reportPath, prompt); return; }
   const output = Buffer.from('V2 live-smoke proof passed.');
   const check = { id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed', summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex') };
-  writeFileSync(reportPath, JSON.stringify({
+  writeAgentReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
     criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.' })),
     checks: [check], artifacts: [], findings: [], residualRisks: [],
-  }));
+  });
 }
 
 function writeBrowserProof(criteria, reportPath, prompt) {
@@ -446,12 +487,12 @@ function writeBrowserProof(criteria, reportPath, prompt) {
     return { id, kind, relativePath, sha256: createHash('sha256').update(bytes).digest('hex'), publishable, description: 'Current V2 browser live-smoke evidence.' };
   });
   const ids = criteria.map((item) => item.id);
-  writeFileSync(reportPath, JSON.stringify({
+  writeAgentReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'visual', targets: ['browser'] },
     criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['browser'], evidenceRefs: ['shot-wide', 'dom-wide', 'shot-narrow', 'dom-narrow'], analysis: 'Both current responsive captures satisfy this criterion.' })),
     checks: [], artifacts,
     visualEvidence: {
-      workflow: { entrypoint: 'live-smoke browser fixture', steps: ['Open fixture', 'Inspect final state'], finalState: 'V2 browser proof ready' },
+      workflow: { entrypoint: 'http://127.0.0.1:4173/', steps: ['Open fixture', 'Inspect final state'], finalState: 'V2 browser proof ready' },
       captures: [
         { target: 'browser', name: 'wide', width: 1280, height: 720, criteriaRefs: ids, screenshotRef: 'shot-wide', stateRef: 'dom-wide' },
         { target: 'browser', name: 'narrow', width: 390, height: 844, criteriaRefs: ids, screenshotRef: 'shot-narrow', stateRef: 'dom-narrow' },
@@ -461,7 +502,14 @@ function writeBrowserProof(criteria, reportPath, prompt) {
       copyReview: [{ summary: 'Visible copy matches the frozen criteria.', evidenceRefs: ['dom-wide', 'dom-narrow'] }],
     },
     findings: [], residualRisks: [],
-  }));
+  });
+}
+
+function writeAgentReport(reportPath, report) {
+  const generated = report.decision
+    ? { ...report, visualEvidence: report.visualEvidence ?? null, blocker: report.blocker ?? null }
+    : report;
+  writeFileSync(reportPath, JSON.stringify({ report: generated }));
 }
 
 function writeChange(scenario) {
@@ -519,27 +567,27 @@ async function discoverRunArtifacts(context, failures) {
 }
 
 async function verifyCleanup(context, failures) {
-  await bestEffort(failures, 'verify no open run issues', async () => {
+  await bestEffort(failures, 'verify no open run issues', () => retryCleanupObservation(async () => {
     const result = await runCommand('gh', ['issue', 'list', '--repo', context.repo, '--state', 'open', '--limit', '1000', '--json', 'number,title,body'], {
       timeoutMs: context.options.timeoutMs,
     });
     const remaining = JSON.parse(result.stdout).filter((issue) => issue.title?.includes(`[live-smoke:${context.runId}]`)
       || issue.body?.includes(`LIVE_SMOKE_RUN_ID=${context.runId}`));
     if (remaining.length > 0) throw new Error(`open issues remain: ${remaining.map((issue) => issue.number).join(', ')}`);
-  });
-  await bestEffort(failures, 'verify no open run pull requests', async () => {
+  }));
+  await bestEffort(failures, 'verify no open run pull requests', () => retryCleanupObservation(async () => {
     const result = await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--state', 'open', '--search', `live-smoke:${context.runId}`, '--limit', '1000', '--json', 'number'], {
       timeoutMs: context.options.timeoutMs,
     });
     const remaining = JSON.parse(result.stdout);
     if (remaining.length > 0) throw new Error(`open pull requests remain: ${remaining.map((pull) => pull.number).join(', ')}`);
-  });
+  }));
   if (context.targetRoot) {
     for (const branch of [...new Set(context.createdBranches)]) {
-      await bestEffort(failures, `verify branch ${branch}`, async () => {
+      await bestEffort(failures, `verify branch ${branch}`, () => retryCleanupObservation(async () => {
         const result = await runCommand('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], { timeoutMs: context.options.timeoutMs });
         if (result.stdout.trim()) throw new Error('remote branch remains');
-      });
+      }));
     }
   }
   if (context.options.cleanupMode === 'delete') {
@@ -551,6 +599,24 @@ async function verifyCleanup(context, failures) {
       if (result.status === 0) failures.push(`issue #${issue}: still exists after delete cleanup`);
     }
   }
+}
+
+export async function retryCleanupObservation(action, options = {}) {
+  const attempts = options.attempts ?? 5;
+  const delayMs = options.delayMs ?? 500;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await action();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts && delayMs > 0) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function selfTestFakeAgent() {
@@ -573,7 +639,7 @@ async function selfTestFakeAgent() {
       cwd: root,
       stdin: `Implement issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
     });
-    const implementation = JSON.parse(await readFile(implementationPath, 'utf8'));
+    const implementation = JSON.parse(await readFile(implementationPath, 'utf8')).report;
     if (implementation.version !== 1 || implementation.status !== 'completed'
       || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
       throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
@@ -583,7 +649,7 @@ async function selfTestFakeAgent() {
       cwd: root,
       stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
     });
-    const proof = JSON.parse(await readFile(proofPath, 'utf8'));
+    const proof = JSON.parse(await readFile(proofPath, 'utf8')).report;
     if (proof.version !== 1 || proof.status !== 'passed' || proof.criteria?.[0]?.id !== 'ac-001'
       || proof.decision?.mode !== 'non-visual') throw new Error('fake proof report contract failed');
     const browserPath = join(root, 'browser-proof.json');
@@ -592,7 +658,7 @@ async function selfTestFakeAgent() {
       cwd: root,
       stdin: `Independently prove issue #2.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
     });
-    const browser = JSON.parse(await readFile(browserPath, 'utf8'));
+    const browser = JSON.parse(await readFile(browserPath, 'utf8')).report;
     if (browser.status !== 'passed' || browser.decision?.targets?.[0] !== 'browser'
       || browser.artifacts?.length !== 6 || browser.visualEvidence?.captures?.length !== 2) {
       throw new Error('fake browser proof report contract failed');
@@ -642,4 +708,6 @@ function runCommand(command, args, options = {}) {
   });
 }
 
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
+}

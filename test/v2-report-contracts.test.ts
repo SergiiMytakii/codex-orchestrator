@@ -12,6 +12,7 @@ import {
   validateProofReport,
   type ProofReportV1,
 } from '../src/v2/proof-report.js';
+import { decodeAgentReportForValidation, unwrapAgentReportEnvelope } from '../src/v2/report-envelope.js';
 
 const completedImplementation: ImplementationReportV1 = {
   version: 1,
@@ -171,9 +172,6 @@ test('implementation output schema and runtime validator have parity across stat
       accepted: false,
     },
     { value: { ...completedImplementation, status: 'external-block' }, accepted: false },
-    { value: { ...completedImplementation, changedFiles: ['../escape.ts'] }, accepted: false },
-    { value: { ...completedImplementation, changedFiles: ['src/feature.ts', 'src/feature.ts'] }, accepted: false },
-    { value: { ...completedImplementation, changedFiles: ['src/feature/'] }, accepted: false },
     { value: { ...completedImplementation, residualRisks: [''] }, accepted: false },
     { value: { ...completedImplementation, summary: 'x'.repeat(4097) }, accepted: false },
     { value: { ...completedImplementation, extra: true }, accepted: false },
@@ -182,7 +180,73 @@ test('implementation output schema and runtime validator have parity across stat
   assertParity(fixtures, implementationReportOutputSchema(), validateImplementationReport);
 });
 
-test('proof output schema and runtime validator have parity across terminal report branches', () => {
+test('agent output schemas use a Structured Outputs compatible root envelope', () => {
+  for (const schema of [implementationReportOutputSchema(), proofReportOutputSchema()]) {
+    assert.equal(schema.type, 'object');
+    assert.deepEqual(schema.required, ['report']);
+    assert.equal(schema.additionalProperties, false);
+    assertNoKeyword(schema, 'oneOf');
+    assertNoKeyword(schema, 'uniqueItems');
+    assertNoRegexLookaround(schema);
+  }
+  assert.equal(Array.isArray((implementationReportOutputSchema().properties as Record<string, any>).report.anyOf), true);
+  assert.equal((proofReportOutputSchema().properties as Record<string, any>).report.type, 'object');
+  assert.deepEqual(unwrapAgentReportEnvelope({ report: completedImplementation }), completedImplementation);
+  assert.deepEqual(
+    unwrapAgentReportEnvelope({ report: { ...passedProof, visualEvidence: null, blocker: null } }, ['visualEvidence', 'blocker']),
+    passedProof,
+  );
+  assert.throws(() => unwrapAgentReportEnvelope(completedImplementation), /report envelope/u);
+  assert.throws(() => unwrapAgentReportEnvelope({ report: completedImplementation, extra: true }), /report envelope/u);
+});
+
+test('contained adapters preserve malformed report bytes for owner-level validation and repair', () => {
+  assert.deepEqual(
+    decodeAgentReportForValidation(Buffer.from(JSON.stringify({ report: completedImplementation }))),
+    completedImplementation,
+  );
+  assert.equal(decodeAgentReportForValidation(Buffer.from('{bad json')), '{bad json');
+  assert.deepEqual(
+    decodeAgentReportForValidation(Buffer.from(JSON.stringify({ unexpected: completedImplementation }))),
+    { unexpected: completedImplementation },
+  );
+});
+
+test('runtime validators enforce uniqueness omitted from the supported generation schema', () => {
+  const duplicateImplementation = { ...completedImplementation, changedFiles: ['src/feature.ts', 'src/feature.ts'] };
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: duplicateImplementation }), true);
+  assert.throws(() => validateImplementationReport(duplicateImplementation), /unique/u);
+
+  const duplicateProof = {
+    ...passedProof,
+    criteria: [{ ...passedProof.criteria[0], surfaces: ['non-visual', 'non-visual'] }],
+  };
+  assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(duplicateProof) }), true);
+  assert.throws(() => validateProofReport(duplicateProof), /unique/u);
+});
+
+test('runtime validators enforce repository paths omitted from the supported generation regex subset', () => {
+  const unsafeImplementation = { ...completedImplementation, changedFiles: ['../escape.ts'] };
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: unsafeImplementation }), true);
+  assert.throws(() => validateImplementationReport(unsafeImplementation), /relative POSIX paths|dot-dot segments/u);
+
+  const unsafeProof = {
+    ...passedProof,
+    artifacts: [{ ...passedProof.artifacts[0], relativePath: '../outside.txt' }],
+  };
+  assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(unsafeProof) }), true);
+  assert.throws(() => validateProofReport(unsafeProof), /relative POSIX paths|dot-dot segments/u);
+});
+
+test('generation schemas reject absolute, backslash, and trailing-slash paths without lookaround', () => {
+  for (const changedFile of ['/tmp/feature.ts', 'src\\feature.ts', 'src/feature/']) {
+    assert.equal(schemaAccepts(implementationReportOutputSchema(), {
+      report: { ...completedImplementation, changedFiles: [changedFile] },
+    }), false);
+  }
+});
+
+test('proof output schema covers valid terminal reports and runtime validator rejects invalid combinations', () => {
   const fixtures: Array<{ value: unknown; accepted: boolean }> = [
     { value: passedProof, accepted: true },
     { value: visualProof, accepted: true },
@@ -213,13 +277,18 @@ test('proof output schema and runtime validator have parity across terminal repo
     { value: { ...passedProof, findings: ['Unexpected finding.'] }, accepted: false },
     { value: { ...passedProof, status: 'needs-rework', findings: [] }, accepted: false },
     { value: { ...passedProof, status: 'external-block' }, accepted: false },
-    { value: { ...passedProof, criteria: [{ ...passedProof.criteria[0], surfaces: ['non-visual', 'non-visual'] }] }, accepted: false },
     { value: { ...passedProof, residualRisks: [''] }, accepted: false },
-    { value: { ...passedProof, artifacts: [{ ...passedProof.artifacts[0], relativePath: 'proofs/' }] }, accepted: false },
+    {
+      value: {
+        ...passedProof,
+        artifacts: [{ ...passedProof.artifacts[0], kind: 'command-output', publishable: true }],
+      },
+      accepted: false,
+    },
     { value: { ...passedProof, extra: true }, accepted: false },
   ];
 
-  assertParity(fixtures, proofReportOutputSchema(), validateProofReport);
+  assertRuntimeContract(fixtures, proofReportOutputSchema(), validateProofReport, generatedProofReport);
 });
 
 test('proof runtime validation rejects dangling evidence, duplicate IDs, and non-canonical artifact paths', () => {
@@ -272,9 +341,54 @@ function assertParity(
   validate: (value: unknown) => unknown,
 ): void {
   for (const fixture of fixtures) {
-    assert.equal(schemaAccepts(schema, fixture.value), fixture.accepted, `schema parity failed for ${JSON.stringify(fixture.value)}`);
+    assert.equal(schemaAccepts(schema, { report: fixture.value }), fixture.accepted, `schema parity failed for ${JSON.stringify(fixture.value)}`);
     assert.equal(runtimeAccepts(validate, fixture.value), fixture.accepted, `runtime parity failed for ${JSON.stringify(fixture.value)}`);
   }
+}
+
+function assertRuntimeContract(
+  fixtures: Array<{ value: unknown; accepted: boolean }>,
+  schema: Record<string, unknown>,
+  validate: (value: unknown) => unknown,
+  generatedValue: (value: unknown) => unknown,
+): void {
+  for (const fixture of fixtures) {
+    if (fixture.accepted) {
+      assert.equal(schemaAccepts(schema, { report: generatedValue(fixture.value) }), true, `schema rejected valid ${JSON.stringify(fixture.value)}`);
+    }
+    assert.equal(runtimeAccepts(validate, fixture.value), fixture.accepted, `runtime contract failed for ${JSON.stringify(fixture.value)}`);
+  }
+}
+
+function generatedProofReport(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const report = value as Record<string, unknown>;
+  return {
+    ...report,
+    visualEvidence: report.visualEvidence ?? null,
+    blocker: report.blocker ?? null,
+  };
+}
+
+function assertNoKeyword(value: unknown, keyword: string): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoKeyword(item, keyword);
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  assert.equal(Object.hasOwn(value, keyword), false, `schema contains unsupported ${keyword}`);
+  for (const child of Object.values(value)) assertNoKeyword(child, keyword);
+}
+
+function assertNoRegexLookaround(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoRegexLookaround(item);
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  const pattern = (value as Record<string, unknown>).pattern;
+  if (typeof pattern === 'string') assert.doesNotMatch(pattern, /\(\?/u);
+  for (const child of Object.values(value)) assertNoRegexLookaround(child);
 }
 
 function visualArtifact(
@@ -296,6 +410,8 @@ function runtimeAccepts(validate: (value: unknown) => unknown, value: unknown): 
 }
 
 function schemaAccepts(schema: Record<string, unknown>, value: unknown): boolean {
+  const anyOf = schema.anyOf as Array<Record<string, unknown>> | undefined;
+  if (anyOf) return anyOf.some((branch) => schemaAccepts(branch, value));
   const oneOf = schema.oneOf as Array<Record<string, unknown>> | undefined;
   if (oneOf) return oneOf.filter((branch) => schemaAccepts(branch, value)).length === 1;
   if (schema.const !== undefined && value !== schema.const) return false;

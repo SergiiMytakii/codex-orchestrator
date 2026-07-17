@@ -83,6 +83,24 @@ test('classifies nonzero exit, spawn failure, and bounded-output overflow separa
   });
 });
 
+test('classifies confirmed Codex stream disconnect without a report as transport failure', async () => {
+  await withRunFixture(async (fixture) => {
+    const result = await new CodexProcess(async () => new FakeChild({
+      reportPath: fixture.reportPath,
+      exit: { exitCode: 1, signal: null },
+      writeReport: false,
+      streams: {
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from('ERROR: stream disconnected before completion: retry the request'),
+        truncated: false,
+      },
+    })).run(fixture.input(), new AbortController().signal);
+
+    assert.equal(result.kind, 'transport-failed');
+    assert.equal(result.report.kind, 'missing');
+  });
+});
+
 test('wall timeout terminates the group and escalates to SIGKILL before returning', async () => {
   await withRunFixture(async (fixture) => {
     const child = new FakeChild({
@@ -193,6 +211,7 @@ class FakeChild implements SupervisedChild {
   private readonly pendingExit: boolean;
   private readonly resolveExitOn?: 'SIGTERM' | 'SIGKILL';
   private readonly streamFailure: boolean;
+  private readonly shouldWriteReport: boolean;
   private groupFailures: number;
   private resolveExit?: (value: { exitCode: number | null; signal: string | null }) => void;
 
@@ -205,6 +224,7 @@ class FakeChild implements SupervisedChild {
     resolveExitOn?: 'SIGTERM' | 'SIGKILL';
     groupFailures?: number;
     streamFailure?: boolean;
+    writeReport?: boolean;
   }) {
     this.reportPath = options.reportPath;
     this.events = options.events ?? [];
@@ -214,6 +234,7 @@ class FakeChild implements SupervisedChild {
     this.resolveExitOn = options.resolveExitOn;
     this.groupFailures = options.groupFailures ?? 0;
     this.streamFailure = options.streamFailure ?? false;
+    this.shouldWriteReport = options.writeReport ?? true;
   }
 
   lastActivityAt(): number {
@@ -247,8 +268,10 @@ class FakeChild implements SupervisedChild {
   async waitForStreamsClosed(): Promise<{ stdout: Buffer; stderr: Buffer; truncated: boolean }> {
     this.events.push('wait-streams');
     if (this.streamFailure) throw new Error('streams remained open');
-    await writeFile(this.reportPath, '{"status":"fixture"}\n');
-    this.events.push('write-report');
+    if (this.shouldWriteReport) {
+      await writeFile(this.reportPath, '{"status":"fixture"}\n');
+      this.events.push('write-report');
+    }
     return this.streams;
   }
 }

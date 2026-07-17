@@ -121,8 +121,10 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
   const proof = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'proof-report.js')).href) as {
     proofReportOutputSchema: () => Record<string, unknown>;
   };
-  assert.equal(Array.isArray(implementation.implementationReportOutputSchema().oneOf), true);
-  assert.equal(Array.isArray(proof.proofReportOutputSchema().oneOf), true);
+  assert.equal(implementation.implementationReportOutputSchema().type, 'object');
+  assert.equal(proof.proofReportOutputSchema().type, 'object');
+  assert.equal(Array.isArray(((implementation.implementationReportOutputSchema().properties as Record<string, any>).report as Record<string, unknown>).anyOf), true);
+  assert.equal(((proof.proofReportOutputSchema().properties as Record<string, any>).report as Record<string, unknown>).type, 'object');
   const setup = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'setup.js')).href) as {
     Setup: new (...args: never[]) => unknown;
   };

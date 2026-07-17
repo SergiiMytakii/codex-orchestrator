@@ -351,7 +351,7 @@ function expectedAssetOrder(path: string): number {
 }
 
 async function ensureManagedDirectoryPath(runtimeRoot: string, target: string, expectedUid: number): Promise<void> {
-  await assertSourcePath(runtimeRoot, runtimeRoot, false);
+  await ensureManagedRuntimeRoot(runtimeRoot, expectedUid);
   assertContained(runtimeRoot, target, 'managed directory');
   const relativeTarget = relative(runtimeRoot, target);
   let current = runtimeRoot;
@@ -376,6 +376,19 @@ async function ensureManagedDirectoryPath(runtimeRoot: string, target: string, e
       assertMode(created.mode, SNAPSHOT_ROOT_MODE, current);
     }
   }
+}
+
+async function ensureManagedRuntimeRoot(runtimeRoot: string, expectedUid: number): Promise<void> {
+  try {
+    await mkdir(runtimeRoot, { mode: SNAPSHOT_ROOT_MODE });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  const info = await lstat(runtimeRoot);
+  if (info.isSymbolicLink()) throw new Error(`managed runtime path contains a symbolic link: ${runtimeRoot}`);
+  assertDirectory(info, runtimeRoot);
+  assertOwner(info.uid, expectedUid, runtimeRoot);
+  assertMode(info.mode, SNAPSHOT_ROOT_MODE, runtimeRoot);
 }
 
 async function assertExistingManagedPath(runtimeRoot: string, target: string, expectedUid: number): Promise<void> {

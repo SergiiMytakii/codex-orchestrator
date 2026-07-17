@@ -1,9 +1,9 @@
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
 import { GitWorktreeManager } from '../git/worktree.js';
@@ -23,6 +23,7 @@ import {
   sha256,
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
+import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
 import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
@@ -72,6 +73,35 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   }
 
   async snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>> {
+    return this.snapshotWithIgnoredUntrackedRoot(worktreePath);
+  }
+
+  async snapshotIgnoringUntrackedRoot(
+    worktreePath: string,
+    ignoredRoot: string,
+  ): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>> {
+    validateRelativeRoot(ignoredRoot);
+    return this.snapshotWithIgnoredUntrackedRoot(worktreePath, ignoredRoot);
+  }
+
+  async fingerprintDeniedPaths(worktreePath: string, deniedPaths: string[]): Promise<string> {
+    const root = await realpath(worktreePath);
+    const entries: Array<{ path: string; fingerprint: unknown }> = [];
+    for (const path of [...deniedPaths].sort()) {
+      entries.push({
+        path,
+        fingerprint: isAbsolute(path)
+          ? { kind: 'external-path-not-monitored' }
+          : await fingerprintRepositoryPath(root, path),
+      });
+    }
+    return sha256(canonicalJson(entries));
+  }
+
+  private async snapshotWithIgnoredUntrackedRoot(
+    worktreePath: string,
+    ignoredRoot?: string,
+  ): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>> {
     const [headSha, indexTreeSha, trackedDiff, untrackedPaths, canonicalPath, gitDirectory] = await Promise.all([
       this.getHead(worktreePath),
       this.getTreeSha(worktreePath),
@@ -82,6 +112,7 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     ]);
     const untracked: Array<{ path: string; sha256: string }> = [];
     for (const path of untrackedPaths.split('\0').filter(Boolean).sort()) {
+      if (ignoredRoot && (path === ignoredRoot || path.startsWith(`${ignoredRoot}/`))) continue;
       untracked.push({ path, sha256: sha256(await readFile(join(canonicalPath, path))) });
     }
     return {
@@ -128,7 +159,20 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   }
 
   async commit(input: { worktreePath: string; message: string }): Promise<string> {
-    await this.worktrees.commitAll(input);
+    await this.git([
+      '-C',
+      input.worktreePath,
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'user.name=codex-orchestrator',
+      '-c',
+      'user.email=codex-orchestrator@users.noreply.github.com',
+      'commit',
+      '--no-verify',
+      '-m',
+      input.message,
+    ]);
     return this.getHead(input.worktreePath);
   }
 
@@ -208,7 +252,10 @@ export class ContainedImplementationAgent {
         return { kind: 'transport-failed', resumable: true };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
-      return { kind: 'completed', report: parseJsonWithoutDuplicateKeys(result.report.bytes.toString('utf8')) };
+      return {
+        kind: 'completed',
+        report: decodeAgentReportForValidation(result.report.bytes),
+      };
     } catch (error) {
       if (!(error instanceof ProcessQuiescenceError)) return { kind: 'internal-error' };
       return {
@@ -324,7 +371,7 @@ export class ContainedProofAgent implements ProofAgent {
       const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
       return {
         kind: 'report',
-        report: parseJsonWithoutDuplicateKeys(result.report.bytes.toString('utf8')),
+        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']),
         proofPhaseChangedFiles: changedArtifactPaths(before, after),
       };
     } catch (error) {
@@ -373,6 +420,12 @@ export function createV2Runtime(input: {
   const now = input.now ?? (() => new Date().toISOString());
   const commandExecutor = input.processExecutor ?? defaultProcessExecutor;
   const git = input.git ?? new LocalGitRunIssueAdapter(commandExecutor);
+  const proofFreshnessGit = git as RunIssueGit & {
+    snapshotIgnoringUntrackedRoot?: (
+      worktreePath: string,
+      ignoredRoot: string,
+    ) => Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
+  };
   const controller = new AbortController();
   let currentConfig: AgentAutoConfigV1 | undefined;
   let runRecords: RunRecordWriter | undefined;
@@ -454,7 +507,9 @@ export function createV2Runtime(input: {
         proofRecords,
         proofAgent,
         inspectFreshness: async (payload) => ({
-          ...await git.snapshot(worktreePath),
+          ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
+            ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
+            : git.snapshot(worktreePath)),
           checkPolicySha256: sha256(canonicalJson(config.checks)),
         }),
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
@@ -828,6 +883,40 @@ function changedArtifactPaths(before: Map<string, string>, after: Map<string, st
     .sort();
 }
 
+async function fingerprintRepositoryPath(root: string, relativePath: string): Promise<unknown> {
+  const segments = relativePath.split('/');
+  let current = root;
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment);
+    const info = await lstat(current).catch((error: unknown) => {
+      if (isErrorCode(error, 'ENOENT') || isErrorCode(error, 'ENOTDIR')) return undefined;
+      throw error;
+    });
+    if (!info) return { kind: 'absent' };
+    if (info.isSymbolicLink()) {
+      return { kind: 'symlink', targetSha256: sha256(await readlink(current)), depth: index };
+    }
+    if (index < segments.length - 1 && !info.isDirectory()) return { kind: 'blocked-parent', depth: index };
+    if (index === segments.length - 1) return fingerprintDeniedEntry(current, info);
+  }
+  return { kind: 'absent' };
+}
+
+async function fingerprintDeniedEntry(
+  path: string,
+  existingInfo?: Awaited<ReturnType<typeof lstat>>,
+): Promise<unknown> {
+  const info = existingInfo ?? await lstat(path);
+  if (info.isSymbolicLink()) return { kind: 'symlink', targetSha256: sha256(await readlink(path)) };
+  if (info.isFile()) return { kind: 'file', bytesSha256: sha256(await readFile(path)) };
+  if (!info.isDirectory()) return { kind: 'special' };
+  const entries: Array<{ nameSha256: string; fingerprint: unknown }> = [];
+  for (const name of (await readdir(path)).sort()) {
+    entries.push({ nameSha256: sha256(name), fingerprint: await fingerprintDeniedEntry(join(path, name)) });
+  }
+  return { kind: 'directory', entries };
+}
+
 async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> {
   while (true) {
     try {
@@ -842,4 +931,16 @@ async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> 
 
 function isErrorCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === code;
+}
+
+function validateRelativeRoot(value: string): void {
+  if (
+    value.length === 0
+    || value.startsWith('/')
+    || value.includes('\\')
+    || posix.normalize(value) !== value
+    || value.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new Error('ignored untracked root must be a normalized repository-relative path');
+  }
 }

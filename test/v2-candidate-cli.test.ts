@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { parseCandidateRunArgs, runCandidateCli } from '../src/v2/candidate-cli.js';
+import { isDirectCandidateExecution, parseCandidateRunArgs, runCandidateCli } from '../src/v2/candidate-cli.js';
+
+test('candidate direct-execution guard canonicalizes macOS temporary path aliases', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'candidate-entry-'));
+  try {
+    const path = join(root, 'candidate-cli.js');
+    await writeFile(path, 'fixture\n');
+    assert.equal(isDirectCandidateExecution(path, await realpath(path)), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('candidate CLI accepts only one exact direct run intent', () => {
   assert.deepEqual(parseCandidateRunArgs(['run', '--target', '/tmp/target', '--issue', '17']), {

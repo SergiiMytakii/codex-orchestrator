@@ -1,5 +1,7 @@
 import { posix } from 'node:path';
 
+import { agentReportEnvelopeSchema } from './report-envelope.js';
+
 const MAX_STRING_LENGTH = 16 * 1024;
 const MAX_SUMMARY_LENGTH = 4 * 1024;
 const MAX_ARRAY_LENGTH = 256;
@@ -186,99 +188,28 @@ export function createProofReceipt(input: {
 }
 
 export function proofReportOutputSchema(): Record<string, unknown> {
-  const common = {
-    version: { type: 'integer', const: 1 },
-    artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: artifactSchema() },
-    findings: stringArraySchema(),
-    residualRisks: stringArraySchema(),
-  };
-  const passedCriteria = { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(true) };
-  const openCriteria = { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: criterionSchema(false) };
-  const passedChecks = { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(true) };
-  const openChecks = { type: 'array', maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: checkSchema(false) };
-  return {
-    oneOf: [
-      reportBranch({
-        status: 'passed',
-        common,
-        decision: nonVisualDecisionSchema(),
-        criteria: passedCriteria,
-        checks: passedChecks,
-        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
-      }),
-      reportBranch({
-        status: 'passed',
-        common,
-        decision: browserDecisionSchema(),
-        criteria: passedCriteria,
-        checks: passedChecks,
-        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: browserVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'passed',
-        common,
-        decision: androidDecisionSchema(),
-        criteria: passedCriteria,
-        checks: passedChecks,
-        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: androidVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'passed',
-        common,
-        decision: iosDecisionSchema(),
-        criteria: passedCriteria,
-        checks: passedChecks,
-        findings: { type: 'array', maxItems: 0, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: iosVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'needs-rework',
-        common,
-        decision: nonVisualDecisionSchema(),
-        criteria: openCriteria,
-        checks: openChecks,
-        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
-      }),
-      reportBranch({
-        status: 'needs-rework',
-        common,
-        decision: browserDecisionSchema(),
-        criteria: openCriteria,
-        checks: openChecks,
-        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: browserVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'needs-rework',
-        common,
-        decision: androidDecisionSchema(),
-        criteria: openCriteria,
-        checks: openChecks,
-        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: androidVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'needs-rework',
-        common,
-        decision: iosDecisionSchema(),
-        criteria: openCriteria,
-        checks: openChecks,
-        findings: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
-        visualEvidence: iosVisualEvidenceSchema(),
-      }),
-      reportBranch({
-        status: 'external-block',
-        common,
-        decision: decisionSchema(),
-        criteria: openCriteria,
-        checks: openChecks,
-        findings: common.findings,
-        blocker: externalBlockerSchema(),
-      }),
+  return agentReportEnvelopeSchema({
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'version', 'status', 'decision', 'criteria', 'checks', 'artifacts',
+      'visualEvidence', 'findings', 'residualRisks', 'blocker',
     ],
-  };
+    properties: {
+      version: { type: 'integer', const: 1 },
+      status: { type: 'string', enum: ['passed', 'needs-rework', 'external-block'] },
+      decision: decisionSchema(),
+      criteria: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: criterionSchema(false) },
+      checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: checkSchema(false) },
+      artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: artifactSchema() },
+      visualEvidence: {
+        anyOf: [browserVisualEvidenceSchema(), androidVisualEvidenceSchema(), iosVisualEvidenceSchema(), { type: 'null' }],
+      },
+      findings: stringArraySchema(),
+      residualRisks: stringArraySchema(),
+      blocker: { anyOf: [externalBlockerSchema(), { type: 'null' }] },
+    },
+  });
 }
 
 export function proofReportRepairDiagnostic(error: unknown): string {
@@ -290,39 +221,9 @@ export function proofReportSkillExcerpt(): string {
   return 'Independently prove the frozen criteria and return only the JSON object required by the runner-supplied output schema. Do not edit product code, publish, or include credential/path material.';
 }
 
-function reportBranch(input: {
-  status: ProofReportV1['status'];
-  common: Record<string, unknown>;
-  decision: Record<string, unknown>;
-  criteria: Record<string, unknown>;
-  checks: Record<string, unknown>;
-  findings: unknown;
-  blocker?: Record<string, unknown>;
-  visualEvidence?: Record<string, unknown>;
-}): Record<string, unknown> {
-  const properties: Record<string, unknown> = {
-    ...input.common,
-    status: { type: 'string', const: input.status },
-    decision: input.decision,
-    criteria: input.criteria,
-    checks: input.checks,
-    findings: input.findings,
-  };
-  const required = ['version', 'status', 'decision', 'criteria', 'checks', 'artifacts', 'findings', 'residualRisks'];
-  if (input.visualEvidence) {
-    properties.visualEvidence = input.visualEvidence;
-    required.push('visualEvidence');
-  }
-  if (input.blocker) {
-    properties.blocker = input.blocker;
-    required.push('blocker');
-  }
-  return { type: 'object', additionalProperties: false, required, properties };
-}
-
 function decisionSchema(): Record<string, unknown> {
   return {
-    oneOf: [
+    anyOf: [
       nonVisualDecisionSchema(),
       {
         type: 'object',
@@ -330,7 +231,7 @@ function decisionSchema(): Record<string, unknown> {
         required: ['mode', 'targets'],
         properties: {
           mode: { type: 'string', const: 'visual' },
-          targets: { type: 'array', minItems: 1, maxItems: TARGETS.length, uniqueItems: true, items: { type: 'string', enum: TARGETS } },
+          targets: { type: 'array', minItems: 1, maxItems: TARGETS.length, items: { type: 'string', enum: TARGETS } },
         },
       },
     ],
@@ -344,7 +245,7 @@ function nonVisualDecisionSchema(): Record<string, unknown> {
     required: ['mode', 'targets'],
     properties: {
       mode: { type: 'string', const: 'non-visual' },
-      targets: { type: 'array', maxItems: 0, uniqueItems: true, items: { type: 'string', enum: TARGETS } },
+      targets: { type: 'array', maxItems: 0, items: { type: 'string', enum: TARGETS } },
     },
   };
 }
@@ -356,7 +257,7 @@ function browserDecisionSchema(): Record<string, unknown> {
     required: ['mode', 'targets'],
     properties: {
       mode: { type: 'string', const: 'visual' },
-      targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'browser' } },
+      targets: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'string', const: 'browser' } },
     },
   };
 }
@@ -368,7 +269,7 @@ function androidDecisionSchema(): Record<string, unknown> {
     required: ['mode', 'targets'],
     properties: {
       mode: { type: 'string', const: 'visual' },
-      targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'android' } },
+      targets: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'string', const: 'android' } },
     },
   };
 }
@@ -380,7 +281,7 @@ function iosDecisionSchema(): Record<string, unknown> {
     required: ['mode', 'targets'],
     properties: {
       mode: { type: 'string', const: 'visual' },
-      targets: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true, items: { type: 'string', const: 'ios' } },
+      targets: { type: 'array', minItems: 1, maxItems: 1, items: { type: 'string', const: 'ios' } },
     },
   };
 }
@@ -394,12 +295,11 @@ function criterionSchema(passed: boolean): Record<string, unknown> {
       id: boundedStringSchema(MAX_STRING_LENGTH),
       status: passed ? { type: 'string', const: 'passed' } : { type: 'string', enum: ['passed', 'failed', 'unknown'] },
       confidence: passed ? { type: 'string', const: 'high' } : { type: 'string', enum: ['high', 'medium', 'low'] },
-      surfaces: { type: 'array', minItems: 1, maxItems: SURFACES.length, uniqueItems: true, items: { type: 'string', enum: SURFACES } },
+      surfaces: { type: 'array', minItems: 1, maxItems: SURFACES.length, items: { type: 'string', enum: SURFACES } },
       evidenceRefs: {
         type: 'array',
         minItems: passed ? 1 : 0,
         maxItems: MAX_ARRAY_LENGTH,
-        uniqueItems: true,
         items: boundedStringSchema(MAX_STRING_LENGTH),
       },
       analysis: boundedStringSchema(MAX_SUMMARY_LENGTH),
@@ -449,7 +349,7 @@ function browserVisualEvidenceSchema(): Record<string, unknown> {
       required: ['summary', 'evidenceRefs'],
       properties: {
         summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
-        evidenceRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        evidenceRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
       },
     },
   };
@@ -467,7 +367,7 @@ function browserVisualEvidenceSchema(): Record<string, unknown> {
         },
       },
       captures: {
-        type: 'array', minItems: 2, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true,
+        type: 'array', minItems: 2, maxItems: MAX_ARRAY_LENGTH,
         items: {
           type: 'object', additionalProperties: false,
           required: ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'],
@@ -476,7 +376,7 @@ function browserVisualEvidenceSchema(): Record<string, unknown> {
             name: boundedStringSchema(MAX_STRING_LENGTH),
             width: { type: 'integer' },
             height: { type: 'integer' },
-            criteriaRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+            criteriaRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
             screenshotRef: boundedStringSchema(MAX_STRING_LENGTH),
             stateRef: boundedStringSchema(MAX_STRING_LENGTH),
           },
@@ -511,7 +411,7 @@ function mobileVisualEvidenceSchema(target: 'android' | 'ios'): Record<string, u
       type: 'object', additionalProperties: false, required: ['summary', 'evidenceRefs'],
       properties: {
         summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
-        evidenceRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+        evidenceRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
       },
     },
   };
@@ -529,7 +429,7 @@ function mobileVisualEvidenceSchema(target: 'android' | 'ios'): Record<string, u
         },
       },
       captures: {
-        type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true,
+        type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH,
         items: {
           type: 'object', additionalProperties: false,
           required: ['target', 'name', 'width', 'height', 'criteriaRefs', 'screenshotRef', 'stateRef'],
@@ -538,7 +438,7 @@ function mobileVisualEvidenceSchema(target: 'android' | 'ios'): Record<string, u
             name: boundedStringSchema(MAX_STRING_LENGTH),
             width: { type: 'integer' },
             height: { type: 'integer' },
-            criteriaRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, uniqueItems: true, items: boundedStringSchema(MAX_STRING_LENGTH) },
+            criteriaRefs: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: boundedStringSchema(MAX_STRING_LENGTH) },
             screenshotRef: boundedStringSchema(MAX_STRING_LENGTH),
             stateRef: boundedStringSchema(MAX_STRING_LENGTH),
           },
@@ -626,6 +526,9 @@ function validateArtifacts(value: unknown): asserts value is ProofReportV1['arti
     assertRelativePath(artifact.relativePath, `${field}.relativePath`);
     assertSha256(artifact.sha256, `${field}.sha256`);
     if (typeof artifact.publishable !== 'boolean') throw new Error(`${field}.publishable must be boolean`);
+    if (artifact.publishable && artifact.kind !== 'screenshot' && artifact.kind !== 'generated-file') {
+      throw new Error('only screenshots or sanitized generated summaries may be publishable');
+    }
     if (['dom-snapshot', 'console-log', 'network-log', 'ui-hierarchy', 'device-log', 'lease-record'].includes(artifact.kind as string)
       && artifact.publishable !== false) {
       throw new Error(`${field}.kind must remain local-only`);
@@ -872,7 +775,7 @@ function relativePathSchema(): Record<string, unknown> {
     type: 'string',
     minLength: 1,
     maxLength: MAX_STRING_LENGTH,
-    pattern: '^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\/$).+$',
+    pattern: '^[^/\\\\]$|^[^/\\\\][^\\\\]*[^/\\\\]$',
   };
 }
 

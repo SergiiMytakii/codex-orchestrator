@@ -15,6 +15,12 @@ issues. PR records cannot be physically deleted by GitHub, so cleanup closes
 them and deletes their remote branches, then verifies no live smoke issues, open
 PRs, or remote branches remain for the run.
 
+The default profile intentionally keeps only external integration evidence:
+packed installation/publication, one real-Codex run on `gpt-5.6-luna`, browser
+artifact publication, and the safety/cleanup negative path. Deterministic
+policy permutations belong in local tests; use the broader profiles only when
+the corresponding policy or proof contract changes.
+
 Run broader profile sets when release or policy work needs them:
 
 ```sh
@@ -29,8 +35,8 @@ change:
 
 | Change type | Command | Why |
 | --- | --- | --- |
-| Ordinary release gate, scoped runner behavior, diagnostics, quality gates, safety gates, browser proof, plan-auto happy path, or real-Codex handoff | `npm run smoke:live -- --profile core-release` | Covers the main publish path without running every edge matrix. |
-| Loop policy, priority selection, bounded rework, Fresh-Context Review, remote base branch resolution, Acceptance Proof rework/negative cases, or plan-auto blocking behavior | `npm run smoke:live -- --profile extended-policy` | Exercises policy and blocking edge cases that are intentionally outside the default profile. |
+| Ordinary release gate, packed publication, browser proof, safety cleanup, or real-Codex handoff | `npm run smoke:live -- --profile core-release` | Covers external integrations while local tests cover deterministic policy permutations. |
+| Loop policy, bounded rework, report repair, remote base branch resolution, or Acceptance Proof rework/negative cases | `npm run smoke:live -- --profile extended-policy` | Exercises policy and blocking edge cases that are intentionally outside the default profile. |
 | Browser proof, Acceptance Proof, UI Evidence, proof rework, proof product-diff blocking, low-confidence proof, or viewport/UI Evidence validation | `npm run smoke:live -- --profile proof-matrix` | Focuses on proof contracts without unrelated daemon and package scenarios. |
 | Scenario selection/profile behavior, release-signoff after policy/proof/publication changes, or uncertainty about which profile is sufficient | `npm run smoke:live -- --profile full` | Runs every top-level live smoke scenario. |
 | One known contract while developing or debugging a failure | `npm run smoke:live -- --scenario <name>` | Keeps feedback focused; `--scenario` overrides profile selection. |
@@ -38,8 +44,8 @@ change:
 If multiple rows apply, use the broader matching profile. If no row applies, use
 `core-release`. Do not use `full` as the default after every implementation; it
 is the expensive release-signoff and broad-regression profile.
-The focused `plan-auto-tree-recovery` scenario mutates the scratch GitHub
-repository and should be run only after explicit approval.
+Every live scenario mutates the scratch GitHub repository and should be run
+only after explicit approval.
 
 Run focused subsets while developing:
 

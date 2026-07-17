@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,7 +117,12 @@ async function readBootId(): Promise<string> {
   throw new Error(`platform ${process.platform} cannot prove boot identity`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+export function isDirectCandidateExecution(entryPath: string, modulePath: string): boolean {
+  try { return realpathSync.native(entryPath) === realpathSync.native(modulePath); }
+  catch { return false; }
+}
+
+if (process.argv[1] && isDirectCandidateExecution(process.argv[1], fileURLToPath(import.meta.url))) {
   runCandidateCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 70;

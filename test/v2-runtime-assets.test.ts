@@ -35,6 +35,22 @@ test('publishes exact private skill/schema bytes and records package, hashes, mo
   });
 });
 
+test('creates a missing repository runtime root on the first contained attempt', async () => {
+  await withFixture(async ({ packageRoot, runtimeRoot }) => {
+    await rm(runtimeRoot, { recursive: true });
+
+    const snapshot = await publishRuntimeAssetSnapshot({
+      packageRoot,
+      runtimeRoot,
+      snapshotRelativePath: 'runs/run-first/attempts/attempt-first/snapshot',
+      skill: 'agent-auto',
+    });
+
+    assert.equal((await lstat(runtimeRoot)).mode & 0o777, 0o700);
+    await verifyRuntimeAssetSnapshot(snapshot);
+  });
+});
+
 test('fails closed when package bytes change during resolution and publishes no snapshot', async () => {
   await withFixture(async ({ packageRoot, runtimeRoot }) => {
     const snapshotRelativePath = 'v2/repo/runs/run-1/attempts/attempt-race/snapshot';

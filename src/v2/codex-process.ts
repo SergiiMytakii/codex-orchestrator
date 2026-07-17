@@ -142,12 +142,23 @@ export class CodexProcess {
     if (terminal.kind === 'timeout') return finalizeResult('timeout', child, settled, report);
     if (terminal.kind === 'idle-timeout') return finalizeResult('idle-timeout', child, settled, report);
     if (settled.streams.truncated) return finalizeResult('output-truncated', child, settled, report);
+    if (
+      report.kind !== 'available'
+      && settled.exit.exitCode !== 0
+      && isConfirmedTransportFailure(settled.streams.stderr)
+    ) {
+      return finalizeResult('transport-failed', child, settled, report);
+    }
     if (report.kind !== 'available') return finalizeResult('report-failed', child, settled, report);
     if (settled.exit.exitCode === 0 && settled.exit.signal === null) {
       return finalizeResult('completed', child, settled, report);
     }
     return finalizeResult('exit-failed', child, settled, report);
   }
+}
+
+function isConfirmedTransportFailure(stderr: Buffer): boolean {
+  return stderr.toString('utf8').includes('stream disconnected before completion');
 }
 
 type TerminalObservation =

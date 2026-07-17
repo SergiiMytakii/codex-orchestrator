@@ -10,6 +10,7 @@ import {
 import { canonicalJson, sha256 } from './containment.js';
 import {
   createProofReceipt,
+  proofReportRepairDiagnostic,
   validateProofReport,
   type ProofReceipt,
   type ProofReportV1,
@@ -188,6 +189,7 @@ export class AcceptanceProof {
     }
 
     let report: ProofReportV1;
+    let reportRepairFindings: string[] = [];
     while (true) {
       const purpose = state.attempts.at(-1)!.purpose;
       let agentResult: ProofAgentResult;
@@ -201,7 +203,7 @@ export class AcceptanceProof {
           changedFiles: [...input.payload.changedFiles],
           checks: structuredClone(input.payload.checks),
           repairOnly: purpose === 'report-repair',
-          repairFindings: purpose === 'report-repair' ? ['The previous Proof Report did not match the generated schema or evidence contract.'] : [],
+          repairFindings: purpose === 'report-repair' ? [...reportRepairFindings] : [],
           signal: this.dependencies.signal ?? new AbortController().signal,
         });
       } catch (error) {
@@ -233,9 +235,10 @@ export class AcceptanceProof {
       try {
         report = validateProofReport(agentResult.report);
         validateReportAgainstFrozenCriteria(report, input.frozenCriteria);
-      } catch {
+      } catch (error) {
         const alreadyRepaired = state.attempts.some((attempt) => attempt.purpose === 'report-repair');
         if (!alreadyRepaired && await this.isFresh(input.payload)) {
+          reportRepairFindings = [proofReportRepairDiagnostic(error)];
           state = await this.startProofRetry(state, input.bindingSha256, 'report-repair');
           continue;
         }
@@ -457,7 +460,7 @@ function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], byt
   if (artifact.publishable && bytes.length > 64 * 1024) throw new Error('publishable proof summary is too large');
   const text = bytes.toString('utf8');
   if (Buffer.from(text, 'utf8').equals(bytes) === false) throw new Error('proof text artifact is not UTF-8');
-  if (containsSensitiveEvidence(text)) throw new Error('proof text artifact contains sensitive material');
+  if (artifact.publishable && containsSensitiveEvidence(text)) throw new Error('proof text artifact contains sensitive material');
 }
 
 function containsSensitiveEvidence(value: string): boolean {

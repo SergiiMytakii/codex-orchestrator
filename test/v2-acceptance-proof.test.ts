@@ -103,15 +103,46 @@ test('malformed report, rewritten criteria, raw path escape, and forbidden proof
   }
 });
 
+test('sensitive-text filtering applies only to publishable artifacts', async () => {
+  const localBytes = Buffer.from('Configured command: /Users/example/bin/node --version\n');
+  const localReport = passingReport({
+    artifactContent: localBytes,
+    artifactKind: 'static-inspection',
+    publishable: false,
+  });
+  const local = proofFixture({
+    artifactContent: localBytes,
+    agentResult: { kind: 'report', report: localReport, proofPhaseChangedFiles: [artifactPath()] },
+  });
+  assert.equal((await local.proof.proveChange(local.input())).status, 'passed');
+
+  const publishableReport = passingReport({ artifactContent: localBytes });
+  const publishable = proofFixture({
+    artifactContent: localBytes,
+    agentResult: { kind: 'report', report: publishableReport, proofPhaseChangedFiles: [artifactPath()] },
+  });
+  assert.equal((await publishable.proof.proveChange(publishable.input())).status, 'internal-error');
+});
+
 test('one malformed-report repair and one transport retry stay proof-internal under the same binding', async () => {
   const malformed = proofFixture({
     agentResults: [
-      { kind: 'report', report: { status: 'passed' }, proofPhaseChangedFiles: [] },
+      {
+        kind: 'report',
+        report: {
+          ...passingReport(),
+          artifacts: passingReport().artifacts.map((artifact) => ({ ...artifact, kind: 'command-output' as const })),
+        },
+        proofPhaseChangedFiles: [artifactPath()],
+      },
       { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
     ],
   });
   assert.equal((await malformed.proof.proveChange(malformed.input())).status, 'passed');
   assert.equal(malformed.agentCalls.length, 2);
+  const repairCall = malformed.agentCalls[1] as { repairOnly: boolean; repairFindings: string[] };
+  assert.equal(repairCall.repairOnly, true);
+  assert.match(repairCall.repairFindings[0] ?? '', /only screenshots or sanitized generated summaries may be publishable/u);
   assert.deepEqual((await malformed.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'report-repair']);
 
   const transport = proofFixture({
@@ -189,6 +220,7 @@ test('needs-rework, external-block, transport, cancellation, and internal agent 
 function proofFixture(options: {
   agentResult?: ProofAgentResult;
   agentResults?: ProofAgentResult[];
+  artifactContent?: Buffer;
   inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
 } = {}) {
   const capabilities = createCheckedChangeCapabilities();
@@ -222,7 +254,7 @@ function proofFixture(options: {
     },
     readArtifact: async (relativePath) => {
       if (relativePath !== artifactPath()) throw new Error('artifact missing');
-      return artifactBytes;
+      return options.artifactContent ?? artifactBytes;
     },
     proofArtifactDir: 'proofs/proof-1',
     createAttemptId: (() => { let attempt = 0; return () => `attempt-${++attempt}`; })(),
@@ -279,8 +311,15 @@ function artifactPath(): string {
   return 'proofs/proof-1/evidence.txt';
 }
 
-function passingReport(overrides: { criterionId?: string; artifactRelativePath?: string } = {}): ProofReportV1 {
+function passingReport(overrides: {
+  criterionId?: string;
+  artifactRelativePath?: string;
+  artifactContent?: Buffer;
+  artifactKind?: ProofReportV1['artifacts'][number]['kind'];
+  publishable?: boolean;
+} = {}): ProofReportV1 {
   const artifactRelativePath = overrides.artifactRelativePath ?? artifactPath();
+  const content = overrides.artifactContent ?? artifactBytes;
   return {
     version: 1,
     status: 'passed',
@@ -296,10 +335,10 @@ function passingReport(overrides: { criterionId?: string; artifactRelativePath?:
     checks: [],
     artifacts: [{
       id: 'artifact:evidence',
-      kind: 'generated-file',
+      kind: overrides.artifactKind ?? 'generated-file',
       relativePath: artifactRelativePath,
-      sha256: sha256(artifactBytes),
-      publishable: true,
+      sha256: sha256(content),
+      publishable: overrides.publishable ?? true,
       description: 'Acceptance evidence summary.',
     }],
     findings: [],

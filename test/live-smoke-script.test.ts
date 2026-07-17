@@ -44,6 +44,15 @@ test('live smoke help pins the V2 scenario and profile matrix', async () => {
   assert.match(result.stdout, /Default core-release/);
 });
 
+test('default core release keeps only external integration proofs', async () => {
+  const text = await source();
+  const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['extended-policy'"));
+  assert.deepEqual(
+    [...coreProfile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
+    ['core-release', 'package-install', 'real-codex', 'browser-proof', 'safety-negative'],
+  );
+});
+
 test('live smoke rejects unknown profile before package or GitHub work', async () => {
   const result = await runLiveSmoke(['--profile', 'missing-profile']);
   assert.notEqual(result.status, 0);
@@ -81,6 +90,20 @@ test('packed smoke resolves the candidate V2 CLI instead of the public Legacy bi
   assert.doesNotMatch(text, /const cliPath = join\(packageRoot, 'package', 'dist', 'src', 'cli\.js'\)/u);
 });
 
+test('packed smoke parses npm JSON after prepack lifecycle output', async () => {
+  const moduleUrl = new URL('../../scripts/live-smoke.mjs', import.meta.url);
+  const module = await import(moduleUrl.href) as {
+    parseNpmPackOutput: (stdout: string) => Array<{ filename?: unknown }>;
+  };
+  assert.deepEqual(module.parseNpmPackOutput([
+    'cde38bdb71f2b731c7fa050a06dd66f6b639ac879178079a2e4924440d4aed3c',
+    '[',
+    '  {"filename":"codex-orchestrator-0.1.51.tgz"}',
+    ']',
+    '',
+  ].join('\n')), [{ filename: 'codex-orchestrator-0.1.51.tgz' }]);
+});
+
 test('live smoke documents scratch repo and strict cleanup defaults', async () => {
   const result = await runLiveSmoke(['--help']);
   assert.match(result.stdout, /SergiiMytakii\/codex-orchestrator-live-smoke/u);
@@ -92,4 +115,46 @@ test('live smoke documents scratch repo and strict cleanup defaults', async () =
   assert.match(cleanup, /--state', 'all'/u);
   assert.match(cleanup, /LIVE_SMOKE_RUN_ID=/u);
   assert.match(cleanup, /await verifyCleanup\(context, failures\)/u);
+});
+
+test('real Codex scenario keeps routing markers outside frozen acceptance criteria', async () => {
+  const text = await source();
+  assert.match(text, /runRealCodexScenario[\s\S]*?\], false\);/u);
+  assert.match(text, /markersAsCriteria \? markers : \[\]/u);
+});
+
+test('real Codex smoke uses the fast Luna model without changing target defaults', async () => {
+  const text = await source();
+  assert.match(text, /const realCodexSmokeModel = 'gpt-5\.6-luna'/u);
+  assert.match(text, /spawn\('codex', \['--model', '\$\{realCodexSmokeModel\}'/u);
+  assert.match(text, /overrides\.realCodex \? context\.realCodexPath : context\.fakeCodexPath/u);
+});
+
+test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {
+  const text = await source();
+  const fixture = text.slice(text.indexOf('function writeBrowserProof'), text.indexOf('function writeAgentReport'));
+  assert.match(fixture, /entrypoint: 'http:\/\/127\.0\.0\.1:/u);
+});
+
+test('incomplete-progress retry uses a deterministic clean transport failure before the retry', async () => {
+  const text = await source();
+  const fixture = text.slice(text.indexOf("scenario === 'incomplete-progress-rework'"), text.indexOf("if (scenario === 'safety-negative')"));
+  assert.match(fixture, /stream disconnected before completion/u);
+  assert.doesNotMatch(fixture, /setInterval/u);
+});
+
+test('strict cleanup retries eventually consistent observations before failing', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    retryCleanupObservation: (action: () => Promise<void>, options: { attempts: number; delayMs: number }) => Promise<void>;
+  };
+  let attempts = 0;
+  await module.retryCleanupObservation(async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error('not settled');
+  }, { attempts: 3, delayMs: 0 });
+  assert.equal(attempts, 3);
+
+  await assert.rejects(module.retryCleanupObservation(async () => {
+    throw new Error('still present');
+  }, { attempts: 2, delayMs: 0 }), /still present/u);
 });

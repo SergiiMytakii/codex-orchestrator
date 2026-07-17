@@ -1,5 +1,7 @@
 import { posix } from 'node:path';
 
+import { agentReportEnvelopeSchema } from './report-envelope.js';
+
 const MAX_STRING_LENGTH = 16 * 1024;
 const MAX_SUMMARY_LENGTH = 4 * 1024;
 const MAX_ARRAY_LENGTH = 256;
@@ -48,13 +50,11 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
     changedFiles: {
       type: 'array',
       maxItems: MAX_ARRAY_LENGTH,
-      uniqueItems: true,
       items: relativePathSchema(),
     },
     residualRisks: stringArraySchema(),
   };
-  return {
-    oneOf: [
+  return agentReportEnvelopeSchema([
       {
         type: 'object',
         additionalProperties: false,
@@ -75,8 +75,7 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
           blocker: externalBlockerSchema(),
         },
       },
-    ],
-  };
+  ]);
 }
 
 export function implementationReportRepairDiagnostic(error: unknown): string {
@@ -127,7 +126,7 @@ function relativePathSchema(): Record<string, unknown> {
     type: 'string',
     minLength: 1,
     maxLength: MAX_STRING_LENGTH,
-    pattern: '^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*\\/$).+$',
+    pattern: '^[^/\\\\]$|^[^/\\\\][^\\\\]*[^/\\\\]$',
   };
 }
 
