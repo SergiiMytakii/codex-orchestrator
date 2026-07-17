@@ -38,6 +38,8 @@ import {
   type RouteCoordinatorState,
 } from './route-coordinator.js';
 import type { RoutedContinuationRegistry } from './route-continuations.js';
+import type { SpecCoordinatorResult, SpecDeliveryState } from './spec-coordinator.js';
+import type { FrozenSpecReceiptV1 } from './spec-delivery.js';
 import type { WaitingHumanState } from './waiting-human-coordinator.js';
 import type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1 } from './waiting-human.js';
 import {
@@ -57,6 +59,7 @@ import type {
 export type RunIssueResult =
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string }
   | { status: 'route-ready'; route: 'spec-required' | 'awaiting-user'; evidencePath: string }
+  | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1; evidencePath: string }
   | { status: 'awaiting-user'; questionId: string; answerPrefix: string; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
@@ -501,16 +504,8 @@ export class RunIssue {
             frozenCriteria = structuredClone(active.record.frozenCriteria);
           }
           if (existing.lifecycle === 'spec-authoring') {
-            const evidence = await this.dependencies.writeEvidence({
-              runId,
-              code: 'route-ready',
-              summary: existing.routeReceipt?.route ?? existing.lifecycle,
-            });
-            return {
-              status: 'route-ready',
-              route: 'spec-required',
-              evidencePath: evidence.path,
-            };
+            if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
+            return await this.continueSpecRequired(active);
           }
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
@@ -1093,7 +1088,7 @@ export class RunIssue {
     }
     const continuation = receipt.route === 'direct'
       ? await this.dependencies.routeContinuations.direct(context)
-      : await this.dependencies.routeContinuations.specRequired(context);
+      : await this.dependencies.routeContinuations.specRequired(context, this.specState(() => active, (next) => { active = next; }), this.signal);
     if (continuation.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
     if (continuation.status === 'blocked') {
       return { result: await this.terminal(active, {
@@ -1104,12 +1099,10 @@ export class RunIssue {
       return { result: await this.terminal(active, { status: 'transport-failed', resumable: true }, continuation.code) };
     }
     if (receipt.route !== 'direct') {
-      const evidence = await this.dependencies.writeEvidence({
-        runId: active.record.runId,
-        code: 'route-ready',
-        summary: receipt.route,
-      });
-      return { result: { status: 'route-ready', route: receipt.route, evidencePath: evidence.path } };
+      const specContinuation = continuation as SpecCoordinatorResult;
+      if (specContinuation.status !== 'completed') return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
+      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: specContinuation.receipt.receiptSha256 });
+      return { result: { status: 'spec-frozen', receipt: specContinuation.receipt, evidencePath: evidence.path } };
     }
     return { active };
   }
@@ -1134,6 +1127,44 @@ export class RunIssue {
         return true;
       },
     };
+  }
+
+  private specState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): SpecDeliveryState {
+    return {
+      read: async () => structuredClone(readActive().record.specDelivery),
+      compareAndSwap: async (expected, next) => {
+        const active = readActive();
+        const observed = active.record.specDelivery;
+        if (observed === undefined || expected === undefined) {
+          if (observed !== expected) return false;
+        } else if (canonicalJson(observed) !== canonicalJson(expected)) return false;
+        const saved = await this.persist(active, { specDelivery: structuredClone(next) });
+        writeActive(saved);
+        return true;
+      },
+    };
+  }
+
+  private async continueSpecRequired(active: ActiveRun): Promise<RunIssueResult> {
+    if (!active.record.routeReceipt || active.record.routeReceipt.route !== 'spec-required') {
+      return await this.terminal(active, { status: 'internal-error', code: 'spec-route-missing' });
+    }
+    let current = active;
+    const context = {
+      runId: current.record.runId, issue: structuredClone(current.record.issueSnapshot),
+      frozenCriteria: structuredClone(current.record.frozenCriteria), worktreePath: current.record.worktreePath,
+      workflowGeneration: structuredClone(current.record.workflowGeneration), receipt: structuredClone(current.record.routeReceipt!),
+    };
+    const result: SpecCoordinatorResult = await this.dependencies.routeContinuations.specRequired(
+      context, this.specState(() => current, (next) => { current = next; }), this.signal,
+    );
+    if (result.status === 'completed') {
+      const evidence = await this.dependencies.writeEvidence({ runId: current.record.runId, code: 'spec-frozen', summary: result.receipt.receiptSha256 });
+      return { status: 'spec-frozen', receipt: result.receipt, evidencePath: evidence.path };
+    }
+    if (result.status === 'cancelled') return await this.terminal(current, { status: 'cancelled' });
+    if (result.status === 'retryable') return await this.terminal(current, { status: 'transport-failed', resumable: true }, result.code);
+    return await this.terminal(current, { status: 'blocked', kind: result.kind, resumable: result.kind !== 'exhausted' }, result.code);
   }
 
   private async continueWaitingHuman(active: ActiveRun): Promise<{ result: RunIssueResult } | { active: ActiveRun }> {

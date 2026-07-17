@@ -26,6 +26,8 @@ import {
 } from '../src/v2/run-store.js';
 import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
+import { SpecCoordinator } from '../src/v2/spec-coordinator.js';
+import { createSpecRevision } from '../src/v2/spec-delivery.js';
 import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
 import { mkdtemp } from './mission-test-temp.js';
 
@@ -69,6 +71,21 @@ test('initial and persisted waiting routes use one durable continuation without 
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(replay, first);
   assert.equal(fixture.events.slice(effects).includes('agent'), false);
+});
+
+test('spec-required route freezes independently reviewed authority without product implementation', async () => {
+  const fixture = await runFixture({ route: 'spec-required', agentWrites: false });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'spec-frozen', JSON.stringify(fixture.events));
+  assert.equal(fixture.events.includes('agent'), false);
+  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
+  const run = (await fixture.store.read()).runs[0]!;
+  assert.equal(run.lifecycle, 'spec-authoring');
+  assert.equal(run.specDelivery?.stage, 'frozen');
+  assert.equal(run.specDelivery?.frozen?.receiptSha256, result.status === 'spec-frozen' ? result.receipt.receiptSha256 : '');
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(replay, result);
+  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
 });
 
 test('trusted waiting answer reroutes the same run before implementation and retains terminal history', async () => {
@@ -595,8 +612,8 @@ test('cancellation also waits for an in-flight store write and remote effect bef
 
 interface FixtureOptions {
   ownerContention?: boolean;
-  route?: 'direct' | 'awaiting-user';
-  routeSequence?: Array<'direct' | 'awaiting-user'>;
+  route?: 'direct' | 'awaiting-user' | 'spec-required';
+  routeSequence?: Array<'direct' | 'awaiting-user' | 'spec-required'>;
   trustedAnswerOnReplay?: boolean;
   initialLabels?: string[];
   revokeAtAuthorization?: number;
@@ -727,7 +744,8 @@ async function runFixture(options: FixtureOptions = {}) {
           assert.equal(promptFacts.some((fact) => fact.includes(options.expectedTriageComment!)), true);
         }
         const expected = await state.read();
-        const awaiting = (options.routeSequence?.shift() ?? options.route) === 'awaiting-user';
+        const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
+        const awaiting = route === 'awaiting-user';
         const artifact = awaiting ? {
           version: 1 as const, status: 'awaiting-user' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
@@ -740,6 +758,12 @@ async function runFixture(options: FixtureOptions = {}) {
             absenceOfAuthorizedChoiceEvidence: ['No authorized answer.'], recommendation: 'Choose A.', question: 'A or B?',
           },
           blocker: null,
+        } : route === 'spec-required' ? {
+          version: 1 as const, status: 'spec-required' as const,
+          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
+          direct: null,
+          specRequired: { summary: 'Spec fixture.', complexityReasons: ['Durable review authority.'], specMode: 'standard' as const, reviewFocus: ['independence'] },
+          awaitingUser: null, blocker: null,
         } : {
           version: 1 as const, status: 'direct' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
@@ -758,7 +782,7 @@ async function runFixture(options: FixtureOptions = {}) {
         } : null;
         const receipt: RouteReceiptV1 = {
           version: 1,
-          route: awaiting ? 'awaiting-user' : 'direct',
+          route,
           triage,
           review,
           artifact,
@@ -784,7 +808,40 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     routeContinuations: {
       direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
-      specRequired: async () => ({ status: 'completed' }),
+      specRequired: (context, state, signal) => new SpecCoordinator({
+        state,
+        operation: {
+          author: async ({ state: delivery, onPrepared, onLaunched }) => {
+            events.push('spec-author');
+            const attemptId = `author-${delivery.revisions.length + 1}`;
+            const sessionId = delivery.authorSessionId ?? 'author-session';
+            await onPrepared({ attemptId, sessionId });
+            await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
+            return { status: 'completed', value: createSpecRevision({
+              revision: delivery.revisions.length + 1, path: '/state/spec.md', content: '# Frozen spec\n',
+              evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
+              author: { attemptId, sessionId }, previousRevision: delivery.revisions.at(-1) ?? null,
+            }) };
+          },
+          review: async ({ state: delivery, mode, onPrepared, onLaunched }) => {
+            events.push(`spec-review:${mode}`);
+            const attemptId = `review-${mode}`;
+            const sessionId = delivery.review.reviewer?.sessionId ?? 'review-session';
+            await onPrepared({ attemptId, sessionId });
+            await onLaunched({ attemptId, sessionId, pid: 702, processGroupId: 702 });
+            const target = delivery.revisions.at(-1)!;
+            return { status: 'completed', reportSha256: 'd'.repeat(64), value: {
+              version: 1 as const, targetRevision: target.revision, targetSha256: target.revisionSha256,
+              mode, verdict: 'approved' as const, reviewer: { attemptId, sessionId },
+              coverage: ['approved-product-intent','deterministic-executability','safety','scope','validation'],
+              defects: [], affectedDefectIds: [], affectedContracts: [],
+              closureRequestSha256: mode === 'closure' ? delivery.review.closureRequestSha256 : null,
+              acceptedRisks: [], coverageInvalidated: false,
+            } };
+          },
+          recover: async () => ({ status: 'blocked', kind: 'safety', code: 'unexpected-spec-recovery' }),
+        },
+      }).run(context, signal),
       awaitingUser: async (context, state) => {
         const current = await state.read();
         if (current?.phase === 'awaiting-answer') {

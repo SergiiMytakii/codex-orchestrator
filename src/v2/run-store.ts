@@ -1,5 +1,6 @@
 import type { ProofReceipt } from './proof-report.js';
 import { validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
+import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
   validateRouteExecution,
   validateRouteReceipt,
@@ -86,6 +87,7 @@ export interface RunRecordV1 {
   routeReceipt?: RouteReceiptV1;
   waitingHuman?: WaitingHumanExecutionV1;
   directReview?: DirectReviewV1;
+  specDelivery?: SpecDeliveryV1;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -98,7 +100,7 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
-    purpose?: 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof';
+    purpose?: 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof' | 'spec-author' | 'spec-review';
     resumeLifecycle?: Lifecycle;
     resumeReviewStage?: DirectReviewStage | null;
   };
@@ -211,6 +213,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'routeReceipt',
     'waitingHuman',
     'directReview',
+    'specDelivery',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -270,8 +273,15 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'direct') {
       throw new Error(`${field}.directReview requires a direct route`);
     }
-    const process = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
+    const rawProcess = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
       ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
+      : undefined;
+    const process = rawProcess && !['spec-author', 'spec-review'].includes(rawProcess.purpose)
+      ? {
+        purpose: rawProcess.purpose as 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof',
+        resumeLifecycle: rawProcess.resumeLifecycle,
+        resumeReviewStage: rawProcess.resumeReviewStage,
+      }
       : undefined;
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
@@ -282,6 +292,16 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
         resumeReviewStage: process.resumeReviewStage,
       } } : {}),
     });
+  }
+  if (hasOwn(value, 'specDelivery')) {
+    if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'spec-required') {
+      throw new Error(`${field}.specDelivery requires a spec-required route`);
+    }
+    const spec = validateSpecDelivery(value.specDelivery);
+    if (spec.issueNumber !== value.issueNumber || spec.runId !== value.runId
+      || spec.workflowGenerationSha256 !== routeGenerationHash) {
+      throw new Error(`${field}.specDelivery identity binding is invalid`);
+    }
   }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
@@ -354,7 +374,7 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
   if (extended) {
-    if (!['route', 'implementation', 'cleanup-review', 'code-review', 'proof'].includes(value.purpose as string)) {
+    if (!['route', 'implementation', 'cleanup-review', 'code-review', 'proof', 'spec-author', 'spec-review'].includes(value.purpose as string)) {
       throw new Error(`${field}.purpose is invalid`);
     }
     if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);

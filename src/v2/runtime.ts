@@ -31,6 +31,9 @@ import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
 import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import { RouteCoordinator } from './route-coordinator.js';
+import { SpecCoordinator, type SpecDeliveryOperation } from './spec-coordinator.js';
+import { createSpecRevision, type SpecReviewReportV1 } from './spec-delivery.js';
+import { validateCodeReviewDefects } from './code-review-report.js';
 import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
 import { OwnerLockContentionError, OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
@@ -580,6 +583,155 @@ export function createV2Runtime(input: {
     operation: reportOperation,
     createAttemptId: input.createAttemptId ?? randomUUID,
   });
+  const createAttemptId = input.createAttemptId ?? randomUUID;
+  const specOperation: SpecDeliveryOperation = {
+    author: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
+      const attemptId = createAttemptId();
+      const sessionId = state.authorSessionId ?? randomUUID();
+      let attempt;
+      try {
+        attempt = await prepareContainedAttempt({
+          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
+          attemptId, operationId: 'spec-author', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
+        });
+        const revisionPath = join(dirname(attempt.reportPath), `revision-${state.revisions.length + 1}.md`);
+        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
+        const config = requireConfig(currentConfig);
+        const result = await containedProcess.run({
+          codexPath: config.codex.command, cwd: dirname(attempt.reportPath), schemaPath: attempt.schemaPath,
+          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
+          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
+          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
+          operationPolicy: attempt.policy, executionProfile: attempt.profile,
+          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
+          prompt: [
+            `Package profile instructions: ${attempt.profile.developerInstructions}`,
+            `Follow the exact operation at ${attempt.operationPath}.`,
+            `The immutable workflow root is ${attempt.workflowRoot}.`,
+            `Author mode: ${mode}. Issue authority: ${canonicalJson(context.issue)}.`,
+            `Frozen criteria: ${canonicalJson(context.frozenCriteria)}.`,
+            `Prior revisions and review state: ${canonicalJson({ revisions: state.revisions, review: state.review })}.`,
+            `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
+            'Do not modify the product worktree, prior revisions, external state, or any .env file.',
+          ].join('\n'),
+        }, signal);
+        if (result.kind === 'cancelled') return { status: 'cancelled' };
+        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
+        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
+        const report = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
+        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        const content = await readRegularFile(revisionPath);
+        if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        const previous = state.revisions.at(-1) ?? null;
+        return { status: 'completed', value: createSpecRevision({
+          revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
+          evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
+          author: { attemptId, sessionId }, previousRevision: previous,
+        }) };
+      } catch (error) {
+        if (error instanceof ProcessQuiescenceError) {
+          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-author-process-quiescence' }; }
+          catch { return { status: 'blocked', kind: 'safety', code: 'spec-author-process-absence-unconfirmed' }; }
+        }
+        return { status: 'retryable', code: 'spec-author-report-invalid' };
+      }
+    },
+    review: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
+      const attemptId = createAttemptId();
+      const sessionId = state.review.reviewer?.sessionId ?? randomUUID();
+      try {
+        const attempt = await prepareContainedAttempt({
+          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
+          attemptId, operationId: 'spec-review', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
+        });
+        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
+        const config = requireConfig(currentConfig);
+        const result = await containedProcess.run({
+          codexPath: config.codex.command, cwd: context.worktreePath, schemaPath: attempt.schemaPath,
+          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
+          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
+          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
+          operationPolicy: attempt.policy, executionProfile: attempt.profile,
+          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
+          prompt: [
+            `Package profile instructions: ${attempt.profile.developerInstructions}`,
+            `Follow the exact operation at ${attempt.operationPath}.`,
+            `Reviewer session ID: ${sessionId}. Review mode: ${mode}.`,
+            `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
+            `Immutable spec delivery state: ${canonicalJson(state)}.`,
+            'Return only the package spec-review report. Do not edit files or external state.',
+          ].join('\n'),
+        }, signal);
+        if (result.kind === 'cancelled') return { status: 'cancelled' };
+        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
+        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
+        const raw = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
+        if (raw.mode !== mode || raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
+          || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts) || !Array.isArray(raw.acceptedRisks)
+          || typeof raw.coverageInvalidated !== 'boolean'
+          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'retryable', code: 'spec-review-report-invalid' };
+        const target = state.revisions.at(-1)!;
+        const defects = validateCodeReviewDefects(raw.defects, target.revision);
+        const report: SpecReviewReportV1 = {
+          version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256, mode,
+          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId, sessionId },
+          coverage: raw.coverage as string[], defects,
+          affectedDefectIds: raw.affectedDefectIds as string[],
+          affectedContracts: raw.affectedContracts as string[],
+          closureRequestSha256: mode === 'closure' ? state.review.closureRequestSha256 : null,
+          acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
+        };
+        return { status: 'completed', value: report, reportSha256: sha256(result.report.bytes) };
+      } catch (error) {
+        if (error instanceof ProcessQuiescenceError) {
+          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-review-process-quiescence' }; }
+          catch { return { status: 'blocked', kind: 'safety', code: 'spec-review-process-absence-unconfirmed' }; }
+        }
+        return { status: 'retryable', code: 'spec-review-report-invalid' };
+      }
+    },
+    recover: async ({ context, state, signal }) => {
+      const invocation = state.invocation;
+      if (!invocation || signal.aborted) return signal.aborted ? { status: 'cancelled' } : { status: 'blocked', kind: 'safety', code: 'spec-recovery-invocation-missing' };
+      if (invocation.status === 'launched') {
+        try { await waitForProcessGroupAbsent(invocation.processGroupId!); }
+        catch { return { status: 'blocked', kind: 'safety', code: 'spec-process-absence-unconfirmed' }; }
+      }
+      if (!invocation.reportPath) return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` };
+      let reportBytes: Buffer;
+      try { reportBytes = await readRegularFile(invocation.reportPath); }
+      catch { return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` }; }
+      if (invocation.purpose === 'author') {
+        if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        try {
+          const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
+          const content = await readRegularFile(invocation.revisionPath);
+          if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
+          return { status: 'completed', value: createSpecRevision({
+            revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
+            evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
+            author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
+          }) };
+        } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
+      }
+      try {
+        const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
+        if (raw.mode !== invocation.mode || raw.reviewerSessionId !== invocation.sessionId || !Array.isArray(raw.coverage)
+          || !Array.isArray(raw.defects) || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts)
+          || typeof raw.coverageInvalidated !== 'boolean' || !['approved','needs-work','rejected'].includes(raw.verdict as string)) {
+          return { status: 'retryable', code: 'spec-review-report-invalid' };
+        }
+        const defects = validateCodeReviewDefects(raw.defects, invocation.targetRevision);
+        return { status: 'completed', reportSha256: sha256(reportBytes), value: {
+          version: 1, targetRevision: invocation.targetRevision, targetSha256: invocation.targetSha256!,
+          mode: invocation.mode as 'full'|'closure', verdict: raw.verdict as SpecReviewReportV1['verdict'],
+          reviewer: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, coverage: raw.coverage as string[], defects,
+          affectedDefectIds: raw.affectedDefectIds as string[], affectedContracts: raw.affectedContracts as string[],
+          closureRequestSha256: invocation.closureRequestSha256, acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
+        } };
+      } catch { return { status: 'retryable', code: 'spec-review-report-invalid' }; }
+    },
+  };
 
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
@@ -728,7 +880,7 @@ export function createV2Runtime(input: {
     },
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
-      specRequired: async () => ({ status: 'completed' }),
+      specRequired: (context, state, signal) => new SpecCoordinator({ state, operation: specOperation }).run(context, signal),
       awaitingUser: async (context, state, signal) => {
         const config = requireConfig(currentConfig);
         return new WaitingHumanCoordinator({
@@ -963,7 +1115,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review';
+  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review' | 'spec-author' | 'spec-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -987,7 +1139,7 @@ async function prepareContainedAttempt(input: {
     bootId: input.bootId,
   });
   const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review'
-    || input.operationId === 'cleanup-review' || input.operationId === 'code-review';
+    || input.operationId === 'cleanup-review' || input.operationId === 'code-review' || input.operationId === 'spec-review';
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'
       || snapshot.policy.worktreeAccess !== 'read-only'

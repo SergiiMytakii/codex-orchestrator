@@ -55,6 +55,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
     'route-ready',
+    'spec-frozen',
     'awaiting-user',
     'not-eligible',
     'blocked',
@@ -120,6 +121,11 @@ test('candidate CLI JSON and exit mapping are total over every public runIssue o
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
     { result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence/route.json' }, exit: 0 },
+    { result: { status: 'spec-frozen', receipt: {
+      version: 1, issueNumber: 42, runId: 'run-42', workflowGenerationSha256: 'a'.repeat(64), revision: 1,
+      path: '/state/spec.md', contentSha256: 'b'.repeat(64), revisionSha256: 'c'.repeat(64),
+      reviewReportSha256: 'd'.repeat(64), reviewerSessionId: 'reviewer', receiptSha256: 'e'.repeat(64),
+    }, evidencePath: 'evidence/spec.json' }, exit: 0 },
     { result: { status: 'awaiting-user', questionId: 'q-00000000000000000000', answerPrefix: 'Answer q-00000000000000000000:', evidencePath: 'evidence/wait.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },

@@ -6,6 +6,10 @@ export { codeReviewReportOutputSchema, hashClosureRequest, hashCodeReviewReport,
 export type { CodeReviewDefectV1, CodeReviewReportV1, CodeReviewValidationContext } from './v2/code-review-report.js';
 export { ContainedImplementationReviewer } from './v2/implementation-reviewer.js';
 export type { ImplementationReviewerInput, ImplementationReviewerResult } from './v2/implementation-reviewer.js';
+export { SpecCoordinator } from './v2/spec-coordinator.js';
+export type { SpecCoordinatorResult, SpecDeliveryOperation, SpecDeliveryState } from './v2/spec-coordinator.js';
+export { createInitialSpecDelivery, createSpecRevision, freezeApprovedSpec, validateFrozenSpecReceipt, validateSpecDelivery } from './v2/spec-delivery.js';
+export type { FrozenSpecReceiptV1, SpecDeliveryV1, SpecReviewReportV1, SpecRevisionV1 } from './v2/spec-delivery.js';
 export { parseAgentAutoConfig } from './v2/config.js';
 export type { AgentAutoConfigV1 } from './v2/config.js';
 export { validateImplementationReport } from './v2/implementation-report.js';
