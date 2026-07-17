@@ -35,6 +35,7 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 - The Runner chooses an Eligible Issue and owns its Run.
 - The Agent implements; the Runner validates and publishes.
 - Checks create a Checked Change; Acceptance Proof can accept only that unchanged binding.
-- Agent shell commands and subagents have no inherited parent authorization.
+- Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
+  shared Codex auth and same-user local reads remain an accepted local risk.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
 - Five failed implementation cycles exhaust the Run without publication.

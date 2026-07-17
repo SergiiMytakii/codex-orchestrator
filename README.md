@@ -8,7 +8,7 @@ Codex Orchestrator is a runner-owned GitHub Issue loop for Codex. The public run
 - `git`, `gh`, and the configured Codex CLI
 - an authenticated parent Codex installation and GitHub CLI
 
-Authentication remains in the trusted parent process. Child shell commands and agent processes receive only the runtime's explicit environment allowlist; GitHub, SSH, npm, cloud, and parent Codex credentials are not forwarded.
+GitHub, SSH, npm, and cloud publication credentials remain in the trusted Runner and are not forwarded through the child environment. Ordinary Codex execution and native Codex subagents may use the same user-owned Codex authentication and may read files available to the same local OS user; this is an explicit accepted local-read risk, not an external-publication grant.
 
 ## Install and configure
 

@@ -14,7 +14,9 @@ Giving an Agent dynamic authority over priority, stopping, credentials, or publi
 
 ## Consequences
 
-- Agent shell commands and native subagents do not inherit parent credentials.
+- Agent tool environments do not inherit GitHub, SSH, npm, or cloud publication
+  credentials; shared user-owned Codex auth and same-user local reads remain an
+  explicit accepted risk.
 - Checks, device leases, issue mutations, Git, and GitHub publication remain finite Runner actions.
 - Ambiguous ownership or effect outcome fails closed.
 - There is no alternate parent-planning or scoped public loop.

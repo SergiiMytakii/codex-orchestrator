@@ -5,7 +5,7 @@ source_type: "plan"
 source_plan: "/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md"
 source_issues:
   - "None"
-status: "in-progress"
+status: "complete"
 execution_model: "single-agent"
 spec_mode: "full"
 review_profile: "high"
@@ -77,15 +77,15 @@ review_coverage: "Root executable self-checks replace independent review and mus
 - [x] Rewrite README, AGENTS, CONTEXT, execution routing, deep dive, ADRs 0001/0002, live-smoke checklist, and changelog so V2 is the only authority; document install/update ownership, first setup, explicit label preparation, and one-time `setup --fresh`.
 - [x] Remove package-auth, copied-prompt, skill activation/preparation, automatic migration, Fresh-Context Review, plan-auto, and old proof-command guidance.
 - [x] Inspect `npm pack --dry-run --json`; assert one CLI/runtime, exact internal skills, no forbidden source/assets, and no consumer mutation hooks.
-- [ ] Run the compact four-scenario core live profile against scratch with strict cleanup because public package bytes changed; do not run mobile-proof because mobile code is unchanged.
-- [ ] **Exit Gate:** local/package/live gates are GREEN, scratch cleanup is verified, and no implementation-branch push or package publication occurred.
+- [x] Run the compact four-scenario core live profile against scratch with strict cleanup because public package bytes changed; do not run mobile-proof because mobile code is unchanged.
+- [x] **Exit Gate:** local/package/live gates are GREEN, scratch cleanup is verified, and no implementation-branch push or package publication occurred.
 
 ## 4. Halt Conditions
 
-- [ ] Stop if V2 still imports a policy-bearing Legacy coordinator after the adapter closure is computed.
-- [ ] Stop if packed help/bin/export can reach both `src/cli` and `src/v2/candidate-cli` authorities.
-- [ ] Stop if tarball inventory includes `prompts/`, bridge runtime, plan-auto/tree/mission code, or old tests.
-- [ ] Stop live validation if scratch cleanup cannot identify exact run-owned artifacts.
+- [x] Verified V2 imports no policy-bearing Legacy coordinator after the adapter closure was computed.
+- [x] Verified packed help/bin/export reaches only `src/v2/candidate-cli`.
+- [x] Verified tarball inventory excludes `prompts/`, bridge runtime, plan-auto/tree/mission code, and old tests.
+- [x] Verified scratch cleanup identified and removed exact run-owned artifacts.
 
 ## 5. Validation And Done Criteria
 
@@ -93,12 +93,22 @@ review_coverage: "Root executable self-checks replace independent review and mus
 - [x] **Tests:** `npm test` plus focused packed CLI/export/import-closure/package-consumer tests (163/163) and local self-improvement tests (31/31).
 - [x] **Architecture Check:** recursive import closure, forbidden source/docs scan, and one-authority tarball inventory.
 - [x] **Package:** `npm pack --dry-run --json` and clean consumer install/update.
-- [ ] **Live:** compact `core-release` against scratch with default Codex and strict cleanup.
+- [x] **Live:** compact `core-release` against scratch with default Codex and strict cleanup; 4/4 passed in `/var/folders/vl/r4rjhh8j3kzgnw16w8c27zm40000gn/T/codex-orchestrator-v2-smoke-20260717085733-p2PqKC/live-smoke-report.md`.
 - [x] **Diff:** `git diff --check`.
 - [x] **Review:** independent cleanup/final review remain explicitly waived; root records executable self-check findings and repairs.
-- [ ] **Final Reconciliation:** Spec 8, Spec 7, and master tables/checklists contain no unexplained unchecked item or open defect.
-- [ ] **Final Handoff Requirements:** report the public contract, deleted surfaces, retained adapter closure, package inventory, local/live validation, cleanup, skipped mobile/review gates, residual risks, commits, and files by role.
+- [x] **Final Reconciliation:** Spec 8, Spec 7, and master tables/checklists contain no unexplained unchecked item or open defect.
+- [x] **Final Handoff Requirements:** report the public contract, deleted surfaces, retained adapter closure, package inventory, local/live validation, cleanup, skipped mobile/review gates, residual risks, commits, and files by role.
 
-## 6. Final Action
+## 6. Execution Outcome
+
+- Public cutover checkpoint: `477648c` (`feat: cut over public runtime to v2`).
+- Local validation: `npm run typecheck`; `npm test` 163/163; self-improvement 31/31; clean package consumer install/update; `npm pack --dry-run --json`; `git diff --check`.
+- Package result: one V2 CLI/runtime, 148 entries, 180235 packed bytes, exact package-owned internal skills, no prompts/bridge/old tests or alternate runtime.
+- Live result: package-install, real-codex, browser-proof, and safety-negative passed against `SergiiMytakii/codex-orchestrator-live-smoke`; strict cleanup passed.
+- Skipped by contract: mobile proof because mobile code did not change; independent cleanup/final reviews because the user waived them.
+- Residual accepted risk: ordinary Codex and native subagents may use shared user-owned Codex auth and read same-user host files; external publication credentials remain scrubbed and credential material is forbidden in outputs/artifacts.
+- No push, npm publication, release, production-repository mutation, or user-owned mobile-session takeover occurred.
+
+## 7. Final Action
 
 Execute this spec immediately as the current authorized child. Do not push, publish, or create a release. Completion requires one public V2 authority and a tarball with no superseded runtime.

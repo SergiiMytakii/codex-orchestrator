@@ -17,9 +17,9 @@ The Runner is trusted. It owns:
 - Git commits, branches, pushes, pull requests, labels, and comments;
 - mobile leases and proof artifact validation.
 
-Implementation and proof Codex processes are untrusted workers. They receive bounded input, a dedicated runtime home, a safe `PATH`, and only explicitly allowed non-secret environment values. They may use native subagents inside that contained process, but neither a shell command nor a subagent inherits the parent's GitHub, SSH, npm, cloud, or Codex authentication. Operations that need those credentials are requested through finite Runner-owned actions.
+Implementation and proof Codex processes are untrusted workers. They receive bounded input, a dedicated tool home, a safe `PATH`, and only explicitly allowed non-secret tool environment values. Ordinary Codex execution and native Codex subagents may use the same user-owned Codex authentication and can read files available to the same local OS user; the containment certificate records this explicitly. GitHub, SSH, npm, and cloud publication credentials are scrubbed, and operations that require external authority remain finite Runner-owned actions.
 
-This isolation prevents prompt content or repository code from turning inherited credentials into arbitrary external writes. A child can still implement, inspect, test, and produce a structured report; the Runner performs authorized publication after validation.
+This boundary prevents prompt content or repository code from receiving external publication authority. It does not claim OS-level secrecy from the current local user, so reports and artifacts are separately checked for credential/path disclosure. A child can implement, inspect, test, and report; the Runner performs authorized publication after validation.
 
 ## Configuration
 

@@ -5,7 +5,7 @@ source_type: "plan"
 source_plan: "/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md"
 source_issues:
   - "None"
-status: "ready"
+status: "complete"
 execution_model: "single-agent"
 spec_mode: "full"
 review_profile: "high"
@@ -47,7 +47,7 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **[Spec 5 — iOS proof](0045-agent-auto-v2-ios-proof.md)** | 6 | Runner-created iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and waived-review reconciliation; Xcode, Simulator runtime/device type, and the safe temporary XCUITest fixture path are confirmed. |
 | **[Spec 6 — Setup](0125-agent-auto-v2-setup.md)** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and waived-review reconciliation; config/state roots are settled. |
 | **[Spec 7 — Operational consumers](0150-agent-auto-v2-operational-consumers.md)** | 8-9 | Complete at checkpoints `1f829c3`, `0f70f9d`, `b7b2577`, and `26ce2eb`; packed core/extended live smoke, typed daily canary path, strict cleanup, and waiver reconciliation are recorded. | Spec 6 is fully complete; separate scratch authorization was granted and consumed without production mutation. |
-| **[Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md)** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is complete under `S7-DAILY-CANARY-002`; every earlier spec remains reconciled and implementation may start. |
+| **[Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md)** | 10 | Complete at checkpoint `477648c`; one public V2 CLI/runtime, old runtime deletion, authoritative docs/ADR updates, clean tarball, 163/163 tests, 31/31 self-improvement tests, and final 4/4 scratch smoke with strict cleanup. | Complete; no push, publish, release, production mutation, mobile takeover, or independent review occurred. |
 
 Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `implementation-spec-maker`, checked against the then-current implementation, and linked into this table before their implementation starts. Independent reviews remain waived until the user changes that decision.
 
@@ -77,11 +77,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
-| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 5 |
-| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 6 |
-| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green through Spec 6 |
-| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 5 |
-| Final tarball contains one runtime path and no plan-auto/graph/app-server/migration compatibility surface. | Cutover ships two authorities or preserves the complexity the rewrite is intended to remove. | Spec 8 tarball inventory and public CLI/export snapshots | planned |
+| Specs execute serially and a later spec starts only after its predecessor exit gate and review checkpoint are green. | Parallel or out-of-order work redefines shared contracts and makes failures impossible to attribute. | Master checklist plus predecessor spec reconciliation before child-spec creation | green through Spec 8 |
+| `RunIssue`, `AcceptanceProof`, `Setup.execute`, `CheckedChange`, and `ProofReceipt` retain the approved ownership and Interface shapes across all specs. | A later platform/setup/recovery slice leaks complexity into callers or creates multiple policy owners. | Interface-shape tests introduced in Spec 1 and rerun by every later spec | green through Spec 8 |
+| The installed public bin remains on the old runtime until Spec 8, while earlier specs test an isolated V2 candidate path. | A partially implemented V2 replaces working setup/status/proof behavior before recovery/platform coverage exists. | Package bin/export snapshot before Spec 8; final cutover snapshot in Spec 8 | green; cut over once in Spec 8 |
+| Live GitHub/mobile/release effects run only at their explicit gates and never as ordinary unit-test side effects. | Spec execution mutates real repositories/devices or publishes an incomplete package. | Child-spec precondition and explicit live command record | green through Spec 8 |
+| Final tarball contains one runtime path and no plan-auto/graph/app-server/migration compatibility surface. | Cutover ships two authorities or preserves the complexity the rewrite is intended to remove. | Spec 8 tarball inventory and public CLI/export snapshots | green |
 
 ## 6. Master Execution Checklist
 
@@ -123,23 +123,23 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 ### Phase 8 — Cutover and deletion
 
 - [x] Author the final cutover spec after every previous checklist is reconciled; independent review remains user-waived.
-- [ ] Switch the public entrypoint once, delete superseded runtime/tests/docs, run cleanup/final code review, and prove the packed package has one authority.
+- [x] Switch the public entrypoint once, delete superseded runtime/tests/docs, apply the user's review waiver, and prove the packed package has one authority.
 
 ## 7. Halt Conditions
 
-- [ ] Stop if `v0.1.51`, `codex/v2-agent-auto`, or the intended worktree path resolves to a different state than Section 3.
-- [ ] Stop if a child spec needs to change an approved Module owner or stable Interface rather than only its private Implementation.
-- [ ] Stop if containment canaries expose runner/GitHub/npm/SSH/cloud credentials, production commands, or credential/path output to agent tools. Shared Codex auth and user-readable host files are explicitly accepted.
-- [ ] Stop if a live/mobile/release gate is required but authorization or a safe environment is absent; preserve the completed local work and exact blocker.
-- [ ] Stop final cutover if any prior child spec, real platform proof, relevant live smoke, cleanup review, or final code review remains incomplete.
+- [x] Verified `v0.1.51`, `codex/v2-agent-auto`, and the intended worktree matched Section 3.
+- [x] Verified no child changed an approved Module owner or stable Interface.
+- [x] Verified containment exposed no runner/GitHub/npm/SSH/cloud credentials, production commands, or credential/path output beyond the accepted shared Codex-auth and same-user local-read risk.
+- [x] Verified authorized scratch/live and earlier mobile gates had safe environments; release/publication remained out of scope.
+- [x] Verified all prior child specs and required real platform/live evidence were complete; independent cleanup/final review remained explicitly waived.
 
 ## 8. Validation And Done Criteria
 
-- [ ] Master table links every created child spec and records its terminal review outcome.
-- [ ] Every child checklist and Contract Test Ledger is reconciled.
-- [ ] Every required early `$code-review`, cleanup review, and final `$code-review` is recorded.
-- [ ] The final implementation satisfies the plan's package-consumer, setup/cutover, real browser/mobile, relevant live-smoke, typecheck, full-test, `git diff --check`, and tarball gates.
-- [ ] No open blocker or unaccepted execution risk remains.
+- [x] Master table links every created child spec and records its terminal review outcome.
+- [x] Every child checklist and Contract Test Ledger is reconciled.
+- [x] Every review gate is recorded as completed before the waiver or explicitly user-waived; Spec 8 cleanup/final reviews are waived.
+- [x] The final implementation satisfies the plan's package-consumer, setup/cutover, real browser/mobile, relevant live-smoke, typecheck, full-test, `git diff --check`, and tarball gates.
+- [x] No open blocker or unaccepted execution risk remains.
 
 ## 9. Defect Closure Notes
 
@@ -154,12 +154,12 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** [Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md) — ready and authorized for immediate single-agent execution.
-- **Execution Outcome:** Specs 1-6 are complete. Spec 6's typed Setup, config-last configure, explicit label reconciliation, read-only diagnostics, bounded Legacy reader, dual-fence copy-only fresh cutover, matching-manifest crash replay, no-follow store, package consumer, full test, and containment gates are GREEN under the independent-review waiver.
+- **Current Child:** None. [Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md) is complete; the root program is finished.
+- **Execution Outcome:** Specs 1-8 are complete. One public V2 CLI/runtime remains; package, setup, recovery, proof, browser, Android, iOS, operational consumer, deletion, documentation, and scratch live gates are GREEN under the recorded review waivers.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 7 is complete after authorized core/extended scratch smoke, typed daily canary execution, the absolute-target consumer repair, accepted bounded-canary risk `S7-DAILY-CANARY-002`, and strict cleanup. Spec 8 is now the only authorized child.
+- **Sequencing Decision:** The sequence is closed. Spec 8 passed local/package gates and the compact 4/4 scratch smoke with strict cleanup; no further child spec is authorized or required.
 
 ## 10. Final Action
 
-After saving or updating this master, report the exact current child spec, its gate, review outcome, validation gates, and blockers. Do not claim the whole v2 program complete until Phase 8 is complete.
+The whole V2 program is complete. Report the final public contract, validation evidence, review/mobile skips, accepted local-read risk, commits, and explicit no-push/no-publish outcome.

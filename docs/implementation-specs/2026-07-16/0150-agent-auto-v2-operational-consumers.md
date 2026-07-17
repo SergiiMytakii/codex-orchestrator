@@ -5,7 +5,7 @@ source_type: "plan"
 source_plan: "/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md"
 source_issues:
   - "None"
-status: "ready"
+status: "complete"
 execution_model: "single-agent"
 spec_mode: "full"
 review_profile: "high"

@@ -20,10 +20,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   package.
 
 ### Security
-- Contained agent processes and their shell commands or native subagents no
-  longer inherit parent credentials. Proof rejects credentials in every text
-  artifact while applying public-only host-identity restrictions to evidence
-  intended for publication.
+- Contained tool environments exclude GitHub, SSH, npm, and cloud publication
+  credentials while preserving the explicitly accepted shared Codex-auth and
+  same-user local-read behavior. Proof rejects credentials in every text
+  artifact and applies public-only host-identity restrictions to evidence.
 
 ## [0.1.51] - 2026-07-15
 

@@ -22,7 +22,9 @@ The build must clean `dist` before compilation. Stale compiled modules are a pac
 ## Ownership rules
 
 - Agent processes may change only their assigned worktree and structured report/artifact paths.
-- Shell commands and native subagents do not inherit parent credentials.
+- Tool environments do not inherit GitHub, SSH, npm, or cloud publication
+  credentials. Shared user-owned Codex auth and same-user host-file reads are an
+  explicit accepted local risk and must never be copied into output.
 - Only Runner adapters may perform GitHub writes, publication, durable ownership, or device lease actions.
 - All direct and daemon work must enter the same `runIssue` lifecycle.
 - Target policy belongs under `.codex-orchestrator/`; reusable behavior belongs under `src/v2/`.
