@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { lstat, readFile, rm } from 'node:fs/promises';
+import { finished } from 'node:stream/promises';
 
 import { buildContainmentCodexArgs, buildContainmentCodexEnvironment } from './containment.js';
 
@@ -376,14 +377,15 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
     processGroupId: pid,
     lastActivityAt: () => lastActivity,
     writeStdinAndClose: async (value) => {
-      await new Promise<void>((resolveWrite, rejectWrite) => {
-        const onError = (error: Error) => rejectWrite(error);
-        child.stdin.once('error', onError);
-        child.stdin.end(value, () => {
-          child.stdin.off('error', onError);
-          resolveWrite();
-        });
-      });
+      const completion = finished(child.stdin, { cleanup: true });
+      if (value.length === 0) child.stdin.end();
+      else child.stdin.end(value);
+      try {
+        await completion;
+      } catch (error) {
+        if (value.length === 0 && (error as NodeJS.ErrnoException).code === 'EPIPE') return;
+        throw error;
+      }
     },
     waitForExit: () => exit,
     terminateGroup: async (terminationSignal) => {
