@@ -16,8 +16,8 @@ them and deletes their remote branches, then verifies no live smoke issues, open
 PRs, or remote branches remain for the run.
 
 The default profile intentionally keeps only external integration evidence:
-packed installation/publication, one real-Codex run on `gpt-5.6-luna`, browser
-artifact publication, and the safety/cleanup negative path. Deterministic
+packed installation/publication, one real-Codex run using the normal Codex
+default, browser artifact publication, and the safety/cleanup negative path. Deterministic
 policy permutations belong in local tests; use the broader profiles only when
 the corresponding policy or proof contract changes.
 

@@ -46,8 +46,8 @@ The approved Modules and Interfaces are immutable inputs to every child spec:
 | **[Spec 4 — Android proof](2359-agent-auto-v2-android-proof.md)** | 5 | Runner-leased Android workflow evidence behind the unchanged proof Interface. | Spec 3 is fully complete, including its real browser evidence and final review; Android toolchain/safe lease fixture are confirmed. |
 | **[Spec 5 — iOS proof](0045-agent-auto-v2-ios-proof.md)** | 6 | Runner-created iOS Simulator workflow evidence behind the unchanged proof Interface. | Spec 4 is fully complete, including actual leased Android evidence and waived-review reconciliation; Xcode, Simulator runtime/device type, and the safe temporary XCUITest fixture path are confirmed. |
 | **[Spec 6 — Setup](0125-agent-auto-v2-setup.md)** | 7 | Typed `Setup.execute`, minimal first setup, byte-stable repeat, label preparation, detect-only Legacy status, and manifest-backed fresh cutover. | Spec 5 is fully complete, including actual leased iOS evidence and waived-review reconciliation; config/state roots are settled. |
-| **[Spec 7 — Operational consumers](0150-agent-auto-v2-operational-consumers.md)** | 8-9 | Local/package implementation checkpoint `1f829c3` is GREEN; required live scratch and daily mutation evidence is blocked on separate authorization. | Spec 6 is fully complete, including Setup crash matrix and waived-review self-check; live smoke still requires separate explicit authorization. |
-| **Spec 8 — Cutover and deletion** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is fully complete, including authorized relevant live smoke and self-improvement validation; every earlier spec remains reconciled. |
+| **[Spec 7 — Operational consumers](0150-agent-auto-v2-operational-consumers.md)** | 8-9 | Complete at checkpoints `1f829c3`, `0f70f9d`, `b7b2577`, and `26ce2eb`; packed core/extended live smoke, typed daily canary path, strict cleanup, and waiver reconciliation are recorded. | Spec 6 is fully complete; separate scratch authorization was granted and consumed without production mutation. |
+| **[Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md)** | 10 | Public CLI/package entrypoint switch, old runtime deletion, authoritative docs/ADR updates, final package/live gates, and release-ready tarball. | Spec 7 is complete under `S7-DAILY-CANARY-002`; every earlier spec remains reconciled and implementation may start. |
 
 Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `implementation-spec-maker`, checked against the then-current implementation, and linked into this table before their implementation starts. Independent reviews remain waived until the user changes that decision.
 
@@ -118,11 +118,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 ### Phase 7 — Operational consumers
 
 - [x] Author live-smoke/self-improvement adaptation after the CLI JSON contract settles; independent review remains waived and executable self-check gates are recorded.
-- [ ] Run package/local tests first; run live smoke only with separate explicit authorization.
+- [x] Run package/local tests first; run live smoke only with separate explicit authorization.
 
 ### Phase 8 — Cutover and deletion
 
-- [ ] Author and review the final cutover spec only after every previous checklist is reconciled.
+- [x] Author the final cutover spec after every previous checklist is reconciled; independent review remains user-waived.
 - [ ] Switch the public entrypoint once, delete superseded runtime/tests/docs, run cleanup/final code review, and prove the packed package has one authority.
 
 ## 7. Halt Conditions
@@ -154,11 +154,11 @@ Specs 1 and 2 are authored in this directory. Specs 3-8 must be produced with `i
 
 ### 9.1 Current Execution Status
 
-- **Current Child:** Spec 7 — Operational consumers — local implementation complete at `1f829c3`; blocked on `S7-LIVE-AUTH-001` because the active `gh` keyring token is invalid and external mutations lack separate authorization.
+- **Current Child:** [Spec 8 — Cutover and deletion](../2026-07-17/1139-agent-auto-v2-cutover-deletion.md) — ready and authorized for immediate single-agent execution.
 - **Execution Outcome:** Specs 1-6 are complete. Spec 6's typed Setup, config-last configure, explicit label reconciliation, read-only diagnostics, bounded Legacy reader, dual-fence copy-only fresh cutover, matching-manifest crash replay, no-follow store, package consumer, full test, and containment gates are GREEN under the independent-review waiver.
 - **Evidence State:** The old all-false canary is historical RED evidence. The revised V2 certificate is GREEN: root/native child recorded Codex-auth and host-file readability `true`, with external credentials and production effects `false`; strict reparse matched package version and argv-policy digest.
 - **Review Decision:** Independent artifact/code reviews are user-waived; the Slices 1-3 containment checkpoint and Slices 4-5 lifecycle/publication checkpoint passed executable root self-checks. Outcome remains `Waived`, not independently approved.
-- **Sequencing Decision:** Spec 7's local/fake/package gates are GREEN. Live smoke and deliberate daily GitHub mutation still require separate explicit authorization; Spec 8 remains gated until both pass and Spec 7 becomes complete.
+- **Sequencing Decision:** Spec 7 is complete after authorized core/extended scratch smoke, typed daily canary execution, the absolute-target consumer repair, accepted bounded-canary risk `S7-DAILY-CANARY-002`, and strict cleanup. Spec 8 is now the only authorized child.
 
 ## 10. Final Action
 

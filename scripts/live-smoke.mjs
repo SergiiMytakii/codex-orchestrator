@@ -10,7 +10,6 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 600_000;
 const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
   ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
-const realCodexSmokeModel = 'gpt-5.6-luna';
 const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
@@ -62,7 +61,7 @@ async function main() {
   const root = options.workDir ? resolve(options.workDir) : await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
   const context = {
     options, runId, root, sourceRoot, repo: options.repo,
-    reportPath: join(root, 'live-smoke-report.md'), targetRoot: '', cliPath: '', fakeCodexPath: '', realCodexPath: '',
+    reportPath: join(root, 'live-smoke-report.md'), targetRoot: '', cliPath: '', fakeCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
   };
   await appendReport(context, `# V2 live smoke ${runId}\n\nRepository: ${context.repo}\n\n`);
@@ -70,7 +69,6 @@ async function main() {
   try {
     context.cliPath = await preparePackagedCandidate(context);
     context.fakeCodexPath = await writeFakeCodex(context);
-    context.realCodexPath = await writeRealCodexWrapper(context);
     context.targetRoot = await prepareTarget(context);
     await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
     context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
@@ -209,7 +207,7 @@ async function configureTarget(context, overrides = {}) {
   config.runner.workspaceRoot = `.codex-orchestrator/workspaces-v2-${context.runId}`;
   config.runner.stateDir = `.codex-orchestrator/v2/state-${context.runId}`;
   config.proof.artifactDir = `.codex-orchestrator/v2/proofs-${context.runId}`;
-  config.codex.command = overrides.realCodex ? context.realCodexPath : context.fakeCodexPath;
+  config.codex.command = overrides.realCodex ? 'codex' : context.fakeCodexPath;
   config.codex.timeoutMs = 180_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.failingCheck
@@ -368,26 +366,6 @@ async function writeFakeCodex(context) {
   await writeFile(path, fakeCodexSource(process.execPath));
   await chmod(path, 0o700);
   return path;
-}
-
-async function writeRealCodexWrapper(context) {
-  const path = join(context.root, 'real-codex');
-  await writeFile(path, realCodexWrapperSource(process.execPath));
-  await chmod(path, 0o700);
-  return path;
-}
-
-function realCodexWrapperSource(nodePath) {
-  return `#!${nodePath}
-import { spawn } from 'node:child_process';
-
-const child = spawn('codex', ['--model', '${realCodexSmokeModel}', ...process.argv.slice(2)], { stdio: 'inherit' });
-child.on('error', (error) => { process.stderr.write(\`${'${error.message}'}\\n\`); process.exitCode = 1; });
-child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exitCode = code ?? 1;
-});
-`;
 }
 
 function fakeCodexSource(nodePath) {

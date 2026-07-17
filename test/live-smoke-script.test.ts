@@ -123,11 +123,10 @@ test('real Codex scenario keeps routing markers outside frozen acceptance criter
   assert.match(text, /markersAsCriteria \? markers : \[\]/u);
 });
 
-test('real Codex smoke uses the fast Luna model without changing target defaults', async () => {
+test('real Codex smoke uses the normal Codex default without changing target defaults', async () => {
   const text = await source();
-  assert.match(text, /const realCodexSmokeModel = 'gpt-5\.6-luna'/u);
-  assert.match(text, /spawn\('codex', \['--model', '\$\{realCodexSmokeModel\}'/u);
-  assert.match(text, /overrides\.realCodex \? context\.realCodexPath : context\.fakeCodexPath/u);
+  assert.match(text, /overrides\.realCodex \? 'codex' : context\.fakeCodexPath/u);
+  assert.doesNotMatch(text, /realCodexSmokeModel|model_reasoning_effort/u);
 });
 
 test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {

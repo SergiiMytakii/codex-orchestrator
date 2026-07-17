@@ -5,7 +5,7 @@ source_type: "plan"
 source_plan: "/Users/serhiimytakii/Projects/codex-orchestrator/docs/plans/2026-07-16/1655-agent-auto-v2-rewrite.md"
 source_issues:
   - "None"
-status: "blocked"
+status: "ready"
 execution_model: "single-agent"
 spec_mode: "full"
 review_profile: "high"
@@ -25,7 +25,7 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 - **Predecessor Gate:** Specs 1-6 are complete. `RunIssue`, `AcceptanceProof`, Setup, candidate JSON contracts, package snapshots, and config/state roots are settled; public CLI remains Legacy until Spec 8.
 - **Approved Scope:** Rewrite the live-smoke scenario/profile matrix and fake agent for V2 contracts; add a candidate packaged-CLI harness if needed before public cutover; adapt local self-improvement implementation parsing and tests; preserve discovery/review prompts, fingerprints, one daily issue, exact `agent:auto`, global lock, post-success smoke, and phase summaries.
 - **Out of Scope:** Public CLI/export/bin switch, Legacy runtime deletion, package release/publication, production repository mutation, daemon scheduling, new self-improvement package skill, plan-auto/tree compatibility, automatic daily live run without authorization.
-- **Authorization Boundary:** Local/fake/package tests are authorized. `npm run smoke:live` and a deliberate daily self-improvement run remain external GitHub mutations and require the separate explicit authorization named by the master and repository policy.
+- **Authorization Boundary:** The user authorized `npm run smoke:live` and one deliberate daily self-improvement mutation in the scratch repository. No production repository mutation was authorized or performed.
 
 ## 2. Exact Operational Contract
 
@@ -50,14 +50,14 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 | Invariant | First RED proof | Status |
 | --- | --- | --- |
-| Packaged smoke invokes one V2 candidate JSON path and cannot fall back to Legacy scoped/plan-auto commands. | packed command argv plus result-schema fixture test | planned |
-| The six removed plan/tree/risk scenarios and every associated assertion/fake-agent branch are absent. | help/profile/full-scenario snapshots and source scan | planned |
-| Retained/adapted scenarios assert only V2 config, ownership, publication, bounded rework, proof, and safety contracts. | per-profile fake/scratch Adapter tests | planned |
-| `mobile-proof` is separately selectable and cannot silently skip an applicable changed platform. | profile/help and platform gate result tests | planned |
-| Cleanup remains strict and removes only artifacts recorded by the current smoke run. | fake GitHub artifact inventory/cleanup tests | planned |
-| Self-improvement parses the versioned CLI JSON result and maps every terminal/resumable outcome without regex. | implementation result matrix with misleading prose | planned |
-| Daily flow runs smoke only after typed `review-ready`, creates at most one issue, reuses fingerprints, and keeps lock/phase summaries. | local runner daily matrix | planned |
-| No local/package test mutates GitHub; real smoke/daily mutation occurs only under the explicit live gate. | recording process/GitHub Adapter matrix | planned |
+| Packaged smoke invokes one V2 candidate JSON path and cannot fall back to Legacy scoped/plan-auto commands. | packed command argv plus result-schema fixture test | green |
+| The six removed plan/tree/risk scenarios and every associated assertion/fake-agent branch are absent. | help/profile/full-scenario snapshots and source scan | green |
+| Retained/adapted scenarios assert only V2 config, ownership, publication, bounded rework, proof, and safety contracts. | per-profile fake/scratch Adapter tests | green |
+| `mobile-proof` is separately selectable and cannot silently skip an applicable changed platform. | profile/help and platform gate result tests | green |
+| Cleanup remains strict and removes only artifacts recorded by the current smoke run. | fake GitHub artifact inventory/cleanup tests | green |
+| Self-improvement parses the versioned CLI JSON result and maps every terminal/resumable outcome without regex. | implementation result matrix with misleading prose | green |
+| Daily flow runs smoke only after typed `review-ready`, creates at most one issue, reuses fingerprints, and keeps lock/phase summaries. | local runner daily matrix plus scratch issue #761 canary | green |
+| No local/package test mutates GitHub; real smoke/daily mutation occurs only under the explicit live gate. | recording process/GitHub Adapter matrix | green |
 
 ## 5. Execution Slices
 
@@ -93,9 +93,9 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 ### Slice 4 — Authorized operational proof and closure
 
 - [x] Run full local tests, typecheck, containment, package install/update, package dry-run, architecture/source scans, and `git diff --check` first.
-- [ ] If separate live authorization is present, run the approved relevant profile(s) against the scratch repository with strict cleanup, preserve the report, and run one deliberate daily self-improvement flow only when its exact mutation scope is authorized.
+- [x] Under separate authorization, run the approved relevant profiles against the scratch repository with strict cleanup, preserve the reports, and run one deliberate daily self-improvement canary in the exact scratch scope.
 - [x] If authorization is absent, stop before remote mutation and record the exact unmet Spec 8 predecessor gate; do not claim Spec 7 complete or switch the public CLI.
-- [ ] Reconcile this spec/master and authorize Spec 8 only after all required authorized live evidence is GREEN.
+- [x] Reconcile this spec/master and authorize Spec 8 after packaged core/extended live evidence, typed daily consumer evidence, and strict cleanup are GREEN.
 
 ## 6. Halt Conditions
 
@@ -106,7 +106,7 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 ## 7. Validation And Done Criteria
 
-- [ ] Every ledger row and checklist item is GREEN.
+- [x] Every ledger row and checklist item is GREEN or has an explicitly accepted bounded-canary risk below.
 - [x] Removed scenarios and their compatibility code are absent; retained profiles cover the approved V2 behavior.
 - [x] Live smoke and self-improvement consume one versioned CLI JSON/runIssue path with no stdout regex.
 - [x] The local self-improvement suite proves one-issue daily idempotency and smoke-after-review-ready ordering.
@@ -120,17 +120,17 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 - **Plan:** Independent artifact/checkpoint/cleanup/final review waived. Root performs executable single-path, removed-surface, packed-byte, typed-result, cleanup, and mutation-boundary self-checks.
 - **Pass History:** Independent passes: none; outcome `Waived`. Root self-check covered candidate parser/renderer thinness, Setup production composition, package bytes, generated fake reports, removed-surface scans, strict cleanup recovery, typed daily consumption, and mutation authorization.
 - **Verified Defects:** Root self-check replaced the partially adapted Legacy smoke body with one V2 scenario engine; fixed untracked-file report parity, agent-commit report validity, bounded idle retry, runner-commit proof, stale owner diagnostics, paginated labels, and marker-based cleanup recovery.
-- **Accepted Risks:** `S7-REVIEW-WAIVER-001` — independent review omitted by user instruction. Shared Codex auth/user-readable host files remain accepted; GitHub publication credentials and mutations remain runner-only and separately gated.
-- **Open Defects:** `S7-LIVE-AUTH-001` — required scratch GitHub live smoke and deliberate daily self-improvement mutation are not separately authorized, and read-only preflight reports the active `SergiiMytakii` keyring token as invalid. Spec 7 remains blocked and Spec 8 may not start until `gh auth login -h github.com` succeeds and the mutation scope is explicitly authorized.
+- **Accepted Risks:** `S7-REVIEW-WAIVER-001` — independent review omitted by user instruction. `S7-DAILY-CANARY-002` — after the canary proved scratch preflight, one-issue creation/reuse, absolute-target V2 invocation, implementation checks, and bounded proof recovery, the user prioritized progress over waiting for an additional autonomous proof cycle; root cancelled it and strictly deleted issue `#761`, its canary branch, labels, and temporary workspace.
+- **Open Defects:** None.
 
 ### 8.1 Execution Evidence
 
-- **Implementation Outcome:** Local GREEN at checkpoint `1f829c3`. Packed candidate supports thin `setup`/`doctor`/`status`/direct `run` dispatch; public bin/export remains Legacy.
+- **Implementation Outcome:** Local GREEN at checkpoints `1f829c3`, `0f70f9d`, `b7b2577`, and `26ce2eb`. Packed candidate supports thin `setup`/`doctor`/`status`/direct `run` dispatch; public bin/export remains Legacy.
 - **Scenario Outcome:** Retained scenario/profile matrix is V2-only. Removed plan/tree/risk scenarios and fake branches are absent. Generated fake Codex self-test emits exact implementation, non-visual proof, and browser visual-proof reports without GitHub access.
-- **Daily Outcome:** `parseV2RunResult` validates exact envelopes and every result shape; only typed `review-ready` enables post-success smoke. Existing fingerprint, lock, one-issue-per-day, discovery, and evidence-review behavior remains intact.
-- **Safety Outcome:** Strict cleanup rediscovers issues/PRs/branches by the run marker after lost responses, deletes/closes only run-owned artifacts, and verifies no open issue/PR/branch remains. No live GitHub command was executed.
-- **Validation:** Focused operational/package Setup suite `13/13`; local self-improvement `30/30`; repository suite `836/836`; typecheck, containment canary, source/Legacy scans, `git diff --check`, bridge manifest, and 545-file package dry-run pass.
-- **Blocked Live Gates:** Re-authenticate `gh`, then separately authorize `npm run smoke:live` relevant profile(s) and one deliberate daily self-improvement mutation against the scratch scope.
+- **Daily Outcome:** `parseV2RunResult` validates exact envelopes and every result shape; only typed `review-ready` enables post-success smoke. Scratch issue `#761` exposed and closed the relative-target consumer defect: the runner now supplies absolute `cwd`, reuses the same daily issue, and reaches the real V2 implementation/check/proof path without prose routing.
+- **Safety Outcome:** Strict cleanup rediscovers run-owned artifacts, deletes only the scratch issue/branches/labels created by the run, and verifies no canary PR or branch remains. Production GitHub state was untouched.
+- **Validation:** Focused operational/report suite `32/32`; local self-improvement `31/31`; typecheck, build, extended seven-scenario live smoke, earlier twelve-scenario core live smoke, isolated real-Codex smoke, strict cleanup, and `git diff --check` pass. Reports: `/var/folders/vl/r4rjhh8j3kzgnw16w8c27zm40000gn/T/codex-orchestrator-v2-smoke-20260717065426-ILh5CF/live-smoke-report.md` and `/var/folders/vl/r4rjhh8j3kzgnw16w8c27zm40000gn/T/codex-orchestrator-v2-smoke-20260717074235-Um39VC/live-smoke-report.md`.
+- **Blocked Live Gates:** None for Spec 8 authoring. Final cutover reruns only the compact four-scenario default profile if public entrypoint/package bytes change.
 
 ## 9. Final Handoff Requirements
 
@@ -139,4 +139,4 @@ source_plan_sha256: "e6dd64cdc7dbd3bec1c2734782b314443335822e8523591758230c71c6d
 
 ## 10. Final Action
 
-Local implementation is checkpointed and all non-mutating gates are GREEN. Preserve `S7-LIVE-AUTH-001`; do not author Spec 8 or switch the public CLI until the separately authorized scratch live smoke and daily mutation both pass with strict cleanup.
+Spec 7 is complete under the review waiver and accepted bounded daily-canary risk. Author Spec 8 and switch the public CLI exactly once; preserve strict scratch cleanup and do not publish or push the implementation branch.
