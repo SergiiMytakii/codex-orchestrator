@@ -260,7 +260,7 @@ async function captureRealBrowserReport(input: { entrypoint: string; root: strin
   await mkdir(absoluteProofRoot, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
-    executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    channel: 'chrome',
   });
   const consoleErrors: string[] = [];
   const networkFailures: string[] = [];
