@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { isDirectCandidateExecution, parseCandidateRunArgs, runCandidateCli } from '../src/v2/candidate-cli.js';
+import {
+  isDirectCandidateExecution,
+  parseCandidateDaemonArgs,
+  parseCandidateRunArgs,
+  runCandidateCli,
+} from '../src/v2/candidate-cli.js';
 
 test('candidate direct-execution guard canonicalizes macOS temporary path aliases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'candidate-entry-'));
@@ -42,6 +47,25 @@ test('candidate CLI renders only the typed runIssue outcome and matching exit', 
   });
 });
 
+test('candidate daemon accepts one absolute target and delegates the serial loop', async () => {
+  assert.deepEqual(parseCandidateDaemonArgs(['daemon', '--target', '/tmp/target']), {
+    targetRoot: '/tmp/target', once: false,
+  });
+  assert.deepEqual(parseCandidateDaemonArgs(['daemon', '--target', '/tmp/target', '--once']), {
+    targetRoot: '/tmp/target', once: true,
+  });
+  for (const argv of [
+    ['daemon'], ['daemon', '--target', 'relative'], ['daemon', '--target', '/tmp/target', '--once', '--again'],
+  ]) assert.throws(() => parseCandidateDaemonArgs(argv));
+
+  const seen: unknown[] = [];
+  const exit = await runCandidateCli(['daemon', '--target', '/tmp/target', '--once'], {
+    executeDaemon: async (intent) => { seen.push(intent); return 0; },
+  });
+  assert.equal(exit, 0);
+  assert.deepEqual(seen, [{ targetRoot: '/tmp/target', once: true }]);
+});
+
 test('candidate CLI delegates setup, doctor, and status policy to Setup and renders its typed result', async () => {
   for (const command of ['setup', 'doctor', 'status'] as const) {
     const output: string[] = [];
@@ -67,7 +91,7 @@ test('candidate CLI delegates setup, doctor, and status policy to Setup and rend
 test('candidate CLI help and version are side-effect free', async () => {
   const output: string[] = [];
   assert.equal(await runCandidateCli(['--help'], { write: (text) => { output.push(text); } }), 0);
-  assert.match(output.pop() ?? '', /V2 candidate/);
+  assert.match(output.pop() ?? '', /^codex-orchestrator\n/m);
   assert.equal(await runCandidateCli(['--version'], { packageVersion: '9.8.7', write: (text) => { output.push(text); } }), 0);
   assert.equal(output.pop(), '9.8.7\n');
 });

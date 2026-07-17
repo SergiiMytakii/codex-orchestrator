@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { open, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
-import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
+import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { canonicalJson } from './containment.js';
 
 export interface AndroidLeaseRecordV1 {

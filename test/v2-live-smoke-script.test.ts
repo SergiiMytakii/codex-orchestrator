@@ -84,7 +84,7 @@ test('mobile-proof is explicit and non-skippable', async () => {
   assert.match(text, /v2-ios-real-gate\.js/u);
 });
 
-test('packed smoke resolves the candidate V2 CLI instead of the public Legacy bin', async () => {
+test('packed smoke resolves the public V2 CLI', async () => {
   const text = await source();
   assert.match(text, /dist['"], 'src', 'v2', 'candidate-cli\.js'/u);
   assert.doesNotMatch(text, /const cliPath = join\(packageRoot, 'package', 'dist', 'src', 'cli\.js'\)/u);

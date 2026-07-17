@@ -5,11 +5,11 @@ import { lstat, mkdir, open, readFile, readdir, readlink, realpath } from 'node:
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
 
-import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
-import { GitWorktreeManager } from '../git/worktree.js';
-import type { GitHubIssueAdapter } from '../github/issues.js';
-import type { GitHubPullRequestAdapter } from '../github/pull-requests.js';
-import { defaultProcessExecutor, type ProcessExecutor } from '../process/command.js';
+import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
+import { GitWorktreeManager } from './adapters/worktree.js';
+import type { GitHubIssueAdapter } from './adapters/issues.js';
+import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
+import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { acquireExclusiveJsonFileLock } from './atomic-store.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';

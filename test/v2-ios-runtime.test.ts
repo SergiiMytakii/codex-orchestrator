@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { ProcessExecutor } from '../src/process/command.js';
+import type { ProcessExecutor } from '../src/v2/adapters/command.js';
 import type { IosLeaseRecordV1 } from '../src/v2/mobile-lease.js';
 import { discoverIosTooling, releaseIosSimulator } from '../src/v2/runtime.js';
 

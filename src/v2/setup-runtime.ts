@@ -6,7 +6,7 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { acquireTargetActivityFence } from '../runner/target-activity-fence.js';
+import { acquireTargetActivityFence } from './adapters/target-activity-fence.js';
 import { acquireExclusiveJsonFileLock } from './atomic-store.js';
 import { sha256 } from './containment.js';
 import { detectLegacyConfig } from './legacy-cutover.js';

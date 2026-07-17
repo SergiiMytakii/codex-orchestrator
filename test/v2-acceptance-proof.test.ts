@@ -103,7 +103,7 @@ test('malformed report, rewritten criteria, raw path escape, and forbidden proof
   }
 });
 
-test('sensitive-text filtering applies only to publishable artifacts', async () => {
+test('host identity filtering applies only to publishable artifacts', async () => {
   const localBytes = Buffer.from('Configured command: /Users/example/bin/node --version\n');
   const localReport = passingReport({
     artifactContent: localBytes,

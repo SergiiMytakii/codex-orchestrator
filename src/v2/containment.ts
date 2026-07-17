@@ -3,7 +3,7 @@ import { readFile, rm } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
+import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 
 export const CONTAINMENT_CODEX_VERSION = '0.144.4' as const;
 export const CONTAINMENT_PLATFORM = 'darwin' as const;

@@ -12,7 +12,7 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { writeDurableAtomicFile } from '../fs/durable-atomic-file.js';
+import { writeDurableAtomicFile } from './durable-atomic-file.js';
 import { acquireMissionCoordinatorLock } from './mission-coordinator-lock.js';
 
 const execFileAsync = promisify(execFile);

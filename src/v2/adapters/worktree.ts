@@ -1,9 +1,9 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
-import { normalizePath, uniqueSortedPaths } from '../path-policy.js';
-import type { ProcessExecutor } from '../process/command.js';
-import { defaultProcessExecutor } from '../process/command.js';
+import { normalizePath, uniqueSortedPaths } from './path-policy.js';
+import type { ProcessExecutor } from './command.js';
+import { defaultProcessExecutor } from './command.js';
 
 export interface BranchTemplateValues {
   issueNumber?: number;

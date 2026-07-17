@@ -162,7 +162,7 @@ async function preparePackagedCandidate(context) {
     await runCommand('npm', ['run', 'typecheck', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
     await runCommand('npm', ['run', 'build', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
     await runCommand(process.execPath, [
-      'dist/test/v2-candidate-cli.test.js', 'dist/test/v2-package-consumer.test.js', 'dist/test/live-smoke-script.test.js',
+      'dist/test/v2-candidate-cli.test.js', 'dist/test/v2-package-consumer.test.js', 'dist/test/v2-live-smoke-script.test.js',
     ], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
   }
   const packed = await runCommand('npm', ['pack', '--json'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
@@ -176,7 +176,7 @@ async function preparePackagedCandidate(context) {
   const cliPath = join(extracted, 'package', 'dist', 'src', 'v2', 'candidate-cli.js');
   await readFile(cliPath);
   const help = await runCommand(process.execPath, [cliPath, '--help'], { timeoutMs: context.options.timeoutMs });
-  if (!help.stdout.includes('V2 candidate')) throw new Error('packed candidate help is not V2');
+  if (!help.stdout.startsWith('codex-orchestrator\n')) throw new Error('packed CLI help is not public V2');
   return cliPath;
 }
 

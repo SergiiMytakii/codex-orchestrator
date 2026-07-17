@@ -5,8 +5,8 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { GhCliIssueAdapter } from '../github/gh-issue-adapter.js';
-import { GhCliPullRequestAdapter } from '../github/gh-pull-request-adapter.js';
+import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
+import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
 import { parseAgentAutoConfig } from './config.js';
 import { sha256 } from './containment.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
@@ -17,6 +17,7 @@ import type { SetupIntent, SetupOutcome } from './setup.js';
 import type { RunIssueResult } from './run-issue.js';
 
 export interface CandidateRunIntent { targetRoot: string; issueNumber: number }
+export interface CandidateDaemonIntent { targetRoot: string; once: boolean }
 
 export function parseCandidateRunArgs(argv: string[]): CandidateRunIntent {
   if (argv.length !== 5 || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
@@ -28,8 +29,21 @@ export function parseCandidateRunArgs(argv: string[]): CandidateRunIntent {
   return { targetRoot: resolve(targetRoot), issueNumber };
 }
 
+export function parseCandidateDaemonArgs(argv: string[]): CandidateDaemonIntent {
+  if ((argv.length !== 3 && argv.length !== 4)
+    || argv[0] !== 'daemon'
+    || argv[1] !== '--target'
+    || (argv.length === 4 && argv[3] !== '--once')) {
+    throw new Error('usage: candidate-cli daemon --target <absolute-path> [--once]');
+  }
+  const targetRoot = argv[2]!;
+  if (!isAbsolute(targetRoot)) throw new Error('candidate daemon target is invalid');
+  return { targetRoot: resolve(targetRoot), once: argv[3] === '--once' };
+}
+
 export async function runCandidateCli(argv: string[], dependencies: {
   executeRun?: (input: CandidateRunIntent) => Promise<RunIssueResult>;
+  executeDaemon?: (input: CandidateDaemonIntent, write: (text: string) => void) => Promise<number>;
   executeSetup?: (input: SetupIntent) => Promise<SetupOutcome>;
   packageVersion?: string;
   write?: (text: string) => void;
@@ -49,16 +63,39 @@ export async function runCandidateCli(argv: string[], dependencies: {
     write(renderSetupResultJson(outcome));
     return setupOutcomeExitCode(outcome);
   }
+  if (argv[0] === 'daemon') {
+    const intent = parseCandidateDaemonArgs(argv);
+    return (dependencies.executeDaemon ?? executeProductionDaemon)(intent, write);
+  }
   const intent = parseCandidateRunArgs(argv);
   const result = await (dependencies.executeRun ?? executeProductionRun)(intent);
   write(renderRunResultJson(result));
   return runIssueExitCode(result);
 }
 
+async function executeProductionDaemon(
+  intent: CandidateDaemonIntent,
+  write: (text: string) => void,
+): Promise<number> {
+  const config = await readTargetConfig(intent.targetRoot);
+  const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
+  let exitCode = 0;
+  do {
+    const candidates = await issues.listOpenIssuesWithAnyLabel([config.github.labels.auto.name]);
+    for (const issue of candidates) {
+      const result = await executeProductionRun({ targetRoot: intent.targetRoot, issueNumber: issue.number });
+      write(renderRunResultJson(result));
+      exitCode = Math.max(exitCode, runIssueExitCode(result));
+    }
+    if (intent.once) return exitCode;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, config.runner.pollIntervalSeconds * 1_000));
+  } while (true);
+}
+
 async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssueResult> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const packageVersion = await readPackageVersion();
-  const config = parseAgentAutoConfig(JSON.parse(await readFile(join(intent.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')));
+  const config = await readTargetConfig(intent.targetRoot);
   const skillHashes = {
     'agent-auto': sha256(await readFile(join(packageRoot, 'internal-skills', 'agent-auto', 'SKILL.md'))),
     'acceptance-proof': sha256(await readFile(join(packageRoot, 'internal-skills', 'acceptance-proof', 'SKILL.md'))),
@@ -79,6 +116,10 @@ async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssu
   finally { runtime.dispose(); }
 }
 
+async function readTargetConfig(targetRoot: string) {
+  return parseAgentAutoConfig(JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')));
+}
+
 async function executeProductionSetup(intent: SetupIntent): Promise<SetupOutcome> {
   const setup = createProductionSetup({
     orchestratorHome: resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator')),
@@ -96,11 +137,12 @@ async function readPackageVersion(): Promise<string> {
 
 function candidateHelp(): string {
   return [
-    'codex-orchestrator V2 candidate',
+    'codex-orchestrator',
     '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels|--fresh] [--dry-run]',
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
     '  run --target <absolute-path> --issue <positive-integer>',
+    '  daemon --target <absolute-path> [--once]',
     '',
   ].join('\n');
 }

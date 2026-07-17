@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Replaced the compatibility and experimental runtimes with one public V2 CLI,
+  one strict configuration contract, and one `runIssue` lifecycle shared by
+  direct runs and the serial daemon.
+- Reduced the default live release smoke to package install, normal default
+  Codex, browser proof, and safety-negative scenarios; broader policy scenarios
+  remain opt-in.
+
+### Removed
+- Removed the Legacy CLI, bridge manifest, bundled workflow prompts, alternate
+  planning/scoped execution paths, and their compiled/test assets from the npm
+  package.
+
+### Security
+- Contained agent processes and their shell commands or native subagents no
+  longer inherit parent credentials. Proof rejects credentials in every text
+  artifact while applying public-only host-identity restrictions to evidence
+  intended for publication.
+
 ## [0.1.51] - 2026-07-15
 
 ### Fixed

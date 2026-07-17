@@ -1,124 +1,16 @@
-export type { CodexOrchestratorConfig, ConfigValidationResult, CodexPhase, CodexProfileConfig } from './config/schema.js';
-export { validateConfig, codexPhaseKeys } from './config/schema.js';
-export { CodexCommandAdapter, buildCodexProcessEnv, resolveCodexProfile } from './codex/command-adapter.js';
-export type { CodexCommandRunInput, CodexCommandRunResult, EffectiveCodexProfile } from './codex/command-adapter.js';
-export { GhCliPullRequestAdapter } from './github/gh-pull-request-adapter.js';
-export type {
-  CloseIssueEvidenceInput,
-  CloseIssueEvidenceReason,
-  GitHubIssue,
-  GitHubIssueAdapter,
-  GitHubIssueComment,
-  GitHubIssueLabel,
-  GitHubPullRequestLink,
-  IssueState,
-  PullRequestState,
-} from './github/issues.js';
-export {
-  CloseIssueEvidenceError,
-  closeIssueWithEvidence,
-  formatIssueClosureEvidenceComment,
-  hasIssueClosureEvidence,
-  InMemoryGitHubIssueAdapter,
-  isIssueClosureEvidenceComment,
-} from './github/issues.js';
-export type { CreateDraftPullRequestInput, GitHubPullRequest, GitHubPullRequestAdapter } from './github/pull-requests.js';
-export { InMemoryGitHubPullRequestAdapter } from './github/pull-requests.js';
-export { GitWorktreeManager, renderBranchTemplate } from './git/worktree.js';
-export {
-  applyClarificationGate,
-  applyCodexSessionResult,
-  claimIssue,
-  clearClarificationGate,
-  discoverIssueWork,
-  hasMaintainerResponseAfterLatestClarification,
-} from './runner/issue-state-machine.js';
-export type {
-  ClarificationQuestion,
-  CodexSessionActionResult,
-  CodexSessionResult,
-  IssueDiscoveryDecision,
-  RunnerMode,
-  SkipReasonCode,
-} from './runner/issue-state-machine.js';
-export {
-  ensureAutonomousChildBody,
-  isAutonomousChildOfParent,
-  renderAutonomousChildMarker,
-  validatePlanGraph,
-} from './runner/issue-tree.js';
-export type { PlanChildNode, PlanDependencyEdge, PlanGraph, PlanGraphValidationResult } from './runner/issue-tree.js';
-export { RunnerStateStore } from './runner/local-state.js';
-export type {
-  RunnerProcessMetadata,
-  RunnerStateFile,
-  RunnerStateFileV1,
-  RunnerStateFileV2,
-} from './runner/local-state.js';
-export {
-  buildBridgeRuntimeManifest,
-  readBridgeRuntimeManifest,
-  verifyBridgeRuntimeManifest,
-  writeBridgeRuntimeManifest,
-} from './bridge-runtime.js';
-export type { BridgeRuntimeFileV1, BridgeRuntimeManifestV1 } from './bridge-runtime.js';
-export { runLocalExecutionSession } from './runner/local-execution-session.js';
-export type {
-  LocalExecutionPhaseExecutor,
-  LocalExecutionPhaseInput,
-  LocalExecutionPhaseResult,
-  LocalExecutionSessionInput,
-  LocalExecutionSessionResult,
-} from './runner/local-execution-session.js';
-export {
-  readPlanAutoCompletionReport,
-  readScopedCompletionReport,
-} from './runner/completion-report.js';
-export type {
-  PlanAutoCompletionReport,
-  ReviewHandoffFlow,
-  ReviewHandoffRisk,
-  ScopedCompletionReport,
-} from './runner/completion-report.js';
-export {
-  buildPlanAutoPrompt,
-  buildScopedImplementationPrompt,
-  sessionPromptPath,
-  sessionReportPath,
-  writeDurablePrompt,
-} from './runner/prompt.js';
-export type {
-  PlanAutoPromptInput,
-  ScopedPromptInput,
-} from './runner/prompt.js';
-export { runDaemonCommand } from './runner/daemon-command.js';
-export type { DaemonCommandOptions, DaemonCommandResult } from './runner/daemon-command.js';
-export { runHygieneCleanup } from './runner/hygiene-cleanup.js';
-export type { HygieneCleanupResult, RunHygieneCleanupInput } from './runner/hygiene-cleanup.js';
-export { cleanupMergedWorktrees } from './runner/worktree-cleanup.js';
-export type {
-  CleanupMergedWorktreesInput,
-  WorktreeCleanupEntry,
-  WorktreeCleanupResult,
-  WorktreeCleanupSkip,
-} from './runner/worktree-cleanup.js';
-export { reconcileRunnerState } from './runner/recovery.js';
-export type { ReconcileRunnerStateInput, RecoveryEntry, RecoveryStatus } from './runner/recovery.js';
-export { runPlanAutoCommand } from './runner/plan-auto-command.js';
-export type { PlanAutoCommandOptions, PlanAutoCommandResult } from './runner/plan-auto-command.js';
-export { runScopedAutoCommand } from './runner/scoped-auto-command.js';
-export type { ScopedAutoCommandOptions, ScopedAutoCommandResult } from './runner/scoped-auto-command.js';
-export {
-  validateChangedPaths,
-  validateCompletionReportSafety,
-  validateNoAgentOwnedGitPublication,
-} from './runner/safety.js';
-export type { SafetyViolation, SafetyViolationCode } from './runner/safety.js';
-export { runStatusCommand } from './runner/status-command.js';
-export type { StatusCommandOptions, StatusCommandResult } from './runner/status-command.js';
-export { runDoctorCommand } from './runner/doctor-command.js';
-export type { DoctorCheckResult, DoctorCommandOptions, DoctorCommandResult, DoctorJson } from './runner/doctor-command.js';
-export { RunnerLifecycleEventStore } from './runner/lifecycle-events.js';
-export type { LifecycleArtifact, RunnerLifecycleEvent } from './runner/lifecycle-events.js';
-export type { SetupCommandOptions, SetupCommandResult } from './setup/setup-command.js';
-export { runSetupCommand } from './setup/setup-command.js';
+export { AcceptanceProof, ProofQuiescenceError } from './v2/acceptance-proof.js';
+export type { FrozenCriterion, IssueSnapshot, ProveChangeResult, ProofAgent, ProofAgentResult } from './v2/acceptance-proof.js';
+export { createCheckedChangeCapabilities, checkedChangeFreshnessMatches, checkedChangePayloadSha256 } from './v2/checked-change.js';
+export type { CheckedChange, CheckedChangeFreshness, CheckedChangePayloadV1 } from './v2/checked-change.js';
+export { parseAgentAutoConfig } from './v2/config.js';
+export type { AgentAutoConfigV1 } from './v2/config.js';
+export { validateImplementationReport } from './v2/implementation-report.js';
+export type { ImplementationReportV1 } from './v2/implementation-report.js';
+export { validateProofReport } from './v2/proof-report.js';
+export type { ProofReceipt, ProofReportV1 } from './v2/proof-report.js';
+export { RunIssue } from './v2/run-issue.js';
+export type { RunIssueDependencies, RunIssueResult } from './v2/run-issue.js';
+export { createV2Runtime } from './v2/runtime.js';
+export type { V2Runtime } from './v2/runtime.js';
+export { Setup } from './v2/setup.js';
+export type { SetupIntent, SetupOutcome } from './v2/setup.js';

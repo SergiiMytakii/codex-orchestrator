@@ -109,7 +109,7 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
-  assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/cli.js' });
+  assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/v2/candidate-cli.js' });
   assert.equal(installedPackage.scripts?.postinstall, undefined);
   assert.match(await readFile(join(installed, 'internal-skills', 'agent-auto', 'SKILL.md'), 'utf8'), new RegExp(agentText, 'u'));
   assert.match(await readFile(join(installed, 'internal-skills', 'acceptance-proof', 'SKILL.md'), 'utf8'), /Independently prove/u);
