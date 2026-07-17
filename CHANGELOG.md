@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-17
+
 ### Changed
 - Replaced the compatibility and experimental runtimes with one public V2 CLI,
   one strict configuration contract, and one `runIssue` lifecycle shared by
