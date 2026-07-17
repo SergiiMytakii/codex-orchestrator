@@ -47,6 +47,7 @@ export interface CodexProcessInput {
   idleTimeoutMs: number;
   operationPolicy: WorkflowOperationPolicy;
   executionProfile: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
+  onSpawned?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
 }
 
 export type CodexReportRead =
@@ -59,6 +60,7 @@ export interface CodexProcessResult {
     | 'completed'
     | 'exit-failed'
     | 'spawn-failed'
+    | 'launch-gate-failed'
     | 'transport-failed'
     | 'timeout'
     | 'idle-timeout'
@@ -118,6 +120,15 @@ export class CodexProcess {
       child = await this.spawnProcess(spec);
     } catch (error) {
       return emptyResult('spawn-failed', errorMessage(error));
+    }
+
+    if (input.onSpawned) {
+      try {
+        await input.onSpawned({ pid: child.pid, processGroupId: child.processGroupId });
+      } catch (error) {
+        const settled = await terminateAndSettle(child, child.waitForExit());
+        return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
+      }
     }
 
     let stdinError: unknown;

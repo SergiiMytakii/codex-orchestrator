@@ -8,8 +8,8 @@ implementation outcome mapping. It applies
 mechanics, defect lifecycle, no-progress, and the common result envelope.
 `spec-implementer`, `cleanup-review`, and `code-review` are callers or Adapters;
 they must not reproduce either Module. Deterministic tickets-orchestrator work
-marked or defaulted to `Implementation preparation: direct` remains outside
-this Module and uses direct TDD plus repo review gates.
+using its issue as authority remains outside this Module and uses direct TDD
+plus repo review gates.
 
 This policy does not replace tests, architecture checks, smoke tests, or Git
 checkpoints. Those proofs remain independent evidence.
@@ -86,11 +86,11 @@ Before the first implementation reviewer, root creates a short Review Plan:
 - only stable intermediate checkpoints and their required lenses; move an unstable checkpoint to final coverage when later slices touch the same files, owners, or contracts
 - any separate cleanup requirement, which must name a concrete evidenced reason that cannot fit the final spec/standards lens
 - final code-review lenses and minimum independent coverage
-- reviewer sessions that can perform affected-lens Closure
+- reviewer lineages that own affected-lens Closure
 
 Create one durable activation record for each logical skill invocation. Record
 `activation_id`, skill, owner, opened/closed state, and resume rule. Review Full
-and same-session Closure passes stay inside that review skill's activation;
+and lineage-preserving Closure passes stay inside that review skill's activation;
 TDD repair cycles stay inside the active TDD activation. Cleanup, code review,
 TDD, and debugger activations never share an ID, and a continuation resumes an
 ID only for the same skill and authorized flow.
@@ -111,13 +111,15 @@ Record at least:
   Closure-wave count, and latest Closure wave ID
 - planned mandatory final reviews and their lenses
 - authority artifact kind/path and logical skill activation records
+- each lineage ID, origin Full session, active session generation, Closure count,
+  rotation reason, live/timeout state, and `conclude_requested_at`
 - any convergence audit epoch: trigger, triggering pass/wave/revision,
   completion, dispositions, selected sessions, resume reason, and pass/wave/time
   baselines used for its next rearm
-- pending reviewer launches with launch ID, mode, reviewer/session identity,
+- pending reviewer launches with launch ID, mode, lineage/session identity,
   activation ID, target revision, checkpoint/gate, Closure wave ID when
   applicable, assigned lenses, and start timestamp
-- every completed review's mode, reviewer/session identity, target revision,
+- every completed review's mode, lineage/session identity, target revision,
   checkpoint/gate, Closure wave ID, assigned lenses, start/end timestamps, and
   outcome
 - the stable Defect Ledger with transition history, reopen count, fixed revision,
@@ -169,6 +171,7 @@ Closure only for the lenses explicitly assigned in the Review Plan; a
 
 Use the protocol capsule with these implementation fields:
 
+- the unanswered implementation question and any prior coverage it invalidates
 - authority artifact kind/path, profile, current revision, checkpoint, and exact diff command
 - changed paths and assigned `Review Focus` lenses
 - source-of-truth docs and relevant Contract Test Ledger rows
@@ -206,8 +209,8 @@ closed. Focused tests and every required check for a repair always rerun.
 1. Implement the slice and pass its tests/exit gate.
 2. At an explicit intermediate checkpoint, run the required targeted
    `code-review` directly under the Review Plan.
-3. Repair one consolidated finding batch and use same-session Closure for the
-   affected lenses. An already planned Full reviewer may verify the repair when
+3. Repair one consolidated finding batch and use protocol Closure for the
+   affected lineages. An already planned Full reviewer may verify the repair when
    its assigned lenses cover it.
    At one gate, collect the usable results from all already-launched reviewers
    before repairing, unless an immediate blocker invalidates the remaining
@@ -230,7 +233,7 @@ spec/standards lens. `large` or `high` alone is not a reason. If an approved spe
 names an intermediate cleanup checkpoint, return `Blocked` for spec revision.
 
 Cleanup review runs at most once as a Full review for the whole spec. After its
-findings are repaired, either use same-session Closure or give the final code
+findings are repaired, either use protocol Closure or give the final code
 reviewer those stable defect IDs for verification. Never launch another Full
 cleanup review over the repaired whole diff.
 
@@ -242,7 +245,7 @@ audit is implementation-specific.
 Before launching more reviewers, run one non-terminal convergence audit after
 two consecutive Closure waves in one gate, ten total implementation review
 passes, or 90 minutes when timing is available. One coordinated launch over all
-affected existing sessions is one wave regardless of parallel pass count.
+affected lineages is one wave regardless of parallel pass count.
 
 Persist one audit epoch with trigger, triggering pass/wave/revision,
 completion, dispositions, selected sessions, and resume reason. It survives

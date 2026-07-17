@@ -1,6 +1,6 @@
 ---
 name: diagnosing-bugs
-description: Disciplined debugging loop for hard, flaky, unclear, or performance-related bugs. Reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when the user asks to diagnose/debug, reports nondeterministic failure, says something is broken/throwing/failing and the cause is unclear, or describes a performance regression.
+description: Debug hard, flaky, unclear, or performance bugs through reproduce, minimize, hypothesize, instrument, fix, and regression-test. Trigger for nondeterministic failures, unclear breakage, or performance regressions.
 ---
 
 # Diagnosing Bugs

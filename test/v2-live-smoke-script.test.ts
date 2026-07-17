@@ -71,7 +71,7 @@ test('removed plan-tree-risk scenarios are absent from registry and profiles', a
   }
 });
 
-test('generated fake agent emits exact V2 implementation and proof reports without GitHub work', async () => {
+test('generated fake agent emits exact V2 implementation, code-review, and proof reports without GitHub work', async () => {
   const result = await runLiveSmoke(['--self-test-fake-agent']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'V2 fake agent self-test passed.\n');

@@ -1,6 +1,6 @@
 ---
 name: ui-evidence-proof
-description: Use when proving UI, visual, layout, copy, responsive, screenshot, video, browser, mobile, frontend, or app-facing changes in normal Codex chat. Guides prompt-level visual proof with exact workflow, viewport, fresh artifacts, layout review, copy review, and criterion-to-artifact mapping before claiming completion.
+description: Prove UI, layout, copy, responsive, browser, mobile, or frontend changes with fresh visual artifacts. Use when app-facing completion requires workflow/viewport evidence and criterion-to-artifact mapping.
 ---
 
 # UI Evidence Proof

@@ -117,7 +117,7 @@ assigned primary lenses. A standalone direct review covers all lenses:
 - **Contract Test Ledger:** contract-heavy behavior changes map ordering, precedence, threading, runtime contract, retry/idempotency, determinism, evidence, partial failure, and cardinality risks to first tests/proofs.
 - **Review Checkpoints and Focus:** high-risk specs use an early `$code-review` checkpoint only when the first risky slice becomes stable before later work. Otherwise the spec assigns concrete `Review Focus` lenses, targeted recipes, and bug classes to the final parallel review wave.
 - **Final Handoff Requirements:** medium/high-risk specs require a compact final response packet covering contract implemented, risky checkpoints, invariants proved, review findings/fixes, validation, skipped checks, residual risks, and files by role.
-- **Reuse and simplicity:** new helpers, services, adapters, layers, or compatibility branches are justified by a current need.
+- **Minimum solution and reuse:** the spec states a direct `Minimum Solution`, records `Added Complexity: None` or ties every added mechanism to a concrete invariant/failure, and removes anything that passes the deletion challenge. Prefer the fewest necessary concepts, owners, states, and integration points; line or file count is not decisive.
 - **Deep-module fit:** using the `$codebase-design` lens, new Modules or Seams pass the deletion test, avoid one-adapter abstraction, and test through the Module Interface.
 - **Risk Controls:** full specs include only applicable risk controls, and each control is specific enough to guide execution.
 - **Ownership:** source-of-truth ownership is explicit when behavior/data can drift across layers. A short `Source of Truth` bullet is enough when there is only one material owner.
@@ -141,8 +141,7 @@ assigned primary lenses. A standalone direct review covers all lenses:
 - A full spec touches a real safety/contract/state risk but has no applicable `Risk Controls` entry.
 - The spec says or implies the executor should continue despite a mismatch instead of stopping.
 - Security-sensitive or destructive work lacks explicit safe sources, guards, or stop-before-damage constraints.
-- The spec adds abstraction, cleanup, compatibility logic, or future-facing branches without a current approved need.
-- The spec requires a shallow/pass-through Module, one-adapter Seam, or test-only helper without an approved current need.
+- The spec requires an added mechanism outside approved scope, or safe execution would depend on inventing that mechanism's need or contract.
 
 ## Common Defects
 
@@ -155,6 +154,7 @@ assigned primary lenses. A standalone direct review covers all lenses:
 - Acceptance criteria are subjective, non-observable, or not tied to proof.
 - Ticket specs lose issue-only requirements such as `Implementation preparation`, `External contracts`, `Verification`, `Blocked by`, live prerequisites, or rejected approaches, or absorb sibling-ticket scope.
 - Evidence sections repeat a file inventory instead of proving determinism.
+- `Minimum Solution` is a slogan rather than a direct path, `Added Complexity` is absent or vague, or a smaller evidence-backed path satisfies the same approved behavior, invariants, and proof.
 - Full specs add large tables where 2-4 exact `Risk Controls` bullets would be clearer.
 - Full specs include generic halt checklists instead of task-specific stop conditions.
 - Full specs spread one rule across multiple files without a declared owner.
@@ -198,10 +198,12 @@ Keep the output short, severe, and execution-oriented.
 ## Anti-Overengineering Heuristic
 
 - If a compact direct flow is enough, flag unnecessary full-mode ceremony as an improvement or execution risk.
+- Run the whole-solution deletion challenge: if a mechanism can be removed while preserving every approved behavior, material invariant, and proof, require its removal. Do not remove a necessary mechanism merely because it adds a file, type, schema object, or boundary.
 - If a lean full spec gives exact risk controls without tables, do not ask for tables unless prose leaves ambiguity.
 - If a full spec has enough phase-level targets, do not ask for `Write Scope Summary` unless the write set or ownership is hard to audit.
 - If a full spec introduces an indirect flow where a direct one satisfies all constraints, treat that as a defect.
-- If a new abstraction exists only for cleanliness or future flexibility, treat that as a blocker unless approved source material requires it.
+- If a new abstraction exists only for cleanliness or future flexibility, return `Needs Work` and require its removal. Treat it as a blocker only when execution would be unsafe, broaden approved scope, or require invention.
+- Treat missing or unsupported `Minimum Solution` / `Added Complexity` evidence as `Needs Work`; escalate to `Rejected` only when the added mechanism is unsafe, unapproved scope, or requires invention.
 - If the review can make the spec safer by deleting ceremony rather than adding it, say so.
 
 ## Tone

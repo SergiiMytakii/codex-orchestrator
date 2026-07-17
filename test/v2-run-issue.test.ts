@@ -175,6 +175,16 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
 });
 
+test('malformed code review consumes one durable report-repair bit and retries before checks', async () => {
+  const fixture = await runFixture({ reviewMalformedOnce: true });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.directReview?.review.reportRepairs, 1);
+  assert.equal(record.directReview?.status, 'clear');
+});
+
 test('repeated runIssue replays the durable terminal outcome without a second claim or publication', async () => {
   const fixture = await runFixture();
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -614,6 +624,7 @@ interface FixtureOptions {
   expectedTriageComment?: string;
   revokeDuringRoute?: boolean;
   workflowVerificationReject?: boolean;
+  reviewMalformedOnce?: boolean;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -646,6 +657,7 @@ async function runFixture(options: FixtureOptions = {}) {
   let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
   let authReads = 0;
+  let reviewCalls = 0;
   const rejectedEffects = new Set<string>();
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejectedEffects.has(effect)) return false;
@@ -843,9 +855,41 @@ async function runFixture(options: FixtureOptions = {}) {
           await execFileAsync('git', ['-C', path, 'add', '--all']);
           await execFileAsync('git', ['-C', path, '-c', 'user.name=agent', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent commit']);
         }
-        return selected ?? { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
+        const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
+        return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? 'implementation-attempt-1' } : completed;
       },
     },
+    implementationReviewer: {
+      run: async (input) => {
+        reviewCalls += 1;
+        events.push('review:code-review');
+        const invocation = {
+          attemptId: 'code-review-attempt-1', operation: input.operation, mode: input.mode,
+          reviewerSessionId: input.reviewerSessionId, targetRevision: input.targetRevision,
+          targetFingerprint: input.targetFingerprint, closureRequestSha256: input.closureRequestSha256,
+        };
+        await input.onPrepared(invocation);
+        await input.onLaunched({ ...invocation, pid: 4242, processGroupId: 4242 });
+        if (options.reviewMalformedOnce && reviewCalls === 1) {
+          const originalReportBytes = Buffer.from('{"report":{"version":1}}');
+          return {
+            kind: 'report-invalid', diagnostic: 'missing operation', originalReportBytes,
+            originalReportSha256: sha256(originalReportBytes),
+          };
+        }
+        return {
+          kind: 'completed', attemptId: invocation.attemptId, artifactSha256: '8'.repeat(64),
+          report: {
+            version: 1, operation: input.operation, targetRevision: input.targetRevision,
+            targetFingerprint: input.targetFingerprint, verdict: 'approved', mode: input.mode,
+            coverage: ['acceptance-criteria', 'correctness', 'test-quality'], defects: [], residualRisks: [],
+            reviewerSessionId: input.reviewerSessionId, closureRequestSha256: input.closureRequestSha256,
+            repairFindingOutcomes: input.fixedRepairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
+          },
+        };
+      },
+    },
+    waitForReviewProcessAbsence: async () => {},
     checks: {
       run: async () => {
         events.push('check:typecheck');
@@ -875,6 +919,7 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
+    createReviewSessionId: () => 'code-review-session-1',
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
@@ -935,6 +980,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
     snapshot: (path) => delegate.snapshot(path),
     fingerprintDeniedPaths: (path, deniedPaths) => delegate.fingerprintDeniedPaths(path, deniedPaths),
     listChangedFiles: (path) => delegate.listChangedFiles(path),
+    fingerprintChangedFiles: (path, changedFiles) => delegate.fingerprintChangedFiles(path, changedFiles),
     stageAll: async (path) => { events.push('git:stage'); return delegate.stageAll(path); },
     getTreeSha: (path) => delegate.getTreeSha(path),
     getHead: (path) => delegate.getHead(path),

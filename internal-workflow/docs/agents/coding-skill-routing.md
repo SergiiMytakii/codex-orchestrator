@@ -98,7 +98,7 @@ owns its axis split. Analysis routing remains independent of review profile.
 | `$security-best-practices` | Root coordinates explicit security review | One `reviewer_deep` |
 | `$improve-codebase-architecture` | Inline for bounded analysis | `analyst_deep` only for broad or ambiguous architecture |
 | `$commit` | Inline | No agent unless another policy already requires review |
-| `$tickets-orchestrator` | Root owns ticket graph, user decisions, integration, and delivery | One simple ticket stays root-owned; disjoint slices use named implementers; root may prepare one blocked successor during current-ticket review; maker/spec Modules retain review ownership |
+| `$tickets-orchestrator` | Root owns ticket graph, user decisions, integration, and delivery | One ready ticket stays root-owned; launch at most two independent disjoint implementers; prepare later tickets only after blockers settle; reuse issue authority or route through maker/spec Modules |
 | `$smoke-test-orchestrator` | Inline unless the scenario explicitly requires workers | Follow the scenario's disjoint ownership contract |
 
 ## Artifact Review Loop

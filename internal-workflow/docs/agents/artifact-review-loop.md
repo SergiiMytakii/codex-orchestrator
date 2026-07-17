@@ -131,6 +131,7 @@ use affected-lens Closure for repaired defects.
 
 Use the protocol capsule with these artifact fields:
 
+- the unanswered artifact question and any prior coverage it invalidates
 - current saved artifact content and artifact kind
 - approved scope, out of scope, and Decision Snapshot
 - source-authority paths or URLs
@@ -158,11 +159,11 @@ audit and performance metrics, never terminal limits.
 
 ### Simple And Medium
 
-Use one profile-selected reviewer session and one Full pass. After a consolidated
-repair batch, use protocol Closure in that same session until the assigned lenses
-are clear or protocol no-progress/stop rules apply.
+Use one profile-selected reviewer lineage and one Full pass. After each
+consolidated repair batch, use protocol Closure until its lenses are clear or
+protocol no-progress/stop rules apply.
 
-Default fresh sessions: 1. Default full reviews: 1.
+Default initial sessions: 1. Default full reviews: 1.
 
 ### High
 
@@ -185,13 +186,12 @@ all mandatory lenses and cross-lens defects before approval.
    1. The two briefs have disjoint primary lenses and both reviewers remain
    independent.
 3. After one consolidated repair batch, apply protocol Closure only to affected
-   A/B sessions, in parallel when both are affected.
+   A/B lineages, in parallel when both are affected.
 4. Stop when both lens sets are clear on the same settled revision or protocol
    stop/no-progress rules apply.
 
-Default fresh sessions: 2. Default full reviews: 2. Additional Full sessions are
-exceptional and require evidence that the settled artifact invalidated previous
-mandatory-lens coverage.
+Default initial sessions: 2. Default full reviews: 2. Closure sessions rotate by
+protocol; another Full requires invalidated mandatory-lens coverage.
 
 Root owns launches, aggregation, repairs, and final decisions. Parallel launch
 must preserve and close every fulfilled handle even after partial failure.
@@ -263,5 +263,5 @@ token/tool usage separately.
 | Invariant | Risk It Prevents | First Test / Proof | Status |
 | --- | --- | --- | --- |
 | Risk classification requires a material consequence for hard escalation; narrow use of a sensitive mechanism remains a standard signal. | Simple stateful work is over-reviewed or genuinely dangerous work is under-reviewed. | Manual eval scenario 10 | planned |
-| High-risk work uses two parallel Full reviews while the protocol owns affected-lens-only same-session Closure. | Follow-up creates unnecessary agents or loses mandatory-lens coverage. | Manual eval scenarios 10-11 | green |
+| High-risk work uses two parallel Full lineages while protocol owns affected-lens Closure and session rotation. | Follow-up restarts Full review, retains stale context, or loses mandatory-lens coverage. | Manual eval scenarios 10-11 | green |
 | Substantive edits invalidate approval while lifecycle-only edits do not. | A changed plan/spec is executed under stale approval. | Review-state inspection | green |

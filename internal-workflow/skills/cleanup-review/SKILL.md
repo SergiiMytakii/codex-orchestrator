@@ -1,6 +1,6 @@
 ---
 name: "cleanup-review"
-description: "Run one exceptional independent post-implementation simplification review when the user, approved source, or repo policy names a concrete cleanup risk that cannot fit final code review. Detect removable duplication, obsolete paths, speculative compatibility, workaround branches, and unjustified production abstractions without re-reviewing correctness or test coverage."
+description: "Run an independent post-implementation simplification review only when a concrete cleanup risk cannot fit final code review. Find removable duplication, obsolete paths, workarounds, and unjustified abstractions without re-reviewing correctness."
 ---
 
 # Cleanup Review
@@ -23,7 +23,7 @@ lifecycle, and Closure. Otherwise follow
 ## Invocation Contract
 
 - Use one profile-selected independent reviewer. Root never reviews or certifies cleanup inline.
-- One logical activation spans the Full pass and every same-session Closure; each Closure is a review pass, not a new skill activation.
+- One logical activation spans the Full pass and every lineage-preserving Closure; protocol session rotation creates neither a new activation nor Full pass.
 - Run one Full cleanup review only after the complete implementation diff and required validation have settled. Never run it per slice or re-enter cleanup after final code review starts.
 - The implementation owner integrates accepted fixes. The reviewer remains read-only and returns evidence and bounded changes.
 - If independent review is unavailable, report the gate as unavailable; do not substitute root self-review.

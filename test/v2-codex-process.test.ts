@@ -95,6 +95,33 @@ test('awaits stdin, exit, process-group absence, streams, and only then reads th
   });
 });
 
+test('launch gate records the spawned process before stdin and terminates on rejected persistence', async () => {
+  await withRunFixture(async (fixture) => {
+    const events: string[] = [];
+    const acceptedChild = new FakeChild({ reportPath: fixture.reportPath, events });
+    const accepted = await new CodexProcess(async () => acceptedChild).run(fixture.input({
+      onSpawned: async ({ pid, processGroupId }) => {
+        events.push(`gate:${pid}:${processGroupId}`);
+      },
+    }), new AbortController().signal);
+    assert.equal(accepted.kind, 'completed');
+    assert.deepEqual(events.slice(0, 2), ['gate:4242:4242', 'stdin']);
+
+    const rejectedChild = new FakeChild({
+      reportPath: fixture.reportPath,
+      events: [],
+      pendingExit: true,
+      resolveExitOn: 'SIGTERM',
+    });
+    const rejected = await new CodexProcess(async () => rejectedChild).run(fixture.input({
+      onSpawned: async () => { throw new Error('CAS rejected'); },
+    }), new AbortController().signal);
+    assert.equal(rejected.kind, 'launch-gate-failed');
+    assert.equal(rejectedChild.events.includes('stdin'), false);
+    assert.deepEqual(rejectedChild.terminations, ['SIGTERM']);
+  });
+});
+
 test('classifies nonzero exit, spawn failure, and bounded-output overflow separately', async () => {
   await withRunFixture(async (fixture) => {
     const nonzero = await new CodexProcess(async () => new FakeChild({
@@ -318,7 +345,7 @@ async function withRunFixture(
     safePath: string;
     parentCodexHome: string;
     parentEnv: NodeJS.ProcessEnv;
-    input: (overrides?: Partial<{ timeoutMs: number; idleTimeoutMs: number }>) => Parameters<CodexProcess['run']>[0];
+    input: (overrides?: Partial<Parameters<CodexProcess['run']>[0]>) => Parameters<CodexProcess['run']>[0];
   }) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-process-'));
@@ -361,6 +388,7 @@ async function withRunFixture(
         idleTimeoutMs: overrides.idleTimeoutMs ?? 5_000,
         operationPolicy: defaultContainmentOperationPolicy(),
         executionProfile: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
+        ...(overrides.onSpawned ? { onSpawned: overrides.onSpawned } : {}),
       }),
     });
   } finally {

@@ -1,6 +1,6 @@
 ---
 name: codebase-design
-description: Reference vocabulary and a bounded decision lens for designing deep modules. Use when a named module interface or seam must be designed or evaluated, when tests need a durable public seam, or when another skill needs the deep-module vocabulary. Do not use as a session driver, repository-wide architecture scan, or implementation workflow.
+description: Design or evaluate a named module interface, deep-module seam, or durable public test seam. Provides bounded design vocabulary; not a session driver, repository-wide scan, or implementation workflow.
 ---
 
 # Codebase Design

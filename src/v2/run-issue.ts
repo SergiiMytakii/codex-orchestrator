@@ -10,6 +10,20 @@ import {
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
 import { canonicalJson, sha256 } from './containment.js';
 import { validateImplementationReport } from './implementation-report.js';
+import {
+  acceptApprovedDirectReview,
+  acceptNeedsWorkDirectReview,
+  beginDirectReviewRepair,
+  createLegacyBypassDirectReview,
+  createInitialDirectReview,
+  directReviewClosureRequestSha256,
+  directReviewTargetFingerprint,
+  launchDirectReviewInvocation,
+  prepareDirectReviewClosure,
+  prepareDirectReviewInvocation,
+  projectTerminalDirectReview,
+} from './direct-delivery.js';
+import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
 import { ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
@@ -69,6 +83,7 @@ export interface RunIssueGit {
   snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   fingerprintDeniedPaths(worktreePath: string, deniedPaths: string[]): Promise<string>;
   listChangedFiles(worktreePath: string): Promise<string[]>;
+  fingerprintChangedFiles(worktreePath: string, changedFiles: string[]): Promise<string>;
   stageAll(worktreePath: string): Promise<void>;
   getTreeSha(worktreePath: string): Promise<string>;
   getHead(worktreePath: string): Promise<string>;
@@ -79,7 +94,7 @@ export interface RunIssueGit {
 }
 
 export type ImplementationAgentResult =
-  | { kind: 'completed'; report: unknown }
+  | { kind: 'completed'; report: unknown; attemptId?: string }
   | { kind: 'transport-failed'; resumable: boolean }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
@@ -114,6 +129,10 @@ export interface RunIssueDependencies {
       signal: AbortSignal;
     }): Promise<ImplementationAgentResult>;
   };
+  implementationReviewer: {
+    run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult>;
+  };
+  waitForReviewProcessAbsence(processGroupId: number): Promise<void>;
   routeCoordinator: {
     run(input: RouteCoordinatorInput & { state: RouteCoordinatorState }): Promise<RouteCoordinatorResult>;
   };
@@ -138,6 +157,7 @@ export interface RunIssueDependencies {
   verifyWorkflowGeneration(receipt: WorkflowGenerationReceipt): Promise<void>;
   createRunId(): string;
   createProofId(): string;
+  createReviewSessionId(): string;
   now(): string;
   signal?: AbortSignal;
 }
@@ -463,7 +483,16 @@ export class RunIssue {
           active = await this.migratePreRouteRun(active, issue);
           issueSnapshot = structuredClone(active.record.issueSnapshot);
         } else {
-          if (existing.lifecycle === 'safe-halt') return await this.publicationDiverged(active, 'safe-halt-requires-process-absence');
+          if (existing.lifecycle === 'safe-halt') {
+            const process = existing.process;
+            if (!process) return await this.publicationDiverged(active, 'safe-halt-process-missing');
+            try { await this.dependencies.waitForReviewProcessAbsence(process.processGroupId); }
+            catch { return await this.invokedFailure(active, 'safe-halt-process-absence-unconfirmed'); }
+            if (!process.purpose || !process.resumeLifecycle || process.resumeReviewStage === undefined) {
+              return await this.terminal(active, { status: 'internal-error', code: 'direct-review-migration-unrecoverable' });
+            }
+            active = await this.persist(active, { lifecycle: process.resumeLifecycle, process: undefined });
+          }
           if (existing.lifecycle === 'waiting-human') {
             const waiting = await this.continueWaitingHuman(active);
             if ('result' in waiting) return waiting.result;
@@ -489,10 +518,16 @@ export class RunIssue {
           if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
           if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
             if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteMigrationUnrecoverableError();
-            if (active.record.cycle >= config.runner.maxCycles) {
-              return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+            const reviewRecovery = active.record.lifecycle === 'implementing' && active.record.directReview?.status === 'active'
+              && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure');
+            const checkRecovery = active.record.lifecycle === 'checking'
+              && (active.record.directReview?.status === 'clear' || active.record.directReview?.status === 'legacy-bypass');
+            if (!reviewRecovery && !checkRecovery) {
+              if (active.record.cycle >= config.runner.maxCycles) {
+                return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+              }
+              active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
             }
-            active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
           }
         }
       } else {
@@ -528,8 +563,20 @@ export class RunIssue {
         if ('result' in routed) return routed.result;
         active = routed.active;
       }
-      if (active.record.lifecycle !== 'implementing') {
+      if (active.record.lifecycle !== 'implementing' && active.record.lifecycle !== 'checking') {
         return await this.terminal(active, { status: 'internal-error', code: 'route-dispatch-not-implementing' });
+      }
+      if (active.record.lifecycle === 'checking' && !active.record.directReview && active.record.routeReceipt?.route === 'direct') {
+        const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
+        const targetFingerprint = directReviewTargetFingerprint({
+          snapshot: await this.dependencies.git.snapshot(worktreePath),
+          changedFiles,
+          routeDecisionSha256: active.record.routeReceipt.decisionSha256,
+          workflowGenerationHash: active.record.workflowGeneration.generationHash,
+          cycle: active.record.cycle,
+          frozenCriteria,
+        });
+        active = await this.persist(active, { directReview: createLegacyBypassDirectReview(targetFingerprint) });
       }
       attemptLoop: while (true) {
       if (!await this.authorized(input.issueNumber, runId, branchName, config)) {
@@ -537,6 +584,28 @@ export class RunIssue {
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
+      let resumeAtChecks = active.record.lifecycle === 'checking'
+        && (active.record.directReview?.status === 'clear' || active.record.directReview?.status === 'legacy-bypass');
+      if (active.record.lifecycle === 'implementing'
+        && active.record.directReview?.status === 'active'
+        && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure')) {
+        const recovered = await this.recoverDirectReviewInvocation(active);
+        if ('status' in recovered) return recovered;
+        active = recovered;
+        const reviewed = await this.runDirectReviewFull(
+          active,
+          publicIssueSnapshot(issueSnapshot),
+          frozenCriteria,
+          `recovered-implementation-cycle-${active.record.cycle}`,
+          config.runner.maxCycles,
+        );
+        if ('status' in reviewed) return reviewed;
+        active = reviewed;
+        if (active.record.lifecycle === 'implementing') continue attemptLoop;
+        resumeAtChecks = true;
+      }
+
+      if (!resumeAtChecks) {
       const implementationBaseline = await this.dependencies.git.snapshot(worktreePath);
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
       let implementation = await this.runImplementation({
@@ -622,8 +691,48 @@ export class RunIssue {
         return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
       }
 
-      active = await this.persist(active, { lifecycle: 'checking' });
+      if (active.record.routeReceipt?.route === 'direct') {
+        const targetFingerprint = directReviewTargetFingerprint({
+          snapshot: await this.dependencies.git.snapshot(worktreePath),
+          changedFiles,
+          routeDecisionSha256: active.record.routeReceipt.decisionSha256,
+          workflowGenerationHash: active.record.workflowGeneration.generationHash,
+          cycle: active.record.cycle,
+          frozenCriteria,
+        });
+        if (active.record.directReview?.stage === 'review-repair') {
+          active = await this.persist(active, {
+            directReview: prepareDirectReviewClosure(active.record.directReview, targetFingerprint).state,
+          });
+        } else {
+          const reviewerSessionId = this.dependencies.createReviewSessionId();
+          assertNonEmptyString(reviewerSessionId, 'reviewerSessionId');
+          active = await this.persist(active, {
+            directReview: createInitialDirectReview({
+              targetFingerprint,
+              cleanupRequired: false,
+              cleanupReason: 'bounded final review owns cleanup',
+              cleanupReviewerSessionId: null,
+              codeReviewerSessionId: reviewerSessionId,
+            }),
+          });
+        }
+        const reviewed = await this.runDirectReviewFull(
+          active,
+          publicIssueSnapshot(issueSnapshot),
+          frozenCriteria,
+          implementation.attemptId ?? `implementation-cycle-${active.record.cycle}`,
+          config.runner.maxCycles,
+        );
+        if ('status' in reviewed) return reviewed;
+        active = reviewed;
+        if (active.record.lifecycle === 'implementing') continue attemptLoop;
+      } else {
+        active = await this.persist(active, { lifecycle: 'checking' });
+      }
+      }
       for (const [id, command] of Object.entries(config.checks)) {
+        if (active.record.checks.some((check) => check.id === id && check.status === 'passed')) continue;
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
         let check;
         try {
@@ -638,13 +747,39 @@ export class RunIssue {
           if (active.record.cycle >= config.runner.maxCycles) {
             return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
           }
-          active = await this.startNextCycle(active, [`Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`]);
+          const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
+          active = await this.startNextCycle(active, [summary], [{
+            provenance: 'check', sourceId: `check:${id}:${row.outputSha256}`, summary,
+            affectedContracts: ['configured-checks'],
+          }]);
           continue attemptLoop;
         }
       }
 
+      let reviewedStageBinding: { files: string[]; contentSha256: string } | undefined;
       try {
+        const reviewedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
+        const reviewedContentSha256 = await this.dependencies.git.fingerprintChangedFiles(worktreePath, reviewedFiles);
+        reviewedStageBinding = { files: reviewedFiles, contentSha256: reviewedContentSha256 };
+        if (active.record.directReview?.status === 'clear') {
+          const currentFingerprint = directReviewTargetFingerprint({
+            snapshot: await this.dependencies.git.snapshot(worktreePath),
+            changedFiles: await this.dependencies.git.listChangedFiles(worktreePath),
+            routeDecisionSha256: active.record.routeReceipt!.decisionSha256,
+            workflowGenerationHash: active.record.workflowGeneration.generationHash,
+            cycle: active.record.cycle,
+            frozenCriteria,
+          });
+          if (currentFingerprint !== active.record.directReview.targetFingerprint) {
+            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'direct-review-target-drift');
+          }
+        }
         await this.dependencies.git.stageAll(worktreePath);
+        const stagedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
+        const stagedContentSha256 = await this.dependencies.git.fingerprintChangedFiles(worktreePath, stagedFiles);
+        if (!sameStrings(reviewedFiles, stagedFiles) || reviewedContentSha256 !== stagedContentSha256) {
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'post-stage-review-binding-drift');
+        }
       } catch {
         return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' });
       }
@@ -653,6 +788,11 @@ export class RunIssue {
       }
       const proofChangedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
       const freshness = await this.dependencies.git.snapshot(worktreePath);
+      const proofContentSha256 = await this.dependencies.git.fingerprintChangedFiles(worktreePath, proofChangedFiles);
+      if (!reviewedStageBinding || !sameStrings(reviewedStageBinding.files, proofChangedFiles)
+        || reviewedStageBinding.contentSha256 !== proofContentSha256) {
+        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'checked-change-review-binding-drift');
+      }
       const payload: CheckedChangePayloadV1 = {
         version: 1,
         canonicalRepository,
@@ -701,6 +841,9 @@ export class RunIssue {
                 untrackedContentSha256: freshness.untrackedContentSha256,
                 worktreeIdentity: freshness.worktreeIdentity,
               },
+              purpose: 'proof',
+              resumeLifecycle: 'proving',
+              resumeReviewStage: null,
             },
           });
           while (true) {
@@ -720,7 +863,12 @@ export class RunIssue {
         if (active.record.cycle >= config.runner.maxCycles) {
           return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
         }
-        active = await this.startNextCycle(active, proof.findings);
+        active = await this.startNextCycle(active, proof.findings, proof.findings.map((summary) => ({
+          provenance: 'proof' as const,
+          sourceId: `proof:${proofId}:${sha256(summary)}`,
+          summary,
+          affectedContracts: ['acceptance-proof'],
+        })));
         continue attemptLoop;
       }
       if (proof.status !== 'passed') return await this.mapProofFailure(active, proof);
@@ -1167,7 +1315,214 @@ export class RunIssue {
     }
   }
 
-  private async startNextCycle(active: ActiveRun, findings: string[]): Promise<ActiveRun> {
+  private async runDirectReviewFull(
+    starting: ActiveRun,
+    issue: IssueSnapshot,
+    frozenCriteria: FrozenCriterion[],
+    implementationAttemptId: string,
+    maxCycles: number,
+  ): Promise<ActiveRun | RunIssueResult> {
+    let active = starting;
+    let reportRepair: { originalReportSha256: string; originalReportBytes: Buffer; diagnostic: string } | undefined;
+    while (true) {
+      const directReview = active.record.directReview;
+      const routeReceipt = active.record.routeReceipt;
+      if (!directReview || !routeReceipt || routeReceipt.route !== 'direct'
+        || (directReview.stage !== 'review-full' && directReview.stage !== 'review-closure')) {
+        return this.terminal(active, { status: 'internal-error', code: 'direct-review-state-invalid' });
+      }
+      const reviewerSessionId = directReview.review.reviewerSessionId;
+      if (!reviewerSessionId) return this.terminal(active, { status: 'internal-error', code: 'direct-review-session-missing' });
+      const closureRequestSha256 = directReview.stage === 'review-closure'
+        ? directReviewClosureRequestSha256(directReview)
+        : null;
+      const mode = directReview.stage === 'review-closure' ? 'closure' as const : 'full' as const;
+      const result = await this.dependencies.implementationReviewer.run({
+        runId: active.record.runId,
+        worktreePath: active.record.worktreePath,
+        operation: 'code-review',
+        mode,
+        reviewerSessionId,
+        implementationAttemptId,
+        targetRevision: directReview.targetRevision,
+        targetFingerprint: directReview.targetFingerprint,
+        closureRequestSha256,
+        issue,
+        frozenCriteria,
+        routeReceipt: structuredClone(routeReceipt),
+        defects: structuredClone(directReview.review.defects),
+        affectedDefectIds: [...directReview.review.affectedDefectIds],
+        fixedRepairFindings: directReview.repairFindings.filter((finding) => finding.status === 'fixed')
+          .map((finding) => ({ id: finding.id, affectedContracts: [...finding.affectedContracts] })),
+        mandatoryCoverage: directReview.stage === 'review-closure'
+          ? [...directReview.review.coverage]
+          : ['acceptance-criteria', 'correctness', 'test-quality'],
+        workflowGeneration: structuredClone(active.record.workflowGeneration),
+        repairOnly: reportRepair !== undefined,
+        originalReportSha256: reportRepair?.originalReportSha256 ?? null,
+        validationDiagnostic: reportRepair?.diagnostic ?? null,
+        originalReportBytes: reportRepair?.originalReportBytes ?? null,
+        signal: this.signal,
+        onPrepared: async (invocation) => {
+          const current = active.record.directReview;
+          if (!current) throw new Error('direct review disappeared before prepare');
+          active = await this.persist(active, {
+            directReview: prepareDirectReviewInvocation(current, invocation),
+          });
+        },
+        onLaunched: async (invocation) => {
+          const current = active.record.directReview;
+          if (!current) throw new Error('direct review disappeared before launch');
+          active = await this.persist(active, {
+            directReview: launchDirectReviewInvocation(current, invocation),
+          });
+        },
+      });
+      if (result.kind === 'completed') {
+        const current = active.record.directReview;
+        if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
+        if (result.report.verdict === 'needs-work') {
+          if (active.record.cycle >= maxCycles) {
+            return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
+          }
+          const repaired = acceptNeedsWorkDirectReview(current, result.report, result.artifactSha256);
+          const findings = [
+            ...result.report.defects
+            .filter((defect) => defect.status === 'open' || defect.status === 'reopened')
+            .map((defect) => `${defect.id}: ${defect.failure}\nRepair: ${defect.repair}`),
+            ...repaired.repairFindings
+              .filter((finding) => finding.status === 'reopened')
+              .map((finding) => `${finding.id}: ${finding.summary}`),
+          ];
+          return this.persist(active, {
+            lifecycle: 'implementing',
+            cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+            directReview: repaired,
+            reworkFindings: findings,
+            checks: [],
+            checkedChangeSha256: undefined,
+            proofId: undefined,
+            proofReceipt: undefined,
+          });
+        }
+        if (result.report.verdict !== 'approved') return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-rejected');
+        return this.persist(active, {
+          lifecycle: 'checking',
+          directReview: acceptApprovedDirectReview(current, result.report, result.artifactSha256),
+        });
+      }
+      if (result.kind === 'report-invalid') {
+        const current = active.record.directReview;
+        if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
+        const selected = current.stage?.startsWith('cleanup-') ? current.cleanup : current.review;
+        if (selected.reportRepairs >= 1 || reportRepair) {
+          return this.terminal(active, { status: 'internal-error', code: 'direct-review-report-malformed' });
+        }
+        const { invocation: _invocation, ...withoutInvocation } = structuredClone(current);
+        const trackKey = current.stage?.startsWith('cleanup-') ? 'cleanup' as const : 'review' as const;
+        active = await this.persist(active, {
+          directReview: {
+            ...withoutInvocation,
+            [trackKey]: { ...withoutInvocation[trackKey], reportRepairs: 1 },
+          },
+        });
+        reportRepair = {
+          originalReportSha256: result.originalReportSha256,
+          originalReportBytes: Buffer.from(result.originalReportBytes),
+          diagnostic: result.diagnostic,
+        };
+        continue;
+      }
+      if (result.kind === 'transport-failed') {
+        const current = active.record.directReview;
+        if (!current || current.review.transportRetries >= 1) {
+          return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-transport-exhausted');
+        }
+        const { invocation: _invocation, ...withoutInvocation } = structuredClone(current);
+        active = await this.persist(active, {
+          directReview: {
+            ...withoutInvocation,
+            review: { ...withoutInvocation.review, transportRetries: 1 },
+          },
+        });
+        continue;
+      }
+      if (result.kind === 'safe-halt') {
+        active = await this.persist(active, {
+          lifecycle: 'safe-halt',
+          process: {
+            ...result.process,
+            purpose: 'code-review',
+            resumeLifecycle: 'implementing',
+            resumeReviewStage: directReview.stage,
+          },
+        });
+        try { await result.waitForAbsence(); }
+        catch { return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-unconfirmed'); }
+        return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-delayed');
+      }
+      if (result.kind === 'cancelled') return this.terminal(active, { status: 'cancelled' });
+      return this.terminal(active, { status: 'internal-error', code: result.code });
+    }
+  }
+
+  private async recoverDirectReviewInvocation(starting: ActiveRun): Promise<ActiveRun | RunIssueResult> {
+    const directReview = starting.record.directReview;
+    const invocation = directReview?.invocation;
+    if (!directReview || !invocation) return starting;
+    const { invocation: _invocation, ...withoutInvocation } = structuredClone(directReview);
+    if (invocation.status === 'prepared') {
+      return this.persist(starting, { directReview: withoutInvocation });
+    }
+    if (invocation.status === 'launched') {
+      try { await this.dependencies.waitForReviewProcessAbsence(invocation.processGroupId!); }
+      catch { return this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-process-absence-unconfirmed'); }
+      if (directReview.review.transportRetries >= 1) {
+        return this.terminal(starting, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-transport-exhausted');
+      }
+      return this.persist(starting, {
+        directReview: {
+          ...withoutInvocation,
+          review: { ...withoutInvocation.review, transportRetries: 1 },
+        },
+      });
+    }
+    return this.persist(starting, { directReview: withoutInvocation });
+  }
+
+  private async startNextCycle(
+    active: ActiveRun,
+    findings: string[],
+    sources?: Array<{ provenance: 'check' | 'proof'; sourceId: string; summary: string; affectedContracts: string[] }>,
+  ): Promise<ActiveRun> {
+    if (active.record.directReview?.status === 'clear') {
+      const fallbackProvenance = active.record.lifecycle === 'proving' ? 'proof' as const : 'check' as const;
+      const normalizedSources = sources ?? findings.map((summary) => ({
+        provenance: fallbackProvenance,
+        sourceId: `${fallbackProvenance}:recovery:${sha256(summary)}`,
+        summary,
+        affectedContracts: [fallbackProvenance === 'proof' ? 'acceptance-proof' : 'configured-checks'],
+      }));
+      const repairFindings = normalizedSources.map((source) => ({
+        id: source.sourceId,
+        provenance: source.provenance,
+        sourceId: source.sourceId,
+        targetRevision: active.record.directReview!.targetRevision,
+        summary: source.summary,
+        affectedContracts: source.affectedContracts,
+        status: 'open' as const,
+      }));
+      return this.persist(active, {
+        lifecycle: 'implementing',
+        cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+        reworkFindings: [...findings],
+        directReview: beginDirectReviewRepair(active.record.directReview, repairFindings),
+        checks: [],
+        checkedChangeSha256: undefined,
+        proofId: undefined,
+        proofReceipt: undefined,
+      });
+    }
     active = await this.persist(active, { lifecycle: 'reworking', reworkFindings: [...findings] });
     return this.persist(active, {
       lifecycle: 'implementing',
@@ -1219,6 +1574,11 @@ export class RunIssue {
       outcomeEvidenceId: evidence.id,
       process: undefined,
     };
+    if (outcome.status !== 'review-ready' && active.record.directReview && active.record.directReview.status !== 'terminal') {
+      changes.directReview = projectTerminalDirectReview(active.record.directReview, outcome.status === 'blocked'
+        ? { status: 'blocked', kind: outcome.kind }
+        : { status: outcome.status });
+    }
     if (active.record.waitingHuman && (active.record.lifecycle === 'waiting-human' || active.record.waitingHuman.phase === 'resumed')) {
       if (active.record.waitingHuman.phase === 'resumed') {
         changes.waitingHuman = {

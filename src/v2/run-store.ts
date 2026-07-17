@@ -1,4 +1,5 @@
 import type { ProofReceipt } from './proof-report.js';
+import { validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
 import {
   validateRouteExecution,
   validateRouteReceipt,
@@ -84,6 +85,7 @@ export interface RunRecordV1 {
   routeExecution?: RouteExecutionV1;
   routeReceipt?: RouteReceiptV1;
   waitingHuman?: WaitingHumanExecutionV1;
+  directReview?: DirectReviewV1;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -96,6 +98,9 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
+    purpose?: 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof';
+    resumeLifecycle?: Lifecycle;
+    resumeReviewStage?: DirectReviewStage | null;
   };
   checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
   checkedChangeSha256?: string;
@@ -205,6 +210,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'routeExecution',
     'routeReceipt',
     'waitingHuman',
+    'directReview',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -260,6 +266,23 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       terminalOutcome: hasOwn(value, 'terminalOutcome') ? value.terminalOutcome as RunTerminalOutcome : undefined,
     });
   }
+  if (hasOwn(value, 'directReview')) {
+    if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'direct') {
+      throw new Error(`${field}.directReview requires a direct route`);
+    }
+    const process = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
+      ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
+      : undefined;
+    validateDirectReview(value.directReview, {
+      lifecycle: value.lifecycle as string,
+      ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
+      ...(process ? { process: {
+        purpose: process.purpose,
+        resumeLifecycle: process.resumeLifecycle,
+        resumeReviewStage: process.resumeReviewStage,
+      } } : {}),
+    });
+  }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
@@ -293,6 +316,13 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   }
 }
 
+function directTerminalOutcome(outcome: RunTerminalOutcome): DirectReviewV1['terminalOutcome'] | undefined {
+  if (outcome.status === 'review-ready') return undefined;
+  return outcome.status === 'blocked'
+    ? { status: 'blocked', kind: outcome.kind }
+    : { status: outcome.status };
+}
+
 function validateWorkflowGeneration(value: unknown, field: string): asserts value is WorkflowGenerationReceipt {
   assertExactObject(value, [
     'generationHash', 'manifestSha256', 'packageVersion', 'generationRoot', 'contentSha256',
@@ -307,7 +337,11 @@ function validateWorkflowGeneration(value: unknown, field: string): asserts valu
 }
 
 function validateProcess(value: unknown, field: string): void {
-  assertExactObject(value, ['pid', 'processGroupId', 'startedAt', 'baseline'], field);
+  const extended = hasOwn(value, 'purpose') || hasOwn(value, 'resumeLifecycle') || hasOwn(value, 'resumeReviewStage');
+  assertExactObject(value, [
+    'pid', 'processGroupId', 'startedAt', 'baseline',
+    ...(extended ? ['purpose', 'resumeLifecycle', 'resumeReviewStage'] : []),
+  ], field);
   assertPositiveInteger(value.pid, `${field}.pid`);
   assertPositiveInteger(value.processGroupId, `${field}.processGroupId`);
   assertTimestamp(value.startedAt, `${field}.startedAt`);
@@ -319,6 +353,15 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
+  if (extended) {
+    if (!['route', 'implementation', 'cleanup-review', 'code-review', 'proof'].includes(value.purpose as string)) {
+      throw new Error(`${field}.purpose is invalid`);
+    }
+    if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
+    if (value.resumeReviewStage !== null && ![
+      'cleanup-full', 'cleanup-repair', 'cleanup-closure', 'review-full', 'review-repair', 'review-closure',
+    ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
+  }
 }
 
 function validateChecks(value: unknown, field: string): asserts value is RunRecordV1['checks'] {

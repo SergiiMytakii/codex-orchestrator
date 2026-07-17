@@ -1,5 +1,10 @@
-import { canonicalJson, containsCredentialEvidence } from './containment.js';
+import { canonicalJson, containsCredentialEvidence, sha256 } from './containment.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
+import {
+  hashCodeReviewReport,
+  validateCodeReviewReport,
+  type CodeReviewValidationContext,
+} from './code-review-report.js';
 import {
   hashAmbiguityReviewArtifact,
   hashTriageArtifact,
@@ -19,7 +24,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review';
+export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review';
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
@@ -29,11 +34,14 @@ export interface ContainedReportOperationInput {
   workflowGeneration: WorkflowGenerationReceipt;
   promptFacts: string[];
   signal: AbortSignal;
+  reviewContext?: CodeReviewValidationContext;
+  onPrepared?: () => Promise<void>;
+  onLaunched?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
 }
 
 export type ContainedReportOperationResult =
   | { status: 'completed'; attemptId: string; validatedPayload: unknown; artifactSha256: string }
-  | { status: 'invalid'; attemptId: string; findings: string[] }
+  | { status: 'invalid'; attemptId: string; findings: string[]; repairInput?: { originalReportSha256: string; originalReportBytes: Buffer } }
   | { status: 'retryable'; code: string }
   | { status: 'safe-halt'; process: NonNullable<RunRecordV1['process']>; waitForAbsence(): Promise<void> }
   | { status: 'cancelled' }
@@ -107,6 +115,20 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     if (!hasExactReadOnlyAuthority(attempt, input)) {
       launchResult = { status: 'blocked', kind: 'safety', code: 'report-operation-authority-drift' };
     } else {
+      if (isImplementationReview(input.operation)) {
+        if (!input.reviewContext || !input.onPrepared || !input.onLaunched) {
+          return this.finishWithSnapshot(input.worktreePath, before, {
+            status: 'blocked', kind: 'safety', code: 'review-operation-launch-gate-missing',
+          });
+        }
+        try {
+          await input.onPrepared();
+        } catch {
+          return this.finishWithSnapshot(input.worktreePath, before, {
+            status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed',
+          });
+        }
+      }
       try {
         launchResult = await this.dependencies.launch({ ...input, attempt });
       } catch {
@@ -147,7 +169,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
 
     if (launchResult.status !== 'completed') return launchResult;
     if (!input) return { status: 'blocked', kind: 'external', code: 'report-operation-prepare-failed' };
-    return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes);
+    return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes, input.reviewContext);
   }
 }
 
@@ -178,31 +200,62 @@ function validateCompletedReport(
   operation: ContainedReportOperationId,
   attemptId: string,
   reportBytes: Buffer,
+  reviewContext?: CodeReviewValidationContext,
 ): ContainedReportOperationResult {
+  const rawText = reportBytes.toString('utf8');
+  const repairable = Buffer.from(rawText, 'utf8').equals(reportBytes)
+    && !containsCredentialEvidence(rawText)
+    && reportBytes.length <= 1024 * 1024;
   try {
-    const rawText = reportBytes.toString('utf8');
     if (!Buffer.from(rawText, 'utf8').equals(reportBytes) || containsCredentialEvidence(rawText)) {
       throw new Error('report payload contains forbidden credential material');
     }
     const decoded = decodeAgentReportForValidation(reportBytes);
-    const validatedPayload = operation === 'triage'
-      ? validateTriageRoute(decoded)
-      : validateAmbiguityReviewArtifact(decoded);
+    let validatedPayload: unknown;
+    let artifactSha256: string;
+    if (operation === 'triage') {
+      validatedPayload = validateTriageRoute(decoded);
+      artifactSha256 = hashTriageArtifact(validatedPayload);
+    } else if (operation === 'ambiguity-review') {
+      validatedPayload = validateAmbiguityReviewArtifact(decoded);
+      artifactSha256 = hashAmbiguityReviewArtifact(validatedPayload);
+    } else {
+      const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
+      validatedPayload = reviewReport;
+      artifactSha256 = hashCodeReviewReport(reviewReport);
+    }
     return {
       status: 'completed',
       attemptId,
       validatedPayload,
-      artifactSha256: operation === 'triage'
-        ? hashTriageArtifact(validatedPayload)
-        : hashAmbiguityReviewArtifact(validatedPayload),
+      artifactSha256,
     };
   } catch (error) {
     return {
       status: 'invalid',
       attemptId,
       findings: [safeFinding(error)],
+      ...(repairable ? { repairInput: { originalReportSha256: sha256(reportBytes), originalReportBytes: Buffer.from(reportBytes) } } : {}),
     };
   }
+}
+
+function isImplementationReview(operation: ContainedReportOperationId): operation is 'cleanup-review' | 'code-review' {
+  return operation === 'cleanup-review' || operation === 'code-review';
+}
+
+function inputReviewContext(context: CodeReviewValidationContext | undefined): CodeReviewValidationContext {
+  if (!context) throw new Error('implementation review validation context is missing');
+  return context;
+}
+
+function inputReview(
+  operation: 'cleanup-review' | 'code-review',
+  context: CodeReviewValidationContext,
+  decoded: unknown,
+) {
+  if (context.operation !== operation) throw new Error('implementation review operation context mismatch');
+  return validateCodeReviewReport(decoded, context);
 }
 
 function safeFinding(error: unknown): string {

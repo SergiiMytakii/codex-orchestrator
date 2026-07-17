@@ -61,10 +61,12 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('internal-workflow/skills/acceptance-proof/SKILL.md'), true);
     assert.equal(packedPaths.some((path) => path.startsWith('internal-skills/')), false);
     assert.equal(packedPaths.includes('dist/src/v2/implementation-report.js'), true);
+    assert.equal(packedPaths.includes('dist/src/v2/code-review-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
       'acceptance-proof', 'atomic-store', 'candidate-cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
-      'implementation-report', 'legacy-cutover', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+      'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
+      'legacy-cutover', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
       'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'waiting-human', 'waiting-human-coordinator', 'workflow-assets',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
@@ -89,9 +91,12 @@ test('packed install uses one package-owned workflow with empty or conflicting c
       bootId: 'packed-consumer',
     });
     const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
+    const codeReview = await workflowAssets.resolveWorkflowOperation(receipt, 'code-review');
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
     assert.match(await readFile(implementation.entryPath, 'utf8'), /Implementation Operation/u);
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
+    assert.match(await readFile(codeReview.entryPath, 'utf8'), /Code Review Operation/u);
+    assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
   } finally {

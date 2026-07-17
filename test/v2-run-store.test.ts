@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
+import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
   createWaitingQuestion,
@@ -147,6 +148,21 @@ test('run store persists exact triaging and routed state while retaining structu
 
   const legacy = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   assert.equal((await legacy.compareAndSwap(0, body([{ ...record(), lifecycle: 'implementing' }]))).runs[0]?.lifecycle, 'implementing');
+});
+
+test('run store persists direct review composites and rejects them on non-direct routes', async () => {
+  const routed = directRoutedRecord();
+  const directReview = createInitialDirectReview({
+    targetFingerprint: '7'.repeat(64), cleanupRequired: false, cleanupReason: 'final review owns cleanup',
+    cleanupReviewerSessionId: null, codeReviewerSessionId: 'review-session-1',
+  });
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  const saved = await writer.compareAndSwap(0, body([{ ...routed, lifecycle: 'implementing', directReview }]));
+  assert.equal((saved.runs[0] as RunRecordV1 & { directReview: typeof directReview }).directReview.stage, 'review-full');
+
+  const invalid = { ...record(), lifecycle: 'implementing' as const, directReview };
+  const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /direct route/u);
 });
 
 test('run store strictly persists active waiting execution bound to the run route and workflow generation', async () => {
@@ -448,6 +464,33 @@ function awaitingUserReceipt(): RouteReceiptV1 {
   };
   receipt.decisionSha256 = hashRouteDecision(receipt);
   return receipt;
+}
+
+function directRoutedRecord(): RunRecordV1 {
+  const base = record();
+  const artifact = {
+    version: 1 as const, status: 'direct' as const,
+    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
+    direct: { summary: 'Direct.', behaviors: ['Deliver.'], verification: ['Test.'] },
+    specRequired: null, awaitingUser: null, blocker: null,
+  };
+  const triage = {
+    operation: 'triage' as const, attemptId: 'triage-direct-1', artifactSha256: hashTriageArtifact(artifact),
+    generationHash: base.workflowGeneration.generationHash,
+  };
+  const routeReceipt: RouteReceiptV1 = {
+    version: 1, route: 'direct', triage, review: null, artifact, decisionSha256: '', decidedAt: timestamp(), assumptions: [],
+  };
+  routeReceipt.decisionSha256 = hashRouteDecision(routeReceipt);
+  return {
+    ...base,
+    lifecycle: 'routed',
+    routeExecution: {
+      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      candidateReviews: 0, phase: 'route-complete', triage, review: null,
+    },
+    routeReceipt,
+  };
 }
 
 function questionReceipt(route = awaitingUserReceipt()): WaitingQuestionReceiptV1 {

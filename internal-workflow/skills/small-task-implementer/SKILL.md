@@ -1,6 +1,6 @@
 ---
 name: small-task-implementer
-description: Implement small low-risk coding tasks quickly with a compact contract, narrow edits, targeted validation, and explicit escalation when scope, risk, or verification no longer fits. Use for tiny bug fixes, UI/copy tweaks, config/build corrections, simple tests, one-module behavior changes, and other changes that should not require plans, specs, issue orchestration, or heavy review gates.
+description: Implement small low-risk coding tasks with narrow edits and targeted validation. Use for tiny fixes, UI/copy changes, config/build corrections, simple tests, or one-module changes that do not need plans, specs, orchestration, or heavy review.
 ---
 
 # Small Task Implementer

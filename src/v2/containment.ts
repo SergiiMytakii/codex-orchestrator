@@ -299,7 +299,7 @@ export function containsCredentialEvidence(value: string): boolean {
   return [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----/iu,
     /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
-    /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
+    /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
   ].some((pattern) => pattern.test(value));
 }
 

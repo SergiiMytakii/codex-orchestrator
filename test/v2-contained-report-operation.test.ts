@@ -46,6 +46,20 @@ const reviewArtifact = {
   findings: [],
   recommendation: 'Proceed.',
 };
+const codeReviewArtifact = {
+  version: 1,
+  operation: 'code-review',
+  targetRevision: 1,
+  targetFingerprint: 'd'.repeat(64),
+  verdict: 'approved',
+  mode: 'full',
+  coverage: ['correctness'],
+  defects: [],
+  residualRisks: [],
+  reviewerSessionId: 'reviewer-session-1',
+  closureRequestSha256: null,
+  repairFindingOutcomes: [],
+};
 
 test('report-only launcher returns validated triage payload with the exact domain-separated hash', async () => {
   const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact }, null, 2)));
@@ -73,6 +87,52 @@ test('report-only launcher validates and hashes ambiguity-review payload indepen
     validatedPayload: reviewArtifact,
     artifactSha256: 'a15f377edd58ccb08d215dbf85b214a73d83c684bf3a98b626d14cf7fb4ff356',
   });
+});
+
+test('implementation reviewer persists prepared and launched identity before accepting a correlated report', async () => {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const input = runInput('code-review');
+  const result = await fixture.operation.run({
+    ...input,
+    reviewContext: {
+      operation: 'code-review', mode: 'full', targetRevision: 1,
+      targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
+      closureRequestSha256: null,
+    },
+    onPrepared: async () => { fixture.events.push('persist:prepared'); },
+    onLaunched: async ({ pid, processGroupId }) => { fixture.events.push(`persist:launched:${pid}:${processGroupId}`); },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') return;
+  assert.deepEqual(result.validatedPayload, codeReviewArtifact);
+  assert.deepEqual(fixture.events, [
+    'snapshot', 'prepare:code-review', 'persist:prepared', 'launch:code-review',
+    'persist:launched:4242:4242', 'snapshot',
+  ]);
+});
+
+test('implementation reviewer rejects missing launch persistence and stale correlation', async () => {
+  const fixture = operationFixture('cleanup-review', Buffer.from(JSON.stringify({
+    report: { ...codeReviewArtifact, operation: 'cleanup-review' },
+  })));
+  const missingGate = await fixture.operation.run(runInput('cleanup-review'));
+  assert.deepEqual(missingGate, {
+    status: 'blocked', kind: 'safety', code: 'review-operation-launch-gate-missing',
+  });
+
+  const staleFixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const stale = await staleFixture.operation.run({
+    ...runInput('code-review'),
+    reviewContext: {
+      operation: 'code-review', mode: 'full', targetRevision: 2,
+      targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
+      closureRequestSha256: null,
+    },
+    onPrepared: async () => {},
+    onLaunched: async () => {},
+  });
+  assert.equal(stale.status, 'invalid');
 });
 
 test('invalid payload returns validation findings without retaining raw payload bytes', async () => {
@@ -163,7 +223,7 @@ test('launcher blocks a completed report when any before/after worktree fingerpr
   });
 });
 
-function runInput(operation: 'triage' | 'ambiguity-review') {
+function runInput(operation: 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review') {
   return {
     operation,
     attemptId: 'attempt-1',
@@ -176,7 +236,7 @@ function runInput(operation: 'triage' | 'ambiguity-review') {
 }
 
 function operationFixture(
-  operation: 'triage' | 'ambiguity-review',
+  operation: 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review',
   reportBytes: Buffer,
   options: {
     prepared?: PreparedContainedReportAttempt;
@@ -197,6 +257,7 @@ function operationFixture(
     },
     launch: async (input) => {
       events.push(`launch:${input.attempt.operation}`);
+      await input.onLaunched?.({ pid: 4242, processGroupId: 4242 });
       return { status: 'completed', reportBytes };
     },
   };

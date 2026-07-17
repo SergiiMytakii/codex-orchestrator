@@ -1,6 +1,6 @@
 ---
 name: "code-review"
-description: "Review code changes or existing code with an evidence-first two-lens process. Use for code review, PR review, commit audit, regression scan, bug hunt, or review-and-fix work. Automatically fix only critical or high-severity high-confidence issues that satisfy the auto-fix policy. For spec-driven work, use one final profile-selected wave with bounded cleanup in the spec/standards lens."
+description: "Evidence-first review of code, PRs, commits, regressions, or review-and-fix work using correctness and standards/cleanup lenses. Auto-fix only qualifying high-confidence severe issues."
 ---
 
 # Code Review
@@ -175,8 +175,8 @@ The coordinator must not blindly relay reviewer output.
 
 Keep the two axes visible in your own notes, but present the final report by severity unless the user explicitly asked for side-by-side Standards/Spec output.
 
-For a Module-scheduled Closure, send the bounded Closure capsule to the supplied
-reviewer session and return its defect updates to the executor.
+For a Module-scheduled Closure, send the bounded capsule to the reviewer lineage
+and session selected by the shared protocol, then return its defect updates.
 
 ## Evidence Standard
 

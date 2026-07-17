@@ -13,6 +13,7 @@ import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command
 import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
+import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
 import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
@@ -137,6 +138,15 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
 
   listChangedFiles(worktreePath: string): Promise<string[]> {
     return this.worktrees.listChangedFiles(worktreePath);
+  }
+
+  async fingerprintChangedFiles(worktreePath: string, changedFiles: string[]): Promise<string> {
+    const root = await realpath(worktreePath);
+    const entries = [];
+    for (const path of [...changedFiles].sort()) {
+      entries.push({ path, fingerprint: await fingerprintRepositoryPath(root, path) });
+    }
+    return sha256(canonicalJson(entries));
   }
 
   async stageAll(worktreePath: string): Promise<void> {
@@ -269,6 +279,7 @@ export class ContainedImplementationAgent {
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
       return {
         kind: 'completed',
+        attemptId,
         report: decodeAgentReportForValidation(result.report.bytes),
       };
     } catch (error) {
@@ -491,7 +502,7 @@ export function createV2Runtime(input: {
       }),
     }),
     snapshot: (worktreePath) => git.snapshot(worktreePath),
-    launch: async ({ attempt, worktreePath, promptFacts, signal }) => {
+    launch: async ({ attempt, worktreePath, promptFacts, signal, onLaunched }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
@@ -532,6 +543,7 @@ export function createV2Runtime(input: {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
+        ...(onLaunched ? { onSpawned: onLaunched } : {}),
         }, signal);
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
@@ -552,6 +564,9 @@ export function createV2Runtime(input: {
         if (!cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
       }
       if (result.kind === 'cancelled') return { status: 'cancelled' as const };
+      if (result.kind === 'launch-gate-failed') {
+        return { status: 'blocked' as const, kind: 'safety' as const, code: 'review-operation-launch-persistence-failed' };
+      }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
         return { status: 'retryable' as const, code: `report-operation-${result.kind}` };
       }
@@ -560,6 +575,10 @@ export function createV2Runtime(input: {
       }
       return { status: 'completed' as const, reportBytes: result.report.bytes };
     },
+  });
+  const implementationReviewer = new ContainedImplementationReviewer({
+    operation: reportOperation,
+    createAttemptId: input.createAttemptId ?? randomUUID,
   });
 
   const readConfig = async (requestedRoot: string) => {
@@ -726,6 +745,8 @@ export function createV2Runtime(input: {
       },
     },
     implementationAgent,
+    implementationReviewer,
+    waitForReviewProcessAbsence: waitForProcessGroupAbsent,
     checks: {
       run: async ({ command, cwd, signal }) => runShellCheck(command, cwd, signal),
     },
@@ -743,6 +764,7 @@ export function createV2Runtime(input: {
     verifyWorkflowGeneration,
     createRunId: input.createRunId ?? randomUUID,
     createProofId: input.createProofId ?? randomUUID,
+    createReviewSessionId: input.createAttemptId ?? randomUUID,
     now,
     signal: controller.signal,
   });
@@ -941,7 +963,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review';
+  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -964,7 +986,8 @@ async function prepareContainedAttempt(input: {
     operation: input.operationId,
     bootId: input.bootId,
   });
-  const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review';
+  const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review'
+    || input.operationId === 'cleanup-review' || input.operationId === 'code-review';
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'
       || snapshot.policy.worktreeAccess !== 'read-only'

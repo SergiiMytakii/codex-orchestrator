@@ -1,6 +1,6 @@
 ---
 name: research
-description: Investigate a material external documentation, API, SDK, specification, service-capability, or source-code question against high-trust primary sources and save one cited Markdown artifact in the repository. Use when the user explicitly requests durable research or delegated reading, even for a narrow source, or when a plan, PRD, ticket, or implementation spec depends on current external facts that require multi-source comparison or contract synthesis. Do not use for a narrow lookup without a delegation/artifact request, repo-only exploration, bug reproduction, or an answer that belongs entirely to a specialized documentation skill.
+description: Research material external API, SDK, specification, service, or source-code questions using primary sources and save one cited repository artifact. Use for requested durable/delegated research or multi-source contract uncertainty; not for narrow lookups, repo-only work, bug reproduction, or specialized docs tasks.
 ---
 
 # Research

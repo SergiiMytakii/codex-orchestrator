@@ -386,9 +386,22 @@ process.stdin.on('end', () => {
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'baseline';
   mkdirSync(dirname(reportPath), { recursive: true });
-  if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
+  if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
+  else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
   else writeImplementation(marker, reportPath, prompt);
 });
+
+function writeReview(reportPath, prompt) {
+  const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
+  const capsule = JSON.parse(facts[0] ?? '{}');
+  writeAgentReport(reportPath, {
+    version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
+    targetFingerprint: capsule.targetFingerprint, verdict: 'approved', mode: capsule.mode,
+    coverage: capsule.mandatoryCoverage ?? [], defects: capsule.defects ?? [], residualRisks: [],
+    reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
+    repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({ id: finding.id, status: 'verified' })),
+  });
+}
 
 function writeImplementation(scenario, reportPath, prompt) {
   if (scenario === 'report-repair' && !prompt.includes('Report repair only')) {
@@ -621,6 +634,21 @@ async function selfTestFakeAgent() {
     if (implementation.version !== 1 || implementation.status !== 'completed'
       || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
       throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
+    }
+    const reviewPath = join(root, 'review.json');
+    const reviewCapsule = {
+      operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1', targetRevision: 1,
+      targetFingerprint: 'a'.repeat(64), closureRequestSha256: null, mandatoryCoverage: ['correctness'],
+      defects: [], fixedRepairFindings: [],
+    };
+    await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {
+      cwd: root,
+      stdin: `Follow the exact operation at /code-review/SKILL.md.\nRunner-provided facts: ${JSON.stringify([JSON.stringify(reviewCapsule)])}\n`,
+    });
+    const review = JSON.parse(await readFile(reviewPath, 'utf8')).report;
+    if (review.operation !== 'code-review' || review.verdict !== 'approved'
+      || review.targetFingerprint !== reviewCapsule.targetFingerprint || review.coverage?.[0] !== 'correctness') {
+      throw new Error('fake code review report contract failed');
     }
     const proofPath = join(root, 'proof.json');
     await runCommand(fakePath, ['exec', '--output-last-message', proofPath], {
