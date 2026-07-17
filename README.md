@@ -19,7 +19,7 @@ npx codex-orchestrator setup --target "$PWD" --prepare-labels
 npx codex-orchestrator doctor --target "$PWD"
 ```
 
-`setup` writes the exact V2 policy to `.codex-orchestrator/config.json`. Use `--github-owner` and `--github-repo` together only when repository inference is unavailable. Existing recognized pre-V2 state is detect-only; migrate it explicitly with `setup --fresh` while all old activity is stopped.
+`setup` writes the exact V2 policy to `.codex-orchestrator/config.json`. Use `--github-owner` and `--github-repo` together only when repository inference is unavailable. Exact Config V1 is migrated by `setup`; older recognized runtime state remains detect-only and requires `setup --fresh` while all old activity is stopped.
 
 ## Run
 
@@ -47,12 +47,13 @@ All commands require an absolute target. `doctor`, `status`, `run`, and `daemon`
 
 1. Read the issue and confirm the exact `auto` authorization label.
 2. Acquire runner ownership and create or resume one issue worktree.
-3. Pin one verified package-owned workflow generation and invoke its `implementation` operation in a contained Codex process.
-4. Validate the structured implementation report and the complete worktree diff.
-5. Run the configured finite checks.
-6. Freeze the checked change and invoke the pinned generation's `acceptance-proof` operation in a separate contained process.
-7. Validate fresh proof artifacts and criterion coverage.
-8. Publish through runner-owned Git and GitHub adapters, then mark the issue review-ready.
+3. Triage the issue. An approved product ambiguity publishes one marker-bound question and moves the issue to `agent:waiting-human`; only an unedited, post-question answer from a current repository writer can resume the same run.
+4. Pin one verified package-owned workflow generation and invoke its `implementation` operation in a contained Codex process.
+5. Validate the structured implementation report and the complete worktree diff.
+6. Run the configured finite checks.
+7. Freeze the checked change and invoke the pinned generation's `acceptance-proof` operation in a separate contained process.
+8. Validate fresh proof artifacts and criterion coverage.
+9. Publish through runner-owned Git and GitHub adapters, then mark the issue review-ready.
 
 Implementation and proof retries are bounded. Crashes resume from durable intents instead of repeating already-confirmed external effects. Ambiguous ownership, process quiescence, repository identity, credentials, denied paths, or publication state fails closed with a typed result.
 

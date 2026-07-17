@@ -14,6 +14,7 @@ import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type Issue
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
+import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
   canonicalJson,
   containmentArgvPolicySha256,
@@ -30,7 +31,7 @@ import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 }
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import { RouteCoordinator } from './route-coordinator.js';
 import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
-import { OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
+import { OwnerLockContentionError, OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
 import {
   parseWorkflowExecutionProfile,
@@ -670,7 +671,7 @@ export function createV2Runtime(input: {
           removeLabels: current.filter((label) => !labels.includes(label)),
         });
       },
-      postComment: (issueNumber, body) => input.issues.postComment(issueNumber, body),
+      postComment: async (issueNumber, body) => { await input.issues.postComment(issueNumber, body); },
     },
     pullRequests: {
       findOpen: async ({ headBranch, baseBranch }) => {
@@ -709,7 +710,20 @@ export function createV2Runtime(input: {
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
       specRequired: async () => ({ status: 'completed' }),
-      awaitingUser: async () => ({ status: 'completed' }),
+      awaitingUser: async (context, state, signal) => {
+        const config = requireConfig(currentConfig);
+        return new WaitingHumanCoordinator({
+          issues: input.issues,
+          labels: {
+            auto: config.github.labels.auto.name,
+            running: config.github.labels.running.name,
+            blocked: config.github.labels.blocked.name,
+            review: config.github.labels.review.name,
+            waitingHuman: config.github.labels.waitingHuman.name,
+          },
+          now,
+        }).run(context, state, signal);
+      },
     },
     implementationAgent,
     checks: {
@@ -764,7 +778,10 @@ async function acquireOwnerLock(input: {
       processAlive: input.processAlive,
     });
   } catch (error) {
-    if (error instanceof OwnerControlLockBlockedError) throw new OwnerLockSafetyError(error.message);
+    if (error instanceof OwnerControlLockBlockedError) {
+      if (error.kind === 'live-contention') throw new OwnerLockContentionError(error.message);
+      throw new OwnerLockSafetyError(error.message);
+    }
     throw error;
   }
 }

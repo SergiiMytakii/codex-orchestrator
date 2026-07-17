@@ -46,6 +46,7 @@ export function setupOutcomeExitCode(outcome: SetupOutcome): 0 | 20 | 70 {
     case 'unchanged':
     case 'labels-prepared':
     case 'fresh-reset':
+    case 'migrated':
     case 'planned':
       return 0;
     case 'inspected':

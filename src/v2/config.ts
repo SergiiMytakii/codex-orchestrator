@@ -12,7 +12,7 @@ interface LabelPolicy {
 
 export interface AgentAutoConfigV1 {
   schema: 'codex-orchestrator.agent-auto';
-  version: 1;
+  version: 2;
   github: {
     owner: string;
     repo: string;
@@ -22,6 +22,7 @@ export interface AgentAutoConfigV1 {
       running: LabelPolicy;
       blocked: LabelPolicy;
       review: LabelPolicy;
+      waitingHuman: LabelPolicy;
     };
   };
   runner: {
@@ -46,16 +47,20 @@ export interface AgentAutoConfigV1 {
 export function parseAgentAutoConfig(value: unknown): AgentAutoConfigV1 {
   assertExactObject(value, ['schema', 'version', 'github', 'runner', 'codex', 'checks', 'proof', 'deny'], 'config');
   if (value.schema !== 'codex-orchestrator.agent-auto') throw new Error('config.schema is invalid');
-  if (value.version !== 1) throw new Error('config.version is invalid');
+  if (value.version !== 2) throw new Error('config.version is invalid');
 
   assertExactObject(value.github, ['owner', 'repo', 'baseBranch', 'labels'], 'config.github');
   assertGitHubOwner(value.github.owner, 'config.github.owner');
   assertGitHubRepo(value.github.repo, 'config.github.repo');
   assertNonEmptyString(value.github.baseBranch, 'config.github.baseBranch');
-  assertExactObject(value.github.labels, ['auto', 'running', 'blocked', 'review'], 'config.github.labels');
-  for (const key of ['auto', 'running', 'blocked', 'review'] as const) {
+  assertExactObject(value.github.labels, ['auto', 'running', 'blocked', 'review', 'waitingHuman'], 'config.github.labels');
+  for (const key of ['auto', 'running', 'blocked', 'review', 'waitingHuman'] as const) {
     validateLabel(value.github.labels[key], `config.github.labels.${key}`);
   }
+  const labels = value.github.labels as Record<string, LabelPolicy>;
+  const labelNames = ['auto', 'running', 'blocked', 'review', 'waitingHuman']
+    .map((key) => labels[key]!.name);
+  if (new Set(labelNames).size !== labelNames.length) throw new Error('config.github.labels names must be distinct');
 
   assertExactObject(value.runner, [
     'workspaceRoot',

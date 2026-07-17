@@ -24,9 +24,12 @@ import {
   type RouteCoordinatorState,
 } from './route-coordinator.js';
 import type { RoutedContinuationRegistry } from './route-continuations.js';
+import type { WaitingHumanState } from './waiting-human-coordinator.js';
+import type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1 } from './waiting-human.js';
 import {
   downstreamLifecycleForRoute,
   validateRouteTransition,
+  validateTrustedAnswerResumeTransition,
   type RouteExecutionV1,
 } from './route-decision.js';
 import type {
@@ -40,11 +43,14 @@ import type {
 export type RunIssueResult =
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string }
   | { status: 'route-ready'; route: 'spec-required' | 'awaiting-user'; evidencePath: string }
+  | { status: 'awaiting-user'; questionId: string; answerPrefix: string; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
-  | { status: 'internal-error'; evidencePath: string };
+  | { status: 'internal-error'; evidencePath: string }
+  | { status: 'migration-required'; fromVersion: 1; requiredAction: string }
+  | { status: 'requeued'; reason: 'owner-contention'; evidencePath: string };
 
 export interface RunIssueSnapshot {
   number: number;
@@ -137,6 +143,7 @@ export interface RunIssueDependencies {
 }
 
 export class OwnerLockSafetyError extends Error {}
+export class OwnerLockContentionError extends Error {}
 
 interface ActiveRun {
   state: RunStateFileV1;
@@ -353,7 +360,10 @@ export class RunIssue {
     const evidence = await this.dependencies.writeEvidence({ runId, code: 'review-ready', summary: pullRequest.url });
     const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path };
     try {
-      await this.persist(active, { lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome });
+      await this.persist(active, {
+        lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome,
+        ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'review-ready' }) } : {}),
+      });
     } catch { throw new PostEffectStateError(active); }
     return outcome;
   }
@@ -373,6 +383,12 @@ export class RunIssue {
       try {
         owner = await this.dependencies.ownerLock.acquire({ canonicalRepository, targetRoot });
       } catch (error) {
+        if (error instanceof OwnerLockContentionError) {
+          const evidence = await this.dependencies.writeEvidence({
+            runId: `issue-${input.issueNumber}`, code: 'owner-contention', summary: 'A known live owner is still running.',
+          });
+          return { status: 'requeued', reason: 'owner-contention', evidencePath: evidence.path };
+        }
         if (error instanceof OwnerLockSafetyError) {
           const evidence = await this.dependencies.writeEvidence({
             runId: `issue-${input.issueNumber}`,
@@ -448,7 +464,14 @@ export class RunIssue {
           issueSnapshot = structuredClone(active.record.issueSnapshot);
         } else {
           if (existing.lifecycle === 'safe-halt') return await this.publicationDiverged(active, 'safe-halt-requires-process-absence');
-          if (existing.lifecycle === 'waiting-human' || existing.lifecycle === 'spec-authoring') {
+          if (existing.lifecycle === 'waiting-human') {
+            const waiting = await this.continueWaitingHuman(active);
+            if ('result' in waiting) return waiting.result;
+            active = waiting.active;
+            issueSnapshot = structuredClone(active.record.issueSnapshot);
+            frozenCriteria = structuredClone(active.record.frozenCriteria);
+          }
+          if (existing.lifecycle === 'spec-authoring') {
             const evidence = await this.dependencies.writeEvidence({
               runId,
               code: 'route-ready',
@@ -456,20 +479,20 @@ export class RunIssue {
             });
             return {
               status: 'route-ready',
-              route: existing.lifecycle === 'waiting-human' ? 'awaiting-user' : 'spec-required',
+              route: 'spec-required',
               evidencePath: evidence.path,
             };
           }
-          if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(existing.lifecycle)) {
+          if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
           }
           if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
-          if (existing.lifecycle !== 'triaging' && existing.lifecycle !== 'routed') {
-            if (!existing.routeExecution || !existing.routeReceipt) throw new RouteMigrationUnrecoverableError();
-            if (existing.cycle >= config.runner.maxCycles) {
+          if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
+            if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteMigrationUnrecoverableError();
+            if (active.record.cycle >= config.runner.maxCycles) {
               return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
             }
-            active = await this.startNextCycle(active, [`Recovered interrupted ${existing.lifecycle} phase.`]);
+            active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
           }
         }
       } else {
@@ -816,6 +839,7 @@ export class RunIssue {
             routeReceipt: undefined,
             outcomeEvidenceId: evidence.id,
             terminalOutcome: { status: 'cancelled', evidencePath: evidence.path },
+            ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'cancelled' }) } : {}),
           });
           return true;
         },
@@ -830,6 +854,10 @@ export class RunIssue {
           `frozenCriteria=${canonicalJson(frozenCriteria)}`,
           `canonicalRepository=${active.record.canonicalRepository}`,
           `baseSha=${active.record.baseSha}`,
+          ...(active.record.waitingHuman?.phase === 'resumed' ? [
+            `trustedAnswer=${canonicalJson(active.record.waitingHuman.trustedAnswer)}`,
+            `priorWaitingRoute=${active.record.waitingHuman.history.at(-1)?.routeReceipt.decisionSha256 ?? ''}`,
+          ] : []),
         ],
         signal: this.signal,
       });
@@ -890,7 +918,7 @@ export class RunIssue {
       routeReceipt: receipt,
       generationHash: active.record.workflowGeneration.generationHash,
     });
-    active = await this.persist(active, { lifecycle });
+    if (receipt.route !== 'awaiting-user') active = await this.persist(active, { lifecycle });
     try {
       if (!await this.authorized(issueNumber, active.record.runId, branchName, config)) {
         return { result: await this.revoked(active) };
@@ -907,11 +935,17 @@ export class RunIssue {
       workflowGeneration: structuredClone(active.record.workflowGeneration),
       receipt,
     };
+    if (receipt.route === 'awaiting-user') {
+      const waiting = await this.dependencies.routeContinuations.awaitingUser(
+        context, this.waitingState(() => active, (next) => { active = next; }), this.signal,
+      );
+      const mapped = await this.mapWaitingResult(active, waiting);
+      if ('result' in mapped) return mapped;
+      return this.routeRun(mapped.active, mapped.active.record.issueSnapshot, mapped.active.record.frozenCriteria, worktreePath, config, issueNumber, branchName);
+    }
     const continuation = receipt.route === 'direct'
       ? await this.dependencies.routeContinuations.direct(context)
-      : receipt.route === 'spec-required'
-        ? await this.dependencies.routeContinuations.specRequired(context)
-        : await this.dependencies.routeContinuations.awaitingUser(context);
+      : await this.dependencies.routeContinuations.specRequired(context);
     if (continuation.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
     if (continuation.status === 'blocked') {
       return { result: await this.terminal(active, {
@@ -932,6 +966,86 @@ export class RunIssue {
     return { active };
   }
 
+  private waitingState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): WaitingHumanState {
+    return {
+      read: async () => structuredClone(readActive().record.waitingHuman),
+      compareAndSwap: async (expected, next) => {
+        const active = readActive();
+        const observed = active.record.waitingHuman;
+        if (observed === undefined || expected === undefined) {
+          if (observed !== expected) return false;
+        } else if (canonicalJson(observed) !== canonicalJson(expected)) return false;
+        const saved = await this.persist(active, {
+          ...(active.record.lifecycle === 'routed'
+            && (expected === undefined || (expected.phase === 'resumed' && next.phase !== 'resumed' && next.phase !== 'history-only'))
+            ? { lifecycle: 'waiting-human' as const }
+            : {}),
+          waitingHuman: structuredClone(next),
+        });
+        writeActive(saved);
+        return true;
+      },
+    };
+  }
+
+  private async continueWaitingHuman(active: ActiveRun): Promise<{ result: RunIssueResult } | { active: ActiveRun }> {
+    if (!active.record.routeReceipt || !active.record.workflowGeneration) {
+      return { result: await this.terminal(active, { status: 'internal-error', code: 'waiting-route-missing' }) };
+    }
+    const context = {
+      runId: active.record.runId,
+      issue: structuredClone(active.record.issueSnapshot),
+      frozenCriteria: structuredClone(active.record.frozenCriteria),
+      worktreePath: active.record.worktreePath,
+      workflowGeneration: structuredClone(active.record.workflowGeneration),
+      receipt: structuredClone(active.record.routeReceipt),
+    };
+    let current = active;
+    const result = await this.dependencies.routeContinuations.awaitingUser(
+      context, this.waitingState(() => current, (next) => { current = next; }), this.signal,
+    );
+    return this.mapWaitingResult(current, result);
+  }
+
+  private async mapWaitingResult(
+    active: ActiveRun,
+    result: Awaited<ReturnType<RoutedContinuationRegistry['awaitingUser']>>,
+  ): Promise<{ result: RunIssueResult } | { active: ActiveRun }> {
+    if (result.status === 'awaiting-answer') {
+      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'awaiting-user', summary: result.questionId });
+      return { result: { status: 'awaiting-user', questionId: result.questionId, answerPrefix: result.answerPrefix, evidencePath: evidence.path } };
+    }
+    if (result.status === 'retryable') {
+      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: result.code, summary: result.owner });
+      return { result: { status: 'transport-failed', resumable: true, evidencePath: evidence.path } };
+    }
+    if (result.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
+    if (result.status === 'blocked') {
+      return { result: await this.terminal(active, { status: 'blocked', kind: result.kind, resumable: result.resumable }, result.code) };
+    }
+    const waitingHuman = archiveWaiting(active.record, result.answer, {
+      phase: 'resumed', trustedAnswer: structuredClone(result.answer),
+    });
+    const routeExecution = initialRouteExecution();
+    validateTrustedAnswerResumeTransition({
+      lifecycle: active.record.lifecycle,
+      routeExecution: active.record.routeExecution,
+      routeReceipt: active.record.routeReceipt,
+      generationHash: active.record.workflowGeneration.generationHash,
+    }, {
+      lifecycle: 'triaging', routeExecution, routeReceipt: undefined,
+      generationHash: active.record.workflowGeneration.generationHash,
+    }, active.record.waitingHuman!);
+    const resumed = await this.persist(active, {
+      lifecycle: 'triaging',
+      issueSnapshot: structuredClone(active.record.issueSnapshot),
+      routeExecution,
+      routeReceipt: undefined,
+      waitingHuman,
+    });
+    return { active: resumed };
+  }
+
   private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfigV1 }> {
     const value = await this.dependencies.readConfig(targetRoot);
     return { bytes: Buffer.from(value.bytes), config: parseAgentAutoConfig(structuredClone(value.config)) };
@@ -942,7 +1056,8 @@ export class RunIssue {
     const labels = new Set(issue.labels);
     if (issue.state !== 'OPEN') return 'Issue is not open.';
     if (!labels.has(config.github.labels.auto.name)) return 'Issue lacks the auto label.';
-    if ([config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name].some((label) => labels.has(label))) {
+    if ([config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name, config.github.labels.waitingHuman.name]
+      .some((label) => labels.has(label))) {
       return 'Issue already has a terminal or running label.';
     }
     const branchName = `codex/issue-${issue.number}`;
@@ -1104,6 +1219,28 @@ export class RunIssue {
       outcomeEvidenceId: evidence.id,
       process: undefined,
     };
+    if (active.record.waitingHuman && (active.record.lifecycle === 'waiting-human' || active.record.waitingHuman.phase === 'resumed')) {
+      if (active.record.waitingHuman.phase === 'resumed') {
+        changes.waitingHuman = {
+          version: 1,
+          clarificationAttempts: active.record.waitingHuman.clarificationAttempts,
+          permissionRetries: active.record.waitingHuman.permissionRetries,
+          effectRetries: structuredClone(active.record.waitingHuman.effectRetries),
+          history: structuredClone(active.record.waitingHuman.history),
+          phase: 'history-only',
+          terminalOutcome: outcome.status === 'blocked'
+            ? { status: 'blocked', kind: outcome.kind }
+            : { status: outcome.status },
+        } as WaitingHumanExecutionV1;
+      } else if (outcome.status === 'blocked' || outcome.status === 'cancelled') {
+      changes.waitingHuman = archiveWaiting(active.record, waitingAnswer(active.record.waitingHuman), {
+        phase: 'history-only',
+        terminalOutcome: outcome.status === 'cancelled'
+          ? { status: 'cancelled' }
+          : { status: 'blocked', kind: outcome.kind },
+      });
+      }
+    }
     if (active.record.lifecycle === 'triaging' || (active.record.lifecycle === 'safe-halt' && !active.record.routeReceipt)) {
       changes.routeExecution = undefined;
       changes.routeReceipt = undefined;
@@ -1191,6 +1328,63 @@ function findRun(state: RunStateFileV1, runId: string): RunRecordV1 {
   const record = state.runs.find((candidate) => candidate.runId === runId);
   if (!record) throw new Error('persisted run is missing');
   return record;
+}
+
+function waitingAnswer(waiting: WaitingHumanExecutionV1): TrustedAnswerReceiptV1 | null {
+  if ('answerReceipt' in waiting) return structuredClone(waiting.answerReceipt);
+  if (waiting.phase === 'resumed') return structuredClone(waiting.trustedAnswer);
+  return null;
+}
+
+function archiveWaiting(
+  record: RunRecordV1,
+  answer: TrustedAnswerReceiptV1 | null,
+  terminal: Pick<Extract<WaitingHumanExecutionV1, { phase: 'resumed' }>, 'phase' | 'trustedAnswer'>
+    | Pick<Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>, 'phase' | 'terminalOutcome'>,
+): WaitingHumanExecutionV1 {
+  const waiting = record.waitingHuman;
+  const routeReceipt = record.routeReceipt;
+  if (!waiting || !routeReceipt) throw new Error('waiting archive requires active route evidence');
+  const question = 'question' in waiting ? waiting.question : 'questionReceipt' in waiting ? waiting.questionReceipt.question : undefined;
+  if (!question) throw new Error('waiting archive requires current question');
+  const questionReceipt = 'questionReceipt' in waiting ? waiting.questionReceipt : null;
+  const entry = {
+    routeReceipt: structuredClone(routeReceipt),
+    question: structuredClone(question),
+    questionReceipt: questionReceipt ? structuredClone(questionReceipt) : null,
+    answerReceipt: answer ? structuredClone(answer) : null,
+    conflictHashes: [...question.conflictHashes],
+  };
+  const history = [...waiting.history];
+  if (history.at(-1)?.question.questionSha256 === question.questionSha256) {
+    if (canonicalJson(history.at(-1)) !== canonicalJson(entry)) throw new Error('waiting archive evidence mismatch');
+  } else {
+    history.push(entry);
+  }
+  return {
+    version: 1,
+    clarificationAttempts: waiting.clarificationAttempts,
+    permissionRetries: waiting.permissionRetries,
+    effectRetries: structuredClone(waiting.effectRetries),
+    history,
+    ...terminal,
+  } as WaitingHumanExecutionV1;
+}
+
+function terminalWaiting(
+  waiting: WaitingHumanExecutionV1,
+  terminalOutcome: Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>['terminalOutcome'],
+): WaitingHumanExecutionV1 {
+  if (waiting.phase !== 'resumed' && waiting.phase !== 'history-only') throw new Error('terminal waiting projection requires archived history');
+  return {
+    version: 1,
+    clarificationAttempts: waiting.clarificationAttempts,
+    permissionRetries: waiting.permissionRetries,
+    effectRetries: structuredClone(waiting.effectRetries),
+    history: structuredClone(waiting.history),
+    phase: 'history-only',
+    terminalOutcome,
+  };
 }
 
 function publicOutcome(outcome: RunTerminalOutcome): Exclude<RunIssueResult, { status: 'not-eligible' }> {

@@ -14,3 +14,5 @@ export { createV2Runtime } from './v2/runtime.js';
 export type { V2Runtime } from './v2/runtime.js';
 export { Setup } from './v2/setup.js';
 export type { SetupIntent, SetupOutcome } from './v2/setup.js';
+export { createWaitingQuestion, normalizeAnswer, renderWaitingQuestionBody } from './v2/waiting-human.js';
+export type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1, WaitingQuestionReceiptV1, WaitingQuestionV1 } from './v2/waiting-human.js';

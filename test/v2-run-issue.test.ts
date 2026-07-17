@@ -13,6 +13,7 @@ import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { ProofQuiescenceError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
   RunIssue,
+  OwnerLockContentionError,
   type ImplementationAgentResult,
   type RunIssueDependencies,
   type RunIssueGit,
@@ -25,6 +26,7 @@ import {
 } from '../src/v2/run-store.js';
 import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
+import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
@@ -53,6 +55,54 @@ test('proof freshness snapshot excludes only the configured untracked artifact r
     await git.snapshotIgnoringUntrackedRoot(root, '.codex-orchestrator/proofs'),
     beforeProof,
   );
+});
+
+test('initial and persisted waiting routes use one durable continuation without implementation', async () => {
+  const fixture = await runFixture({ route: 'awaiting-user', agentWrites: false });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'awaiting-user', JSON.stringify(fixture.events));
+  assert.equal(fixture.events.includes('agent'), false);
+  const state = await fixture.store.read();
+  assert.equal(state.runs[0]?.lifecycle, 'waiting-human');
+  assert.equal(state.runs[0]?.waitingHuman?.phase, 'awaiting-answer');
+  const effects = fixture.events.length;
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(replay, first);
+  assert.equal(fixture.events.slice(effects).includes('agent'), false);
+});
+
+test('trusted waiting answer reroutes the same run before implementation and retains terminal history', async () => {
+  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'direct'], trustedAnswerOnReplay: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
+  const before = fixture.events.length;
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify(fixture.events.slice(before)));
+  const resumedEvents = fixture.events.slice(before);
+  assert.equal(resumedEvents.filter((event) => event === 'route:triage').length, 1);
+  assert.ok(resumedEvents.indexOf('route:triage') < resumedEvents.indexOf('agent'));
+  const run = (await fixture.store.read()).runs[0]!;
+  assert.equal(run.runId, '00000000-0000-4000-8000-000000000001');
+  assert.equal(run.waitingHuman?.phase, 'history-only');
+  assert.equal(run.waitingHuman?.history.length, 1);
+});
+
+test('a second approved awaiting-user route re-enters waiting-human in the same run', async () => {
+  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'awaiting-user'], trustedAnswerOnReplay: true, agentWrites: false });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
+  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(second.status, 'awaiting-user', JSON.stringify(fixture.events));
+  const run = (await fixture.store.read()).runs[0]!;
+  assert.equal(run.lifecycle, 'waiting-human');
+  assert.equal(run.waitingHuman?.phase, 'awaiting-answer');
+  assert.equal(run.waitingHuman?.history.length, 1);
+  assert.equal('questionReceipt' in run.waitingHuman! ? run.waitingHuman.questionReceipt.question.generation : undefined, 2);
+  assert.equal(fixture.events.includes('agent'), false);
+});
+
+test('known live owner contention requeues before labels or state', async () => {
+  const fixture = await runFixture({ ownerContention: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'requeued');
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:') || event.startsWith('state:')), false);
 });
 
 test('runner commit preserves the checked pre-proof index and leaves proof artifacts untracked', async () => {
@@ -162,6 +212,10 @@ test('not eligible and revoked authorization start no implementation or publicat
   const ineligible = await runFixture({ initialLabels: [] });
   assert.equal((await ineligible.runner.runIssue({ targetRoot: ineligible.targetRoot, issueNumber: 42 })).status, 'not-eligible');
   assert.equal(ineligible.events.includes('agent'), false);
+
+  const orphanWaiting = await runFixture({ initialLabels: ['agent:auto', 'agent:waiting-human'] });
+  assert.equal((await orphanWaiting.runner.runIssue({ targetRoot: orphanWaiting.targetRoot, issueNumber: 42 })).status, 'not-eligible');
+  assert.equal(orphanWaiting.events.some((event) => event.startsWith('effect:claim')), false);
 
   const revoked = await runFixture({ revokeAtAuthorization: 1 });
   const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
@@ -530,6 +584,10 @@ test('cancellation also waits for an in-flight store write and remote effect bef
 });
 
 interface FixtureOptions {
+  ownerContention?: boolean;
+  route?: 'direct' | 'awaiting-user';
+  routeSequence?: Array<'direct' | 'awaiting-user'>;
+  trustedAnswerOnReplay?: boolean;
   initialLabels?: string[];
   revokeAtAuthorization?: number;
   agentCommit?: boolean;
@@ -608,7 +666,10 @@ async function runFixture(options: FixtureOptions = {}) {
     }),
     validateContainment: async () => { events.push('containment'); },
     ownerLock: {
-      acquire: async () => ({ release: async () => { events.push('owner-release'); } }),
+      acquire: async () => {
+        if (options.ownerContention) throw new OwnerLockContentionError('live');
+        return { release: async () => { events.push('owner-release'); } };
+      },
     },
     issues: {
       read: async () => {
@@ -654,15 +715,24 @@ async function runFixture(options: FixtureOptions = {}) {
           assert.equal(promptFacts.some((fact) => fact.includes(options.expectedTriageComment!)), true);
         }
         const expected = await state.read();
-        const artifact = {
-          version: 1 as const,
-          status: 'direct' as const,
-          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }],
-          assumptions: [],
-          direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
-          specRequired: null,
-          awaitingUser: null,
+        const awaiting = (options.routeSequence?.shift() ?? options.route) === 'awaiting-user';
+        const artifact = awaiting ? {
+          version: 1 as const, status: 'awaiting-user' as const,
+          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
+          direct: null, specRequired: null,
+          awaitingUser: {
+            outcomes: [
+              { id: 'a', title: 'A', behaviorDelta: 'Use A.', evidence: ['Issue is ambiguous.'] },
+              { id: 'b', title: 'B', behaviorDelta: 'Use B.', evidence: ['Issue is ambiguous.'] },
+            ],
+            absenceOfAuthorizedChoiceEvidence: ['No authorized answer.'], recommendation: 'Choose A.', question: 'A or B?',
+          },
           blocker: null,
+        } : {
+          version: 1 as const, status: 'direct' as const,
+          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
+          direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
+          specRequired: null, awaitingUser: null, blocker: null,
         };
         const triage = {
           operation: 'triage' as const,
@@ -670,11 +740,15 @@ async function runFixture(options: FixtureOptions = {}) {
           artifactSha256: hashTriageArtifact(artifact),
           generationHash: workflowGeneration.generationHash,
         };
+        const review = awaiting ? {
+          operation: 'ambiguity-review' as const, attemptId: 'review-fixture', candidateSha256: triage.artifactSha256,
+          artifactSha256: '9'.repeat(64), verdict: 'approved' as const, generationHash: workflowGeneration.generationHash,
+        } : null;
         const receipt: RouteReceiptV1 = {
           version: 1,
-          route: 'direct',
+          route: awaiting ? 'awaiting-user' : 'direct',
           triage,
-          review: null,
+          review,
           artifact,
           decisionSha256: '',
           decidedAt: '2026-07-16T12:00:00.000Z',
@@ -686,10 +760,10 @@ async function runFixture(options: FixtureOptions = {}) {
           triageRepairs: expected.triageRepairs,
           triageTransportRetries: expected.triageTransportRetries,
           ambiguityTransportRetries: expected.ambiguityTransportRetries,
-          candidateReviews: expected.candidateReviews,
+          candidateReviews: awaiting ? 1 as const : expected.candidateReviews,
           phase: 'route-complete' as const,
           triage,
-          review: null,
+          review,
         };
         assert.equal(await state.complete(expected, completed, receipt), true);
         if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
@@ -699,7 +773,63 @@ async function runFixture(options: FixtureOptions = {}) {
     routeContinuations: {
       direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
       specRequired: async () => ({ status: 'completed' }),
-      awaitingUser: async () => ({ status: 'completed' }),
+      awaitingUser: async (context, state) => {
+        const current = await state.read();
+        if (current?.phase === 'awaiting-answer') {
+          if (options.trustedAnswerOnReplay) {
+            const normalizedAnswer = 'Choose A';
+            const answer = {
+              version: 1 as const, questionId: current.questionReceipt.question.questionId,
+              questionSha256: current.questionReceipt.question.questionSha256,
+              commentId: '102', commentUrl: 'https://example.invalid/comments/102', authorId: '2', author: 'maintainer',
+              permission: 'write' as const, permissionCheckedAt: '2026-07-16T12:03:00.000Z',
+              commentCreatedAt: '2026-07-16T12:02:00.000Z', commentUpdatedAt: '2026-07-16T12:02:00.000Z',
+              observedAt: '2026-07-16T12:03:00.000Z', normalizedAnswer,
+              normalizedSha256: hashNormalizedAnswer(normalizedAnswer), duplicateCommentIds: [],
+            };
+            const next = { ...current, phase: 'resume-ready' as const, answerReceipt: answer };
+            assert.equal(await state.compareAndSwap(current, next), true);
+            return { status: 'resume-ready' as const, answer };
+          }
+          return { status: 'awaiting-answer', questionId: current.questionReceipt.question.questionId, answerPrefix: current.questionReceipt.question.answerPrefix };
+        }
+        if (current?.phase === 'resumed') {
+          const prior = current.history[0]!.question;
+          const question = createWaitingQuestion({
+            runId: context.runId, generation: 2, routeDecisionSha256: context.receipt.decisionSha256,
+            workflowGenerationHash: context.workflowGeneration.generationHash,
+            priorQuestionSha256: prior.questionSha256, conflictHashes: [],
+            recommendation: 'Choose A.', question: 'A or B?',
+          });
+          const next = {
+            version: 1 as const, clarificationAttempts: 1 as const, permissionRetries: current.permissionRetries,
+            effectRetries: structuredClone(current.effectRetries), history: structuredClone(current.history),
+            phase: 'awaiting-answer' as const,
+            questionReceipt: {
+              question, commentId: '103', commentUrl: 'https://example.invalid/comments/103', authorId: '1', author: 'runner',
+              createdAt: '2026-07-16T12:04:00.000Z', observedAt: '2026-07-16T12:04:00.000Z',
+            },
+          };
+          assert.equal(await state.compareAndSwap(current, next), true);
+          return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
+        }
+        const question = createWaitingQuestion({
+          runId: context.runId, generation: 1, routeDecisionSha256: context.receipt.decisionSha256,
+          workflowGenerationHash: context.workflowGeneration.generationHash, priorQuestionSha256: null, conflictHashes: [],
+          recommendation: 'Choose A.', question: 'A or B?',
+        });
+        const next = {
+          version: 1 as const, clarificationAttempts: 0 as const, permissionRetries: 0 as const,
+          effectRetries: { questionComment: 0 as const, waitLabels: 0 as const, resumeLabels: 0 as const, revokeLabels: 0 as const },
+          history: [], phase: 'awaiting-answer' as const,
+          questionReceipt: {
+            question, commentId: '101', commentUrl: 'https://example.invalid/comments/101', authorId: '1', author: 'runner',
+            createdAt: '2026-07-16T12:01:00.000Z', observedAt: '2026-07-16T12:01:00.000Z',
+          },
+        };
+        assert.equal(await state.compareAndSwap(undefined, next), true);
+        return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
+      },
     },
     implementationAgent: {
       run: async ({ worktreePath: path }) => {
@@ -831,10 +961,16 @@ function configFixture(): AgentAutoConfigV1 {
   const label = (name: string) => ({ name, color: 'ededed', description: `${name} label` });
   return {
     schema: 'codex-orchestrator.agent-auto',
-    version: 1,
+    version: 2,
     github: {
       owner: 'owner', repo: 'repo', baseBranch: 'main',
-      labels: { auto: label('agent:auto'), running: label('agent:running'), blocked: label('agent:blocked'), review: label('agent:review') },
+      labels: {
+        auto: label('agent:auto'),
+        running: label('agent:running'),
+        blocked: label('agent:blocked'),
+        review: label('agent:review'),
+        waitingHuman: label('agent:waiting-human'),
+      },
     },
     runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60, maxCycles: 5 },
     codex: { command: 'codex', requiredVersion: '0.144.4', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },

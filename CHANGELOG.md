@@ -7,6 +7,9 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Changed
+- Added durable `agent:waiting-human` questions, current-WRITE trusted answers,
+  conflict clarification, permission revocation, and same-run rerouting before
+  implementation. Exact Config V1 now migrates atomically to Config V2.
 - Replaced the two-file runtime skill lookup with one generated, manifest-bound
   package workflow containing the declared skills, profiles, operation wrappers,
   schemas, and shared review contracts.

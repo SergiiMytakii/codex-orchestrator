@@ -7,6 +7,7 @@ import {
   type RouteReceiptV1,
 } from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
+import { validateWaitingHumanExecution, type WaitingHumanExecutionV1 } from './waiting-human.js';
 import { posix } from 'node:path';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
 
@@ -82,6 +83,7 @@ export interface RunRecordV1 {
   workflowGeneration: WorkflowGenerationReceipt;
   routeExecution?: RouteExecutionV1;
   routeReceipt?: RouteReceiptV1;
+  waitingHuman?: WaitingHumanExecutionV1;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -202,6 +204,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'workflowGeneration',
     'routeExecution',
     'routeReceipt',
+    'waitingHuman',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -247,6 +250,16 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'intent')) validateIntent(value.intent, `${field}.intent`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
+  if (hasOwn(value, 'waitingHuman')) {
+    if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
+    validateWaitingHumanExecution(value.waitingHuman, {
+      runId: value.runId,
+      lifecycle: value.lifecycle,
+      workflowGenerationHash: routeGenerationHash,
+      routeReceipt: hasOwn(value, 'routeReceipt') ? value.routeReceipt as RouteReceiptV1 : undefined,
+      terminalOutcome: hasOwn(value, 'terminalOutcome') ? value.terminalOutcome as RunTerminalOutcome : undefined,
+    });
+  }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
@@ -268,6 +281,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain intent`);
   }
+  if (value.lifecycle === 'waiting-human' && !hasOwn(value, 'waitingHuman')) throw new Error(`${field} waiting-human lifecycle requires waitingHuman execution`);
   if (hasOwn(value, 'routeExecution') || hasOwn(value, 'routeReceipt') || value.lifecycle === 'triaging' || value.lifecycle === 'routed') {
     if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
     validateRouteStateInvariant({

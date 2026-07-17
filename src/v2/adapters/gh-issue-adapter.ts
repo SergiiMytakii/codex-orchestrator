@@ -8,11 +8,13 @@ import type {
   GitHubIssueComment,
   GitHubIssueLabel,
   GitHubPullRequestLink,
+  GitHubRepositoryPermission,
+  GitHubRepositoryPermissionObservation,
   IssueState,
   PullRequestState,
   UpdateIssueInput,
 } from './issues.js';
-import { closeIssueWithEvidence } from './issues.js';
+import { closeIssueWithEvidence, GitHubPermissionRetryableError, GitHubPermissionSafetyError } from './issues.js';
 
 const issueJsonFields = 'number,title,body,url,state,labels,comments,closedByPullRequestsReferences';
 
@@ -20,7 +22,12 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   private readonly repo: string;
   private readonly executor: CommandExecutor;
 
-  public constructor(owner: string, repo: string, executor: CommandExecutor = defaultGhExecutor) {
+  public constructor(
+    owner: string,
+    repo: string,
+    executor: CommandExecutor = defaultGhExecutor,
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {
     this.repo = `${owner}/${repo}`;
     this.executor = executor;
   }
@@ -84,12 +91,40 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
       'api', '--paginate', '--slurp', '--method', 'GET',
       `repos/${this.repo}/issues/${issueNumber}/comments`,
       '-f', 'per_page=100',
+      '--jq', 'map(map(.id |= tostring | .user.id |= tostring))',
     ]);
     const pages = JSON.parse(result.stdout) as unknown;
     if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
       throw new Error('GitHub issue comment pagination payload must be an array of pages');
     }
     return pages.flatMap((page) => (page as unknown[]).map(normalizeRestComment));
+  }
+
+  public async getRepositoryPermission(login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation> {
+    let result: Awaited<ReturnType<CommandExecutor>>;
+    try {
+      result = await this.executor('gh', [
+        'api', '--method', 'GET', `repos/${this.repo}/collaborators/${login}/permission`,
+        '--jq', '{permission,user:{id:(.user.id|tostring)}}',
+      ]);
+    } catch (error) {
+      if (isPermissionNotFound(error)) {
+        return { permission: 'none', checkedAt: this.now(), userId: expectedUserId };
+      }
+      throw new GitHubPermissionRetryableError('GitHub repository permission could not be read');
+    }
+    try {
+      const payload = JSON.parse(result.stdout) as unknown;
+      if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw new Error('GitHub permission payload must be an object');
+      const record = payload as Record<string, unknown>;
+      const user = typeof record.user === 'object' && record.user !== null && !Array.isArray(record.user)
+        ? record.user as Record<string, unknown> : {};
+      const userId = readDecimalString(user, 'id');
+      if (userId !== expectedUserId) throw new Error('GitHub permission identity did not match the comment author');
+      return { permission: readPermission(record.permission), checkedAt: this.now(), userId };
+    } catch (error) {
+      throw new GitHubPermissionSafetyError(error instanceof Error ? error.message : 'GitHub permission payload is invalid');
+    }
   }
 
   public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
@@ -148,13 +183,17 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
     ]);
   }
 
-  public async postComment(issueNumber: number, body: string): Promise<void> {
-    await this.executor('gh', ['issue', 'comment', String(issueNumber), '--repo', this.repo, '--body', truncateCommentBody(body)]);
+  public async postComment(issueNumber: number, body: string): Promise<GitHubIssueComment> {
+    const postedBody = truncateCommentBody(body);
+    await this.executor('gh', ['issue', 'comment', String(issueNumber), '--repo', this.repo, '--body', postedBody]);
+    const matches = (await this.listAllComments(issueNumber)).filter((comment) => comment.body === postedBody);
+    if (matches.length === 0) throw new Error('Posted GitHub issue comment was not observable after write');
+    return matches.sort((left, right) => left.id.localeCompare(right.id, 'en', { numeric: true })).at(-1)!;
   }
 
   public async closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void> {
     await closeIssueWithEvidence(issueNumber, input, {
-      postComment: (targetIssueNumber, body) => this.postComment(targetIssueNumber, body),
+      postComment: async (targetIssueNumber, body) => { await this.postComment(targetIssueNumber, body); },
       closeIssue: async (targetIssueNumber) => {
         await this.executor('gh', ['issue', 'close', String(targetIssueNumber), '--repo', this.repo]);
       },
@@ -224,7 +263,7 @@ function normalizeComment(input: unknown): GitHubIssueComment[] {
   const author = typeof record.author === 'object' && record.author !== null ? record.author as Record<string, unknown> : {};
   const login = typeof author.login === 'string' ? author.login : '';
   const authorAssociation = typeof record.authorAssociation === 'string' ? record.authorAssociation : '';
-  return [{ id, url, body, createdAt, author: { login }, authorAssociation }];
+  return [{ id, url, body, createdAt, updatedAt: createdAt, author: { login, id: '' }, authorAssociation }];
 }
 
 function normalizeRestComment(input: unknown): GitHubIssueComment {
@@ -236,13 +275,31 @@ function normalizeRestComment(input: unknown): GitHubIssueComment {
     ? record.user as Record<string, unknown>
     : {};
   return {
-    id: readString(record, 'node_id'),
+    id: readDecimalString(record, 'id'),
     url: readString(record, 'html_url'),
     body: readString(record, 'body'),
     createdAt: readString(record, 'created_at'),
-    author: { login: readString(user, 'login') },
+    updatedAt: readString(record, 'updated_at'),
+    author: { login: readString(user, 'login'), id: readDecimalString(user, 'id') },
     authorAssociation: readString(record, 'author_association'),
   };
+}
+
+function readDecimalString(record: Record<string, unknown>, key: string): string {
+  const value = readString(record, key);
+  if (!/^(0|[1-9]\d*)$/u.test(value)) throw new Error(`GitHub issue payload ${key} must be a decimal string`);
+  return value;
+}
+
+function readPermission(value: unknown): GitHubRepositoryPermission {
+  if (value === 'none' || value === 'read' || value === 'write' || value === 'admin') return value;
+  throw new Error('GitHub repository permission is unsupported');
+}
+
+function isPermissionNotFound(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const commandError = error as CommandExecutionError;
+  return commandError.code === 1 && /(HTTP 404|not found)/iu.test(commandError.stderr ?? '');
 }
 
 function normalizePullRequestLink(input: unknown): GitHubPullRequestLink[] {

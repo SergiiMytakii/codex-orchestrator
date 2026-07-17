@@ -7,6 +7,13 @@ import { test } from 'node:test';
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
+  createWaitingQuestion,
+  hashNormalizedAnswer,
+  type TrustedAnswerReceiptV1,
+  type WaitingHumanExecutionV1,
+  type WaitingQuestionReceiptV1,
+} from '../src/v2/waiting-human.js';
+import {
   FileRunRecordWriter,
   type RunRecordV1,
   type RunStateBodyV1,
@@ -140,6 +147,94 @@ test('run store persists exact triaging and routed state while retaining structu
 
   const legacy = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   assert.equal((await legacy.compareAndSwap(0, body([{ ...record(), lifecycle: 'implementing' }]))).runs[0]?.lifecycle, 'implementing');
+});
+
+test('run store strictly persists active waiting execution bound to the run route and workflow generation', async () => {
+  const active = waitingRecord('awaiting-answer');
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  const saved = await writer.compareAndSwap(0, body([active]));
+  assert.equal(saved.runs[0]?.waitingHuman?.phase, 'awaiting-answer');
+
+  for (const mutate of [
+    (run: RunRecordV1) => { (run.waitingHuman as any).effectRetries.questionComment = 2; },
+    (run: RunRecordV1) => { (run.waitingHuman as any).questionReceipt.question.workflowGenerationHash = 'a'.repeat(64); },
+    (run: RunRecordV1) => { (run.waitingHuman as any).questionReceipt.question.routeDecisionSha256 = '0'.repeat(64); },
+    (run: RunRecordV1) => { (run.waitingHuman as any).extra = true; },
+  ]) {
+    const invalid = structuredClone(active);
+    mutate(invalid);
+    const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    await assert.rejects(next.compareAndSwap(0, body([invalid])), /waiting|question|route|generation|keys|Retries/u);
+  }
+});
+
+test('waiting lifecycle rejects phase drift, missing awaiting route, and duplicate or oversized history', async () => {
+  const cases = [
+    (() => { const run = waitingRecord('awaiting-answer'); run.lifecycle = 'implementing'; return run; })(),
+    (() => { const run = waitingRecord('awaiting-answer'); delete run.routeReceipt; return run; })(),
+    (() => {
+      const run = waitingRecord('awaiting-answer');
+      const receipt = questionReceipt(run.routeReceipt);
+      (run.waitingHuman as any).history.push({ routeReceipt: run.routeReceipt, question: receipt.question, questionReceipt: receipt, answerReceipt: null, conflictHashes: [] });
+      return run;
+    })(),
+    (() => {
+      const run = waitingRecord('awaiting-answer');
+      const receipt = questionReceipt(run.routeReceipt);
+      const entry = { routeReceipt: run.routeReceipt, question: receipt.question, questionReceipt: receipt, answerReceipt: null, conflictHashes: [] };
+      (run.waitingHuman as any).history.push(structuredClone(entry), structuredClone(entry), structuredClone(entry));
+      return run;
+    })(),
+  ];
+  for (const invalid of cases) {
+    const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    await assert.rejects(writer.compareAndSwap(0, body([invalid])), /waiting|route|history|lifecycle|question/u);
+  }
+});
+
+test('resumed waiting history is retained through ordinary non-waiting delivery lifecycles', async () => {
+  for (const lifecycle of ['triaging', 'routed', 'implementing', 'spec-authoring', 'reworking', 'checking'] as const) {
+    const run = waitingRecord('resumed');
+    run.lifecycle = lifecycle;
+    if (lifecycle !== 'routed') {
+      delete run.routeExecution;
+      delete run.routeReceipt;
+    }
+    if (lifecycle === 'triaging') {
+      run.routeExecution = {
+        version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+        candidateReviews: 0, phase: 'triage-ready', previousAttemptId: null,
+      };
+    }
+    const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    assert.equal((await writer.compareAndSwap(0, body([run]))).runs[0]?.waitingHuman?.phase, 'resumed');
+  }
+
+  const invalid = waitingRecord('resumed');
+  invalid.lifecycle = 'waiting-human';
+  delete invalid.routeExecution;
+  delete invalid.routeReceipt;
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  await assert.rejects(writer.compareAndSwap(0, body([invalid])), /resumed|lifecycle/u);
+});
+
+test('terminal waiting history must use history-only and exactly project the terminal outcome', async () => {
+  const blocked = waitingRecord('history-only');
+  blocked.lifecycle = 'blocked';
+  blocked.terminalOutcome = { status: 'blocked', kind: 'safety', resumable: false, evidencePath: 'waiting-evidence.json' };
+  delete blocked.routeExecution;
+  delete blocked.routeReceipt;
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  assert.equal((await writer.compareAndSwap(0, body([blocked]))).runs[0]?.waitingHuman?.phase, 'history-only');
+
+  for (const invalid of [
+    (() => { const run = structuredClone(blocked); (run.waitingHuman as any).terminalOutcome.kind = 'external'; return run; })(),
+    (() => { const run = structuredClone(blocked); (run.waitingHuman as any).phase = 'resumed'; delete (run.waitingHuman as any).terminalOutcome; (run.waitingHuman as any).trustedAnswer = answerReceipt(questionReceipt().question); return run; })(),
+    (() => { const run = structuredClone(blocked); run.lifecycle = 'cancelled'; run.terminalOutcome = { status: 'cancelled', evidencePath: 'waiting-evidence.json' }; return run; })(),
+  ]) {
+    const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /history-only|terminal|outcome|lifecycle|keys/u);
+  }
 });
 
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
@@ -285,6 +380,111 @@ function record(): RunRecordV1 {
     checks: [],
     createdAt: timestamp(),
     updatedAt: timestamp(),
+  };
+}
+
+function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): RunRecordV1 {
+  const routeReceipt = awaitingUserReceipt();
+  const receipt = questionReceipt(routeReceipt);
+  const answer = answerReceipt(receipt.question);
+  const budgets = {
+    version: 1 as const,
+    clarificationAttempts: 0 as const,
+    permissionRetries: 0 as const,
+    effectRetries: { questionComment: 0 as const, waitLabels: 0 as const, resumeLabels: 0 as const, revokeLabels: 0 as const },
+    history: phase === 'awaiting-answer'
+      ? []
+      : [{ routeReceipt, question: receipt.question, questionReceipt: receipt, answerReceipt: answer, conflictHashes: [] }],
+  };
+  let waitingHuman: WaitingHumanExecutionV1;
+  if (phase === 'awaiting-answer') waitingHuman = { ...budgets, phase, questionReceipt: receipt };
+  else if (phase === 'resumed') waitingHuman = { ...budgets, phase, trustedAnswer: answer };
+  else waitingHuman = { ...budgets, phase, terminalOutcome: { status: 'blocked', kind: 'safety' } };
+  return {
+    ...record(),
+    lifecycle: 'waiting-human',
+    routeExecution: {
+      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      candidateReviews: 1, phase: 'route-complete', triage: routeReceipt.triage, review: routeReceipt.review,
+    },
+    routeReceipt,
+    waitingHuman,
+  };
+}
+
+function awaitingUserReceipt(): RouteReceiptV1 {
+  const generationHash = 'd'.repeat(64);
+  const artifact = {
+    version: 1 as const,
+    status: 'awaiting-user' as const,
+    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }],
+    assumptions: [],
+    direct: null,
+    specRequired: null,
+    awaitingUser: {
+      outcomes: [
+        { id: 'a', title: 'Choose A', behaviorDelta: 'Implement A.', evidence: ['Issue does not choose.'] },
+        { id: 'b', title: 'Choose B', behaviorDelta: 'Implement B.', evidence: ['Issue allows B.'] },
+      ],
+      absenceOfAuthorizedChoiceEvidence: ['No maintainer choice exists.'],
+      question: 'A or B?',
+      recommendation: 'Choose A.',
+    },
+    blocker: null,
+  };
+  const artifactSha256 = hashTriageArtifact(artifact);
+  const receipt: RouteReceiptV1 = {
+    version: 1,
+    route: 'awaiting-user',
+    triage: { operation: 'triage', attemptId: 'triage-waiting-1', artifactSha256, generationHash },
+    review: {
+      operation: 'ambiguity-review', attemptId: 'review-waiting-1', candidateSha256: artifactSha256,
+      artifactSha256: '9'.repeat(64), verdict: 'approved', generationHash,
+    },
+    artifact,
+    decisionSha256: '',
+    decidedAt: timestamp(),
+    assumptions: [],
+  };
+  receipt.decisionSha256 = hashRouteDecision(receipt);
+  return receipt;
+}
+
+function questionReceipt(route = awaitingUserReceipt()): WaitingQuestionReceiptV1 {
+  const question = createWaitingQuestion({
+    runId: uuid(1), generation: 1, routeDecisionSha256: route.decisionSha256,
+    workflowGenerationHash: 'd'.repeat(64), priorQuestionSha256: null, conflictHashes: [],
+    recommendation: 'Choose A.', question: 'A or B?',
+  });
+  return {
+    question,
+    commentId: '9007199254740993',
+    commentUrl: 'https://example.invalid/comments/9007199254740993',
+    authorId: '12345678901234567',
+    author: 'runner',
+    createdAt: timestamp(),
+    observedAt: timestamp(),
+  };
+}
+
+function answerReceipt(question: ReturnType<typeof createWaitingQuestion>): TrustedAnswerReceiptV1 {
+  const normalizedAnswer = 'Choose A';
+  return {
+    version: 1,
+    questionId: question.questionId,
+    questionSha256: question.questionSha256,
+    commentId: '9007199254740995',
+    commentUrl: 'https://example.invalid/comments/9007199254740995',
+    authorId: '12345678901234568',
+    author: 'maintainer',
+    permission: 'write',
+    permissionCheckedAt: '2026-07-16T12:02:00.000Z',
+    commentCreatedAt: '2026-07-16T12:01:00.000Z',
+    commentUpdatedAt: '2026-07-16T12:01:00.000Z',
+    observedAt: '2026-07-16T12:02:00.000Z',
+    normalizedAnswer,
+    normalizedSha256: hashNormalizedAnswer(normalizedAnswer),
+    duplicateCommentIds: ['9007199254740997'],
   };
 }
 

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { lstat, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './containment.js';
@@ -16,8 +16,39 @@ interface OwnerControlRecordV1 {
   acquiredAt: string;
 }
 
+export async function inspectOwnerControlLock(input: {
+  orchestratorHome: string;
+  canonicalRepository: string;
+  bootId: string;
+  host: string;
+  processAlive(pid: number): boolean;
+}): Promise<{ status: 'absent' | 'active' | 'ambiguous'; reason?: string }> {
+  validateRepository(input.canonicalRepository);
+  const controlGitDir = join(input.orchestratorHome, 'v2', 'owner-control.git');
+  try {
+    if (!(await lstat(controlGitDir)).isDirectory()) return { status: 'ambiguous', reason: 'Owner control store is not a directory.' };
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'absent' };
+    return { status: 'ambiguous', reason: 'Owner control store cannot be inspected.' };
+  }
+  const ref = `refs/codex-orchestrator/owners/${sha256(input.canonicalRepository)}`;
+  let oid: string | undefined;
+  try { oid = await readRef(controlGitDir, ref); }
+  catch { return { status: 'ambiguous', reason: 'Owner control ref is invalid.' }; }
+  if (!oid) return { status: 'absent' };
+  let owner: OwnerControlRecordV1;
+  try { owner = await readOwner(controlGitDir, oid); }
+  catch { return { status: 'ambiguous', reason: 'Owner control record is malformed.' }; }
+  if (owner.canonicalRepository !== input.canonicalRepository || owner.host !== input.host || owner.bootId !== input.bootId) {
+    return { status: 'ambiguous', reason: 'Owner control identity is foreign or stale.' };
+  }
+  return input.processAlive(owner.pid)
+    ? { status: 'active' }
+    : { status: 'ambiguous', reason: 'Owner control record has ambiguous liveness.' };
+}
+
 export class OwnerControlLockBlockedError extends Error {
-  constructor(message = 'owner control lock is held or ambiguous') {
+  constructor(message = 'owner control lock is held or ambiguous', readonly kind: 'live-contention' | 'safety' = 'safety') {
     super(message);
     this.name = 'OwnerControlLockBlockedError';
   }
@@ -70,7 +101,7 @@ export async function acquireOwnerControlLock(input: OwnerControlLockInput): Pro
       throw new OwnerControlLockBlockedError();
     }
     if (input.processAlive(observed.pid)) {
-      if (Date.now() - startedAt >= (input.waitMs ?? 5_000)) throw new OwnerControlLockBlockedError('owner control lock wait timed out');
+      if (Date.now() - startedAt >= (input.waitMs ?? 5_000)) throw new OwnerControlLockBlockedError('owner control lock wait timed out', 'live-contention');
       await delay(input.pollMs ?? 25);
       continue;
     }

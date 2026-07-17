@@ -1,5 +1,6 @@
 import { canonicalJson, sha256 } from './containment.js';
 import { validateTriageRoute, type TriageRouteV1 } from './triage-route.js';
+import type { WaitingHumanExecutionV1 } from './waiting-human.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_STRING_LENGTH = 16 * 1024;
@@ -342,6 +343,26 @@ export function validateRouteTransition(
   if (previous.lifecycle === 'routed' && next.lifecycle !== 'routed') {
     const expected = downstreamLifecycleForRoute(previous.routeReceipt, previous.generationHash);
     if (next.lifecycle !== expected) throw new Error(`routed ${String((previous.routeReceipt as RouteReceiptV1).route)} must dispatch to ${expected}`);
+  }
+}
+
+export function validateTrustedAnswerResumeTransition(
+  previous: { lifecycle: RouteLifecycle; routeExecution: unknown; routeReceipt: unknown; generationHash: string },
+  next: { lifecycle: RouteLifecycle; routeExecution: unknown; routeReceipt: unknown; generationHash: string },
+  waitingHuman: WaitingHumanExecutionV1,
+): void {
+  validateRouteStateInvariant(previous);
+  validateRouteStateInvariant(next);
+  if (previous.lifecycle !== 'waiting-human' || (previous.routeReceipt as RouteReceiptV1).route !== 'awaiting-user') {
+    throw new Error('trusted answer resume requires waiting-human awaiting-user authority');
+  }
+  if (waitingHuman.phase !== 'resume-ready') throw new Error('trusted answer resume requires resume-ready evidence');
+  if (next.lifecycle !== 'triaging' || next.routeReceipt !== undefined) throw new Error('trusted answer resume must restart triage without a receipt');
+  const execution = validateRouteExecution(next.routeExecution, next.generationHash);
+  if (execution.phase !== 'triage-ready' || execution.previousAttemptId !== null
+    || execution.triageRepairs !== 0 || execution.triageTransportRetries !== 0
+    || execution.ambiguityTransportRetries !== 0 || execution.candidateReviews !== 0) {
+    throw new Error('trusted answer resume requires initial route execution');
   }
 }
 

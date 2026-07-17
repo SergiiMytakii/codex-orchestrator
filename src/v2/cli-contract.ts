@@ -3,11 +3,14 @@ export const CANDIDATE_COMMANDS = ['setup', 'doctor', 'status', 'run', 'daemon']
 export const RUN_ISSUE_STATUSES = [
   'review-ready',
   'route-ready',
+  'awaiting-user',
   'not-eligible',
   'blocked',
   'transport-failed',
   'cancelled',
   'internal-error',
+  'migration-required',
+  'requeued',
 ] as const;
 
 export type CandidateCommand = typeof CANDIDATE_COMMANDS[number];
@@ -17,7 +20,10 @@ export function runIssueExitCode(result: RunIssueResult): 0 | 20 | 21 | 70 | 130
   switch (result.status) {
     case 'review-ready': return 0;
     case 'route-ready': return 0;
+    case 'awaiting-user': return 0;
     case 'blocked': return 20;
+    case 'migration-required': return 20;
+    case 'requeued': return 0;
     case 'not-eligible': return 21;
     case 'transport-failed':
     case 'internal-error': return 70;

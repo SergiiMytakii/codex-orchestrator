@@ -1,6 +1,7 @@
 import type { PersistedFrozenCriterionV1, PersistedIssueSnapshotV1 } from './run-store.js';
 import type { RouteReceiptV1 } from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
+import type { WaitingHumanResult, WaitingHumanState } from './waiting-human-coordinator.js';
 
 export interface RoutedRunContext {
   runId: string;
@@ -20,5 +21,5 @@ export type RoutedContinuationResult =
 export interface RoutedContinuationRegistry {
   direct(input: RoutedRunContext): Promise<RoutedContinuationResult>;
   specRequired(input: RoutedRunContext): Promise<RoutedContinuationResult>;
-  awaitingUser(input: RoutedRunContext): Promise<RoutedContinuationResult>;
+  awaitingUser(input: RoutedRunContext, state: WaitingHumanState, signal: AbortSignal): Promise<WaitingHumanResult>;
 }

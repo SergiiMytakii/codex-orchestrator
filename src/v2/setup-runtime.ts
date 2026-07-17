@@ -3,13 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 import { acquireTargetActivityFence } from './adapters/target-activity-fence.js';
-import { acquireExclusiveJsonFileLock } from './atomic-store.js';
-import { sha256 } from './containment.js';
 import { detectLegacyConfig } from './legacy-cutover.js';
+import { acquireOwnerControlLock, inspectOwnerControlLock } from './owner-control-lock.js';
 import { Setup, type SetupDependencies } from './setup.js';
 
 const execFileAsync = promisify(execFile);
@@ -65,8 +64,24 @@ export function createProductionSetup(input: { orchestratorHome: string; bootId:
       },
     },
     ownership: {
-      acquire: (repository) => acquireSetupOwner(input, repository),
-      inspectV2Owner: (repository) => inspectOwner(input, repository),
+      acquire: (repository) => acquireOwnerControlLock({
+        orchestratorHome: input.orchestratorHome,
+        canonicalRepository: `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}`,
+        bootId: input.bootId,
+        host: hostname(),
+        pid: process.pid,
+        now: () => new Date().toISOString(),
+        createToken: randomUUID,
+        processAlive,
+        waitMs: 0,
+      }),
+      inspectV2Owner: (repository) => inspectOwnerControlLock({
+        orchestratorHome: input.orchestratorHome,
+        canonicalRepository: `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}`,
+        bootId: input.bootId,
+        host: hostname(),
+        processAlive,
+      }),
       acquireLegacyFence: async (targetRoot) => {
         const bytes = await readBoundedRegularFile(resolve(targetRoot, '.codex-orchestrator/config.json'));
         const detected = detectLegacyConfig(bytes);
@@ -110,58 +125,6 @@ async function inspectRetained(input: Parameters<SetupDependencies['repository']
   return { worktreePaths, localRefs, remoteRefs, collisions };
 }
 
-async function acquireSetupOwner(
-  input: { orchestratorHome: string; bootId: string },
-  repository: { owner: string; repo: string },
-): Promise<{ release(): Promise<void> }> {
-  const canonicalRepository = `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}`;
-  const token = randomUUID();
-  const record: OwnerRecordV1 = {
-    version: 1,
-    token,
-    canonicalRepository,
-    host: hostname(),
-    bootId: input.bootId,
-    pid: process.pid,
-    acquiredAt: new Date().toISOString(),
-  };
-  return acquireExclusiveJsonFileLock({
-    path: ownerPath(input.orchestratorHome, canonicalRepository),
-    record,
-    token,
-    parse: parseOwner,
-    tokenOf: (value) => value.token,
-    classifyExisting: () => 'block',
-  });
-}
-
-async function inspectOwner(
-  input: { orchestratorHome: string; bootId: string },
-  repository: { owner: string; repo: string },
-): Promise<{ status: 'absent' | 'inactive' | 'active' | 'ambiguous'; reason?: string }> {
-  const canonicalRepository = `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}`;
-  const path = ownerPath(input.orchestratorHome, canonicalRepository);
-  let bytes: Buffer;
-  try { bytes = await readBoundedRegularFile(path); }
-  catch (error) {
-    if (isErrorCode(error, 'ENOENT')) return { status: 'absent' };
-    return { status: 'ambiguous', reason: 'V2 owner record cannot be read safely.' };
-  }
-  let owner: OwnerRecordV1;
-  try { owner = parseOwner(JSON.parse(bytes.toString('utf8'))); }
-  catch { return { status: 'ambiguous', reason: 'V2 owner record is malformed.' }; }
-  if (owner.canonicalRepository !== canonicalRepository || owner.host !== hostname()) {
-    return { status: 'ambiguous', reason: 'V2 owner identity does not match this repository host.' };
-  }
-  const active = owner.bootId === input.bootId && processAlive(owner.pid);
-  return active
-    ? { status: 'active' }
-    : { status: 'ambiguous', reason: 'A stale V2 owner record is retained for fail-closed recovery.' };
-}
-
-function ownerPath(orchestratorHome: string, canonicalRepository: string): string {
-  return join(orchestratorHome, 'v2', 'owners', `${sha256(canonicalRepository)}.lock`);
-}
 
 function parseGitHubRemote(value: string): { owner: string; repo: string } | undefined {
   const match = value.match(/^(?:https:\/\/github\.com\/|git@github\.com:)([^/]+)\/([^/]+?)(?:\.git)?$/u);
@@ -173,22 +136,6 @@ function parseLabel(value: unknown): { name: string } {
     throw new Error('GitHub label is malformed');
   }
   return { name: (value as { name: string }).name };
-}
-
-function parseOwner(value: unknown): OwnerRecordV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('owner record is invalid');
-  const record = value as Partial<OwnerRecordV1>;
-  const keys = Object.keys(value).sort();
-  const expected = ['version', 'token', 'canonicalRepository', 'host', 'bootId', 'pid', 'acquiredAt'].sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])
-    || record.version !== 1 || typeof record.token !== 'string' || !record.token
-    || typeof record.canonicalRepository !== 'string' || !record.canonicalRepository
-    || typeof record.host !== 'string' || !record.host || typeof record.bootId !== 'string' || !record.bootId
-    || !Number.isSafeInteger(record.pid) || (record.pid ?? 0) <= 0
-    || typeof record.acquiredAt !== 'string' || Number.isNaN(Date.parse(record.acquiredAt))) {
-    throw new Error('owner record is invalid');
-  }
-  return record as OwnerRecordV1;
 }
 
 async function readBoundedRegularFile(path: string): Promise<Buffer> {

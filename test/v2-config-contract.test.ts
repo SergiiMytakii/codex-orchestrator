@@ -8,7 +8,7 @@ import type { RunIssueResult } from '../src/v2/run-issue.js';
 function validConfig(): AgentAutoConfigV1 {
   return {
     schema: 'codex-orchestrator.agent-auto',
-    version: 1,
+    version: 2,
     github: {
       owner: 'SergiiMytakii',
       repo: 'codex-orchestrator',
@@ -18,6 +18,7 @@ function validConfig(): AgentAutoConfigV1 {
         running: { name: 'agent:running', color: 'fbca04', description: 'Agent is running.' },
         blocked: { name: 'agent:blocked', color: 'd93f0b', description: 'Agent needs help.' },
         review: { name: 'agent:review', color: '0e8a16', description: 'Ready for review.' },
+        waitingHuman: { name: 'agent:waiting-human', color: '5319e7', description: 'Waiting for an authorized product answer.' },
       },
     },
     runner: {
@@ -54,17 +55,21 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
     'route-ready',
+    'awaiting-user',
     'not-eligible',
     'blocked',
     'transport-failed',
     'cancelled',
     'internal-error',
+    'migration-required',
+    'requeued',
   ]);
   assert.deepEqual(Object.values(parsed.github.labels).map((label) => label.name), [
     'agent:auto',
     'agent:running',
     'agent:blocked',
     'agent:review',
+    'agent:waiting-human',
   ]);
 });
 
@@ -99,6 +104,13 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
     { ...validConfig(), checks: { '': 'npm test' } },
     { ...validConfig(), checks: { test: '' } },
     { ...validConfig(), codex: { ...validConfig().codex, requiredVersion: 'latest' } },
+    {
+      ...validConfig(),
+      github: {
+        ...validConfig().github,
+        labels: { ...validConfig().github.labels, waitingHuman: { ...validConfig().github.labels.waitingHuman, name: 'agent:auto' } },
+      },
+    },
   ];
 
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
@@ -108,6 +120,7 @@ test('candidate CLI JSON and exit mapping are total over every public runIssue o
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
     { result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence/route.json' }, exit: 0 },
+    { result: { status: 'awaiting-user', questionId: 'q-00000000000000000000', answerPrefix: 'Answer q-00000000000000000000:', evidencePath: 'evidence/wait.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
     { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },
@@ -115,6 +128,8 @@ test('candidate CLI JSON and exit mapping are total over every public runIssue o
     { result: { status: 'transport-failed', resumable: true, evidencePath: 'evidence/6.json' }, exit: 70 },
     { result: { status: 'internal-error', evidencePath: 'evidence/7.json' }, exit: 70 },
     { result: { status: 'cancelled', evidencePath: 'evidence/8.json' }, exit: 130 },
+    { result: { status: 'migration-required', fromVersion: 1, requiredAction: 'setup --target /repo' }, exit: 20 },
+    { result: { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence/requeue.json' }, exit: 0 },
   ];
   for (const entry of cases) {
     assert.equal(runIssueExitCode(entry.result), entry.exit);

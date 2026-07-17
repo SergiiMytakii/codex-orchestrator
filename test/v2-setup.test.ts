@@ -54,6 +54,103 @@ test('Setup.execute dry-run returns exact ordered actions and performs zero writ
   assert.deepEqual(effects, []);
 });
 
+test('Setup.execute migrates the exact Config V1 shape once under an inactive owner', async (t) => {
+  const root = await targetFixture(t);
+  const effects: string[] = [];
+  const setup = new Setup(dependencies(effects));
+  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'created' });
+  const configPath = join(root, '.codex-orchestrator', 'config.json');
+  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  v1.version = 1;
+  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
+  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+
+  effects.length = 0;
+  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'migrated' });
+  const migrated = parseAgentAutoConfig(JSON.parse(await readFile(configPath, 'utf8')));
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.github.labels.waitingHuman.name, 'agent:waiting-human');
+  assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
+  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'unchanged' });
+});
+
+test('Setup.execute plans Config V1 migration without writes and blocks label collisions', async (t) => {
+  const root = await targetFixture(t);
+  const setup = new Setup(dependencies([]));
+  await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false });
+  const configPath = join(root, '.codex-orchestrator', 'config.json');
+  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  v1.version = 1;
+  const labels = (v1.github as { labels: Record<string, { name: string }> }).labels;
+  delete labels.waitingHuman;
+  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+  const before = await readFile(configPath);
+  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: true }), {
+    status: 'planned', actions: [{ kind: 'migrate-config-v1-to-v2', path: '.codex-orchestrator/config.json' }],
+  });
+  assert.deepEqual(await readFile(configPath), before);
+
+  labels.auto!.name = 'agent:waiting-human';
+  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+  const collisionBytes = await readFile(configPath);
+  assert.equal((await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'unsupported-schema');
+  assert.deepEqual(await readFile(configPath), collisionBytes);
+});
+
+test('Setup.execute leaves Config V1 byte-exact when owner or running-claim evidence blocks migration', async (t) => {
+  for (const blocker of ['owner', 'running'] as const) {
+    const root = await targetFixture(t);
+    const seed = new Setup(dependencies([]));
+    await seed.execute({ targetRoot: root, operation: 'configure', dryRun: false });
+    const configPath = join(root, '.codex-orchestrator', 'config.json');
+    const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    v1.version = 1;
+    delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
+    await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+    const before = await readFile(configPath);
+    const deps = dependencies([]);
+    if (blocker === 'owner') deps.ownership.inspectV2Owner = async () => ({ status: 'active', reason: 'live owner' });
+    else deps.labels.listOpenIssueNumbersWithLabel = async () => [99];
+    assert.equal((await new Setup(deps).execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'blocked-active');
+    assert.deepEqual(await readFile(configPath), before);
+  }
+});
+
+test('Config V1 migration rechecks running claims after setup ownership is acquired', async (t) => {
+  const root = await targetFixture(t);
+  const seed = new Setup(dependencies([]));
+  await seed.execute({ targetRoot: root, operation: 'configure', dryRun: false });
+  const configPath = join(root, '.codex-orchestrator', 'config.json');
+  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  v1.version = 1;
+  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
+  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+  const before = await readFile(configPath);
+  const deps = dependencies([]);
+  let reads = 0;
+  deps.labels.listOpenIssueNumbersWithLabel = async () => (++reads === 1 ? [] : [99]);
+
+  assert.equal((await new Setup(deps).execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'blocked-active');
+  assert.equal(reads, 2);
+  assert.deepEqual(await readFile(configPath), before);
+});
+
+test('doctor and status report the exact Config V1 migration requirement', async (t) => {
+  const root = await targetFixture(t);
+  const setup = new Setup(dependencies([]));
+  await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false });
+  const configPath = join(root, '.codex-orchestrator', 'config.json');
+  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+  v1.version = 1;
+  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
+  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
+  for (const operation of ['doctor', 'status'] as const) {
+    assert.deepEqual(await setup.execute({ targetRoot: root, operation, dryRun: false }), {
+      status: 'legacy-detected', reason: 'Config V1 requires setup migration.',
+    });
+  }
+});
+
 test('Setup.execute rejects repository mismatch before local writes', async (t) => {
   const root = await targetFixture(t);
   const effects: string[] = [];
@@ -96,7 +193,7 @@ test('prepare-labels paginates case-insensitively and creates only missing label
   };
   const result = await new Setup(base).execute({ targetRoot: root, operation: 'prepare-labels', dryRun: false });
   assert.deepEqual(result, { status: 'labels-prepared' });
-  assert.deepEqual(created, ['agent:blocked', 'agent:review']);
+  assert.deepEqual(created, ['agent:blocked', 'agent:review', 'agent:waiting-human']);
   assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
 });
 
@@ -114,6 +211,7 @@ test('prepare-labels dry-run reports local and paginated GitHub actions with zer
       { kind: 'create-label', name: 'agent:running' },
       { kind: 'create-label', name: 'agent:blocked' },
       { kind: 'create-label', name: 'agent:review' },
+      { kind: 'create-label', name: 'agent:waiting-human' },
     ],
   });
   await assert.rejects(stat(join(root, '.codex-orchestrator')), { code: 'ENOENT' });
@@ -131,7 +229,7 @@ test('prepare-labels returns typed partial progress and always releases ownershi
   assert.deepEqual(result, {
     status: 'labels-partial',
     created: ['agent:auto', 'agent:running'],
-    missing: ['agent:blocked', 'agent:review'],
+    missing: ['agent:blocked', 'agent:review', 'agent:waiting-human'],
     cause: { code: 'github-unavailable', summary: 'GitHub label creation failed.' },
   });
   assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
@@ -156,6 +254,7 @@ test('doctor and status return deterministic read-only diagnostics owned by Setu
   effects.length = 0;
   deps.labels.listPage = async () => ({ labels: [
     { name: 'agent:auto' }, { name: 'agent:running' }, { name: 'agent:blocked' }, { name: 'agent:review' },
+    { name: 'agent:waiting-human' },
   ], nextCursor: undefined });
   for (const operation of ['doctor', 'status'] as const) {
     const result = await setup.execute({ targetRoot: root, operation, dryRun: false });

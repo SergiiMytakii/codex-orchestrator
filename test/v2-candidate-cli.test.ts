@@ -8,8 +8,15 @@ import {
   isDirectCandidateExecution,
   parseCandidateDaemonArgs,
   parseCandidateRunArgs,
+  parseTargetConfigForExecution,
   runCandidateCli,
 } from '../src/v2/candidate-cli.js';
+
+test('Config V1 operational preflight returns one typed migration requirement', () => {
+  assert.deepEqual(parseTargetConfigForExecution({ schema: 'codex-orchestrator.agent-auto', version: 1 }, '/tmp/target'), {
+    status: 'migration-required', fromVersion: 1, requiredAction: 'setup --target /tmp/target',
+  });
+});
 
 test('candidate direct-execution guard canonicalizes macOS temporary path aliases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'candidate-entry-'));

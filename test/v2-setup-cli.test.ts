@@ -34,6 +34,7 @@ test('candidate setup JSON and exit mapping are total over typed outcomes', () =
     { outcome: { status: 'unchanged' }, exit: 0 },
     { outcome: { status: 'labels-prepared' }, exit: 0 },
     { outcome: { status: 'fresh-reset' }, exit: 0 },
+    { outcome: { status: 'migrated' }, exit: 0 },
     { outcome: { status: 'planned', actions: [] }, exit: 0 },
     { outcome: { status: 'inspected', disposition: 'ok', diagnostics: [] }, exit: 0 },
     { outcome: { status: 'inspected', disposition: 'blocked', diagnostics: [] }, exit: 20 },

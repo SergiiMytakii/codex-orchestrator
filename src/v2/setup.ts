@@ -24,6 +24,7 @@ export interface SetupIntent {
 export type SetupAction =
   | { kind: 'write-ignore'; path: '.gitignore' }
   | { kind: 'write-config'; path: '.codex-orchestrator/config.json' }
+  | { kind: 'migrate-config-v1-to-v2'; path: '.codex-orchestrator/config.json' }
   | { kind: 'create-label'; name: string }
   | { kind: 'backup-legacy'; path: string }
   | { kind: 'commit-fresh'; path: '.codex-orchestrator/config.json' };
@@ -40,7 +41,7 @@ export interface SetupFailure {
 }
 
 export type SetupOutcome =
-  | { status: 'created' | 'unchanged' | 'labels-prepared' | 'fresh-reset' }
+  | { status: 'created' | 'unchanged' | 'labels-prepared' | 'fresh-reset' | 'migrated' }
   | { status: 'planned'; actions: SetupAction[] }
   | { status: 'inspected'; disposition: 'ok' | 'blocked'; diagnostics: SetupDiagnostic[] }
   | { status: 'labels-partial'; created: string[]; missing: string[]; cause: SetupFailure }
@@ -130,6 +131,54 @@ export class Setup {
       try {
         config = parseAgentAutoConfig(JSON.parse(existing.toString('utf8')));
       } catch {
+        const migration = parseConfigV1Migration(existing);
+        if (migration.status === 'migratable') {
+          if (!sameRepository(migration.config.github, repository)
+            || (intent.repository && !sameRepository(migration.config.github, intent.repository))) {
+            return { status: 'repository-mismatch', reason: 'Persisted repository does not match target origin.' };
+          }
+          if (intent.dryRun) {
+            return { status: 'planned', actions: [{ kind: 'migrate-config-v1-to-v2', path: CONFIG_PATH }] };
+          }
+          const owner = await this.dependencies.ownership.inspectV2Owner(repository).catch(() => ({
+            status: 'ambiguous' as const, reason: 'V2 owner state could not be inspected.',
+          }));
+          if (owner.status === 'active' || owner.status === 'ambiguous') {
+            return { status: 'blocked-active', reason: owner.reason ?? 'An active or ambiguous V2 owner blocks Config V1 migration.' };
+          }
+          let running: number[];
+          try {
+            running = await this.dependencies.labels.listOpenIssueNumbersWithLabel({
+              ...repository, label: migration.runningLabel,
+            });
+          } catch {
+            return { status: 'transport-failed', detail: failure('migration-running-read', 'Migration could not prove remote running claims are absent.') };
+          }
+          if (running.length > 0) return { status: 'blocked-active', reason: 'Open Config V1 running claims block migration.' };
+          const lock = await this.dependencies.ownership.acquire(repository);
+          try {
+            const recheck = await this.store.readOptional(resolve(targetRoot, CONFIG_PATH));
+            if (!recheck || !recheck.equals(existing)) {
+              return { status: 'blocked-active', reason: 'Configuration changed while waiting for setup ownership.' };
+            }
+            let lockedRunning: number[];
+            try {
+              lockedRunning = await this.dependencies.labels.listOpenIssueNumbersWithLabel({
+                ...repository, label: migration.runningLabel,
+              });
+            } catch {
+              return { status: 'transport-failed', detail: failure('migration-running-read', 'Migration could not prove remote running claims are absent under setup ownership.') };
+            }
+            if (lockedRunning.length > 0) return { status: 'blocked-active', reason: 'Open Config V1 running claims block migration.' };
+            await this.store.writeAtomic(resolve(targetRoot, CONFIG_PATH), `${canonicalJson(migration.config)}\n`, 0o644);
+            return { status: 'migrated' };
+          } finally {
+            await lock.release();
+          }
+        }
+        if (migration.status === 'collision') {
+          return { status: 'unsupported-schema', reason: 'Config V1 label names collide with agent:waiting-human.' };
+        }
         return classifyNonV2Config(existing);
       }
       if (!sameRepository(config.github, repository) || (intent.repository && !sameRepository(config.github, intent.repository))) {
@@ -262,6 +311,9 @@ export class Setup {
     let config: AgentAutoConfigV1;
     try { config = parseAgentAutoConfig(JSON.parse(bytes.toString('utf8'))); }
     catch {
+      if (parseConfigV1Migration(bytes).status === 'migratable') {
+        return { status: 'legacy-detected', reason: 'Config V1 requires setup migration.' };
+      }
       const classified = classifyNonV2Config(bytes);
       const legacy = classified.status === 'legacy-detected';
       return {
@@ -501,7 +553,7 @@ async function defaultConfig(
   if (typeof scripts.typecheck === 'string') checks.typecheck = 'npm run typecheck';
   return parseAgentAutoConfig({
     schema: 'codex-orchestrator.agent-auto',
-    version: 1,
+    version: 2,
     github: {
       owner: repository.owner,
       repo: repository.repo,
@@ -511,6 +563,7 @@ async function defaultConfig(
         running: { name: 'agent:running', color: 'fbca04', description: 'Agent is running.' },
         blocked: { name: 'agent:blocked', color: 'd93f0b', description: 'Agent needs help.' },
         review: { name: 'agent:review', color: '0e8a16', description: 'Ready for review.' },
+        waitingHuman: { name: 'agent:waiting-human', color: '5319e7', description: 'Waiting for an authorized product answer.' },
       },
     },
     runner: {
@@ -550,6 +603,45 @@ function classifyNonV2Config(bytes: Buffer): SetupOutcome {
       ? 'Experimental runtime configuration requires setup --fresh.'
       : 'Legacy configuration requires setup --fresh.' }
     : { status: 'unsupported-schema', reason: 'Configuration schema is unsupported or unreadable.' };
+}
+
+type ConfigV1Migration =
+  | { status: 'migratable'; config: AgentAutoConfigV1; runningLabel: string }
+  | { status: 'collision' | 'not-v1' };
+
+function parseConfigV1Migration(bytes: Buffer): ConfigV1Migration {
+  let input: unknown;
+  try { input = JSON.parse(bytes.toString('utf8')); }
+  catch { return { status: 'not-v1' }; }
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { status: 'not-v1' };
+  const record = input as Record<string, unknown>;
+  if (record.schema !== 'codex-orchestrator.agent-auto' || record.version !== 1) return { status: 'not-v1' };
+  const github = record.github;
+  if (typeof github !== 'object' || github === null || Array.isArray(github)) return { status: 'not-v1' };
+  const labels = (github as Record<string, unknown>).labels;
+  if (typeof labels !== 'object' || labels === null || Array.isArray(labels)) return { status: 'not-v1' };
+  const labelRecord = labels as Record<string, unknown>;
+  if (Object.keys(labelRecord).sort().join(',') !== 'auto,blocked,review,running') return { status: 'not-v1' };
+  const names = Object.values(labelRecord).map((label) => {
+    if (typeof label !== 'object' || label === null || Array.isArray(label)) return undefined;
+    return (label as Record<string, unknown>).name;
+  });
+  if (names.includes('agent:waiting-human')) return { status: 'collision' };
+  try {
+    const candidate = structuredClone(record);
+    candidate.version = 2;
+    const candidateGithub = candidate.github as Record<string, unknown>;
+    candidateGithub.labels = {
+      ...(candidateGithub.labels as Record<string, unknown>),
+      waitingHuman: {
+        name: 'agent:waiting-human', color: '5319e7', description: 'Waiting for an authorized product answer.',
+      },
+    };
+    const config = parseAgentAutoConfig(candidate);
+    return { status: 'migratable', config, runningLabel: config.github.labels.running.name };
+  } catch {
+    return { status: 'not-v1' };
+  }
 }
 
 function sameRepository(left: { owner: string; repo: string }, right: { owner: string; repo: string }): boolean {

@@ -25,7 +25,7 @@ This boundary prevents prompt content or repository code from receiving external
 
 ## Configuration
 
-`.codex-orchestrator/config.json` is an exact, versioned contract. Unknown keys and removed policy surfaces are rejected. It names one GitHub repository, four labels (`auto`, `running`, `blocked`, `review`), one branch template, a serial polling interval, five implementation cycles, one Codex command contract, finite checks, one proof artifact directory, and deny lists.
+`.codex-orchestrator/config.json` is an exact, versioned contract. Unknown keys and removed policy surfaces are rejected. It names one GitHub repository, five labels (`auto`, `running`, `blocked`, `review`, `waitingHuman`), one branch template, a serial polling interval, five implementation cycles, one Codex command contract, finite checks, one proof artifact directory, and deny lists.
 
 The committed config contains policy, never live run state or credentials. Durable runtime state is stored beneath the configured state directory and the Runner's private home.
 
@@ -36,13 +36,14 @@ Direct runs and daemon-discovered runs call the same lifecycle:
 1. Snapshot issue and repository identity.
 2. Verify authorization and acquire fenced ownership.
 3. Create or reconcile the issue worktree.
-4. Run one implementation attempt and validate its structured report.
-5. Inspect all tracked, staged, unstaged, untracked, and ignored denied-path changes.
-6. Commit the validated implementation candidate locally.
-7. Run configured checks and create a nominal `CheckedChange` bound to exact Git and content hashes.
-8. Run Acceptance Proof against that binding.
-9. Publish with durable intents and postcondition reconciliation.
-10. Persist and return one typed terminal or resumable result.
+4. Persist a reviewed route. An `awaiting-user` route publishes one durable question, freezes only a current WRITE+ answer, restores running labels, and reruns triage in the same Run before implementation.
+5. Run one implementation attempt and validate its structured report.
+6. Inspect all tracked, staged, unstaged, untracked, and ignored denied-path changes.
+7. Commit the validated implementation candidate locally.
+8. Run configured checks and create a nominal `CheckedChange` bound to exact Git and content hashes.
+9. Run Acceptance Proof against that binding.
+10. Publish with durable intents and postcondition reconciliation.
+11. Persist and return one typed terminal or resumable result.
 
 Implementation findings return to the same worktree for at most five cycles. A malformed report gets one report-only repair; a clean transport disconnect gets one separate transport retry. Neither budget silently becomes another implementation cycle.
 
@@ -80,6 +81,8 @@ Command output and static inspection may remain local and include machine paths.
 ## Setup and cutover
 
 `setup` creates or verifies V2 config. `--prepare-labels` performs only the requested GitHub label preparation. `doctor` and `status` are read-only inspections.
+
+Exact Config V1 is upgraded atomically by `setup configure` only after the shared run-owner fence and remote running claims are proven absent. Operational commands return `migration-required` until that upgrade completes.
 
 Recognized earlier config is parsed only by the bounded cutover reader. `setup --fresh` acquires both ownership fences, proves no active old claims, saves immutable backup evidence, and publishes V2 config last. The old runtime never executes as part of this process.
 

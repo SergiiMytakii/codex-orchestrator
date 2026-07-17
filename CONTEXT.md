@@ -26,6 +26,10 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 
 **Resumable intent** — durable record written before an effect and reconciled against its postcondition after restart.
 
+**Waiting question** — immutable route-bound GitHub question published by the Runner after an approved `awaiting-user` decision.
+
+**Trusted answer** — unedited exact-prefix answer posted after its question by an identity with current repository WRITE or ADMIN permission and frozen into the Run before rerouting.
+
 **Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved.
 
 **Review-ready** — terminal successful handoff after checks, proof, and publication. It does not mean merged.
@@ -38,4 +42,5 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
+- A waiting Run resumes only through its matching marker and Trusted Answer, then reruns triage before any product implementation.
 - Five failed implementation cycles exhaust the Run without publication.

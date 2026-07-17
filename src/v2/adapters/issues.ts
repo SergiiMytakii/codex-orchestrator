@@ -10,11 +10,24 @@ export interface GitHubIssueComment {
   url: string;
   body: string;
   createdAt: string;
+  updatedAt: string;
   author: {
     login: string;
+    id: string;
   };
   authorAssociation: string;
 }
+
+export type GitHubRepositoryPermission = 'none' | 'read' | 'write' | 'admin';
+
+export interface GitHubRepositoryPermissionObservation {
+  permission: GitHubRepositoryPermission;
+  checkedAt: string;
+  userId: string;
+}
+
+export class GitHubPermissionRetryableError extends Error {}
+export class GitHubPermissionSafetyError extends Error {}
 
 export interface GitHubPullRequestLink {
   number: number;
@@ -67,11 +80,12 @@ export interface GitHubIssueAdapter {
   getIssue(number: number): Promise<GitHubIssue | undefined>;
   getLabels(issueNumber: number): Promise<string[]>;
   listAllComments(issueNumber: number): Promise<GitHubIssueComment[]>;
+  getRepositoryPermission(login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation>;
   createIssue(input: CreateIssueInput): Promise<GitHubIssue>;
   updateIssue(issueNumber: number, input: UpdateIssueInput): Promise<GitHubIssue>;
   addLabels(issueNumber: number, labels: string[]): Promise<void>;
   removeLabels(issueNumber: number, labels: string[]): Promise<void>;
-  postComment(issueNumber: number, body: string): Promise<void>;
+  postComment(issueNumber: number, body: string): Promise<GitHubIssueComment>;
   closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void>;
 }
 
@@ -204,6 +218,10 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
     return (await this.getIssue(issueNumber))?.comments ?? [];
   }
 
+  public async getRepositoryPermission(_login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation> {
+    return { permission: 'admin', checkedAt: new Date().toISOString(), userId: expectedUserId };
+  }
+
   public async createIssue(input: CreateIssueInput): Promise<GitHubIssue> {
     const nextNumber = Math.max(0, ...this.issues.keys()) + 1;
     const issue: GitHubIssue = {
@@ -271,23 +289,26 @@ export class InMemoryGitHubIssueAdapter implements GitHubIssueAdapter {
     this.removedLabels.push({ issueNumber, labels: [...labels] });
   }
 
-  public async postComment(issueNumber: number, body: string): Promise<void> {
+  public async postComment(issueNumber: number, body: string): Promise<GitHubIssueComment> {
     const issue = this.requireIssue(issueNumber);
     const commentNumber = issue.comments.length + 1;
-    issue.comments.push({
-      id: `comment-${issueNumber}-${commentNumber}`,
+    const comment: GitHubIssueComment = {
+      id: String(issueNumber * 1_000_000 + commentNumber),
       url: `${issue.url}#issuecomment-${commentNumber}`,
       body,
       createdAt: new Date(commentNumber * 1000).toISOString(),
-      author: { login: 'codex-orchestrator' },
+      updatedAt: new Date(commentNumber * 1000).toISOString(),
+      author: { login: 'codex-orchestrator', id: '1' },
       authorAssociation: 'NONE',
-    });
+    };
+    issue.comments.push(comment);
     this.postedComments.push({ issueNumber, body });
+    return structuredClone(comment);
   }
 
   public async closeIssueWithEvidence(issueNumber: number, input: CloseIssueEvidenceInput): Promise<void> {
     await closeIssueWithEvidence(issueNumber, input, {
-      postComment: (targetIssueNumber, body) => this.postComment(targetIssueNumber, body),
+      postComment: async (targetIssueNumber, body) => { await this.postComment(targetIssueNumber, body); },
       closeIssue: async (targetIssueNumber) => {
         const issue = this.requireIssue(targetIssueNumber);
         issue.state = 'CLOSED';

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
-import { parseAgentAutoConfig } from './config.js';
+import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
 import { createV2Runtime } from './runtime.js';
 import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
@@ -77,7 +77,12 @@ async function executeProductionDaemon(
   intent: CandidateDaemonIntent,
   write: (text: string) => void,
 ): Promise<number> {
-  const config = await readTargetConfig(intent.targetRoot);
+  const inspected = await readTargetConfig(intent.targetRoot);
+  if ('status' in inspected) {
+    write(renderRunResultJson(inspected));
+    return runIssueExitCode(inspected);
+  }
+  const config = inspected;
   const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
   let exitCode = 0;
   do {
@@ -96,6 +101,7 @@ async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssu
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const packageVersion = await readPackageVersion();
   const config = await readTargetConfig(intent.targetRoot);
+  if ('status' in config) return config;
   const orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator'));
   const bootId = await readBootId();
   const runtime = createV2Runtime({
@@ -117,7 +123,16 @@ async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssu
 }
 
 async function readTargetConfig(targetRoot: string) {
-  return parseAgentAutoConfig(JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')));
+  return parseTargetConfigForExecution(JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')), targetRoot);
+}
+
+export function parseTargetConfigForExecution(value: unknown, targetRoot: string): AgentAutoConfigV1 | Extract<RunIssueResult, { status: 'migration-required' }> {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)
+    && (value as { schema?: unknown }).schema === 'codex-orchestrator.agent-auto'
+    && (value as { version?: unknown }).version === 1) {
+    return { status: 'migration-required', fromVersion: 1, requiredAction: `setup --target ${resolve(targetRoot)}` };
+  }
+  return parseAgentAutoConfig(value);
 }
 
 async function executeProductionSetup(intent: SetupIntent): Promise<SetupOutcome> {
