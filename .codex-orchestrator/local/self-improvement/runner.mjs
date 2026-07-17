@@ -671,7 +671,7 @@ export function createRunner(options = {}) {
     if (!Number.isInteger(Number(issue))) return { status: 'skipped', reason: 'missing issue number' };
     const build = await exec('npm', ['run', 'build', '--silent'], { cwd });
     if (build.code !== 0) return { status: 'failed', exitCode: build.code, reason: `build failed: ${summarizeOutput(build)}` };
-    const result = await exec('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', String(issue)], { cwd });
+    const result = await exec('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', cwd, '--issue', String(issue)], { cwd });
     let typed;
     try { typed = parseV2RunResult(result.stdout); }
     catch { return { status: 'failed', exitCode: result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }

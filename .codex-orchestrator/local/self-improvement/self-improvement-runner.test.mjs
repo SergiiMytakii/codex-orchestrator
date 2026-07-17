@@ -30,7 +30,8 @@ function makeExecStub(responses = {}) {
   const fn = async (command, args = [], options = {}) => {
     calls.push({ command, args, options });
     const key = commandKey(command, args);
-    const response = responses[key] ?? responses[command] ?? { code: 0, stdout: '', stderr: '' };
+    const normalizedKey = commandKey(command, args.map((arg, index) => args[index - 1] === '--target' ? '<cwd>' : arg));
+    const response = responses[key] ?? responses[normalizedKey] ?? responses[command] ?? { code: 0, stdout: '', stderr: '' };
     if (typeof response === 'function') {
       return response({ command, args, options, calls });
     }
@@ -515,7 +516,7 @@ test('invalid discovery report creates no issue', () => {
 test('implement command builds then runs targeted issue and never calls daemon', async () => {
   const exec = makeExecStub({
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
-    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123'])]: {
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '<cwd>', '--issue', '123'])]: {
       code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' }),
     },
   });
@@ -525,7 +526,7 @@ test('implement command builds then runs targeted issue and never calls daemon',
     assert.equal(result.status, 'passed');
     assert.deepEqual(exec.calls.map((call) => [call.command, call.args]), [
       ['npm', ['run', 'build', '--silent']],
-      ['node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123']],
+      ['node', ['dist/src/v2/candidate-cli.js', 'run', '--target', runner.paths.cwd, '--issue', '123']],
     ]);
     assert.equal(exec.calls.some((call) => call.args.includes('daemon')), false);
   } finally {
@@ -548,7 +549,7 @@ test('typed V2 result parser rejects misleading prose and maps every result stat
 test('implement trusts typed blocked result instead of misleading successful prose', async () => {
   const exec = makeExecStub({
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
-    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '123'])]: {
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '<cwd>', '--issue', '123'])]: {
       code: 20,
       stdout: v2RunResult({ status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' }),
       stderr: 'review-ready passed',
@@ -582,7 +583,7 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       return { code: 0, stdout: '', stderr: '' };
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '222'])]: {
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '<cwd>', '--issue', '222'])]: {
       code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/2', evidencePath: 'evidence.json' }),
     },
     [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
@@ -617,7 +618,7 @@ test('daily implements one code issue and never runs review backlog follow-up pu
       return { code: 0, stdout: '', stderr: '' };
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '223'])]: {
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '<cwd>', '--issue', '223'])]: {
       code: 70, stdout: v2RunResult({ status: 'internal-error', evidencePath: 'evidence.json' }), stderr: 'failed',
     },
   });
@@ -647,7 +648,7 @@ test('daily reuses an open auto self-improvement issue instead of discovering an
       throw new Error(`unexpected gh call ${args.join(' ')}`);
     },
     [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
-    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '.', '--issue', '310'])]: {
+    [commandKey('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', '<cwd>', '--issue', '310'])]: {
       code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/3', evidencePath: 'evidence.json' }),
     },
     [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
