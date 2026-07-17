@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-07-17
+
+### Fixed
+- `setup --fresh` now checks for a pre-existing V2 owner before acquiring its
+  own setup lock, so a safe Legacy cutover no longer blocks on itself.
+
 ## [2.0.0] - 2026-07-17
 
 ### Changed

@@ -200,6 +200,32 @@ test('fresh copies Legacy metadata under both fences and commits V2 config last'
   assert.deepEqual(await readFile(join(root, manifest.backup.statePath, 'owner.json')), originalState);
 });
 
+test('fresh does not classify its own setup ownership as an active V2 runner', async (t) => {
+  const root = await legacyTargetFixture(t);
+  const effects: string[] = [];
+  const deps = dependencies(effects);
+  let setupOwnsRepository = false;
+  deps.ownership.inspectV2Owner = async () => setupOwnsRepository
+    ? { status: 'active' }
+    : { status: 'absent' };
+  deps.ownership.acquire = async () => {
+    setupOwnsRepository = true;
+    effects.push('lock:acquire');
+    return {
+      release: async () => {
+        setupOwnsRepository = false;
+        effects.push('lock:release');
+      },
+    };
+  };
+
+  assert.deepEqual(
+    await new Setup(deps).execute({ targetRoot: root, operation: 'fresh', dryRun: false }),
+    { status: 'fresh-reset' },
+  );
+  assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
+});
+
 test('fresh blocks active, remote, nonempty-root, and retained-collision evidence before writes', async (t) => {
   for (const blocked of ['owner', 'remote', 'root', 'collision'] as const) {
     await t.test(blocked, async (t) => {

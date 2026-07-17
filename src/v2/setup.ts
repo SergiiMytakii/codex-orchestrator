@@ -346,12 +346,12 @@ export class Setup {
     let ownerLock: Awaited<ReturnType<SetupDependencies['ownership']['acquire']>> | undefined;
     let legacyFence: Awaited<ReturnType<SetupDependencies['ownership']['acquireLegacyFence']>> | undefined;
     try {
-      ownerLock = await this.dependencies.ownership.acquire(repository);
-      legacyFence = await this.dependencies.ownership.acquireLegacyFence(targetRoot);
       const owner = await this.dependencies.ownership.inspectV2Owner(repository);
       if (owner.status === 'active' || owner.status === 'ambiguous') {
         return { status: 'blocked-active', reason: owner.reason ?? 'An active or ambiguous V2 owner blocks fresh.' };
       }
+      ownerLock = await this.dependencies.ownership.acquire(repository);
+      legacyFence = await this.dependencies.ownership.acquireLegacyFence(targetRoot);
       let running: number[];
       try { running = await this.dependencies.labels.listOpenIssueNumbersWithLabel({ ...repository, label: legacy.runningLabel }); }
       catch { return { status: 'transport-failed', detail: failure('fresh-running-read', 'Fresh could not prove remote running claims are absent.') }; }
