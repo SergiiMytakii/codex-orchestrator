@@ -52,6 +52,7 @@ async function makeRunner(options = {}) {
     pid: options.pid ?? 12345,
     isPidAlive: options.isPidAlive ?? (() => false),
     codexCommand: options.codexCommand,
+    repo: options.repo,
   });
   return { root, exec, runner, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
@@ -165,6 +166,28 @@ test('preflight verifies auth, required labels, and creates self-improvement lab
     const result = await runner.preflight();
     assert.equal(result.ok, true);
     assert.equal(exec.calls.some((call) => call.args[0] === 'label' && call.args[1] === 'create'), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('explicit scratch repository override scopes every preflight GitHub call', async () => {
+  const repo = 'SergiiMytakii/codex-orchestrator-live-smoke';
+  const exec = makeExecStub({
+    [commandKey('gh', ['repo', 'view', repo, '--json', 'nameWithOwner'])]: {
+      code: 0,
+      stdout: JSON.stringify({ nameWithOwner: repo }),
+    },
+    [commandKey('gh', ['auth', 'status'])]: { code: 0, stdout: 'ok' },
+    [commandKey('gh', ['label', 'list', '--repo', repo, '--limit', '1000', '--json', 'name'])]: {
+      code: 0,
+      stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]),
+    },
+  });
+  const { runner, cleanup } = await makeRunner({ exec, repo });
+  try {
+    assert.deepEqual(await runner.preflight(), { ok: true });
+    assert.equal(exec.calls.some((call) => call.args.includes('SergiiMytakii/codex-orchestrator')), false);
   } finally {
     await cleanup();
   }

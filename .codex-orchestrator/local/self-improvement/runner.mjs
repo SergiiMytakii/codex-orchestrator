@@ -364,6 +364,7 @@ export const dailyPhase = Object.freeze({
 
 export function createRunner(options = {}) {
   const cwd = options.cwd ?? DEFAULT_CWD;
+  const repository = options.repo ?? REPO;
   const localDir = options.localDir ?? path.join(cwd, '.codex-orchestrator/local/self-improvement');
   const exec = options.exec ?? defaultExec;
   const now = options.now ?? (() => new Date());
@@ -442,7 +443,7 @@ export function createRunner(options = {}) {
   }
 
   async function preflight() {
-    const repo = await exec('gh', ['repo', 'view', REPO, '--json', 'nameWithOwner'], { cwd });
+    const repo = await exec('gh', ['repo', 'view', repository, '--json', 'nameWithOwner'], { cwd });
     if (repo.code !== 0) return { ok: false, reason: `repo identity check failed: ${summarizeOutput(repo)}` };
     let repoJson;
     try {
@@ -450,12 +451,12 @@ export function createRunner(options = {}) {
     } catch {
       return { ok: false, reason: 'repo identity check returned invalid JSON' };
     }
-    if (repoJson?.nameWithOwner !== REPO) return { ok: false, reason: `repo identity mismatch: ${repoJson?.nameWithOwner ?? 'unknown'}` };
+    if (repoJson?.nameWithOwner !== repository) return { ok: false, reason: `repo identity mismatch: ${repoJson?.nameWithOwner ?? 'unknown'}` };
 
     const auth = await exec('gh', ['auth', 'status'], { cwd });
     if (auth.code !== 0) return { ok: false, reason: `gh auth status failed: ${summarizeOutput(auth)}` };
 
-    const labels = await exec('gh', ['label', 'list', '--repo', REPO, '--limit', '1000', '--json', 'name'], { cwd });
+    const labels = await exec('gh', ['label', 'list', '--repo', repository, '--limit', '1000', '--json', 'name'], { cwd });
     if (labels.code !== 0) return { ok: false, reason: `gh label list failed: ${summarizeOutput(labels)}` };
     let labelNames;
     try {
@@ -472,7 +473,7 @@ export function createRunner(options = {}) {
         'create',
         'self-improvement',
         '--repo',
-        REPO,
+        repository,
         '--color',
         '5319E7',
         '--description',
@@ -527,7 +528,7 @@ export function createRunner(options = {}) {
       'issue',
       'list',
       '--repo',
-      REPO,
+      repository,
       '--state',
       state,
       '--limit',
@@ -610,7 +611,7 @@ export function createRunner(options = {}) {
       'issue',
       'create',
       '--repo',
-      REPO,
+      repository,
       '--title',
       title,
       '--body-file',
@@ -706,7 +707,7 @@ export function createRunner(options = {}) {
       'view',
       String(number),
       '--repo',
-      REPO,
+      repository,
       '--json',
       'number,title,body,state,url,labels,comments,closedByPullRequestsReferences',
     ], { cwd });
@@ -839,7 +840,10 @@ export function createRunner(options = {}) {
 }
 
 async function main() {
-  const runner = createRunner();
+  const runner = createRunner({
+    cwd: process.env.CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_CWD,
+    repo: process.env.CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_REPO,
+  });
   const [command, ...args] = process.argv.slice(2);
   if (!command || !['daily', 'discover', 'implement', 'review'].includes(command)) {
     console.error('Usage: node runner.mjs <daily|discover|implement --issue <number>|review>');
