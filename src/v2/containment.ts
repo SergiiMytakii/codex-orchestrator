@@ -295,6 +295,14 @@ export function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+export function containsCredentialEvidence(value: string): boolean {
+  return [
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/iu,
+    /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
+    /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
+  ].some((pattern) => pattern.test(value));
+}
+
 function validateProbeResult(value: unknown, field: string): asserts value is ContainmentProbeResultV2 {
   assertExactObject(value, [
     'parentAuthReadable',

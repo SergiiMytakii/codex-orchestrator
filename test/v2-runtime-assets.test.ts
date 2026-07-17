@@ -1,14 +1,41 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
+import { materializeReportReadView } from '../src/v2/runtime.js';
 import { materializeWorkflowGeneration, parseWorkflowExecutionProfile } from '../src/v2/workflow-assets.js';
 
 const packageRoot = join(import.meta.dirname, '..', '..');
+const execFileAsync = promisify(execFile);
+
+test('report read view excludes env, denied paths, and symlinks before triage launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'report-read-view-'));
+  const repository = join(root, 'repository');
+  const destination = join(root, 'read-view');
+  const absoluteSentinel = join(root, 'absolute-sentinel.txt');
+  await mkdir(repository);
+  await execFileAsync('git', ['init', '-b', 'main', repository]);
+  await writeFile(join(repository, 'README.md'), 'visible\n');
+  await writeFile(join(repository, '.env.local'), 'removed\n');
+  await writeFile(join(repository, 'denied.txt'), 'removed\n');
+  await symlink('/tmp', join(repository, 'outside-link'));
+  await writeFile(absoluteSentinel, 'must remain\n');
+  await execFileAsync('git', ['-C', repository, 'add', '--all']);
+  await execFileAsync('git', ['-C', repository, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+
+  await materializeReportReadView({ worktreePath: repository, destination, deniedPaths: ['denied.txt', absoluteSentinel] });
+
+  assert.equal(await readFile(join(destination, 'README.md'), 'utf8'), 'visible\n');
+  assert.equal(await readFile(absoluteSentinel, 'utf8'), 'must remain\n');
+  for (const path of ['.env.local', 'denied.txt', 'outside-link']) {
+    await assert.rejects(lstat(join(destination, path)), { code: 'ENOENT' });
+  }
+});
 
 test('operation snapshot copies one pinned generation closure and concurrent publishers reuse it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-assets-generation-'));

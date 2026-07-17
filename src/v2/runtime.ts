@@ -1,9 +1,9 @@
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, readdir, readlink, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
-import { dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { GitWorktreeManager } from './adapters/worktree.js';
@@ -11,8 +11,8 @@ import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
-import { acquireExclusiveJsonFileLock } from './atomic-store.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
+import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
 import {
   canonicalJson,
@@ -23,16 +23,20 @@ import {
   sha256,
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
+import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
 import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
+import { RouteCoordinator } from './route-coordinator.js';
+import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
 import { OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
 import {
   parseWorkflowExecutionProfile,
   type WorkflowExecutionProfile,
   type WorkflowGenerationReceipt,
+  verifyWorkflowGeneration,
   type WorkflowOperationPolicy,
 } from './workflow-assets.js';
 
@@ -471,6 +475,91 @@ export function createV2Runtime(input: {
     iosXcrunPath,
     processExecutor: commandExecutor,
   });
+  const reportOperation = new InjectedContainedReportOperation({
+    prepare: async ({ operation, attemptId, runId, workflowGeneration }) => ({
+      operation,
+      generationHash: workflowGeneration.generationHash,
+      ...await prepareContainedAttempt({
+        orchestratorHome,
+        canonicalRepository: requireCanonicalRepository(currentConfig),
+        runId,
+        attemptId,
+        operationId: operation,
+        workflowGeneration,
+        bootId: input.bootId,
+      }),
+    }),
+    snapshot: (worktreePath) => git.snapshot(worktreePath),
+    launch: async ({ attempt, worktreePath, promptFacts, signal }) => {
+      const config = requireConfig(currentConfig);
+      if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
+        || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
+        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
+      }
+      let readView: string;
+      try {
+        readView = await materializeReportReadView({
+          worktreePath,
+          destination: join(dirname(attempt.tmpDir), 'read-view'),
+          deniedPaths: config.deny.readPaths,
+        });
+      } catch {
+        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
+      }
+      let result;
+      let cleanupAfterSafeHalt = false;
+      try {
+        result = await containedProcess.run({
+        codexPath: config.codex.command,
+        cwd: readView,
+        schemaPath: attempt.schemaPath,
+        reportPath: attempt.reportPath,
+        toolHome: attempt.toolHome,
+        tmpDir: attempt.tmpDir,
+        safePath: requireRuntimeString(input.safePath, 'safePath'),
+        parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
+        parentEnv: process.env,
+        prompt: [
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+          `Runner-provided facts: ${canonicalJson(promptFacts)}`,
+          'This is a read-only, report-only operation. Do not edit files or external state, use network or MCP tools, or request additional authority.',
+          'Do not read .env or any .env* file. The runner has removed repository credential paths from this read view.',
+        ].join('\n'),
+        timeoutMs: config.codex.timeoutMs,
+        idleTimeoutMs: config.codex.idleTimeoutMs,
+        operationPolicy: attempt.policy,
+        executionProfile: attempt.profile,
+        }, signal);
+      } catch (error) {
+        if (error instanceof ProcessQuiescenceError) {
+          cleanupAfterSafeHalt = true;
+          return {
+            status: 'safe-halt' as const,
+            pid: error.pid,
+            processGroupId: error.processGroupId,
+            startedAt: now(),
+            waitForAbsence: async () => {
+              await waitForProcessGroupAbsent(error.processGroupId);
+              await rm(readView, { recursive: true, force: true });
+            },
+          };
+        }
+        throw error;
+      } finally {
+        if (!cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
+      }
+      if (result.kind === 'cancelled') return { status: 'cancelled' as const };
+      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
+        return { status: 'retryable' as const, code: `report-operation-${result.kind}` };
+      }
+      if (result.kind !== 'completed' || result.report.kind !== 'available') {
+        return { status: 'blocked' as const, kind: 'external' as const, code: 'report-operation-report-unavailable' };
+      }
+      return { status: 'completed' as const, reportBytes: result.report.bytes };
+    },
+  });
 
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
@@ -594,6 +683,34 @@ export function createV2Runtime(input: {
       createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
     },
     git,
+    routeCoordinator: {
+      run: ({ state, ...routeInput }) => new RouteCoordinator({
+        state,
+        operation: reportOperation,
+        createAttemptId: input.createAttemptId ?? randomUUID,
+        now,
+        createReceipt: ({ artifact, triage, review, decidedAt }) => {
+          if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
+          const receipt: RouteReceiptV1 = {
+            version: 1,
+            route: artifact.status,
+            triage,
+            review,
+            artifact,
+            decisionSha256: '',
+            decidedAt,
+            assumptions: [...artifact.assumptions],
+          };
+          receipt.decisionSha256 = hashRouteDecision(receipt);
+          return validateRouteReceipt(receipt, triage.generationHash);
+        },
+      }).run(routeInput),
+    },
+    routeContinuations: {
+      direct: async () => ({ status: 'completed' }),
+      specRequired: async () => ({ status: 'completed' }),
+      awaitingUser: async () => ({ status: 'completed' }),
+    },
     implementationAgent,
     checks: {
       run: async ({ command, cwd, signal }) => runShellCheck(command, cwd, signal),
@@ -609,6 +726,7 @@ export function createV2Runtime(input: {
     },
     packageVersion: input.packageVersion,
     createWorkflowGeneration: input.createWorkflowGeneration,
+    verifyWorkflowGeneration,
     createRunId: input.createRunId ?? randomUUID,
     createProofId: input.createProofId ?? randomUUID,
     now,
@@ -627,16 +745,6 @@ export function createV2Runtime(input: {
   };
 }
 
-interface OwnerLockRecordV1 {
-  version: 1;
-  token: string;
-  canonicalRepository: string;
-  host: string;
-  bootId: string;
-  pid: number;
-  acquiredAt: string;
-}
-
 async function acquireOwnerLock(input: {
   orchestratorHome: string;
   canonicalRepository: string;
@@ -644,44 +752,21 @@ async function acquireOwnerLock(input: {
   now: () => string;
   processAlive: (pid: number) => boolean;
 }): Promise<{ release(): Promise<void> }> {
-  const token = randomUUID();
-  const host = hostname();
-  const record: OwnerLockRecordV1 = {
-    version: 1,
-    token,
-    canonicalRepository: input.canonicalRepository,
-    host,
-    bootId: input.bootId,
-    pid: process.pid,
-    acquiredAt: input.now(),
-  };
-  const repoKey = sha256(input.canonicalRepository);
   try {
-    return await acquireExclusiveJsonFileLock({
-      path: join(input.orchestratorHome, 'v2', 'owners', `${repoKey}.lock`),
-      record,
-      token,
-      parse: parseOwnerLock,
-      tokenOf: (value) => value.token,
-      classifyExisting: (value) => value.host === host && value.bootId === input.bootId && input.processAlive(value.pid) ? 'wait' : 'block',
+    return await acquireOwnerControlLock({
+      orchestratorHome: input.orchestratorHome,
+      canonicalRepository: input.canonicalRepository,
+      bootId: input.bootId,
+      host: hostname(),
+      pid: process.pid,
+      now: input.now,
+      createToken: randomUUID,
+      processAlive: input.processAlive,
     });
   } catch (error) {
-    if (error instanceof Error && /lock (?:owner|record|wait)/u.test(error.message)) throw new OwnerLockSafetyError(error.message);
+    if (error instanceof OwnerControlLockBlockedError) throw new OwnerLockSafetyError(error.message);
     throw error;
   }
-}
-
-function parseOwnerLock(value: unknown): OwnerLockRecordV1 {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('owner lock is invalid');
-  const keys = Object.keys(value).sort();
-  const expected = ['version', 'token', 'canonicalRepository', 'host', 'bootId', 'pid', 'acquiredAt'].sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error('owner lock keys are invalid');
-  const record = value as unknown as OwnerLockRecordV1;
-  if (record.version !== 1 || !record.token || !record.canonicalRepository || !record.host || !record.bootId
-    || !Number.isSafeInteger(record.pid) || record.pid <= 0 || Number.isNaN(Date.parse(record.acquiredAt))) {
-    throw new Error('owner lock fields are invalid');
-  }
-  return record;
 }
 
 async function readRegularFile(path: string): Promise<Buffer> {
@@ -751,6 +836,11 @@ async function runShellCheck(command: string, cwd: string, signal: AbortSignal):
 function requireConfig(config: AgentAutoConfigV1 | undefined): AgentAutoConfigV1 {
   if (!config) throw new Error('runtime config is unavailable');
   return config;
+}
+
+function requireCanonicalRepository(config: AgentAutoConfigV1 | undefined): string {
+  const value = requireConfig(config);
+  return `${value.github.owner.toLowerCase()}/${value.github.repo.toLowerCase()}`;
 }
 
 function requireRuntimeString(value: string | undefined, field: string): string {
@@ -834,7 +924,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof';
+  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -857,9 +947,17 @@ async function prepareContainedAttempt(input: {
     operation: input.operationId,
     bootId: input.bootId,
   });
-  if (snapshot.policy.sandboxMode !== 'workspace-write'
+  const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review';
+  if ((reportOnly
+    ? snapshot.policy.sandboxMode !== 'read-only'
+      || snapshot.policy.worktreeAccess !== 'read-only'
+      || snapshot.policy.runnerPostcondition !== 'report-only'
+      || snapshot.policy.writableRootClasses.length !== 0
+    : snapshot.policy.sandboxMode !== 'workspace-write')
     || snapshot.policy.approvalCeiling !== 'never'
     || snapshot.policy.network !== 'deny'
+    || snapshot.policy.networkHosts.length !== 0
+    || snapshot.policy.mcpTools.length !== 0
     || snapshot.policy.externalWrite !== false) {
     throw new Error(`workflow operation policy exceeds containment: ${input.operationId}`);
   }
@@ -959,6 +1057,66 @@ async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> 
       if (!isErrorCode(error, 'EPERM')) throw error;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+  }
+}
+
+export async function materializeReportReadView(input: {
+  worktreePath: string;
+  destination: string;
+  deniedPaths: string[];
+}): Promise<string> {
+  await rm(input.destination, { recursive: true, force: true });
+  await mkdir(input.destination, { recursive: true, mode: 0o700 });
+  await extractHeadArchive(input.worktreePath, input.destination);
+  for (const relativePath of input.deniedPaths) {
+    if (isAbsolute(relativePath)) continue;
+    const deniedPath = resolve(input.destination, relativePath);
+    const contained = relative(input.destination, deniedPath);
+    if (contained === '' || contained === '..' || contained.startsWith('../') || isAbsolute(contained)) {
+      throw new Error('report read-view denied path escapes destination');
+    }
+    await rm(deniedPath, { recursive: true, force: true });
+  }
+  await scrubReportReadView(input.destination);
+  return input.destination;
+}
+
+async function extractHeadArchive(worktreePath: string, destination: string): Promise<void> {
+  await new Promise<void>((resolveExtract, reject) => {
+    const archive = spawn('git', ['-C', worktreePath, 'archive', '--format=tar', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const extract = spawn('tar', ['-xf', '-', '-C', destination], { stdio: ['pipe', 'ignore', 'pipe'] });
+    const failures: string[] = [];
+    archive.once('error', reject);
+    extract.once('error', reject);
+    archive.stderr.on('data', (chunk: Buffer) => {
+      if (failures.join('').length < 8 * 1024) failures.push(chunk.toString('utf8'));
+    });
+    extract.stderr.on('data', (chunk: Buffer) => {
+      if (failures.join('').length < 8 * 1024) failures.push(chunk.toString('utf8'));
+    });
+    archive.stdout.pipe(extract.stdin);
+    let archiveCode: number | null = null;
+    let extractCode: number | null = null;
+    const settle = () => {
+      if (archiveCode === null || extractCode === null) return;
+      if (archiveCode !== 0 || extractCode !== 0) reject(new Error(`report read-view archive failed: ${failures.join('').slice(0, 8 * 1024)}`));
+      else resolveExtract();
+    };
+    archive.once('close', (code) => { archiveCode = code ?? 1; settle(); });
+    extract.once('close', (code) => { extractCode = code ?? 1; settle(); });
+  });
+}
+
+async function scrubReportReadView(directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.name === '.env' || entry.name.startsWith('.env.') || entry.isSymbolicLink()) {
+      await rm(path, { recursive: true, force: true });
+    } else if (entry.isDirectory()) {
+      await scrubReportReadView(path);
+    } else if (!entry.isFile()) {
+      await rm(path, { recursive: true, force: true });
+    }
   }
 }
 

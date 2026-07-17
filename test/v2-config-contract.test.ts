@@ -53,6 +53,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(CANDIDATE_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
+    'route-ready',
     'not-eligible',
     'blocked',
     'transport-failed',
@@ -106,6 +107,7 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
 test('candidate CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
+    { result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence/route.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
     { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },

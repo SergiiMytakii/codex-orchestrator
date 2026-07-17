@@ -24,6 +24,7 @@ import {
   type RunRecordWriter,
 } from '../src/v2/run-store.js';
 import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
+import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
@@ -87,7 +88,11 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
     'effect:claim-labels',
     'state:claimed:comment',
     'effect:claim-comment',
+    'state:triaging:none',
+    'route:triage',
+    'state:routed:none',
     'state:implementing:none',
+    'route:direct',
     'issue-read:authorize',
     'agent',
     'state:checking:none',
@@ -185,6 +190,37 @@ test('baseline active V1 migration returns dedicated workflow generation evidenc
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
   assert.equal(evidenceCode, 'workflow-generation-unrecoverable');
   assert.equal(fixture.events.includes('implementation'), false);
+});
+
+test('claimed migration verifies the pinned workflow generation before triage', async () => {
+  const fixture = await runFixture({ workflowVerificationReject: true });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'safety', resumable: false,
+  });
+  assert.equal(fixture.events.includes('route:triage'), false);
+});
+
+test('triage receives persisted issue comments and authorization is rechecked after routing', async () => {
+  const comments = [{ body: 'Product owner clarification.', authorAssociation: 'OWNER' }];
+  const visible = await runFixture({ initialComments: comments, expectedTriageComment: comments[0]!.body });
+  assert.equal((await visible.runner.runIssue({ targetRoot: visible.targetRoot, issueNumber: 42 })).status, 'review-ready');
+
+  const revoked = await runFixture({ revokeDuringRoute: true });
+  const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.equal(revoked.events.includes('agent'), false);
+});
+
+test('claimed migration refreshes comments that arrived before restart', async () => {
+  const options: FixtureOptions = { rejectEffect: 'claim-comment' };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const lateComment = 'Clarification added while the claim was interrupted.';
+  await fixture.dependencies.issues.postComment(42, lateComment);
+  options.expectedTriageComment = lateComment;
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
 });
 
 test('agent-authored commit and proof external block map without publication', async () => {
@@ -516,6 +552,10 @@ interface FixtureOptions {
   storeReadReject?: boolean;
   storeReadError?: Error;
   rejectEffect?: 'claim-labels' | 'claim-comment' | 'commit' | 'push' | 'pr' | 'comment' | 'labels';
+  initialComments?: Array<{ body: string; authorAssociation: string }>;
+  expectedTriageComment?: string;
+  revokeDuringRoute?: boolean;
+  workflowVerificationReject?: boolean;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -544,7 +584,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const localGit = new LocalGitRunIssueAdapter();
   const git = traceGit(localGit, events, options);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
-  let comments: Array<{ body: string; authorAssociation: string }> = [];
+  let comments: Array<{ body: string; authorAssociation: string }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
   let authReads = 0;
@@ -607,6 +647,60 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     git,
+    routeCoordinator: {
+      run: async ({ state, workflowGeneration, promptFacts }) => {
+        events.push('route:triage');
+        if (options.expectedTriageComment) {
+          assert.equal(promptFacts.some((fact) => fact.includes(options.expectedTriageComment!)), true);
+        }
+        const expected = await state.read();
+        const artifact = {
+          version: 1 as const,
+          status: 'direct' as const,
+          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }],
+          assumptions: [],
+          direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
+          specRequired: null,
+          awaitingUser: null,
+          blocker: null,
+        };
+        const triage = {
+          operation: 'triage' as const,
+          attemptId: 'triage-fixture',
+          artifactSha256: hashTriageArtifact(artifact),
+          generationHash: workflowGeneration.generationHash,
+        };
+        const receipt: RouteReceiptV1 = {
+          version: 1,
+          route: 'direct',
+          triage,
+          review: null,
+          artifact,
+          decisionSha256: '',
+          decidedAt: '2026-07-16T12:00:00.000Z',
+          assumptions: [],
+        };
+        receipt.decisionSha256 = hashRouteDecision(receipt);
+        const completed = {
+          version: expected.version,
+          triageRepairs: expected.triageRepairs,
+          triageTransportRetries: expected.triageTransportRetries,
+          ambiguityTransportRetries: expected.ambiguityTransportRetries,
+          candidateReviews: expected.candidateReviews,
+          phase: 'route-complete' as const,
+          triage,
+          review: null,
+        };
+        assert.equal(await state.complete(expected, completed, receipt), true);
+        if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
+        return { status: 'succeeded' as const, receipt };
+      },
+    },
+    routeContinuations: {
+      direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
+      specRequired: async () => ({ status: 'completed' }),
+      awaitingUser: async () => ({ status: 'completed' }),
+    },
     implementationAgent: {
       run: async ({ worktreePath: path }) => {
         events.push('agent');
@@ -646,6 +740,9 @@ async function runFixture(options: FixtureOptions = {}) {
       receipt: workflowGeneration('0.1.51', '1'),
       skillHashes: { 'agent-auto': 'a'.repeat(64), 'acceptance-proof': 'b'.repeat(64) },
     }),
+    verifyWorkflowGeneration: async () => {
+      if (options.workflowVerificationReject) throw new Error('generation drift');
+    },
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
     now: () => '2026-07-16T12:00:00.000Z',

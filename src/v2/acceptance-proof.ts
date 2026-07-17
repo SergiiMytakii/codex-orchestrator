@@ -7,7 +7,7 @@ import {
   type CheckedChangePayloadV1,
   type CheckedChangeReadCapability,
 } from './checked-change.js';
-import { canonicalJson, sha256 } from './containment.js';
+import { canonicalJson, containsCredentialEvidence, sha256 } from './containment.js';
 import {
   createProofReceipt,
   proofReportRepairDiagnostic,
@@ -468,14 +468,6 @@ function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], byt
   if (containsCredentialEvidence(text)) throw new Error('proof text artifact contains credential material');
   const isLocalDiagnostic = !artifact.publishable && ['command-output', 'static-inspection'].includes(artifact.kind);
   if (!isLocalDiagnostic && containsHostIdentityEvidence(text)) throw new Error('proof text artifact contains host identity material');
-}
-
-function containsCredentialEvidence(value: string): boolean {
-  return [
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----/iu,
-    /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
-    /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
-  ].some((pattern) => pattern.test(value));
 }
 
 function containsHostIdentityEvidence(value: string): boolean {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
+import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
   FileRunRecordWriter,
   type RunRecordV1,
@@ -89,6 +90,56 @@ test('active baseline V1 history without a generation fails closed while termina
   delete terminal.workflowGeneration;
   const saved = await writer.compareAndSwap(0, body([terminal as RunRecordV1]));
   assert.equal(Object.hasOwn(saved.runs[0]!, 'workflowGeneration'), false);
+});
+
+test('run store persists exact triaging and routed state while retaining structural legacy reads', async () => {
+  const generationHash = record().workflowGeneration.generationHash;
+  const triage = {
+    version: 1 as const,
+    status: 'direct' as const,
+    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }],
+    assumptions: [],
+    direct: { summary: 'Direct.', behaviors: ['Deliver.'], verification: ['Test.'] },
+    specRequired: null,
+    awaitingUser: null,
+    blocker: null,
+  };
+  const triageRef = {
+    operation: 'triage' as const,
+    attemptId: 'triage-1',
+    artifactSha256: hashTriageArtifact(triage),
+    generationHash,
+  };
+  const receipt: RouteReceiptV1 = {
+    version: 1,
+    route: 'direct',
+    triage: triageRef,
+    review: null,
+    artifact: triage,
+    decisionSha256: '',
+    decidedAt: timestamp(),
+    assumptions: [],
+  };
+  receipt.decisionSha256 = hashRouteDecision(receipt);
+  const budgets = {
+    version: 1 as const,
+    triageRepairs: 0 as const,
+    triageTransportRetries: 0 as const,
+    ambiguityTransportRetries: 0 as const,
+    candidateReviews: 0 as const,
+  };
+  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const, previousAttemptId: null } };
+  const routed = { ...record(), lifecycle: 'routed' as const, routeExecution: { ...budgets, phase: 'route-complete' as const, triage: triageRef, review: null }, routeReceipt: receipt };
+  await writer.compareAndSwap(0, body([triaging]));
+  const second = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  assert.equal((await second.compareAndSwap(0, body([routed]))).runs[0]?.lifecycle, 'routed');
+
+  const malformed = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready', previousAttemptId: null } } as RunRecordV1])), /route-complete|keys/u);
+
+  const legacy = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  assert.equal((await legacy.compareAndSwap(0, body([{ ...record(), lifecycle: 'implementing' }]))).runs[0]?.lifecycle, 'implementing');
 });
 
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {

@@ -1,4 +1,11 @@
 import type { ProofReceipt } from './proof-report.js';
+import {
+  validateRouteExecution,
+  validateRouteReceipt,
+  validateRouteStateInvariant,
+  type RouteExecutionV1,
+  type RouteReceiptV1,
+} from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import { posix } from 'node:path';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
@@ -9,6 +16,10 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 
 export type Lifecycle =
   | 'claimed'
+  | 'triaging'
+  | 'routed'
+  | 'waiting-human'
+  | 'spec-authoring'
   | 'implementing'
   | 'reworking'
   | 'checking'
@@ -43,6 +54,7 @@ export interface PersistedIssueSnapshotV1 {
   url: string;
   state: 'OPEN';
   labels: string[];
+  comments?: Array<{ body: string; authorAssociation: string }>;
 }
 
 export interface PersistedFrozenCriterionV1 {
@@ -68,6 +80,8 @@ export interface RunRecordV1 {
   reworkFindings: string[];
   packageVersion: string;
   workflowGeneration: WorkflowGenerationReceipt;
+  routeExecution?: RouteExecutionV1;
+  routeReceipt?: RouteReceiptV1;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -110,6 +124,13 @@ export class WorkflowGenerationUnrecoverableError extends Error {
   constructor() {
     super('workflow-generation-unrecoverable');
     this.name = 'WorkflowGenerationUnrecoverableError';
+  }
+}
+
+export class RouteMigrationUnrecoverableError extends Error {
+  constructor() {
+    super('route-migration-unrecoverable');
+    this.name = 'RouteMigrationUnrecoverableError';
   }
 }
 
@@ -179,6 +200,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'outcomeEvidenceId',
     'terminalOutcome',
     'workflowGeneration',
+    'routeExecution',
+    'routeReceipt',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -210,6 +233,11 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       throw new Error(`${field}.workflowGeneration package version mismatch`);
     }
   }
+  const routeGenerationHash = hasOwn(value, 'workflowGeneration')
+    ? (value.workflowGeneration as unknown as WorkflowGenerationReceipt).generationHash
+    : undefined;
+  if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
+  if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   validateChecks(value.checks, `${field}.checks`);
   if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
@@ -239,6 +267,15 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (value.lifecycle === 'transport-failed' && hasOwn(value, 'intent')
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain intent`);
+  }
+  if (hasOwn(value, 'routeExecution') || hasOwn(value, 'routeReceipt') || value.lifecycle === 'triaging' || value.lifecycle === 'routed') {
+    if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
+    validateRouteStateInvariant({
+      lifecycle: value.lifecycle,
+      routeExecution: value.routeExecution,
+      routeReceipt: value.routeReceipt,
+      generationHash: routeGenerationHash,
+    });
   }
 }
 
@@ -285,13 +322,22 @@ function validateChecks(value: unknown, field: string): asserts value is RunReco
 }
 
 function validateIssueSnapshot(value: unknown, field: string): asserts value is PersistedIssueSnapshotV1 {
-  assertExactObject(value, ['number', 'title', 'body', 'url', 'state', 'labels'], field);
+  const optional = hasOwn(value, 'comments') ? ['comments'] : [];
+  assertExactObject(value, ['number', 'title', 'body', 'url', 'state', 'labels', ...optional], field);
   assertPositiveInteger(value.number, `${field}.number`);
   assertNonEmptyString(value.title, `${field}.title`);
   if (typeof value.body !== 'string' || value.body.length > 16 * 1024) throw new Error(`${field}.body is invalid`);
   assertNonEmptyString(value.url, `${field}.url`);
   if (value.state !== 'OPEN') throw new Error(`${field}.state is invalid`);
   validateStringArray(value.labels, `${field}.labels`);
+  if (hasOwn(value, 'comments')) {
+    if (!Array.isArray(value.comments) || value.comments.length > 256) throw new Error(`${field}.comments is invalid`);
+    for (const [index, comment] of value.comments.entries()) {
+      assertExactObject(comment, ['body', 'authorAssociation'], `${field}.comments[${index}]`);
+      if (typeof comment.body !== 'string' || comment.body.length > 16 * 1024) throw new Error(`${field}.comments[${index}].body is invalid`);
+      assertNonEmptyString(comment.authorAssociation, `${field}.comments[${index}].authorAssociation`);
+    }
+  }
 }
 
 function validateFrozenCriteria(value: unknown, field: string): asserts value is PersistedFrozenCriterionV1[] {
@@ -405,7 +451,7 @@ function emptyRunState(): RunStateFileV1 {
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'waiting-human', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }
