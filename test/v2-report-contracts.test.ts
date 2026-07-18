@@ -190,7 +190,7 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
     assertNoRegexLookaround(schema);
   }
   assert.equal(Array.isArray((implementationReportOutputSchema().properties as Record<string, any>).report.anyOf), true);
-  assert.equal((proofReportOutputSchema().properties as Record<string, any>).report.type, 'object');
+  assert.equal(Array.isArray((proofReportOutputSchema().properties as Record<string, any>).report.anyOf), true);
   assert.deepEqual(unwrapAgentReportEnvelope({ report: completedImplementation }), completedImplementation);
   assert.deepEqual(
     unwrapAgentReportEnvelope({ report: { ...passedProof, visualEvidence: null, blocker: null } }, ['visualEvidence', 'blocker']),
@@ -219,7 +219,7 @@ test('runtime validators enforce uniqueness omitted from the supported generatio
 
   const duplicateProof = {
     ...passedProof,
-    criteria: [{ ...passedProof.criteria[0], surfaces: ['non-visual', 'non-visual'] }],
+    criteria: [{ ...passedProof.criteria[0], evidenceRefs: ['check:typecheck', 'check:typecheck'] }],
   };
   assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(duplicateProof) }), true);
   assert.throws(() => validateProofReport(duplicateProof), /unique/u);
@@ -289,6 +289,45 @@ test('proof output schema covers valid terminal reports and runtime validator re
   ];
 
   assertRuntimeContract(fixtures, proofReportOutputSchema(), validateProofReport, generatedProofReport);
+});
+
+test('proof generation schema rejects semantic failures before report repair', () => {
+  const mediumConfidencePassed = {
+    ...passedProof,
+    criteria: [{ ...passedProof.criteria[0], confidence: 'medium' }],
+  };
+  const publishableLocalArtifact = {
+    ...passedProof,
+    artifacts: [{ ...passedProof.artifacts[0], kind: 'command-output', publishable: true }],
+  };
+
+  assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(mediumConfidencePassed) }), false);
+  assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(publishableLocalArtifact) }), false);
+});
+
+test('proof generation schema binds decisions to matching visual evidence', () => {
+  const visualWithoutEvidence = { ...visualProof, visualEvidence: undefined };
+  const nonVisualWithEvidence = { ...passedProof, visualEvidence: visualProof.visualEvidence };
+  const wrongPlatformEvidence = { ...visualProof, visualEvidence: androidVisualProof.visualEvidence };
+  const multipleVisualTargets = {
+    ...visualProof,
+    decision: { mode: 'visual', targets: ['browser', 'android'] },
+  };
+  const externalBlockWithMultipleTargets = {
+    ...passedProof,
+    status: 'external-block',
+    decision: { mode: 'visual', targets: ['browser', 'android'] },
+    criteria: [{ ...visualProof.criteria[0], status: 'unknown', confidence: 'low' }],
+    blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['inspect service'] },
+  };
+
+  for (const [name, invalid] of Object.entries({
+    visualWithoutEvidence, nonVisualWithEvidence, wrongPlatformEvidence, multipleVisualTargets,
+    externalBlockWithMultipleTargets,
+  })) {
+    assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(invalid) }), false, name);
+    assert.equal(runtimeAccepts(validateProofReport, invalid), false, `${name} runtime`);
+  }
 });
 
 test('proof runtime validation rejects dangling evidence, duplicate IDs, and non-canonical artifact paths', () => {
@@ -441,5 +480,6 @@ function schemaAccepts(schema: Record<string, unknown>, value: unknown): boolean
   }
   if (schema.type === 'integer') return Number.isSafeInteger(value);
   if (schema.type === 'boolean') return typeof value === 'boolean';
+  if (schema.type === 'null') return value === null;
   return true;
 }

@@ -8,6 +8,7 @@ const MAX_ARRAY_LENGTH = 256;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SURFACES = ['non-visual', 'browser', 'android', 'ios'] as const;
 const TARGETS = ['browser', 'android', 'ios'] as const;
+const PROOF_MODES = ['non-visual', ...TARGETS] as const;
 const ARTIFACT_KINDS = [
   'command-output', 'static-inspection', 'generated-file', 'screenshot',
   'dom-snapshot', 'console-log', 'network-log', 'ui-hierarchy', 'device-log', 'lease-record',
@@ -124,6 +125,9 @@ export function validateProofReport(value: unknown): ProofReportV1 {
 
   const decision = value.decision as ProofReportV1['decision'];
   const criteria = value.criteria as ProofReportV1['criteria'];
+  if (decision.mode === 'visual' && decision.targets.length !== 1) {
+    throw new Error('visual proof requires one settled platform target');
+  }
   if (decision.mode === 'non-visual') {
     if (criteria.some((criterion) => criterion.surfaces.some((surface) => surface !== 'non-visual'))) {
       throw new Error('non-visual proof may use only non-visual criterion surfaces');
@@ -188,7 +192,19 @@ export function createProofReceipt(input: {
 }
 
 export function proofReportOutputSchema(): Record<string, unknown> {
-  return agentReportEnvelopeSchema({
+  return agentReportEnvelopeSchema(
+    (['passed', 'needs-rework', 'external-block'] as const)
+      .flatMap((status) => PROOF_MODES.map((mode) => proofReportBranchSchema(status, mode))),
+  );
+}
+
+function proofReportBranchSchema(
+  status: ProofReportV1['status'],
+  mode: typeof PROOF_MODES[number],
+): Record<string, unknown> {
+  const passed = status === 'passed';
+  const externalBlock = status === 'external-block';
+  return {
     type: 'object',
     additionalProperties: false,
     required: [
@@ -197,19 +213,36 @@ export function proofReportOutputSchema(): Record<string, unknown> {
     ],
     properties: {
       version: { type: 'integer', const: 1 },
-      status: { type: 'string', enum: ['passed', 'needs-rework', 'external-block'] },
-      decision: decisionSchema(),
-      criteria: { type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH, items: criterionSchema(false) },
-      checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: checkSchema(false) },
-      artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: artifactSchema() },
-      visualEvidence: {
-        anyOf: [browserVisualEvidenceSchema(), androidVisualEvidenceSchema(), iosVisualEvidenceSchema(), { type: 'null' }],
+      status: { type: 'string', const: status },
+      decision: proofModeDecisionSchema(mode),
+      criteria: {
+        type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH,
+        items: criterionSchema(passed, mode === 'non-visual' ? ['non-visual'] : ['non-visual', mode]),
       },
-      findings: stringArraySchema(),
+      checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: checkSchema(passed) },
+      artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: artifactSchema() },
+      visualEvidence: externalBlock || mode === 'non-visual' ? { type: 'null' } : proofModeVisualEvidenceSchema(mode),
+      findings: {
+        ...stringArraySchema(),
+        ...(passed ? { maxItems: 0 } : status === 'needs-rework' ? { minItems: 1 } : {}),
+      },
       residualRisks: stringArraySchema(),
-      blocker: { anyOf: [externalBlockerSchema(), { type: 'null' }] },
+      blocker: externalBlock ? externalBlockerSchema() : { type: 'null' },
     },
-  });
+  };
+}
+
+function proofModeDecisionSchema(mode: typeof PROOF_MODES[number]): Record<string, unknown> {
+  if (mode === 'non-visual') return nonVisualDecisionSchema();
+  if (mode === 'browser') return browserDecisionSchema();
+  if (mode === 'android') return androidDecisionSchema();
+  return iosDecisionSchema();
+}
+
+function proofModeVisualEvidenceSchema(mode: typeof TARGETS[number]): Record<string, unknown> {
+  if (mode === 'browser') return browserVisualEvidenceSchema();
+  if (mode === 'android') return androidVisualEvidenceSchema();
+  return iosVisualEvidenceSchema();
 }
 
 export function proofReportRepairDiagnostic(error: unknown): string {
@@ -219,23 +252,6 @@ export function proofReportRepairDiagnostic(error: unknown): string {
 
 export function proofReportSkillExcerpt(): string {
   return 'Independently prove the frozen criteria and return only the JSON object required by the runner-supplied output schema. Do not edit product code, publish, or include credential/path material.';
-}
-
-function decisionSchema(): Record<string, unknown> {
-  return {
-    anyOf: [
-      nonVisualDecisionSchema(),
-      {
-        type: 'object',
-        additionalProperties: false,
-        required: ['mode', 'targets'],
-        properties: {
-          mode: { type: 'string', const: 'visual' },
-          targets: { type: 'array', minItems: 1, maxItems: TARGETS.length, items: { type: 'string', enum: TARGETS } },
-        },
-      },
-    ],
-  };
 }
 
 function nonVisualDecisionSchema(): Record<string, unknown> {
@@ -286,7 +302,7 @@ function iosDecisionSchema(): Record<string, unknown> {
   };
 }
 
-function criterionSchema(passed: boolean): Record<string, unknown> {
+function criterionSchema(passed: boolean, surfaces: readonly typeof SURFACES[number][]): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
@@ -295,7 +311,7 @@ function criterionSchema(passed: boolean): Record<string, unknown> {
       id: boundedStringSchema(MAX_STRING_LENGTH),
       status: passed ? { type: 'string', const: 'passed' } : { type: 'string', enum: ['passed', 'failed', 'unknown'] },
       confidence: passed ? { type: 'string', const: 'high' } : { type: 'string', enum: ['high', 'medium', 'low'] },
-      surfaces: { type: 'array', minItems: 1, maxItems: SURFACES.length, items: { type: 'string', enum: SURFACES } },
+      surfaces: { type: 'array', minItems: 1, maxItems: surfaces.length, items: { type: 'string', enum: surfaces } },
       evidenceRefs: {
         type: 'array',
         minItems: passed ? 1 : 0,
@@ -324,15 +340,27 @@ function checkSchema(passed: boolean): Record<string, unknown> {
 
 function artifactSchema(): Record<string, unknown> {
   return {
+    anyOf: [
+      artifactObjectSchema(['generated-file', 'screenshot'], { type: 'boolean' }),
+      artifactObjectSchema(
+        ARTIFACT_KINDS.filter((kind) => kind !== 'generated-file' && kind !== 'screenshot'),
+        { type: 'boolean', const: false },
+      ),
+    ],
+  };
+}
+
+function artifactObjectSchema(kinds: readonly string[], publishable: Record<string, unknown>): Record<string, unknown> {
+  return {
     type: 'object',
     additionalProperties: false,
     required: ['id', 'kind', 'relativePath', 'sha256', 'publishable', 'description'],
     properties: {
       id: boundedStringSchema(MAX_STRING_LENGTH),
-      kind: { type: 'string', enum: ARTIFACT_KINDS },
+      kind: { type: 'string', enum: kinds },
       relativePath: relativePathSchema(),
       sha256: sha256Schema(),
-      publishable: { type: 'boolean' },
+      publishable,
       description: boundedStringSchema(MAX_SUMMARY_LENGTH),
     },
   };
