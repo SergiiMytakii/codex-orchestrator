@@ -55,6 +55,27 @@ test('builds the exact contained argv and allowlisted process environment withou
   });
 });
 
+test('live smoke default-model mode leaves model selection to Codex', async () => {
+  await withRunFixture(async (fixture) => {
+    let captured: SpawnSpec | undefined;
+    const processRunner = new CodexProcess(async (spec) => {
+      captured = spec;
+      return new FakeChild({ reportPath: fixture.reportPath });
+    });
+
+    const result = await processRunner.run(fixture.input({
+      parentEnv: {
+        ...fixture.parentEnv,
+        CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL: '1',
+      },
+    }), new AbortController().signal);
+
+    assert.equal(result.kind, 'completed');
+    assert.equal(captured?.args.some((arg) => arg.startsWith('model=')), false);
+    assert.equal(captured?.args.some((arg) => arg.startsWith('model_reasoning_effort=')), false);
+  });
+});
+
 test('contained argv rejects operation policy widening and honors a declared read-only sandbox', () => {
   const base = {
     schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
@@ -383,7 +404,7 @@ async function withRunFixture(
         tmpDir: attemptTmp,
         safePath,
         parentCodexHome,
-        parentEnv,
+        parentEnv: overrides.parentEnv ?? parentEnv,
         prompt: 'Run the exact package skill.',
         timeoutMs: overrides.timeoutMs ?? 5_000,
         idleTimeoutMs: overrides.idleTimeoutMs ?? 5_000,

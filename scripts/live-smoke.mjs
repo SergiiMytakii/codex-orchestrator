@@ -246,7 +246,7 @@ async function runRealCodexScenario(context, scenario) {
     'Create src/live-smoke/real-codex.txt containing this issue number.',
     'Implementation and proof reports satisfy the runner-generated JSON schemas; neither agent commits nor publishes.',
   ], false);
-  assertResult(await runIssue(context, issue.number), { status: 'review-ready' }, scenario);
+  assertResult(await runIssue(context, issue.number, { useCodexDefaultModel: true }), { status: 'review-ready' }, scenario);
   await recordPublication(context, issue.number);
 }
 
@@ -307,9 +307,12 @@ async function createIssue(context, scenario, eligible, extraCriteria = [], mark
   return { number };
 }
 
-async function runIssue(context, issueNumber) {
+async function runIssue(context, issueNumber, options = {}) {
   const command = await runCommand(process.execPath, [context.cliPath, 'run', '--target', context.targetRoot, '--issue', String(issueNumber)], {
     cwd: context.targetRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 21, 70, 130],
+    env: options.useCodexDefaultModel
+      ? { ...process.env, CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL: '1' }
+      : process.env,
   });
   const envelope = parseExactEnvelope(command.stdout, 'codex-orchestrator.agent-auto-run-result');
   const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];

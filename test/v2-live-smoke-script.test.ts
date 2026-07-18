@@ -126,6 +126,8 @@ test('real Codex scenario keeps routing markers outside frozen acceptance criter
 test('real Codex smoke uses the normal Codex default without changing target defaults', async () => {
   const text = await source();
   assert.match(text, /overrides\.realCodex \? 'codex' : context\.fakeCodexPath/u);
+  assert.match(text, /runIssue\(context, issue\.number, \{ useCodexDefaultModel: true \}\)/u);
+  assert.match(text, /CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL/u);
   assert.doesNotMatch(text, /realCodexSmokeModel|model_reasoning_effort/u);
 });
 

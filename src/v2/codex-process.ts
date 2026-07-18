@@ -104,7 +104,9 @@ export class CodexProcess {
         tmpDir: input.tmpDir,
         safePath: input.safePath,
         operationPolicy: input.operationPolicy,
-        executionProfile: input.executionProfile,
+        executionProfile: input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL === '1'
+          ? undefined
+          : input.executionProfile,
       }),
       cwd: input.cwd,
       env: buildContainmentCodexEnvironment({
