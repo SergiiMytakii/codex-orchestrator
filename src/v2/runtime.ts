@@ -14,7 +14,7 @@ import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type Issue
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
-import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
+import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
   assertContainmentCertificateMatchesRuntime,
@@ -214,7 +214,7 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
 
 export class ContainedImplementationAgent {
   constructor(private readonly dependencies: {
-    config: () => AgentAutoConfigV1;
+    config: () => AgentAutoConfig;
     orchestratorHome: string;
     parentCodexHome: string;
     safePath: string;
@@ -304,7 +304,7 @@ export class ContainedImplementationAgent {
 
 export class ContainedProofAgent implements ProofAgent {
   constructor(private readonly dependencies: {
-    config: () => AgentAutoConfigV1;
+    config: () => AgentAutoConfig;
     orchestratorHome: string;
     parentCodexHome: string;
     safePath: string;
@@ -460,7 +460,7 @@ export function createV2Runtime(input: {
     ) => Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   };
   const controller = new AbortController();
-  let currentConfig: AgentAutoConfigV1 | undefined;
+  let currentConfig: AgentAutoConfig | undefined;
   let runRecords: RunRecordWriter | undefined;
   const containedProcess = input.codexProcess ?? new CodexProcess();
   const configuredAndroidAdbPath = input.androidAdbPath
@@ -1025,12 +1025,12 @@ async function runShellCheck(command: string, cwd: string, signal: AbortSignal):
   });
 }
 
-function requireConfig(config: AgentAutoConfigV1 | undefined): AgentAutoConfigV1 {
+function requireConfig(config: AgentAutoConfig | undefined): AgentAutoConfig {
   if (!config) throw new Error('runtime config is unavailable');
   return config;
 }
 
-function requireCanonicalRepository(config: AgentAutoConfigV1 | undefined): string {
+function requireCanonicalRepository(config: AgentAutoConfig | undefined): string {
   const value = requireConfig(config);
   return `${value.github.owner.toLowerCase()}/${value.github.repo.toLowerCase()}`;
 }
@@ -1116,7 +1116,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review' | 'spec-author' | 'spec-review';
+  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -1140,7 +1140,7 @@ async function prepareContainedAttempt(input: {
     bootId: input.bootId,
   });
   const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review'
-    || input.operationId === 'cleanup-review' || input.operationId === 'code-review' || input.operationId === 'spec-review';
+    || input.operationId === 'code-review' || input.operationId === 'spec-review';
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'
       || snapshot.policy.worktreeAccess !== 'read-only'

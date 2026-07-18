@@ -16,109 +16,66 @@ import {
 
 const fingerprint = 'a'.repeat(64);
 
-test('initial direct review state has one canonical cleanup Full owner', () => {
+test('initial direct review state has one canonical Full owner', () => {
   const state = createInitialDirectReview({
     targetFingerprint: fingerprint,
-    cleanupRequired: true,
-    cleanupReason: 'new shared state machine',
-    cleanupReviewerSessionId: 'cleanup-session-1',
     codeReviewerSessionId: 'review-session-1',
   });
   assert.equal(state.status, 'active');
-  assert.equal(state.stage, 'cleanup-full');
-  assert.equal(state.cleanup.disposition, 'active');
-  assert.equal(state.cleanup.mode, 'full');
-  assert.equal(state.review.disposition, 'pending');
+  assert.equal(state.stage, 'review-full');
+  assert.equal(state.review.disposition, 'active');
+  assert.equal(state.review.mode, 'full');
   assert.deepEqual(validateDirectReview(state, { lifecycle: 'implementing' }), state);
 });
 
-test('not-required cleanup, clear review, and legacy bypass have exact legal composites', () => {
-  const noCleanup = createInitialDirectReview({
+test('clear review has an exact legal composite', () => {
+  const initial = createInitialDirectReview({
     targetFingerprint: fingerprint,
-    cleanupRequired: false,
-    cleanupReason: 'bounded final review owns cleanup',
-    cleanupReviewerSessionId: null,
     codeReviewerSessionId: 'review-session-1',
   });
-  assert.equal(noCleanup.stage, 'review-full');
-  assert.equal(noCleanup.cleanup.disposition, 'not-required');
-  assert.deepEqual(noCleanup.cleanup.coverage, ['not-required:bounded final review owns cleanup']);
-
   const clear: DirectReviewV1 = {
-    ...noCleanup,
+    ...initial,
     status: 'clear',
-    cleanup: noCleanup.cleanup,
     review: {
-      ...noCleanup.review,
+      ...initial.review,
       disposition: 'clear', reviewerSessionId: 'review-session-1', mode: 'full',
       coverage: ['correctness', 'spec'], acceptedReportSha256: 'b'.repeat(64),
     },
   };
   assert.deepEqual(validateDirectReview(clear, { lifecycle: 'checking' }), clear);
 
-  const legacy: DirectReviewV1 = {
-    ...clear,
-    status: 'legacy-bypass', stage: null, targetRevision: 0,
-    cleanup: notRequired('legacy-pinned-generation'), review: notRequired('legacy-pinned-generation'),
-  };
-  assert.deepEqual(validateDirectReview(legacy, { lifecycle: 'proving' }), legacy);
-  assert.throws(() => validateDirectReview({
-    ...legacy,
-    cleanup: notRequired('some-other-reason'),
-  }, { lifecycle: 'proving' }), /legacy-bypass/u);
 });
 
 test('direct review validator rejects impossible stage, budget, Closure, and safe-halt states', () => {
   const initial = createInitialDirectReview({
     targetFingerprint: fingerprint,
-    cleanupRequired: true,
-    cleanupReason: 'risk',
-    cleanupReviewerSessionId: 'cleanup-session-1',
     codeReviewerSessionId: 'review-session-1',
   });
   const invalid = [
-    { ...initial, stage: 'review-full' },
-    { ...initial, cleanup: { ...initial.cleanup, reportRepairs: 2 } },
-    { ...initial, cleanup: { ...initial.cleanup, mode: 'closure' } },
-    { ...initial, status: 'legacy-bypass', stage: 'cleanup-full' },
+    { ...initial, review: { ...initial.review, reportRepairs: 2 } },
+    { ...initial, review: { ...initial.review, mode: 'closure' } },
   ];
   for (const value of invalid) assert.throws(() => validateDirectReview(value, { lifecycle: 'implementing' }));
 
-  assert.throws(() => validateDirectReview(initial, {
-    lifecycle: 'safe-halt',
-    process: { purpose: 'code-review', resumeLifecycle: 'implementing', resumeReviewStage: 'review-full' },
-  }), /safe-halt.*stage/u);
   assert.deepEqual(validateDirectReview(initial, {
     lifecycle: 'safe-halt',
-    process: { purpose: 'cleanup-review', resumeLifecycle: 'implementing', resumeReviewStage: 'cleanup-full' },
+    process: { purpose: 'code-review', resumeLifecycle: 'implementing', resumeReviewStage: 'review-full' },
   }), initial);
 });
 
 test('terminal projection preserves review evidence without retaining an invocation', () => {
   const active = createInitialDirectReview({
-    targetFingerprint: fingerprint, cleanupRequired: true, cleanupReason: 'risk',
-    cleanupReviewerSessionId: 'cleanup-session-1', codeReviewerSessionId: 'review-session-1',
+    targetFingerprint: fingerprint, codeReviewerSessionId: 'review-session-1',
   });
   const terminal: DirectReviewV1 = {
     ...active, status: 'terminal', terminalOutcome: { status: 'blocked', kind: 'exhausted' },
   };
   assert.deepEqual(validateDirectReview(terminal, { lifecycle: 'blocked' }), terminal);
   assert.throws(() => validateDirectReview({ ...terminal, invocation: {
-    attemptId: 'a', operation: 'cleanup-review', mode: 'full', reviewerSessionId: 'cleanup-session-1',
+    attemptId: 'a', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
     targetRevision: 1, targetFingerprint: fingerprint, closureRequestSha256: null,
     status: 'prepared', pid: null, processGroupId: null,
   } }, { lifecycle: 'blocked' }), /terminal/u);
-
-  const legacy: DirectReviewV1 = {
-    ...active, status: 'terminal', stage: null, targetRevision: 0,
-    cleanup: notRequired('legacy-pinned-generation'), review: notRequired('legacy-pinned-generation'),
-    terminalOutcome: { status: 'internal-error' },
-  };
-  assert.deepEqual(validateDirectReview(legacy, { lifecycle: 'internal-error' }), legacy);
-  assert.throws(() => validateDirectReview({
-    ...legacy,
-    review: notRequired('some-other-reason'),
-  }, { lifecycle: 'internal-error' }), /terminal/u);
 });
 
 test('target fingerprint and prepared-launched-accepted review transition are exact', () => {
@@ -128,8 +85,7 @@ test('target fingerprint and prepared-launched-accepted review transition are ex
     cycle: 1, frozenCriteria: [{ id: 'criterion-1' }],
   });
   const initial = createInitialDirectReview({
-    targetFingerprint, cleanupRequired: false, cleanupReason: 'bounded final review owns cleanup',
-    cleanupReviewerSessionId: null, codeReviewerSessionId: 'review-session-1',
+    targetFingerprint, codeReviewerSessionId: 'review-session-1',
   });
   const prepared = prepareDirectReviewInvocation(initial, {
     attemptId: 'review-attempt-1', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
@@ -168,8 +124,7 @@ test('target fingerprint and prepared-launched-accepted review transition are ex
 
 test('needs-work defects become fixed only after implementation and enter correlated Closure', () => {
   const initial = createInitialDirectReview({
-    targetFingerprint: fingerprint, cleanupRequired: false, cleanupReason: 'final review',
-    cleanupReviewerSessionId: null, codeReviewerSessionId: 'review-session-1',
+    targetFingerprint: fingerprint, codeReviewerSessionId: 'review-session-1',
   });
   const launched = launchDirectReviewInvocation(prepareDirectReviewInvocation(initial, {
     attemptId: 'review-attempt-1', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
@@ -206,11 +161,3 @@ test('needs-work defects become fixed only after implementation and enter correl
     repairFindingOutcomes: [],
   }, 'd'.repeat(64)), /unresolved defects/u);
 });
-
-function notRequired(reason: string): DirectReviewV1['cleanup'] {
-  return {
-    version: 1, disposition: 'not-required', profile: 'high', reviewerSessionId: null, mode: null,
-    reportRepairs: 0, transportRetries: 0, coverage: [`not-required:${reason}`], defects: [],
-    affectedDefectIds: [], acceptedReportSha256: null,
-  };
-}

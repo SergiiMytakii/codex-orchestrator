@@ -1,8 +1,0 @@
-## Contract Test Ledger
-
-| Invariant | Risk It Prevents | First Test / Proof | Status |
-| --- | --- | --- | --- |
-| Scoped review handoff separates agent-verified checks from maintainer-only checks, and every maintainer-only check carries a reason the agent could not verify it. | Runnable commands, grep/import checks, or generic "confirm" items get mislabeled as human work in the review handoff. | `scoped completion report accepts review handoff with maintainer-only reasons` / `npm run build --silent && node --test dist/test/completion-report.test.js` | green |
-| Scoped completion report rejects legacy `humanReviewChecklist` instead of reading or rendering it. | Old report shape silently survives and keeps pushing agent-verifiable work into human handoff paths. | `scoped completion report rejects legacy humanReviewChecklist` / `npm run build --silent && node --test dist/test/completion-report.test.js` | green |
-| Risk routing rejects maintainer-only checks without a concrete agent-verification blocker. | Empty or generic human checklist entries satisfy the gate and push agent-verifiable work to the maintainer. | `risk routing warns when maintainer-only checks contain agent-verifiable commands` / `npm run build --silent && node --test dist/test/review-gates.test.js` | green |
-| Maintainer-facing report renders agent-verified review evidence separately from maintainer-only checks. | Review reports blur proof already completed by the agent with actions that genuinely require a person. | `scoped handoff evidence renders review report and PR body proof artifacts` / `npm run build --silent && node --test dist/test/scoped-auto-command.test.js` | green |

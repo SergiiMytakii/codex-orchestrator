@@ -1,11 +1,24 @@
 ---
 name: tdd
-description: Test-driven development policy gate for implementation, bugfix, and new feature work unless the user explicitly opts out. Use before planning or editing code to shape the first behavior proof, and when the user mentions red-green-refactor, integration tests, or test-first development.
+description: Test-driven development for changes that alter observable behavior, have a natural public test seam, and can produce a meaningful failing test before implementation. Use after the global TDD Fit Gate passes, or when the user explicitly requests red-green-refactor, test-first development, or TDD.
 ---
 
 # Test-Driven Development
 
 Use short vertical RED -> GREEN cycles. Make each test prove observable behavior through the same public seam real callers use.
+
+## Fit
+
+Use this skill only when the change alters observable behavior, a natural public
+seam exists, and the pre-change test will fail for the intended behavioral
+reason. If an implicit activation fails this gate, stop the TDD route and use
+existing regression tests plus affected validation. For mixed tasks, apply TDD
+only to the behavioral slice.
+
+Behavior-preserving cleanup, dead-code deletion, documentation, copy,
+formatting, generated assets, package maintenance, simple config, builds, and
+read-only work do not need TDD. Absence and architecture guards added after a
+cleanup are validation, not RED proofs.
 
 ## Core Contract
 
@@ -24,7 +37,7 @@ Read [tests.md](tests.md) when choosing or reviewing test shape. Read [mocking.m
 3. Select the public seam where callers observe each behavior.
 4. Ask the user only when the seam changes the public contract, product intent is unclear, or behavior priorities materially conflict.
 5. For contract-risk changes, create or update the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) and map each invariant to its first failing test or observable proof.
-6. If no natural public seam exists, consult [interface-design.md](interface-design.md) instead of testing internals.
+6. If no natural public seam exists, stop the TDD route. Consult [interface-design.md](interface-design.md) only when changing the interface is itself required by the task.
 
 For UI behavior, define proof at the rendered seam: visible content and order, interaction result, semantics, or screenshot when layout direction or scrolling matters.
 

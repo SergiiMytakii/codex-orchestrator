@@ -6,7 +6,7 @@ export function parseSetupArgs(argv: string[]): SetupIntent {
   if (command !== 'setup' && command !== 'doctor' && command !== 'status') throw new Error('operational command is invalid');
   const values = new Map<string, string | true>();
   const valueFlags = new Set(['--target', '--github-owner', '--github-repo']);
-  const booleanFlags = new Set(['--dry-run', '--prepare-labels', '--fresh']);
+  const booleanFlags = new Set(['--dry-run', '--prepare-labels']);
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index]!;
     if (values.has(flag)) throw new Error('operational flag is duplicated');
@@ -24,12 +24,9 @@ export function parseSetupArgs(argv: string[]): SetupIntent {
   if (command !== 'setup' && (values.size !== 1 || owner !== undefined || values.has('--dry-run'))) {
     throw new Error('doctor and status accept only target');
   }
-  if (values.has('--fresh') && values.has('--prepare-labels')) throw new Error('setup operation flags are ambiguous');
   const operation = command === 'doctor' || command === 'status'
     ? command
-    : values.has('--fresh')
-      ? 'fresh'
-      : values.has('--prepare-labels')
+    : values.has('--prepare-labels')
         ? 'prepare-labels'
         : 'configure';
   return {
@@ -45,13 +42,10 @@ export function setupOutcomeExitCode(outcome: SetupOutcome): 0 | 20 | 70 {
     case 'created':
     case 'unchanged':
     case 'labels-prepared':
-    case 'fresh-reset':
-    case 'migrated':
     case 'planned':
       return 0;
     case 'inspected':
       return outcome.disposition === 'ok' ? 0 : 20;
-    case 'legacy-detected':
     case 'blocked-active':
     case 'repository-mismatch':
     case 'unsupported-schema':

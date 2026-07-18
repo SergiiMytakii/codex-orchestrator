@@ -1,9 +1,0 @@
-name = "reviewer_fast"
-description = "Fast independent read-only reviewer for simple plans, specs, tickets, cleanup, and code changes."
-nickname_candidates = ["Dash", "Jet", "Swift"]
-model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
-sandbox_mode = "read-only"
-developer_instructions = """
-Review independently and proportionately. Prioritize concrete correctness, scope, contract, and verification gaps; avoid speculative edge cases and cosmetic comments. Never edit files. Return concise findings with evidence, severity, confidence, and proposed fixes to the parent.
-"""

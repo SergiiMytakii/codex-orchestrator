@@ -7,14 +7,13 @@ import {
   type CheckedChangeMintCapability,
   type CheckedChangePayloadV1,
 } from './checked-change.js';
-import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
+import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { canonicalJson, sha256 } from './containment.js';
 import { validateImplementationReport } from './implementation-report.js';
 import {
   acceptApprovedDirectReview,
   acceptNeedsWorkDirectReview,
   beginDirectReviewRepair,
-  createLegacyBypassDirectReview,
   createInitialDirectReview,
   directReviewClosureRequestSha256,
   directReviewTargetFingerprint,
@@ -28,7 +27,7 @@ import { ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type Pr
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
-  RouteMigrationUnrecoverableError,
+  RouteInitializationUnrecoverableError,
   WorkflowGenerationUnrecoverableError,
 } from './run-store.js';
 import {
@@ -66,7 +65,6 @@ export type RunIssueResult =
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; evidencePath: string }
-  | { status: 'migration-required'; fromVersion: 1; requiredAction: string }
   | { status: 'requeued'; reason: 'owner-contention'; evidencePath: string };
 
 export interface RunIssueSnapshot {
@@ -96,16 +94,18 @@ export interface RunIssueGit {
   push(input: { worktreePath: string; branchName: string }): Promise<void>;
 }
 
+type InterruptedProcess = Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
+
 export type ImplementationAgentResult =
   | { kind: 'completed'; report: unknown; attemptId?: string }
   | { kind: 'transport-failed'; resumable: boolean }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
-  | { kind: 'safe-halt'; process: NonNullable<RunRecordV1['process']>; waitForAbsence(): Promise<void> };
+  | { kind: 'safe-halt'; process: InterruptedProcess; waitForAbsence(): Promise<void> };
 
 export interface RunIssueDependencies {
-  readConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfigV1 }>;
-  validateContainment(config: AgentAutoConfigV1): Promise<void>;
+  readConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }>;
+  validateContainment(config: AgentAutoConfig): Promise<void>;
   ownerLock: {
     acquire(input: { canonicalRepository: string; targetRoot: string }): Promise<{ release(): Promise<void> }>;
   };
@@ -189,7 +189,7 @@ export class RunIssue {
 
   private async reconcileClaim(
     starting: ActiveRun,
-    config: AgentAutoConfigV1,
+    config: AgentAutoConfig,
   ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
     let active = starting;
     const { issueNumber, runId, branchName } = active.record;
@@ -248,7 +248,7 @@ export class RunIssue {
 
   private async publish(
     starting: ActiveRun,
-    config: AgentAutoConfigV1,
+    config: AgentAutoConfig,
     issue: IssueSnapshot,
     issueNumber: number,
   ): Promise<RunIssueResult> {
@@ -483,7 +483,7 @@ export class RunIssue {
             try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
             catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
           }
-          active = await this.migratePreRouteRun(active, issue);
+          active = await this.initializeClaimedRun(active, issue);
           issueSnapshot = structuredClone(active.record.issueSnapshot);
         } else {
           if (existing.lifecycle === 'safe-halt') {
@@ -491,9 +491,6 @@ export class RunIssue {
             if (!process) return await this.publicationDiverged(active, 'safe-halt-process-missing');
             try { await this.dependencies.waitForReviewProcessAbsence(process.processGroupId); }
             catch { return await this.invokedFailure(active, 'safe-halt-process-absence-unconfirmed'); }
-            if (!process.purpose || !process.resumeLifecycle || process.resumeReviewStage === undefined) {
-              return await this.terminal(active, { status: 'internal-error', code: 'direct-review-migration-unrecoverable' });
-            }
             active = await this.persist(active, { lifecycle: process.resumeLifecycle, process: undefined });
           }
           if (existing.lifecycle === 'waiting-human') {
@@ -512,11 +509,11 @@ export class RunIssue {
           }
           if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
           if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
-            if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteMigrationUnrecoverableError();
+            if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteInitializationUnrecoverableError();
             const reviewRecovery = active.record.lifecycle === 'implementing' && active.record.directReview?.status === 'active'
               && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure');
             const checkRecovery = active.record.lifecycle === 'checking'
-              && (active.record.directReview?.status === 'clear' || active.record.directReview?.status === 'legacy-bypass');
+              && active.record.directReview?.status === 'clear';
             if (!reviewRecovery && !checkRecovery) {
               if (active.record.cycle >= config.runner.maxCycles) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
@@ -550,7 +547,7 @@ export class RunIssue {
         active = claim.active;
         try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
         catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
-        active = await this.migratePreRouteRun(active, issue);
+        active = await this.initializeClaimedRun(active, issue);
         issueSnapshot = structuredClone(active.record.issueSnapshot);
       }
       if (active.record.lifecycle === 'triaging' || active.record.lifecycle === 'routed') {
@@ -562,16 +559,7 @@ export class RunIssue {
         return await this.terminal(active, { status: 'internal-error', code: 'route-dispatch-not-implementing' });
       }
       if (active.record.lifecycle === 'checking' && !active.record.directReview && active.record.routeReceipt?.route === 'direct') {
-        const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
-        const targetFingerprint = directReviewTargetFingerprint({
-          snapshot: await this.dependencies.git.snapshot(worktreePath),
-          changedFiles,
-          routeDecisionSha256: active.record.routeReceipt.decisionSha256,
-          workflowGenerationHash: active.record.workflowGeneration.generationHash,
-          cycle: active.record.cycle,
-          frozenCriteria,
-        });
-        active = await this.persist(active, { directReview: createLegacyBypassDirectReview(targetFingerprint) });
+        return await this.terminal(active, { status: 'internal-error', code: 'direct-review-state-missing' });
       }
       attemptLoop: while (true) {
       if (!await this.authorized(input.issueNumber, runId, branchName, config)) {
@@ -580,7 +568,7 @@ export class RunIssue {
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
       let resumeAtChecks = active.record.lifecycle === 'checking'
-        && (active.record.directReview?.status === 'clear' || active.record.directReview?.status === 'legacy-bypass');
+        && active.record.directReview?.status === 'clear';
       if (active.record.lifecycle === 'implementing'
         && active.record.directReview?.status === 'active'
         && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure')) {
@@ -614,7 +602,15 @@ export class RunIssue {
         workflowGeneration: active.record.workflowGeneration,
       });
       if (implementation.kind === 'safe-halt') {
-        active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
+        active = await this.persist(active, {
+          lifecycle: 'safe-halt',
+          process: {
+            ...implementation.process,
+            purpose: 'implementation',
+            resumeLifecycle: 'implementing',
+            resumeReviewStage: null,
+          },
+        });
         while (true) {
           try {
             await implementation.waitForAbsence();
@@ -660,7 +656,15 @@ export class RunIssue {
           workflowGeneration: active.record.workflowGeneration,
         });
         if (implementation.kind === 'safe-halt') {
-          active = await this.persist(active, { lifecycle: 'safe-halt', process: implementation.process });
+          active = await this.persist(active, {
+            lifecycle: 'safe-halt',
+            process: {
+              ...implementation.process,
+              purpose: 'implementation',
+              resumeLifecycle: 'implementing',
+              resumeReviewStage: null,
+            },
+          });
           while (true) {
             try { await implementation.waitForAbsence(); break; }
             catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
@@ -705,9 +709,6 @@ export class RunIssue {
           active = await this.persist(active, {
             directReview: createInitialDirectReview({
               targetFingerprint,
-              cleanupRequired: false,
-              cleanupReason: 'bounded final review owns cleanup',
-              cleanupReviewerSessionId: null,
               codeReviewerSessionId: reviewerSessionId,
             }),
           });
@@ -885,11 +886,11 @@ export class RunIssue {
       if (active && error instanceof TransportReadError) {
         return await this.invokedFailure(active, 'authorization-read-failed');
       }
-      if (active && error instanceof RouteMigrationUnrecoverableError) {
+      if (active && error instanceof RouteInitializationUnrecoverableError) {
         const evidence = await this.dependencies.writeEvidence({
           runId: active.record.runId,
-          code: 'route-migration-unrecoverable',
-          summary: 'The pre-route run cannot be safely migrated without product-state ambiguity.',
+          code: 'route-initialization-unrecoverable',
+          summary: 'The claimed run cannot be safely initialized without product-state ambiguity.',
         });
         return { status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path };
       }
@@ -918,25 +919,25 @@ export class RunIssue {
     }
   }
 
-  async migratePreRouteRun(active: ActiveRun, issue?: RunIssueSnapshot): Promise<ActiveRun> {
+  async initializeClaimedRun(active: ActiveRun, issue?: RunIssueSnapshot): Promise<ActiveRun> {
     if (active.record.lifecycle !== 'claimed'
       || active.record.process
       || active.record.intent
       || active.record.routeExecution
       || active.record.routeReceipt) {
-      throw new RouteMigrationUnrecoverableError();
+      throw new RouteInitializationUnrecoverableError();
     }
     const [snapshot, changedFiles] = await Promise.all([
       this.dependencies.git.snapshot(active.record.worktreePath),
       this.dependencies.git.listChangedFiles(active.record.worktreePath),
     ]);
     if (snapshot.headSha !== active.record.baseSha || changedFiles.length !== 0) {
-      throw new RouteMigrationUnrecoverableError();
+      throw new RouteInitializationUnrecoverableError();
     }
     try {
       await this.dependencies.verifyWorkflowGeneration(active.record.workflowGeneration);
     } catch {
-      throw new RouteMigrationUnrecoverableError();
+      throw new RouteInitializationUnrecoverableError();
     }
     const issueSnapshot = issue?.state === 'OPEN' ? snapshotIssue(issue) : active.record.issueSnapshot;
     return this.persist(active, { lifecycle: 'triaging', routeExecution: initialRouteExecution(), issueSnapshot });
@@ -947,7 +948,7 @@ export class RunIssue {
     issue: IssueSnapshot,
     frozenCriteria: FrozenCriterion[],
     worktreePath: string,
-    config: AgentAutoConfigV1,
+    config: AgentAutoConfig,
     issueNumber: number,
     branchName: string,
   ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
@@ -1006,7 +1007,15 @@ export class RunIssue {
       });
       if (result.status === 'repairable' || result.status === 'retryable') continue;
       if (result.status === 'safe-halt') {
-        active = await this.persist(active, { lifecycle: 'safe-halt', process: result.process });
+        active = await this.persist(active, {
+          lifecycle: 'safe-halt',
+          process: {
+            ...result.process,
+            purpose: 'route',
+            resumeLifecycle: 'triaging',
+            resumeReviewStage: null,
+          },
+        });
         while (true) {
           try {
             await result.waitForAbsence();
@@ -1225,12 +1234,12 @@ export class RunIssue {
     return { active: resumed };
   }
 
-  private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfigV1 }> {
+  private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }> {
     const value = await this.dependencies.readConfig(targetRoot);
     return { bytes: Buffer.from(value.bytes), config: parseAgentAutoConfig(structuredClone(value.config)) };
   }
 
-  private async ineligibilityReason(issue: RunIssueSnapshot | undefined, config: AgentAutoConfigV1): Promise<string | undefined> {
+  private async ineligibilityReason(issue: RunIssueSnapshot | undefined, config: AgentAutoConfig): Promise<string | undefined> {
     if (!issue) return 'Issue does not exist.';
     const labels = new Set(issue.labels);
     if (issue.state !== 'OPEN') return 'Issue is not open.';
@@ -1303,7 +1312,7 @@ export class RunIssue {
     }
   }
 
-  private async authorized(issueNumber: number, runId: string, branchName: string, config: AgentAutoConfigV1): Promise<boolean> {
+  private async authorized(issueNumber: number, runId: string, branchName: string, config: AgentAutoConfig): Promise<boolean> {
     const issue = await this.readIssue(issueNumber);
     if (!issue || issue.state !== 'OPEN') return false;
     const labels = new Set(issue.labels);
@@ -1445,16 +1454,14 @@ export class RunIssue {
       if (result.kind === 'report-invalid') {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
-        const selected = current.stage?.startsWith('cleanup-') ? current.cleanup : current.review;
-        if (selected.reportRepairs >= 1 || reportRepair) {
+        if (current.review.reportRepairs >= 1 || reportRepair) {
           return this.terminal(active, { status: 'internal-error', code: 'direct-review-report-malformed' });
         }
         const { invocation: _invocation, ...withoutInvocation } = structuredClone(current);
-        const trackKey = current.stage?.startsWith('cleanup-') ? 'cleanup' as const : 'review' as const;
         active = await this.persist(active, {
           directReview: {
             ...withoutInvocation,
-            [trackKey]: { ...withoutInvocation[trackKey], reportRepairs: 1 },
+            review: { ...withoutInvocation.review, reportRepairs: 1 },
           },
         });
         reportRepair = {

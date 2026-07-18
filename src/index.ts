@@ -11,7 +11,7 @@ export type { SpecCoordinatorResult, SpecDeliveryOperation, SpecDeliveryState } 
 export { createInitialSpecDelivery, createSpecRevision, freezeApprovedSpec, validateFrozenSpecReceipt, validateSpecDelivery } from './v2/spec-delivery.js';
 export type { FrozenSpecReceiptV1, SpecDeliveryV1, SpecReviewReportV1, SpecRevisionV1 } from './v2/spec-delivery.js';
 export { parseAgentAutoConfig } from './v2/config.js';
-export type { AgentAutoConfigV1 } from './v2/config.js';
+export type { AgentAutoConfig } from './v2/config.js';
 export { validateImplementationReport } from './v2/implementation-report.js';
 export type { ImplementationReportV1 } from './v2/implementation-report.js';
 export { validateProofReport } from './v2/proof-report.js';

@@ -183,6 +183,6 @@ npm pack --dry-run --json
 
 `npm run refresh:workflow` rebuilds the package-owned workflow inventory from the explicit allowlist in `scripts/agent-auto-workflow-source.json`, validates operation bindings, and runs focused contract tests. `npm run check:workflow` is the non-writing drift check; `npm run verify:workflow` verifies the committed generated workflow without reading local skills.
 
-`npm run smoke:live` packs the current candidate and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
+`npm run smoke:live` packs the current package and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
 For the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model, see [docs/deep-dive.md](docs/deep-dive.md). For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).

@@ -40,13 +40,13 @@ file count or generic risk labels.
 | Situation | Route |
 | --- | --- |
 | Tiny, clear, low-risk edit | `$small-task-implementer` after its Fit Gate |
-| Clear feature or fix | Root + one `$tdd` activation + affected validation |
+| Clear feature or fix | Apply the TDD Fit Gate; when it fits, use Root + one `$tdd` activation, otherwise affected validation |
 | Missing execution detail | `$implementation-spec-maker` -> artifact review -> `$spec-implementer` |
 | Approved implementation spec | `$spec-implementer` |
 | Approved dependency graph or explicit orchestration | `$tickets-orchestrator` |
 | Product discovery or ticket decomposition | `$to-spec`, `$spec-to-tickets`, or `$wayfinder` as applicable; stop before delivery |
 | Explain-only bug | `$bug-root-cause-explainer`; no edits |
-| Confirmed bounded bug fix | `$tdd` + `$code-debugger` unless already inside an authorized implementation flow |
+| Confirmed bounded bug fix | Apply the TDD Fit Gate, then `$tdd` + `$code-debugger` when it fits; otherwise `$code-debugger` + affected validation |
 | Hard, flaky, unclear, or performance bug | `$diagnosing-bugs` before the explain/fix route |
 | Review request | `$code-review` in the profile-selected reviewer child |
 | External multi-source uncertainty | `$research`; narrow documentation lookup stays inline |
@@ -58,9 +58,19 @@ delivery workflow.
 
 ## TDD And Review
 
-Apply `$tdd` before behavior-changing features, fixes, logic, persistence,
-APIs, or risky refactors. Do not manufacture RED tests for docs, copy,
-formatting, simple config, builds, or read-only work.
+Apply `$tdd` only when all three Fit Gate conditions hold:
+
+1. The change alters observable behavior.
+2. A natural public seam can prove that behavior.
+3. A new test will fail before the change for the intended behavioral reason.
+
+Otherwise use existing regression tests plus affected validation. Do not invoke
+TDD merely because implementation files change, and do not manufacture RED
+tests for behavior-preserving cleanup, dead-code deletion, documentation, copy,
+formatting, generated assets, package maintenance, simple config, builds, or
+read-only work. For mixed tasks, activate `$tdd` only for the behavioral slice.
+An absence or architecture guard added after cleanup is validation, not a TDD
+cycle.
 
 Review applicability lives in [`review-gates.md`](review-gates.md). Shared
 Full/Closure mechanics live in [`review-protocol.md`](review-protocol.md).

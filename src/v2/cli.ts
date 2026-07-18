@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
-import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
+import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
 import { createV2Runtime } from './runtime.js';
 import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
@@ -16,41 +16,41 @@ import { createProductionSetup } from './setup-runtime.js';
 import type { SetupIntent, SetupOutcome } from './setup.js';
 import type { RunIssueResult } from './run-issue.js';
 
-export interface CandidateRunIntent { targetRoot: string; issueNumber: number }
-export interface CandidateDaemonIntent { targetRoot: string; once: boolean }
+export interface RunIntent { targetRoot: string; issueNumber: number }
+export interface DaemonIntent { targetRoot: string; once: boolean }
 
-export function parseCandidateRunArgs(argv: string[]): CandidateRunIntent {
+export function parseRunArgs(argv: string[]): RunIntent {
   if (argv.length !== 5 || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
-    throw new Error('usage: candidate-cli run --target <absolute-path> --issue <positive-integer>');
+    throw new Error('usage: cli run --target <absolute-path> --issue <positive-integer>');
   }
   const targetRoot = argv[2]!;
   const issueNumber = Number(argv[4]);
-  if (!isAbsolute(targetRoot) || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error('candidate run intent is invalid');
+  if (!isAbsolute(targetRoot) || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error('CLI run intent is invalid');
   return { targetRoot: resolve(targetRoot), issueNumber };
 }
 
-export function parseCandidateDaemonArgs(argv: string[]): CandidateDaemonIntent {
+export function parseDaemonArgs(argv: string[]): DaemonIntent {
   if ((argv.length !== 3 && argv.length !== 4)
     || argv[0] !== 'daemon'
     || argv[1] !== '--target'
     || (argv.length === 4 && argv[3] !== '--once')) {
-    throw new Error('usage: candidate-cli daemon --target <absolute-path> [--once]');
+    throw new Error('usage: cli daemon --target <absolute-path> [--once]');
   }
   const targetRoot = argv[2]!;
-  if (!isAbsolute(targetRoot)) throw new Error('candidate daemon target is invalid');
+  if (!isAbsolute(targetRoot)) throw new Error('CLI daemon target is invalid');
   return { targetRoot: resolve(targetRoot), once: argv[3] === '--once' };
 }
 
-export async function runCandidateCli(argv: string[], dependencies: {
-  executeRun?: (input: CandidateRunIntent) => Promise<RunIssueResult>;
-  executeDaemon?: (input: CandidateDaemonIntent, write: (text: string) => void) => Promise<number>;
+export async function runCli(argv: string[], dependencies: {
+  executeRun?: (input: RunIntent) => Promise<RunIssueResult>;
+  executeDaemon?: (input: DaemonIntent, write: (text: string) => void) => Promise<number>;
   executeSetup?: (input: SetupIntent) => Promise<SetupOutcome>;
   packageVersion?: string;
   write?: (text: string) => void;
 } = {}): Promise<number> {
   const write = dependencies.write ?? ((text: string) => process.stdout.write(text));
   if (argv.length === 1 && argv[0] === '--help') {
-    write(candidateHelp());
+    write(cliHelp());
     return 0;
   }
   if (argv.length === 1 && argv[0] === '--version') {
@@ -64,25 +64,20 @@ export async function runCandidateCli(argv: string[], dependencies: {
     return setupOutcomeExitCode(outcome);
   }
   if (argv[0] === 'daemon') {
-    const intent = parseCandidateDaemonArgs(argv);
+    const intent = parseDaemonArgs(argv);
     return (dependencies.executeDaemon ?? executeProductionDaemon)(intent, write);
   }
-  const intent = parseCandidateRunArgs(argv);
+  const intent = parseRunArgs(argv);
   const result = await (dependencies.executeRun ?? executeProductionRun)(intent);
   write(renderRunResultJson(result));
   return runIssueExitCode(result);
 }
 
 async function executeProductionDaemon(
-  intent: CandidateDaemonIntent,
+  intent: DaemonIntent,
   write: (text: string) => void,
 ): Promise<number> {
-  const inspected = await readTargetConfig(intent.targetRoot);
-  if ('status' in inspected) {
-    write(renderRunResultJson(inspected));
-    return runIssueExitCode(inspected);
-  }
-  const config = inspected;
+  const config = await readTargetConfig(intent.targetRoot);
   const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
   let exitCode = 0;
   do {
@@ -97,11 +92,10 @@ async function executeProductionDaemon(
   } while (true);
 }
 
-async function executeProductionRun(intent: CandidateRunIntent): Promise<RunIssueResult> {
+async function executeProductionRun(intent: RunIntent): Promise<RunIssueResult> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const packageVersion = await readPackageVersion();
   const config = await readTargetConfig(intent.targetRoot);
-  if ('status' in config) return config;
   const orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator'));
   const bootId = await readBootId();
   const runtime = createV2Runtime({
@@ -126,12 +120,8 @@ async function readTargetConfig(targetRoot: string) {
   return parseTargetConfigForExecution(JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')), targetRoot);
 }
 
-export function parseTargetConfigForExecution(value: unknown, targetRoot: string): AgentAutoConfigV1 | Extract<RunIssueResult, { status: 'migration-required' }> {
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)
-    && (value as { schema?: unknown }).schema === 'codex-orchestrator.agent-auto'
-    && (value as { version?: unknown }).version === 1) {
-    return { status: 'migration-required', fromVersion: 1, requiredAction: `setup --target ${resolve(targetRoot)}` };
-  }
+export function parseTargetConfigForExecution(value: unknown, targetRoot: string): AgentAutoConfig {
+  void targetRoot;
   return parseAgentAutoConfig(value);
 }
 
@@ -150,10 +140,10 @@ async function readPackageVersion(): Promise<string> {
   return packageJson.version;
 }
 
-function candidateHelp(): string {
+function cliHelp(): string {
   return [
     'codex-orchestrator',
-    '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels|--fresh] [--dry-run]',
+    '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels] [--dry-run]',
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
     '  run --target <absolute-path> --issue <positive-integer>',
@@ -174,13 +164,13 @@ async function readBootId(): Promise<string> {
   throw new Error(`platform ${process.platform} cannot prove boot identity`);
 }
 
-export function isDirectCandidateExecution(entryPath: string, modulePath: string): boolean {
+export function isDirectCliExecution(entryPath: string, modulePath: string): boolean {
   try { return realpathSync.native(entryPath) === realpathSync.native(modulePath); }
   catch { return false; }
 }
 
-if (process.argv[1] && isDirectCandidateExecution(process.argv[1], fileURLToPath(import.meta.url))) {
-  runCandidateCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error: unknown) => {
+if (process.argv[1] && isDirectCliExecution(process.argv[1], fileURLToPath(import.meta.url))) {
+  runCli(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 70;
   });

@@ -10,7 +10,7 @@ interface LabelPolicy {
   description: string;
 }
 
-export interface AgentAutoConfigV1 {
+export interface AgentAutoConfig {
   schema: 'codex-orchestrator.agent-auto';
   version: 2;
   github: {
@@ -44,7 +44,7 @@ export interface AgentAutoConfigV1 {
   deny: { readPaths: string[]; commands: string[] };
 }
 
-export function parseAgentAutoConfig(value: unknown): AgentAutoConfigV1 {
+export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
   assertExactObject(value, ['schema', 'version', 'github', 'runner', 'codex', 'checks', 'proof', 'deny'], 'config');
   if (value.schema !== 'codex-orchestrator.agent-auto') throw new Error('config.schema is invalid');
   if (value.version !== 2) throw new Error('config.version is invalid');
@@ -105,7 +105,7 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfigV1 {
   assertStringArray(value.deny.commands, 'config.deny.commands');
   for (const command of value.deny.commands) assertCanonicalAbsolutePath(command, 'config.deny.commands');
 
-  return value as unknown as AgentAutoConfigV1;
+  return value as unknown as AgentAutoConfig;
 }
 
 function validateLabel(value: unknown, field: string): void {

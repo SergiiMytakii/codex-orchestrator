@@ -86,21 +86,8 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
   }
 });
 
-test('active baseline V1 history without a generation fails closed while terminal history stays readable', async () => {
-  const active = structuredClone(record()) as unknown as Record<string, unknown>;
-  delete active.workflowGeneration;
-  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  await assert.rejects(writer.compareAndSwap(0, body([active as unknown as RunRecordV1])), /workflow-generation-unrecoverable/u);
 
-  const terminal = structuredClone(record()) as Record<string, any>;
-  terminal.lifecycle = 'blocked';
-  terminal.terminalOutcome = { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'legacy-evidence.json' };
-  delete terminal.workflowGeneration;
-  const saved = await writer.compareAndSwap(0, body([terminal as RunRecordV1]));
-  assert.equal(Object.hasOwn(saved.runs[0]!, 'workflowGeneration'), false);
-});
-
-test('run store persists exact triaging and routed state while retaining structural legacy reads', async () => {
+test('run store persists exact triaging and routed state', async () => {
   const generationHash = record().workflowGeneration.generationHash;
   const triage = {
     version: 1 as const,
@@ -145,16 +132,12 @@ test('run store persists exact triaging and routed state while retaining structu
 
   const malformed = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready', previousAttemptId: null } } as RunRecordV1])), /route-complete|keys/u);
-
-  const legacy = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  assert.equal((await legacy.compareAndSwap(0, body([{ ...record(), lifecycle: 'implementing' }]))).runs[0]?.lifecycle, 'implementing');
 });
 
 test('run store persists direct review composites and rejects them on non-direct routes', async () => {
   const routed = directRoutedRecord();
   const directReview = createInitialDirectReview({
-    targetFingerprint: '7'.repeat(64), cleanupRequired: false, cleanupReason: 'final review owns cleanup',
-    cleanupReviewerSessionId: null, codeReviewerSessionId: 'review-session-1',
+    targetFingerprint: '7'.repeat(64), codeReviewerSessionId: 'review-session-1',
   });
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   const saved = await writer.compareAndSwap(0, body([{ ...routed, lifecycle: 'implementing', directReview }]));

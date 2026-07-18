@@ -1,6 +1,6 @@
 interface:
   display_name: "Test-Driven Development"
-  short_description: "Apply behavior-first red-green development"
-  default_prompt: "Use $tdd to define the public test seam and implement this behavior through red-green cycles."
+  short_description: "Use TDD only when its behavioral fit gate passes"
+  default_prompt: "Use $tdd after confirming an observable behavior change, a public test seam, and a meaningful pre-change failure."
 policy:
   allow_implicit_invocation: true

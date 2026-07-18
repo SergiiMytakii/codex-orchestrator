@@ -11,9 +11,8 @@ roles to the actual label strings used in this repo's issue tracker.
 | `ready-for-human` | `ready-for-human` | Requires human implementation |
 | `wontfix` | `wontfix` | Will not be actioned |
 
-These labels are separate from the runner authorization labels such as
-`agent:auto`, `agent:plan-auto`, `agent:running`, `agent:blocked`, and
-`agent:review`.
+These labels are separate from the runner authorization labels `agent:auto`,
+`agent:running`, `agent:waiting-human`, `agent:blocked`, and `agent:review`.
 
 When a skill mentions a triage role, use the corresponding label string from
 this table, while respecting the GitHub mutation boundary in

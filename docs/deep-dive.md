@@ -284,7 +284,7 @@ The CLI prints exact JSON envelopes. Run results include:
 Exit codes are grouped for automation:
 
 - `0`: successful or intentionally paused progress such as `review-ready`, `spec-frozen`, `awaiting-user`, or `requeued`;
-- `20`: blocked policy or migration-required outcome;
+- `20`: blocked policy outcome;
 - `21`: not eligible;
 - `70`: transport or internal failure;
 - `130`: cancelled.
@@ -304,6 +304,6 @@ npm pack --dry-run --json
 
 The build deletes `dist` before TypeScript compilation so removed modules cannot survive in tests or the tarball. `prepack` verifies the committed workflow and rebuilds from a clean output directory.
 
-`npm run smoke:live` packs and installs the exact candidate bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation, a real Codex path, browser evidence, and a safety-negative path. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
+`npm run smoke:live` packs and installs the exact package bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation, a real Codex path, browser evidence, and a safety-negative path. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
 
 Live smoke is not a normal local test and must run only with explicit authorization. Release publication is owned by the GitHub release workflow after the release commit reaches `main`.

@@ -24,7 +24,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review';
+export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review';
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
@@ -43,7 +43,11 @@ export type ContainedReportOperationResult =
   | { status: 'completed'; attemptId: string; validatedPayload: unknown; artifactSha256: string }
   | { status: 'invalid'; attemptId: string; findings: string[]; repairInput?: { originalReportSha256: string; originalReportBytes: Buffer } }
   | { status: 'retryable'; code: string }
-  | { status: 'safe-halt'; process: NonNullable<RunRecordV1['process']>; waitForAbsence(): Promise<void> }
+  | {
+    status: 'safe-halt';
+    process: Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
+    waitForAbsence(): Promise<void>;
+  }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety'; code: string };
 
@@ -240,8 +244,8 @@ function validateCompletedReport(
   }
 }
 
-function isImplementationReview(operation: ContainedReportOperationId): operation is 'cleanup-review' | 'code-review' {
-  return operation === 'cleanup-review' || operation === 'code-review';
+function isImplementationReview(operation: ContainedReportOperationId): operation is 'code-review' {
+  return operation === 'code-review';
 }
 
 function inputReviewContext(context: CodeReviewValidationContext | undefined): CodeReviewValidationContext {
@@ -250,7 +254,7 @@ function inputReviewContext(context: CodeReviewValidationContext | undefined): C
 }
 
 function inputReview(
-  operation: 'cleanup-review' | 'code-review',
+  operation: 'code-review',
   context: CodeReviewValidationContext,
   decoded: unknown,
 ) {

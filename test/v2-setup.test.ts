@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -52,103 +52,6 @@ test('Setup.execute dry-run returns exact ordered actions and performs zero writ
   await assert.rejects(stat(join(root, '.codex-orchestrator')), { code: 'ENOENT' });
   await assert.rejects(stat(join(root, '.gitignore')), { code: 'ENOENT' });
   assert.deepEqual(effects, []);
-});
-
-test('Setup.execute migrates the exact Config V1 shape once under an inactive owner', async (t) => {
-  const root = await targetFixture(t);
-  const effects: string[] = [];
-  const setup = new Setup(dependencies(effects));
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'created' });
-  const configPath = join(root, '.codex-orchestrator', 'config.json');
-  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-  v1.version = 1;
-  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
-  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-
-  effects.length = 0;
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'migrated' });
-  const migrated = parseAgentAutoConfig(JSON.parse(await readFile(configPath, 'utf8')));
-  assert.equal(migrated.version, 2);
-  assert.equal(migrated.github.labels.waitingHuman.name, 'agent:waiting-human');
-  assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false }), { status: 'unchanged' });
-});
-
-test('Setup.execute plans Config V1 migration without writes and blocks label collisions', async (t) => {
-  const root = await targetFixture(t);
-  const setup = new Setup(dependencies([]));
-  await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false });
-  const configPath = join(root, '.codex-orchestrator', 'config.json');
-  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-  v1.version = 1;
-  const labels = (v1.github as { labels: Record<string, { name: string }> }).labels;
-  delete labels.waitingHuman;
-  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-  const before = await readFile(configPath);
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'configure', dryRun: true }), {
-    status: 'planned', actions: [{ kind: 'migrate-config-v1-to-v2', path: '.codex-orchestrator/config.json' }],
-  });
-  assert.deepEqual(await readFile(configPath), before);
-
-  labels.auto!.name = 'agent:waiting-human';
-  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-  const collisionBytes = await readFile(configPath);
-  assert.equal((await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'unsupported-schema');
-  assert.deepEqual(await readFile(configPath), collisionBytes);
-});
-
-test('Setup.execute leaves Config V1 byte-exact when owner or running-claim evidence blocks migration', async (t) => {
-  for (const blocker of ['owner', 'running'] as const) {
-    const root = await targetFixture(t);
-    const seed = new Setup(dependencies([]));
-    await seed.execute({ targetRoot: root, operation: 'configure', dryRun: false });
-    const configPath = join(root, '.codex-orchestrator', 'config.json');
-    const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-    v1.version = 1;
-    delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
-    await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-    const before = await readFile(configPath);
-    const deps = dependencies([]);
-    if (blocker === 'owner') deps.ownership.inspectV2Owner = async () => ({ status: 'active', reason: 'live owner' });
-    else deps.labels.listOpenIssueNumbersWithLabel = async () => [99];
-    assert.equal((await new Setup(deps).execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'blocked-active');
-    assert.deepEqual(await readFile(configPath), before);
-  }
-});
-
-test('Config V1 migration rechecks running claims after setup ownership is acquired', async (t) => {
-  const root = await targetFixture(t);
-  const seed = new Setup(dependencies([]));
-  await seed.execute({ targetRoot: root, operation: 'configure', dryRun: false });
-  const configPath = join(root, '.codex-orchestrator', 'config.json');
-  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-  v1.version = 1;
-  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
-  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-  const before = await readFile(configPath);
-  const deps = dependencies([]);
-  let reads = 0;
-  deps.labels.listOpenIssueNumbersWithLabel = async () => (++reads === 1 ? [] : [99]);
-
-  assert.equal((await new Setup(deps).execute({ targetRoot: root, operation: 'configure', dryRun: false })).status, 'blocked-active');
-  assert.equal(reads, 2);
-  assert.deepEqual(await readFile(configPath), before);
-});
-
-test('doctor and status report the exact Config V1 migration requirement', async (t) => {
-  const root = await targetFixture(t);
-  const setup = new Setup(dependencies([]));
-  await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false });
-  const configPath = join(root, '.codex-orchestrator', 'config.json');
-  const v1 = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
-  v1.version = 1;
-  delete ((v1.github as { labels: Record<string, unknown> }).labels).waitingHuman;
-  await writeFile(configPath, `${JSON.stringify(v1)}\n`);
-  for (const operation of ['doctor', 'status'] as const) {
-    assert.deepEqual(await setup.execute({ targetRoot: root, operation, dryRun: false }), {
-      status: 'legacy-detected', reason: 'Config V1 requires setup migration.',
-    });
-  }
 });
 
 test('Setup.execute rejects repository mismatch before local writes', async (t) => {
@@ -270,118 +173,6 @@ test('doctor and status return deterministic read-only diagnostics owned by Setu
   assert.deepEqual(effects, []);
 });
 
-test('fresh copies Legacy metadata under both fences and commits V2 config last', async (t) => {
-  const root = await legacyTargetFixture(t);
-  const effects: string[] = [];
-  const deps = dependencies(effects);
-  deps.repository.inspectRetained = async () => ({ worktreePaths: ['/tmp/retained'], localRefs: ['refs/heads/codex/old'], remoteRefs: [], collisions: [] });
-  deps.ownership.acquireLegacyFence = async () => {
-    effects.push('legacy:acquire');
-    return { release: async () => { effects.push('legacy:release'); } };
-  };
-  deps.labels.listOpenIssueNumbersWithLabel = async () => {
-    effects.push('github:running-read');
-    return [];
-  };
-  const originalState = await readFile(join(root, '.codex-orchestrator', 'state', 'owner.json'));
-  const result = await new Setup(deps).execute({ targetRoot: root, operation: 'fresh', dryRun: false });
-  assert.deepEqual(result, { status: 'fresh-reset' });
-  assert.deepEqual(effects, ['lock:acquire', 'legacy:acquire', 'github:running-read', 'legacy:release', 'lock:release']);
-  const config = parseAgentAutoConfig(JSON.parse(await readFile(join(root, '.codex-orchestrator', 'config.json'), 'utf8')));
-  assert.equal(config.runner.workspaceRoot, '.codex-orchestrator/workspaces-v2');
-  assert.deepEqual(await readFile(join(root, '.codex-orchestrator', 'state', 'owner.json')), originalState);
-  const manifests = await readdir(join(root, '.codex-orchestrator', 'v2', 'fresh-cutover'));
-  assert.equal(manifests.length, 1);
-  const manifest = JSON.parse(await readFile(join(root, '.codex-orchestrator', 'v2', 'fresh-cutover', manifests[0]!), 'utf8')) as {
-    backup: { configPath: string; statePath: string };
-  };
-  assert.equal(JSON.parse(await readFile(join(root, manifest.backup.configPath), 'utf8')).version, 1);
-  assert.deepEqual(await readFile(join(root, manifest.backup.statePath, 'owner.json')), originalState);
-});
-
-test('fresh does not classify its own setup ownership as an active V2 runner', async (t) => {
-  const root = await legacyTargetFixture(t);
-  const effects: string[] = [];
-  const deps = dependencies(effects);
-  let setupOwnsRepository = false;
-  deps.ownership.inspectV2Owner = async () => setupOwnsRepository
-    ? { status: 'active' }
-    : { status: 'absent' };
-  deps.ownership.acquire = async () => {
-    setupOwnsRepository = true;
-    effects.push('lock:acquire');
-    return {
-      release: async () => {
-        setupOwnsRepository = false;
-        effects.push('lock:release');
-      },
-    };
-  };
-
-  assert.deepEqual(
-    await new Setup(deps).execute({ targetRoot: root, operation: 'fresh', dryRun: false }),
-    { status: 'fresh-reset' },
-  );
-  assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
-});
-
-test('fresh blocks active, remote, nonempty-root, and retained-collision evidence before writes', async (t) => {
-  for (const blocked of ['owner', 'remote', 'root', 'collision'] as const) {
-    await t.test(blocked, async (t) => {
-      const root = await legacyTargetFixture(t);
-      const effects: string[] = [];
-      const deps = dependencies(effects);
-      deps.repository.inspectRetained = async () => ({
-        worktreePaths: [], localRefs: [], remoteRefs: [], collisions: blocked === 'collision' ? ['refs/heads/codex/issue-1'] : [],
-      });
-      if (blocked === 'owner') deps.ownership.inspectV2Owner = async () => ({ status: 'active' });
-      if (blocked === 'remote') deps.labels.listOpenIssueNumbersWithLabel = async () => [17];
-      if (blocked === 'root') await mkdir(join(root, '.codex-orchestrator', 'workspaces-v2'), { recursive: true }).then(() => writeFile(join(root, '.codex-orchestrator', 'workspaces-v2', 'x'), 'x'));
-      const before = await readFile(join(root, '.codex-orchestrator', 'config.json'));
-      const result = await new Setup(deps).execute({ targetRoot: root, operation: 'fresh', dryRun: false });
-      assert.equal(result.status, 'blocked-active');
-      assert.deepEqual(await readFile(join(root, '.codex-orchestrator', 'config.json')), before);
-      await assert.rejects(stat(join(root, '.codex-orchestrator', 'v2', 'fresh-cutover')), { code: 'ENOENT' });
-    });
-  }
-});
-
-test('fresh dry-run is write-free and committed replay returns without locks or writes', async (t) => {
-  const root = await legacyTargetFixture(t);
-  const effects: string[] = [];
-  const deps = dependencies(effects);
-  deps.repository.inspectRetained = async () => ({ worktreePaths: [], localRefs: [], remoteRefs: [], collisions: [] });
-  const setup = new Setup(deps);
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'fresh', dryRun: true }), {
-    status: 'planned', actions: [
-      { kind: 'backup-legacy', path: '.codex-orchestrator/v2/legacy-backups' },
-      { kind: 'commit-fresh', path: '.codex-orchestrator/config.json' },
-    ],
-  });
-  assert.deepEqual(effects, []);
-  await setup.execute({ targetRoot: root, operation: 'fresh', dryRun: false });
-  effects.length = 0;
-  assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'fresh', dryRun: false }), { status: 'fresh-reset' });
-  assert.deepEqual(effects, []);
-});
-
-test('fresh fails closed on GitHub read failure and ambiguous precommit manifests', async (t) => {
-  await t.test('GitHub read', async (t) => {
-    const root = await legacyTargetFixture(t);
-    const deps = dependencies([]);
-    deps.labels.listOpenIssueNumbersWithLabel = async () => { throw new Error('offline'); };
-    assert.equal((await new Setup(deps).execute({ targetRoot: root, operation: 'fresh', dryRun: false })).status, 'transport-failed');
-  });
-  await t.test('manifest ambiguity', async (t) => {
-    const root = await legacyTargetFixture(t);
-    const directory = join(root, '.codex-orchestrator', 'v2', 'fresh-cutover');
-    await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, 'foreign.json'), '{}\n');
-    assert.equal((await new Setup(dependencies([])).execute({ targetRoot: root, operation: 'fresh', dryRun: false })).status, 'io-failed');
-    assert.equal(JSON.parse(await readFile(join(root, '.codex-orchestrator', 'config.json'), 'utf8')).version, 1);
-  });
-});
-
 test('configure converges after every injected config publication boundary', async (t) => {
   for (const point of faultPoints) {
     await t.test(point, async (t) => {
@@ -405,63 +196,23 @@ test('configure converges after every injected config publication boundary', asy
   }
 });
 
-test('fresh converges after every injected config publication boundary without changing Legacy state', async (t) => {
-  for (const point of faultPoints) {
-    await t.test(point, async (t) => {
-      const root = await legacyTargetFixture(t);
-      const canonicalRoot = await realpath(root);
-      const originalState = await readFile(join(root, '.codex-orchestrator', 'state', 'owner.json'));
-      let injected = false;
-      const store = new SetupStore({
-        fault: ({ path, point: observed }) => {
-          if (!injected && path === join(canonicalRoot, '.codex-orchestrator', 'config.json') && observed === point) {
-            injected = true;
-            throw new Error(`injected ${point}`);
-          }
-        },
-      });
-      const setup = new Setup(dependencies([]), store);
-      assert.equal((await setup.execute({ targetRoot: root, operation: 'fresh', dryRun: false })).status, 'io-failed');
-      assert.deepEqual(await setup.execute({ targetRoot: root, operation: 'fresh', dryRun: false }), { status: 'fresh-reset' });
-      parseAgentAutoConfig(JSON.parse(await readFile(join(root, '.codex-orchestrator', 'config.json'), 'utf8')));
-      assert.deepEqual(await readFile(join(root, '.codex-orchestrator', 'state', 'owner.json')), originalState);
-      assert.equal((await readdir(join(root, '.codex-orchestrator', 'v2', 'fresh-cutover'))).length, 1);
-    });
-  }
-});
-
 function dependencies(effects: string[]): SetupDependencies {
   return {
     repository: {
       inspect: async () => ({ repository: { owner: 'owner', repo: 'repo' }, baseBranch: 'main' }),
-      inspectRetained: async () => ({ worktreePaths: [], localRefs: [], remoteRefs: [], collisions: [] }),
     },
     labels: {
       listPage: async () => ({ labels: [], nextCursor: undefined }),
       create: async () => 'created',
-      listOpenIssueNumbersWithLabel: async () => [],
     },
     ownership: {
       acquire: async () => {
         effects.push('lock:acquire');
         return { release: async () => { effects.push('lock:release'); } };
       },
-      inspectV2Owner: async () => ({ status: 'absent' }),
-      acquireLegacyFence: async () => ({ release: async () => undefined }),
+      inspectOwner: async () => ({ status: 'absent' }),
     },
   };
-}
-
-async function legacyTargetFixture(t: TestContext): Promise<string> {
-  const root = await targetFixture(t);
-  await mkdir(join(root, '.codex-orchestrator', 'state'), { recursive: true });
-  await writeFile(join(root, '.codex-orchestrator', 'config.json'), `${JSON.stringify({
-    version: 1,
-    github: { owner: 'owner', repo: 'repo', labels: { running: { name: 'agent:running' } } },
-    runner: { workspaceRoot: '.codex-orchestrator/workspaces', stateDir: '.codex-orchestrator/state' },
-  })}\n`);
-  await writeFile(join(root, '.codex-orchestrator', 'state', 'owner.json'), '{"pid":999999}\n');
-  return root;
 }
 
 const faultPoints: SetupStoreFaultPoint[] = [

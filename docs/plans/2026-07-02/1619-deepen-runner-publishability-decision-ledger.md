@@ -1,7 +1,0 @@
-## Contract Test Ledger
-
-| Invariant | Risk It Prevents | First Test / Proof | Status |
-| --- | --- | --- | --- |
-| Post-Fresh blocked evidence combines the original publishability evidence with Fresh-Context Review blockers and residual risks without moving GitHub writes into the decision helper. | Scoped, tree-child, and recovery callers drift on blocked summary/comment evidence after Fresh-Context Review. | `runner handoff decision builds blocked evidence with fresh-context findings` / `npm run build && node --test dist/test/runner-handoff-decision.test.js` | green |
-| Scoped promotion remains `promotion-requested`, while tree-child and recovery promotion become blocked handoff evidence with distinct next-action semantics. | A generic helper collapses promotion outcomes and lets child/recovery paths claim autonomous promotion. | `runner handoff decision keeps scoped promotion distinct from promotion-as-blocked` / `npm run build && node --test dist/test/runner-handoff-decision.test.js` | green |
-| Review-ready evidence includes Fresh-Context Review residual risks and suggestion evidence, but leaves PR creation, push, labels, and comments to command modules. | Publishability helper crosses the Runner-Owned Publication Boundary or drops Fresh-Context evidence. | `runner handoff decision builds review-ready evidence without publication side effects` / `npm run build && node --test dist/test/runner-handoff-decision.test.js` | green |

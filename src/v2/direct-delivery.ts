@@ -7,7 +7,6 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_ITEMS = 256;
 
 export type DirectReviewStage =
-  | 'cleanup-full' | 'cleanup-repair' | 'cleanup-closure'
   | 'review-full' | 'review-repair' | 'review-closure';
 
 export interface ReviewInvocationV1 {
@@ -25,7 +24,7 @@ export interface ReviewInvocationV1 {
 
 export interface ReviewTrackV1 {
   version: 1;
-  disposition: 'pending' | 'not-required' | 'active' | 'clear';
+  disposition: 'active' | 'clear';
   profile: 'simple' | 'medium' | 'high';
   reviewerSessionId: string | null;
   mode: ReviewMode | null;
@@ -39,7 +38,7 @@ export interface ReviewTrackV1 {
 
 export interface DirectRepairFindingV1 {
   id: string;
-  provenance: 'cleanup' | 'code-review' | 'check' | 'proof';
+  provenance: 'code-review' | 'check' | 'proof';
   sourceId: string;
   targetRevision: number;
   summary: string;
@@ -49,11 +48,10 @@ export interface DirectRepairFindingV1 {
 
 export interface DirectReviewV1 {
   version: 1;
-  status: 'active' | 'clear' | 'legacy-bypass' | 'terminal';
+  status: 'active' | 'clear' | 'terminal';
   stage: DirectReviewStage | null;
   targetRevision: number;
   targetFingerprint: string;
-  cleanup: ReviewTrackV1;
   review: ReviewTrackV1;
   invocation?: ReviewInvocationV1;
   repairFindings: DirectRepairFindingV1[];
@@ -66,7 +64,7 @@ export interface DirectReviewValidationContext {
   lifecycle: string;
   terminalOutcome?: DirectReviewV1['terminalOutcome'];
   process?: {
-    purpose: 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof';
+    purpose: 'route' | 'implementation' | 'code-review' | 'proof';
     resumeLifecycle: string;
     resumeReviewStage: DirectReviewStage | null;
   };
@@ -143,24 +141,19 @@ export function acceptApprovedDirectReview(
     || report.closureRequestSha256 !== state.invocation.closureRequestSha256) {
     throw new Error('accepted direct review report correlation mismatch');
   }
-  const cleanup = state.stage.startsWith('cleanup-');
-  const selected = cleanup ? state.cleanup : state.review;
   const defects = mergeDefectLedger(state, report);
   if (defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
     && defect.status !== 'verified' && defect.status !== 'superseded')) {
     throw new Error('approved direct review merge has unresolved defects');
   }
   const clearTrack: ReviewTrackV1 = {
-    ...structuredClone(selected),
+    ...structuredClone(state.review),
     disposition: 'clear',
     coverage: [...report.coverage],
     defects,
     affectedDefectIds: [],
     acceptedReportSha256: artifactSha256,
   };
-  if (cleanup) {
-    throw new Error('cleanup approval requires an explicit code-review session transition');
-  }
   const { invocation: _invocation, ...withoutInvocation } = structuredClone(state);
   const outcomes = new Map(report.repairFindingOutcomes.map((outcome) => [outcome.id, outcome.status]));
   return {
@@ -194,9 +187,9 @@ export function acceptNeedsWorkDirectReview(
   return {
     ...withoutInvocation,
     status: 'active',
-    stage: state.stage.startsWith('cleanup-') ? 'cleanup-repair' : 'review-repair',
-    [state.stage.startsWith('cleanup-') ? 'cleanup' : 'review']: {
-      ...structuredClone(state.stage.startsWith('cleanup-') ? state.cleanup : state.review),
+    stage: 'review-repair',
+    review: {
+      ...structuredClone(state.review),
       disposition: 'active',
       coverage: [...report.coverage],
       defects: mergeDefectLedger(state, report),
@@ -207,17 +200,17 @@ export function acceptNeedsWorkDirectReview(
       const outcome = outcomes.get(finding.id);
       return outcome ? { ...structuredClone(finding), status: outcome } : structuredClone(finding);
     }),
-  } as DirectReviewV1;
+  };
 }
 
 function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): CodeReviewDefectV1[] {
-  const current = state.stage?.startsWith('cleanup-') ? state.cleanup.defects : state.review.defects;
+  const current = state.review.defects;
   if (report.mode === 'full') {
     if (current.length !== 0) throw new Error('Full review cannot replace an existing defect ledger');
     return structuredClone(report.defects);
   }
   const reported = new Map(report.defects.map((defect) => [defect.id, defect]));
-  const affected = new Set((state.stage?.startsWith('cleanup-') ? state.cleanup : state.review).affectedDefectIds);
+  const affected = new Set(state.review.affectedDefectIds);
   const merged = current.map((existing) => {
     const next = reported.get(existing.id);
     if (!next) {
@@ -340,40 +333,17 @@ export function projectTerminalDirectReview(
 
 export function createInitialDirectReview(input: {
   targetFingerprint: string;
-  cleanupRequired: boolean;
-  cleanupReason: string;
-  cleanupReviewerSessionId: string | null;
   codeReviewerSessionId: string;
 }): DirectReviewV1 {
   assertSha256(input.targetFingerprint, 'direct review target fingerprint');
-  assertText(input.cleanupReason, 'cleanup reason');
   assertText(input.codeReviewerSessionId, 'code reviewer session ID');
-  if (input.cleanupRequired) assertText(input.cleanupReviewerSessionId, 'cleanup reviewer session ID');
-  else if (input.cleanupReviewerSessionId !== null) throw new Error('not-required cleanup cannot have a reviewer session');
   return {
     version: 1,
     status: 'active',
-    stage: input.cleanupRequired ? 'cleanup-full' : 'review-full',
+    stage: 'review-full',
     targetRevision: 1,
     targetFingerprint: input.targetFingerprint,
-    cleanup: input.cleanupRequired
-      ? activeTrack(input.cleanupReviewerSessionId!, 'full')
-      : notRequiredTrack(input.cleanupReason),
-    review: input.cleanupRequired ? pendingTrack() : activeTrack(input.codeReviewerSessionId, 'full'),
-    repairFindings: [],
-  };
-}
-
-export function createLegacyBypassDirectReview(targetFingerprint: string): DirectReviewV1 {
-  assertSha256(targetFingerprint, 'legacy direct review target fingerprint');
-  return {
-    version: 1,
-    status: 'legacy-bypass',
-    stage: null,
-    targetRevision: 0,
-    targetFingerprint,
-    cleanup: notRequiredTrack('legacy-pinned-generation'),
-    review: notRequiredTrack('legacy-pinned-generation'),
+    review: activeTrack(input.codeReviewerSessionId, 'full'),
     repairFindings: [],
   };
 }
@@ -384,15 +354,14 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
     ...(hasOwn(value, 'terminalOutcome') ? ['terminalOutcome'] : []),
   ];
   assertExactObject(value, [
-    'version', 'status', 'stage', 'targetRevision', 'targetFingerprint', 'cleanup', 'review', 'repairFindings', ...optional,
+    'version', 'status', 'stage', 'targetRevision', 'targetFingerprint', 'review', 'repairFindings', ...optional,
   ], 'direct review');
-  if (value.version !== 1 || !['active', 'clear', 'legacy-bypass', 'terminal'].includes(value.status as string)) {
+  if (value.version !== 1 || !['active', 'clear', 'terminal'].includes(value.status as string)) {
     throw new Error('direct review version/status is invalid');
   }
   if (value.stage !== null && !isStage(value.stage)) throw new Error('direct review stage is invalid');
   if (!Number.isSafeInteger(value.targetRevision) || (value.targetRevision as number) < 0) throw new Error('direct review target revision is invalid');
   assertSha256(value.targetFingerprint, 'direct review target fingerprint');
-  const cleanup = validateTrack(value.cleanup, 'cleanup', value.targetRevision as number);
   const review = validateTrack(value.review, 'review', value.targetRevision as number);
   const invocation = hasOwn(value, 'invocation') ? validateInvocation(value.invocation) : undefined;
   const repairFindings = validateRepairFindings(value.repairFindings, value.targetRevision as number);
@@ -404,7 +373,6 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
     status: value.status as DirectReviewV1['status'],
     stage: value.stage as DirectReviewStage | null,
     targetRevision: value.targetRevision as number,
-    cleanup,
     review,
     invocation,
     repairFindings,
@@ -416,7 +384,6 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
     stage: value.stage as DirectReviewStage | null,
     targetRevision: value.targetRevision as number,
     targetFingerprint: value.targetFingerprint as string,
-    cleanup,
     review,
     ...(invocation ? { invocation } : {}),
     repairFindings,
@@ -426,51 +393,30 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
 
 function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFingerprint'>, context: DirectReviewValidationContext): void {
   if (value.status === 'terminal') {
-    const legacy = value.stage === null && value.targetRevision === 0
-      && isLegacyPinnedTrack(value.cleanup) && isLegacyPinnedTrack(value.review);
-    if ((!legacy && value.stage === null) || value.invocation || !value.terminalOutcome
+    if (value.stage === null || value.targetRevision < 1 || value.invocation || !value.terminalOutcome
       || !['blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(context.lifecycle)) {
       throw new Error('terminal direct review composite is invalid');
     }
     return;
   }
   if (value.terminalOutcome) throw new Error('non-terminal direct review has terminal projection');
-  if (value.status === 'legacy-bypass') {
-    if (value.stage !== null || value.targetRevision !== 0 || value.invocation
-      || !isLegacyPinnedTrack(value.cleanup) || !isLegacyPinnedTrack(value.review)
-      || !['checking', 'proving', 'publishing', 'review-ready'].includes(context.lifecycle)) {
-      throw new Error('legacy-bypass direct review composite is invalid');
-    }
-    return;
-  }
   if (value.stage === null || value.targetRevision < 1) throw new Error('active direct review requires a stage and revision');
-  const cleanupStage = value.stage.startsWith('cleanup-');
-  const selected = cleanupStage ? value.cleanup : value.review;
   if (value.status === 'active') {
     if (context.lifecycle !== 'implementing' && context.lifecycle !== 'safe-halt') throw new Error('active direct review lifecycle is invalid');
-    if (selected.disposition !== 'active') throw new Error('active direct review stage has no active track');
-    if (cleanupStage && value.review.disposition !== 'pending') throw new Error('cleanup stage requires pending code review');
-    if (!cleanupStage && !['clear', 'not-required'].includes(value.cleanup.disposition)) throw new Error('code review stage requires settled cleanup');
-    validateStageFields(value.stage, selected, value.invocation, value.repairFindings);
+    if (value.review.disposition !== 'active') throw new Error('active direct review stage has no active track');
+    validateStageFields(value.stage, value.review, value.invocation, value.repairFindings);
   } else {
     const proofSafeHalt = context.lifecycle === 'safe-halt' && context.process?.purpose === 'proof'
       && context.process.resumeLifecycle === 'proving' && context.process.resumeReviewStage === null;
     if ((!['checking', 'proving', 'publishing', 'review-ready'].includes(context.lifecycle) && !proofSafeHalt)
-      || value.invocation || !['clear', 'not-required'].includes(value.cleanup.disposition) || value.review.disposition !== 'clear') {
+      || value.invocation || value.review.disposition !== 'clear') {
       throw new Error('clear direct review composite is invalid');
     }
   }
   if (value.status === 'active' && context.lifecycle === 'safe-halt') {
-    const operation = cleanupStage ? 'cleanup-review' : 'code-review';
-    if (!context.process || context.process.purpose !== operation || context.process.resumeLifecycle !== 'implementing'
+    if (!context.process || context.process.purpose !== 'code-review' || context.process.resumeLifecycle !== 'implementing'
       || context.process.resumeReviewStage !== value.stage) throw new Error('safe-halt review stage/process mismatch');
   }
-}
-
-function isLegacyPinnedTrack(track: ReviewTrackV1): boolean {
-  return track.disposition === 'not-required'
-    && track.coverage.length === 1
-    && track.coverage[0] === 'not-required:legacy-pinned-generation';
 }
 
 function validateTerminalProjection(value: unknown, lifecycle: string): DirectReviewV1['terminalOutcome'] {
@@ -510,8 +456,7 @@ function validateStageFields(
     throw new Error('Closure review stage fields are invalid');
   }
   if (invocation) {
-    const operation = stage.startsWith('cleanup-') ? 'cleanup-review' : 'code-review';
-    if (invocation.operation !== operation || invocation.mode !== track.mode || invocation.reviewerSessionId !== track.reviewerSessionId) {
+    if (invocation.operation !== 'code-review' || invocation.mode !== track.mode || invocation.reviewerSessionId !== track.reviewerSessionId) {
       throw new Error('review invocation does not match active stage');
     }
   }
@@ -522,25 +467,15 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
     'version', 'disposition', 'profile', 'reviewerSessionId', 'mode', 'reportRepairs', 'transportRetries',
     'coverage', 'defects', 'affectedDefectIds', 'acceptedReportSha256',
   ], `direct review ${field} track`);
-  if (value.version !== 1 || !['pending', 'not-required', 'active', 'clear'].includes(value.disposition as string)
+  if (value.version !== 1 || !['active', 'clear'].includes(value.disposition as string)
     || !['simple', 'medium', 'high'].includes(value.profile as string)
     || !isBit(value.reportRepairs) || !isBit(value.transportRetries)) throw new Error(`direct review ${field} track is invalid`);
   if (value.reviewerSessionId !== null) assertText(value.reviewerSessionId, `${field} reviewer session ID`);
   if (value.mode !== null && value.mode !== 'full' && value.mode !== 'closure') throw new Error(`${field} review mode is invalid`);
   const coverage = sortedUniqueStrings(value.coverage, `${field} coverage`);
   const affectedDefectIds = sortedUniqueStrings(value.affectedDefectIds, `${field} affected defect IDs`);
-  const defects = targetRevision === 0
-    ? (Array.isArray(value.defects) && value.defects.length === 0 ? [] : (() => { throw new Error(`${field} legacy defects are invalid`); })())
-    : validateCodeReviewDefects(value.defects, targetRevision);
+  const defects = validateCodeReviewDefects(value.defects, targetRevision);
   if (value.acceptedReportSha256 !== null) assertSha256(value.acceptedReportSha256, `${field} accepted report hash`);
-  if (value.disposition === 'pending' && (value.reviewerSessionId !== null || value.mode !== null || value.acceptedReportSha256 !== null
-    || coverage.length !== 0 || defects.length !== 0 || affectedDefectIds.length !== 0 || value.reportRepairs !== 0 || value.transportRetries !== 0)) {
-    throw new Error(`${field} pending track has state`);
-  }
-  if (value.disposition === 'not-required' && (value.reviewerSessionId !== null || value.mode !== null || value.acceptedReportSha256 !== null
-    || defects.length !== 0 || affectedDefectIds.length !== 0 || coverage.length !== 1 || !coverage[0]!.startsWith('not-required:'))) {
-    throw new Error(`${field} not-required track is invalid`);
-  }
   if (value.disposition === 'active' && (value.reviewerSessionId === null || value.mode === null)) throw new Error(`${field} active track lacks identity`);
   if (value.disposition === 'clear' && (value.reviewerSessionId === null || value.mode === null || value.acceptedReportSha256 === null
     || affectedDefectIds.length !== 0 || coverage.length === 0 || defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
@@ -566,7 +501,7 @@ function validateInvocation(value: unknown): ReviewInvocationV1 {
     'closureRequestSha256', 'status', 'pid', 'processGroupId',
   ], 'review invocation');
   for (const field of ['attemptId', 'reviewerSessionId'] as const) assertText(value[field], `review invocation.${field}`);
-  if (value.operation !== 'cleanup-review' && value.operation !== 'code-review') throw new Error('review invocation operation is invalid');
+  if (value.operation !== 'code-review') throw new Error('review invocation operation is invalid');
   if (value.mode !== 'full' && value.mode !== 'closure') throw new Error('review invocation mode is invalid');
   if (!Number.isSafeInteger(value.targetRevision) || (value.targetRevision as number) < 1) throw new Error('review invocation target revision is invalid');
   assertSha256(value.targetFingerprint, 'review invocation target fingerprint');
@@ -586,7 +521,7 @@ function validateRepairFindings(value: unknown, targetRevision: number): DirectR
   const findings = value.map((finding, index) => {
     assertExactObject(finding, ['id', 'provenance', 'sourceId', 'targetRevision', 'summary', 'affectedContracts', 'status'], `repair finding[${index}]`);
     for (const field of ['id', 'sourceId', 'summary'] as const) assertText(finding[field], `repair finding.${field}`);
-    if (!['cleanup', 'code-review', 'check', 'proof'].includes(finding.provenance as string)
+    if (!['code-review', 'check', 'proof'].includes(finding.provenance as string)
       || !['open', 'fixed', 'verified', 'reopened'].includes(finding.status as string)
       || !Number.isSafeInteger(finding.targetRevision) || (finding.targetRevision as number) < 1
       || (finding.targetRevision as number) > targetRevision) throw new Error('repair finding fields are invalid');
@@ -599,20 +534,15 @@ function validateRepairFindings(value: unknown, targetRevision: number): DirectR
   return findings;
 }
 
-function pendingTrack(): ReviewTrackV1 {
-  return { version: 1, disposition: 'pending', profile: 'high', reviewerSessionId: null, mode: null, reportRepairs: 0, transportRetries: 0, coverage: [], defects: [], affectedDefectIds: [], acceptedReportSha256: null };
-}
-
 function activeTrack(reviewerSessionId: string, mode: ReviewMode): ReviewTrackV1 {
-  return { ...pendingTrack(), disposition: 'active', reviewerSessionId, mode };
-}
-
-function notRequiredTrack(reason: string): ReviewTrackV1 {
-  return { ...pendingTrack(), disposition: 'not-required', coverage: [`not-required:${reason}`] };
+  return {
+    version: 1, disposition: 'active', profile: 'high', reviewerSessionId, mode,
+    reportRepairs: 0, transportRetries: 0, coverage: [], defects: [], affectedDefectIds: [], acceptedReportSha256: null,
+  };
 }
 
 function isStage(value: unknown): value is DirectReviewStage {
-  return ['cleanup-full', 'cleanup-repair', 'cleanup-closure', 'review-full', 'review-repair', 'review-closure'].includes(value as string);
+  return ['review-full', 'review-repair', 'review-closure'].includes(value as string);
 }
 
 function isBit(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }

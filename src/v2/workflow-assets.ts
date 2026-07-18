@@ -15,38 +15,12 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import { publishImmutableWorkflow, type ImmutableWorkflowPublishStep } from './immutable-workflow-publisher.js';
 
-const GENERATION_MAGIC_V1 = 'codex-orchestrator-workflow-generation-v1\0';
-const SOURCE_MAGIC_V1 = 'codex-orchestrator-workflow-source-v1\0';
-const GENERATION_MAGIC_V2 = 'codex-orchestrator-workflow-generation-v2\0';
-const SOURCE_MAGIC_V2 = 'codex-orchestrator-workflow-source-v2\0';
+const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v2\0';
+const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
 const CONTENT_MAGIC = 'codex-orchestrator-sealed-content-v1\0';
 const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const EXPECTED_SKILLS_V1 = [
-  'acceptance-proof', 'agent-auto', 'cleanup-review', 'code-review', 'codebase-design', 'diagnosing-bugs',
-  'implementation-spec-maker', 'implementation-spec-review', 'research', 'small-task-implementer',
-  'spec-implementer', 'tdd', 'triage', 'ui-evidence-proof',
-];
-const EXPECTED_PROFILES_V1 = [
-  'analyst_deep', 'implementer_deep', 'implementer_standard', 'proof_agent', 'researcher_standard',
-  'reviewer_deep', 'reviewer_fast', 'reviewer_standard',
-];
-const EXPECTED_OPERATIONS_V1 = [
-  'acceptance-proof', 'ambiguity-review', 'cleanup-review', 'code-review', 'implementation',
-  'spec-author', 'spec-implementation', 'spec-review', 'triage',
-];
-const EXPECTED_OPERATION_BINDINGS_V1: Record<string, { sourceSkill: string | null; outputSchema: string; profile: string }> = {
-  'acceptance-proof': { sourceSkill: 'acceptance-proof', outputSchema: 'schemas/proof-report-v1.json', profile: 'proof_agent' },
-  'ambiguity-review': { sourceSkill: null, outputSchema: 'schemas/ambiguity-review-v1.json', profile: 'reviewer_deep' },
-  'cleanup-review': { sourceSkill: 'cleanup-review', outputSchema: 'schemas/code-review-v1.json', profile: 'reviewer_standard' },
-  'code-review': { sourceSkill: 'code-review', outputSchema: 'schemas/code-review-v1.json', profile: 'reviewer_deep' },
-  implementation: { sourceSkill: 'agent-auto', outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer_standard' },
-  'spec-author': { sourceSkill: 'implementation-spec-maker', outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer_standard' },
-  'spec-implementation': { sourceSkill: 'spec-implementer', outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer_standard' },
-  'spec-review': { sourceSkill: 'implementation-spec-review', outputSchema: 'schemas/spec-review-v1.json', profile: 'reviewer_deep' },
-  triage: { sourceSkill: 'triage', outputSchema: 'schemas/triage-route-v1.json', profile: 'analyst_deep' },
-};
-const EXPECTED_OPERATION_BINDINGS_V2: Record<string, {
+const EXPECTED_OPERATION_BINDINGS: Record<string, {
   sourceSkill: string | null; dependencySkills: string[]; outputSchema: string; profile: string;
 }> = {
   'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'proof_agent' },
@@ -81,7 +55,7 @@ export interface WorkflowOperationPolicy {
   externalWrite: false;
 }
 
-interface WorkflowOperationV1 {
+interface WorkflowOperation {
   id: string;
   entry: string;
   sourceSkill: string | null;
@@ -89,35 +63,20 @@ interface WorkflowOperationV1 {
   profile: string;
   policy: WorkflowOperationPolicy;
   files: string[];
-}
-
-interface WorkflowOperationV2 extends WorkflowOperationV1 {
   dependencySkills: string[];
   resources: string[];
 }
 
-export interface WorkflowManifestV1 {
-  version: 1;
-  sourceFingerprint: string;
-  generationHash: string;
-  files: WorkflowFileRecord[];
-  skills: Record<string, { entry: string; metadata: string; files: string[] }>;
-  profiles: Record<string, string>;
-  operations: Record<string, WorkflowOperationV1>;
-}
-
-export interface WorkflowManifestV2 {
+export interface WorkflowManifest {
   version: 2;
   sourceFingerprint: string;
   generationHash: string;
   files: WorkflowFileRecord[];
   skills: Record<string, { entry: string; metadata: string; files: string[] }>;
   profiles: Record<string, string>;
-  operations: Record<string, WorkflowOperationV2>;
+  operations: Record<string, WorkflowOperation>;
   evals: Record<string, { owner: string | null; path: string }>;
 }
-
-export type WorkflowManifest = WorkflowManifestV1 | WorkflowManifestV2;
 
 export interface LoadedPackageWorkflow {
   manifest: WorkflowManifest;
@@ -359,9 +318,9 @@ export async function verifyWorkflowGeneration(receipt: WorkflowGenerationReceip
 function verifyManifestIdentity(manifest: WorkflowManifest, manifestBytes: Buffer): void {
   const canonicalBytes = Buffer.from(`${canonicalJson(manifest)}\n`, 'utf8');
   if (!manifestBytes.equals(canonicalBytes)) throw new Error('workflow manifest bytes are not canonical');
-  const sourceFingerprint = sha(Buffer.from(`${manifest.version === 2 ? SOURCE_MAGIC_V2 : SOURCE_MAGIC_V1}${canonicalJson({ files: manifest.files })}`, 'utf8'));
+  const sourceFingerprint = sha(Buffer.from(`${SOURCE_MAGIC}${canonicalJson({ files: manifest.files })}`, 'utf8'));
   if (sourceFingerprint !== manifest.sourceFingerprint) throw new Error('workflow source fingerprint mismatch');
-  const generationHash = sha(Buffer.from(`${manifest.version === 2 ? GENERATION_MAGIC_V2 : GENERATION_MAGIC_V1}${canonicalJson({ ...manifest, generationHash: '' })}`, 'utf8'));
+  const generationHash = sha(Buffer.from(`${GENERATION_MAGIC}${canonicalJson({ ...manifest, generationHash: '' })}`, 'utf8'));
   if (generationHash !== manifest.generationHash) throw new Error('workflow generation hash mismatch');
 }
 
@@ -439,18 +398,15 @@ function parseReady(value: unknown): WorkflowReadyRecord {
 }
 
 function parseManifest(value: unknown): WorkflowManifest {
-  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) throw new Error('workflow manifest is invalid');
-  const version = value.version;
-  assertExact(value, version === 2
-    ? ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations', 'evals']
-    : ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations']);
+  if (!isRecord(value) || value.version !== 2) throw new Error('workflow manifest version is invalid');
+  assertExact(value, ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations', 'evals']);
   if (!SHA256.test(String(value.sourceFingerprint)) || !SHA256.test(String(value.generationHash))
     || !Array.isArray(value.files) || !isRecord(value.skills) || !isRecord(value.profiles) || !isRecord(value.operations)
-    || (version === 2 && !isRecord(value.evals))) throw new Error('workflow manifest is invalid');
+    || !isRecord(value.evals)) throw new Error('workflow manifest is invalid');
   const skills = value.skills as Record<string, any>;
   const profiles = value.profiles as Record<string, any>;
   const operations = value.operations as Record<string, any>;
-  const evals = version === 2 ? value.evals as Record<string, any> : {};
+  const evals = value.evals as Record<string, any>;
   let previous = '';
   const physical = new Set<string>();
   for (const file of value.files) {
@@ -461,8 +417,7 @@ function parseManifest(value: unknown): WorkflowManifest {
     previous = file.path;
     physical.add(file.path);
   }
-  if (version === 1) assertRecordKeys(skills, EXPECTED_SKILLS_V1, 'workflow skills');
-  else if (Object.keys(skills).length === 0) throw new Error('workflow skills inventory is invalid');
+  if (Object.keys(skills).length === 0) throw new Error('workflow skills inventory is invalid');
   for (const [id, skill] of Object.entries(skills)) {
     assertExact(skill, ['entry', 'metadata', 'files']);
     if (typeof skill.entry !== 'string' || typeof skill.metadata !== 'string' || !Array.isArray(skill.files)) {
@@ -474,19 +429,16 @@ function parseManifest(value: unknown): WorkflowManifest {
       throw new Error(`workflow skill authority is invalid: ${id}`);
     }
   }
-  if (version === 1) assertRecordKeys(profiles, EXPECTED_PROFILES_V1, 'workflow profiles');
-  else if (Object.keys(profiles).length === 0) throw new Error('workflow profiles inventory is invalid');
+  if (Object.keys(profiles).length === 0) throw new Error('workflow profiles inventory is invalid');
   for (const [id, path] of Object.entries(profiles)) {
     if (typeof path !== 'string' || normalizePath(path) !== path || path !== `profiles/${id}.toml` || !physical.has(path)) {
       throw new Error(`workflow profile is invalid: ${id}`);
     }
   }
-  const bindings = version === 2 ? EXPECTED_OPERATION_BINDINGS_V2 : EXPECTED_OPERATION_BINDINGS_V1;
-  assertRecordKeys(operations, version === 2 ? Object.keys(bindings) : EXPECTED_OPERATIONS_V1, 'workflow operations');
+  const bindings = EXPECTED_OPERATION_BINDINGS;
+  assertRecordKeys(operations, Object.keys(bindings), 'workflow operations');
   for (const [id, operation] of Object.entries(operations)) {
-    assertExact(operation, version === 2
-      ? ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy', 'files']
-      : ['id', 'entry', 'sourceSkill', 'outputSchema', 'profile', 'policy', 'files']);
+    assertExact(operation, ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy', 'files']);
     if (operation.id !== id || typeof operation.entry !== 'string' || operation.entry !== `operations/${id}/SKILL.md`
       || !(operation.sourceSkill === null || typeof operation.sourceSkill === 'string')
       || typeof operation.outputSchema !== 'string' || typeof operation.profile !== 'string'
@@ -497,16 +449,12 @@ function parseManifest(value: unknown): WorkflowManifest {
       throw new Error(`workflow operation source skill is invalid: ${id}`);
     }
     const binding = bindings[id]!;
-    let dependencySkills: string[] = [];
-    let resources: string[] = [];
-    if (version === 2) {
-      validateSortedStrings(operation.dependencySkills, `workflow operation dependency skills: ${id}`);
-      validateSortedStrings(operation.resources, `workflow operation resources: ${id}`);
-      dependencySkills = operation.dependencySkills;
-      resources = operation.resources;
-      if (!same(dependencySkills, (binding as typeof EXPECTED_OPERATION_BINDINGS_V2[string]).dependencySkills)) {
-        throw new Error(`workflow operation dependency binding is invalid: ${id}`);
-      }
+    validateSortedStrings(operation.dependencySkills, `workflow operation dependency skills: ${id}`);
+    validateSortedStrings(operation.resources, `workflow operation resources: ${id}`);
+    const dependencySkills = operation.dependencySkills;
+    const resources = operation.resources;
+    if (!same(dependencySkills, binding.dependencySkills)) {
+      throw new Error(`workflow operation dependency binding is invalid: ${id}`);
     }
     if (operation.sourceSkill !== binding.sourceSkill || operation.outputSchema !== binding.outputSchema || operation.profile !== binding.profile) {
       throw new Error(`workflow operation binding is invalid: ${id}`);
@@ -528,28 +476,25 @@ function parseManifest(value: unknown): WorkflowManifest {
       ...dependencySkills.flatMap((skill) => skills[skill]!.files),
     ].sort(compareUtf8);
     if (!same(operation.files, [...new Set(required)].sort(compareUtf8))) throw new Error(`workflow operation closure is invalid: ${id}`);
-    if (version === 2 && operation.files.some((path) => path.includes('/evals/'))) {
+    if (operation.files.some((path) => path.includes('/evals/'))) {
       throw new Error(`workflow operation eval isolation is invalid: ${id}`);
     }
     validateOperationPolicy(id, operation.policy);
   }
-  if (version === 2) {
-    const evalPaths = new Set<string>();
-    for (const [id, entry] of Object.entries(evals)) {
-      assertExact(entry, ['owner', 'path']);
-      if (!id || !(entry.owner === null || (typeof entry.owner === 'string' && entry.owner in skills))
-        || typeof entry.path !== 'string' || !physical.has(entry.path) || evalPaths.has(entry.path)) {
-        throw new Error(`workflow eval binding is invalid: ${id}`);
-      }
-      evalPaths.add(entry.path);
+  const evalPaths = new Set<string>();
+  for (const [id, entry] of Object.entries(evals)) {
+    assertExact(entry, ['owner', 'path']);
+    if (!id || !(entry.owner === null || (typeof entry.owner === 'string' && entry.owner in skills))
+      || typeof entry.path !== 'string' || !physical.has(entry.path) || evalPaths.has(entry.path)) {
+      throw new Error(`workflow eval binding is invalid: ${id}`);
     }
-    if (evalPaths.size === 0) throw new Error('workflow eval inventory is empty');
+    evalPaths.add(entry.path);
   }
+  if (evalPaths.size === 0) throw new Error('workflow eval inventory is empty');
   return value as unknown as WorkflowManifest;
 }
 
 function verifyEvalBytes(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
-  if (manifest.version !== 2) return;
   const caseIds = new Set<string>();
   for (const [id, entry] of Object.entries(manifest.evals)) {
     const bytes = bytesByPath.get(entry.path);
@@ -569,7 +514,6 @@ function verifyEvalBytes(manifest: WorkflowManifest, bytesByPath: Map<string, Bu
 }
 
 function verifyOperationEntryBindings(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
-  if (manifest.version !== 2) return;
   for (const [id, operation] of Object.entries(manifest.operations)) {
     const entryBytes = bytesByPath.get(operation.entry);
     if (!entryBytes) throw new Error(`workflow operation entry bytes are missing: ${id}`);
@@ -611,7 +555,7 @@ function validateOperationPolicy(id: string, value: Record<string, unknown>): vo
   if (value.network !== 'deny' || !Array.isArray(value.networkHosts) || value.networkHosts.length !== 0
     || !Array.isArray(value.mcpTools) || value.mcpTools.length !== 0 || value.approvalCeiling !== 'never'
     || value.externalWrite !== false) throw new Error(`workflow operation authority is invalid: ${id}`);
-  const expected = id === 'implementation' || id === 'spec-implementation'
+  const expected = id === 'implementation'
     ? ['workspace-write', 'worktree', 'write', 'worktree', 'change-set']
     : id === 'acceptance-proof'
       ? ['workspace-write', 'worktree', 'write', 'worktree', 'proof-only']

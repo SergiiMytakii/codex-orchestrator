@@ -1,4 +1,4 @@
-export const CANDIDATE_COMMANDS = ['setup', 'doctor', 'status', 'run', 'daemon'] as const;
+export const PUBLIC_COMMANDS = ['setup', 'doctor', 'status', 'run', 'daemon'] as const;
 
 export const RUN_ISSUE_STATUSES = [
   'review-ready',
@@ -10,11 +10,10 @@ export const RUN_ISSUE_STATUSES = [
   'transport-failed',
   'cancelled',
   'internal-error',
-  'migration-required',
   'requeued',
 ] as const;
 
-export type CandidateCommand = typeof CANDIDATE_COMMANDS[number];
+export type PublicCommand = typeof PUBLIC_COMMANDS[number];
 export type RunIssueStatus = typeof RUN_ISSUE_STATUSES[number];
 
 export function runIssueExitCode(result: RunIssueResult): 0 | 20 | 21 | 70 | 130 {
@@ -24,7 +23,6 @@ export function runIssueExitCode(result: RunIssueResult): 0 | 20 | 21 | 70 | 130
     case 'spec-frozen': return 0;
     case 'awaiting-user': return 0;
     case 'blocked': return 20;
-    case 'migration-required': return 20;
     case 'requeued': return 0;
     case 'not-eligible': return 21;
     case 'transport-failed':

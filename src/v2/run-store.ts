@@ -100,9 +100,9 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
-    purpose?: 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof' | 'spec-author' | 'spec-review';
-    resumeLifecycle?: Lifecycle;
-    resumeReviewStage?: DirectReviewStage | null;
+    purpose: 'route' | 'implementation' | 'code-review' | 'proof' | 'spec-author' | 'spec-review';
+    resumeLifecycle: Lifecycle;
+    resumeReviewStage: DirectReviewStage | null;
   };
   checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
   checkedChangeSha256?: string;
@@ -136,10 +136,10 @@ export class WorkflowGenerationUnrecoverableError extends Error {
   }
 }
 
-export class RouteMigrationUnrecoverableError extends Error {
+export class RouteInitializationUnrecoverableError extends Error {
   constructor() {
-    super('route-migration-unrecoverable');
-    this.name = 'RouteMigrationUnrecoverableError';
+    super('route-initialization-unrecoverable');
+    this.name = 'RouteInitializationUnrecoverableError';
   }
 }
 
@@ -208,7 +208,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'intent',
     'outcomeEvidenceId',
     'terminalOutcome',
-    'workflowGeneration',
     'routeExecution',
     'routeReceipt',
     'waitingHuman',
@@ -218,7 +217,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
     'reportRepairs', 'transportRetries', 'issueSnapshot', 'frozenCriteria', 'reworkFindings',
-    'packageVersion', 'skillHashes', 'checks', 'createdAt', 'updatedAt', ...optional,
+    'packageVersion', 'workflowGeneration', 'skillHashes', 'checks', 'createdAt', 'updatedAt', ...optional,
   ], field);
   if (typeof value.runId !== 'string' || !UUID_V4_PATTERN.test(value.runId)) throw new Error(`${field}.runId is invalid`);
   assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -238,16 +237,12 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
   validateStringList(value.reworkFindings, `${field}.reworkFindings`);
   assertNonEmptyString(value.packageVersion, `${field}.packageVersion`);
-  if (hasOwn(value, 'workflowGeneration')) {
-    const workflowGeneration = value.workflowGeneration;
-    validateWorkflowGeneration(workflowGeneration, `${field}.workflowGeneration`);
-    if (workflowGeneration.packageVersion !== value.packageVersion) {
-      throw new Error(`${field}.workflowGeneration package version mismatch`);
-    }
+  const workflowGeneration = value.workflowGeneration;
+  validateWorkflowGeneration(workflowGeneration, `${field}.workflowGeneration`);
+  if (workflowGeneration.packageVersion !== value.packageVersion) {
+    throw new Error(`${field}.workflowGeneration package version mismatch`);
   }
-  const routeGenerationHash = hasOwn(value, 'workflowGeneration')
-    ? (value.workflowGeneration as unknown as WorkflowGenerationReceipt).generationHash
-    : undefined;
+  const routeGenerationHash = workflowGeneration.generationHash;
   if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
   if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
@@ -278,7 +273,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       : undefined;
     const process = rawProcess && !['spec-author', 'spec-review'].includes(rawProcess.purpose)
       ? {
-        purpose: rawProcess.purpose as 'route' | 'implementation' | 'cleanup-review' | 'code-review' | 'proof',
+        purpose: rawProcess.purpose as 'route' | 'implementation' | 'code-review' | 'proof',
         resumeLifecycle: rawProcess.resumeLifecycle,
         resumeReviewStage: rawProcess.resumeReviewStage,
       }
@@ -307,7 +302,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
   const terminal = ['review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(value.lifecycle);
-  if (!terminal && !hasOwn(value, 'workflowGeneration')) throw new WorkflowGenerationUnrecoverableError();
   if (terminal !== hasOwn(value, 'terminalOutcome')) throw new Error(`${field} terminal lifecycle requires terminalOutcome`);
   if (terminal && (value.terminalOutcome as RunTerminalOutcome).status !== value.lifecycle) throw new Error(`${field} terminalOutcome does not match lifecycle`);
   if (value.lifecycle === 'proving' && (!hasOwn(value, 'checkedChangeSha256') || !hasOwn(value, 'proofId') || value.checks.some((check) => check.status !== 'passed'))) {
@@ -325,15 +319,12 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} resumable transport failure cannot retain intent`);
   }
   if (value.lifecycle === 'waiting-human' && !hasOwn(value, 'waitingHuman')) throw new Error(`${field} waiting-human lifecycle requires waitingHuman execution`);
-  if (hasOwn(value, 'routeExecution') || hasOwn(value, 'routeReceipt') || value.lifecycle === 'triaging' || value.lifecycle === 'routed') {
-    if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
-    validateRouteStateInvariant({
-      lifecycle: value.lifecycle,
-      routeExecution: value.routeExecution,
-      routeReceipt: value.routeReceipt,
-      generationHash: routeGenerationHash,
-    });
-  }
+  validateRouteStateInvariant({
+    lifecycle: value.lifecycle,
+    routeExecution: value.routeExecution,
+    routeReceipt: value.routeReceipt,
+    generationHash: routeGenerationHash,
+  });
 }
 
 function directTerminalOutcome(outcome: RunTerminalOutcome): DirectReviewV1['terminalOutcome'] | undefined {
@@ -357,10 +348,8 @@ function validateWorkflowGeneration(value: unknown, field: string): asserts valu
 }
 
 function validateProcess(value: unknown, field: string): void {
-  const extended = hasOwn(value, 'purpose') || hasOwn(value, 'resumeLifecycle') || hasOwn(value, 'resumeReviewStage');
   assertExactObject(value, [
-    'pid', 'processGroupId', 'startedAt', 'baseline',
-    ...(extended ? ['purpose', 'resumeLifecycle', 'resumeReviewStage'] : []),
+    'pid', 'processGroupId', 'startedAt', 'baseline', 'purpose', 'resumeLifecycle', 'resumeReviewStage',
   ], field);
   assertPositiveInteger(value.pid, `${field}.pid`);
   assertPositiveInteger(value.processGroupId, `${field}.processGroupId`);
@@ -373,15 +362,13 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (extended) {
-    if (!['route', 'implementation', 'cleanup-review', 'code-review', 'proof', 'spec-author', 'spec-review'].includes(value.purpose as string)) {
-      throw new Error(`${field}.purpose is invalid`);
-    }
-    if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
-    if (value.resumeReviewStage !== null && ![
-      'cleanup-full', 'cleanup-repair', 'cleanup-closure', 'review-full', 'review-repair', 'review-closure',
-    ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
+  if (!['route', 'implementation', 'code-review', 'proof', 'spec-author', 'spec-review'].includes(value.purpose as string)) {
+    throw new Error(`${field}.purpose is invalid`);
   }
+  if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
+  if (value.resumeReviewStage !== null && ![
+    'review-full', 'review-repair', 'review-closure',
+  ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
 }
 
 function validateChecks(value: unknown, field: string): asserts value is RunRecordV1['checks'] {

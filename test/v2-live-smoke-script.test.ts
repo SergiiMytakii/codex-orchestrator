@@ -60,17 +60,6 @@ test('live smoke rejects unknown profile before package or GitHub work', async (
   assert.doesNotMatch(result.stdout, /npm pack|scenario/u);
 });
 
-test('removed plan-tree-risk scenarios are absent from registry and profiles', async () => {
-  const text = await source();
-  const registry = text.slice(text.indexOf('const scenarioDefinitions'), text.indexOf('async function main'));
-  for (const removed of ['risk-routing', 'plan-auto', 'run-plan-auto', 'plan-auto-blocking', 'tree-child-quality-rework', 'plan-auto-tree-recovery']) {
-    assert.doesNotMatch(registry, new RegExp(removed, 'u'));
-  }
-  for (const legacyContract of ['allowAgentLocalCommits', 'freshContextReview', 'policySuggestions', 'plan-child', 'tree-child', 'run-plan-auto']) {
-    assert.doesNotMatch(text, new RegExp(legacyContract, 'u'));
-  }
-});
-
 test('generated fake agent emits exact V2 implementation, code-review, and proof reports without GitHub work', async () => {
   const result = await runLiveSmoke(['--self-test-fake-agent']);
   assert.equal(result.status, 0, result.stderr);
@@ -86,7 +75,7 @@ test('mobile-proof is explicit and non-skippable', async () => {
 
 test('packed smoke resolves the public V2 CLI', async () => {
   const text = await source();
-  assert.match(text, /dist['"], 'src', 'v2', 'candidate-cli\.js'/u);
+  assert.match(text, /dist['"], 'src', 'v2', 'cli\.js'/u);
   assert.doesNotMatch(text, /const cliPath = join\(packageRoot, 'package', 'dist', 'src', 'cli\.js'\)/u);
 });
 

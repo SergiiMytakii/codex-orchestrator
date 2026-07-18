@@ -1,6 +1,0 @@
-interface:
-  display_name: "Codebase Design"
-  short_description: "Reference vocabulary for deep-module decisions"
-  default_prompt: "Use $codebase-design inside the current workflow as a bounded reference to evaluate this named Module Interface or Seam; keep the active driver in control and do not start a broader workflow."
-policy:
-  allow_implicit_invocation: true

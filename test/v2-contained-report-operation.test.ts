@@ -113,10 +113,8 @@ test('implementation reviewer persists prepared and launched identity before acc
 });
 
 test('implementation reviewer rejects missing launch persistence and stale correlation', async () => {
-  const fixture = operationFixture('cleanup-review', Buffer.from(JSON.stringify({
-    report: { ...codeReviewArtifact, operation: 'cleanup-review' },
-  })));
-  const missingGate = await fixture.operation.run(runInput('cleanup-review'));
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const missingGate = await fixture.operation.run(runInput('code-review'));
   assert.deepEqual(missingGate, {
     status: 'blocked', kind: 'safety', code: 'review-operation-launch-gate-missing',
   });
@@ -223,7 +221,7 @@ test('launcher blocks a completed report when any before/after worktree fingerpr
   });
 });
 
-function runInput(operation: 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review') {
+function runInput(operation: 'triage' | 'ambiguity-review' | 'code-review') {
   return {
     operation,
     attemptId: 'attempt-1',
@@ -236,7 +234,7 @@ function runInput(operation: 'triage' | 'ambiguity-review' | 'cleanup-review' | 
 }
 
 function operationFixture(
-  operation: 'triage' | 'ambiguity-review' | 'cleanup-review' | 'code-review',
+  operation: 'triage' | 'ambiguity-review' | 'code-review',
   reportBytes: Buffer,
   options: {
     prepared?: PreparedContainedReportAttempt;

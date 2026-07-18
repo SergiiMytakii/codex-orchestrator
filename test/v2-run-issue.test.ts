@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 
 import type { CheckedChange, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
-import type { AgentAutoConfigV1 } from '../src/v2/config.js';
+import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { ProofQuiescenceError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
@@ -260,20 +260,8 @@ test('malformed config and run state return typed internal error before claim ef
   assert.equal(invalidState.events.includes('effect:claim-labels'), false);
 });
 
-test('baseline active V1 migration returns dedicated workflow generation evidence', async () => {
-  const fixture = await runFixture({ storeReadError: new WorkflowGenerationUnrecoverableError() });
-  let evidenceCode = '';
-  const write = fixture.dependencies.writeEvidence;
-  fixture.dependencies.writeEvidence = async (input) => {
-    evidenceCode = input.code;
-    return write(input);
-  };
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
-  assert.equal(evidenceCode, 'workflow-generation-unrecoverable');
-  assert.equal(fixture.events.includes('implementation'), false);
-});
 
-test('claimed migration verifies the pinned workflow generation before triage', async () => {
+test('claimed initialization verifies the pinned workflow generation before triage', async () => {
   const fixture = await runFixture({ workflowVerificationReject: true });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
@@ -293,7 +281,7 @@ test('triage receives persisted issue comments and authorization is rechecked af
   assert.equal(revoked.events.includes('agent'), false);
 });
 
-test('claimed migration refreshes comments that arrived before restart', async () => {
+test('claimed initialization refreshes comments that arrived before restart', async () => {
   const options: FixtureOptions = { rejectEffect: 'claim-comment' };
   const fixture = await runFixture(options);
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
@@ -691,7 +679,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const dependencies: RunIssueDependencies = {
     readConfig: async () => ({
       bytes: configBytes,
-      config: options.invalidConfig ? { ...config, unknown: true } as AgentAutoConfigV1 : config,
+      config: options.invalidConfig ? { ...config, unknown: true } as AgentAutoConfig : config,
     }),
     validateContainment: async () => { events.push('containment'); },
     ownerLock: {
@@ -1060,7 +1048,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   };
 }
 
-function configFixture(): AgentAutoConfigV1 {
+function configFixture(): AgentAutoConfig {
   const label = (name: string) => ({ name, color: 'ededed', description: `${name} label` });
   return {
     schema: 'codex-orchestrator.agent-auto',

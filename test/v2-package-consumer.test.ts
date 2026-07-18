@@ -64,9 +64,9 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('dist/src/v2/code-review-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
-      'acceptance-proof', 'atomic-store', 'candidate-cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
+      'acceptance-proof', 'atomic-store', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
       'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
-      'legacy-cutover', 'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+      'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
       'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'waiting-human', 'waiting-human-coordinator', 'workflow-assets',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
@@ -125,7 +125,7 @@ async function assertInstalledContract(installed: string, agentText: string): Pr
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
-  assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/v2/candidate-cli.js' });
+  assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/v2/cli.js' });
   assert.equal(installedPackage.scripts?.postinstall, undefined);
   assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), new RegExp(agentText, 'u'));
   assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'acceptance-proof', 'SKILL.md'), 'utf8'), /Independently prove/u);

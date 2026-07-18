@@ -162,7 +162,7 @@ async function preparePackagedCandidate(context) {
     await runCommand('npm', ['run', 'typecheck', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
     await runCommand('npm', ['run', 'build', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
     await runCommand(process.execPath, [
-      'dist/test/v2-candidate-cli.test.js', 'dist/test/v2-package-consumer.test.js', 'dist/test/v2-live-smoke-script.test.js',
+      'dist/test/v2-cli.test.js', 'dist/test/v2-package-consumer.test.js', 'dist/test/v2-live-smoke-script.test.js',
     ], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
   }
   const packed = await runCommand('npm', ['pack', '--json'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
@@ -173,7 +173,7 @@ async function preparePackagedCandidate(context) {
   await mkdir(extracted, { recursive: true });
   await runCommand('tar', ['-xzf', tarball, '-C', extracted], { timeoutMs: context.options.timeoutMs });
   if (!context.options.keepPackageTarball) await rm(tarball, { force: true });
-  const cliPath = join(extracted, 'package', 'dist', 'src', 'v2', 'candidate-cli.js');
+  const cliPath = join(extracted, 'package', 'dist', 'src', 'v2', 'cli.js');
   await readFile(cliPath);
   const help = await runCommand(process.execPath, [cliPath, '--help'], { timeoutMs: context.options.timeoutMs });
   if (!help.stdout.startsWith('codex-orchestrator\n')) throw new Error('packed CLI help is not public V2');
@@ -230,7 +230,7 @@ async function runPackageInstallScenario(context, scenario) {
   await writeFile(join(external, 'package.json'), '{"private":true,"type":"module"}\n');
   const packageRoot = resolve(dirname(context.cliPath), '../../..');
   await runCommand('npm', ['install', packageRoot, '--ignore-scripts'], { cwd: external, timeoutMs: context.options.timeoutMs });
-  await readFile(join(external, 'node_modules', 'codex-orchestrator', 'dist', 'src', 'v2', 'candidate-cli.js'));
+  await readFile(join(external, 'node_modules', 'codex-orchestrator', 'dist', 'src', 'v2', 'cli.js'));
   await runReviewReadyScenario(context, scenario);
 }
 
@@ -329,11 +329,11 @@ async function requireTypedSetup(context, args) {
 
 function parseExactEnvelope(stdout, schema) {
   let value;
-  try { value = JSON.parse(stdout); } catch { throw new Error(`candidate returned non-JSON output for ${schema}`); }
+  try { value = JSON.parse(stdout); } catch { throw new Error(`package returned non-JSON output for ${schema}`); }
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join(',') !== 'result,schema,version'
     || value.schema !== schema || value.version !== 1 || !value.result || typeof value.result !== 'object') {
-    throw new Error(`candidate returned an invalid ${schema} envelope`);
+    throw new Error(`package returned an invalid ${schema} envelope`);
   }
   return value;
 }

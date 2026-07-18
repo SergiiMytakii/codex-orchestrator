@@ -3,7 +3,6 @@
   "personalSkills": [
     "code-debugger",
     "code-review",
-    "codebase-design",
     "diagnosing-bugs",
     "implementation-spec-maker",
     "implementation-spec-review",
@@ -24,11 +23,8 @@
   "sharedEvals": ["coding-skill-evals.json"],
   "profiles": {
     "analyst_deep": "analyst-deep.toml",
-    "implementer_deep": "implementer-deep.toml",
     "implementer_standard": "implementer-standard.toml",
-    "researcher_standard": "researcher-standard.toml",
     "reviewer_deep": "reviewer-deep.toml",
-    "reviewer_fast": "reviewer-fast.toml",
     "reviewer_standard": "reviewer-standard.toml"
   },
   "overlayRoot": "scripts/runtime-workflow-overlays",

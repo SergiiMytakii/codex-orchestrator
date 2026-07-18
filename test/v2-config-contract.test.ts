@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { parseAgentAutoConfig, type AgentAutoConfigV1 } from '../src/v2/config.js';
-import { CANDIDATE_COMMANDS, RUN_ISSUE_STATUSES, renderRunResultJson, runIssueExitCode } from '../src/v2/cli-contract.js';
+import { parseAgentAutoConfig, type AgentAutoConfig } from '../src/v2/config.js';
+import { PUBLIC_COMMANDS, RUN_ISSUE_STATUSES, renderRunResultJson, runIssueExitCode } from '../src/v2/cli-contract.js';
 import type { RunIssueResult } from '../src/v2/run-issue.js';
 
-function validConfig(): AgentAutoConfigV1 {
+function validConfig(): AgentAutoConfig {
   return {
     schema: 'codex-orchestrator.agent-auto',
     version: 2,
@@ -51,7 +51,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   const parsed = parseAgentAutoConfig(validConfig());
 
   assert.deepEqual(parsed, validConfig());
-  assert.deepEqual(CANDIDATE_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
+  assert.deepEqual(PUBLIC_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
     'route-ready',
@@ -62,7 +62,6 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
     'transport-failed',
     'cancelled',
     'internal-error',
-    'migration-required',
     'requeued',
   ]);
   assert.deepEqual(Object.values(parsed.github.labels).map((label) => label.name), [
@@ -74,20 +73,10 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   ]);
 });
 
-test('V2 rejects Legacy, experimental, removed label, and unknown nested surfaces', () => {
+test('V2 rejects unknown configuration surfaces', () => {
   const rejected = [
-    { ...validConfig(), schema: 'codex-orchestrator' },
-    { ...validConfig(), schema: 'codex-orchestrator.skill-runtime-v2' },
-    { ...validConfig(), workflows: {} },
-    { ...validConfig(), auth: { mode: 'package' } },
-    { ...validConfig(), skillRuntime: { version: 2 } },
-    {
-      ...validConfig(),
-      github: {
-        ...validConfig().github,
-        labels: { ...validConfig().github.labels, planAuto: { name: 'plan:auto', color: 'fff', description: 'removed' } },
-      },
-    },
+    { ...validConfig(), schema: 'codex-orchestrator.invalid' },
+    { ...validConfig(), unknown: {} },
     { ...validConfig(), runner: { ...validConfig().runner, profile: 'deep' } },
   ];
 
@@ -117,7 +106,7 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
 });
 
-test('candidate CLI JSON and exit mapping are total over every public runIssue outcome', () => {
+test('CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
     { result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence/route.json' }, exit: 0 },
@@ -134,7 +123,6 @@ test('candidate CLI JSON and exit mapping are total over every public runIssue o
     { result: { status: 'transport-failed', resumable: true, evidencePath: 'evidence/6.json' }, exit: 70 },
     { result: { status: 'internal-error', evidencePath: 'evidence/7.json' }, exit: 70 },
     { result: { status: 'cancelled', evidencePath: 'evidence/8.json' }, exit: 130 },
-    { result: { status: 'migration-required', fromVersion: 1, requiredAction: 'setup --target /repo' }, exit: 20 },
     { result: { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence/requeue.json' }, exit: 0 },
   ];
   for (const entry of cases) {

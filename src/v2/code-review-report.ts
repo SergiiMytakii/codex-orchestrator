@@ -7,7 +7,7 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_ITEMS = 256;
 const MAX_TEXT = 16 * 1024;
 
-export type ReviewOperation = 'cleanup-review' | 'code-review';
+export type ReviewOperation = 'code-review';
 export type ReviewMode = 'full' | 'closure';
 export type ReviewVerdict = 'approved' | 'needs-work' | 'rejected';
 export type ReviewClass = 'blocker' | 'execution-risk' | 'improvement';
@@ -184,7 +184,7 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
     ],
     properties: {
       version: { type: 'integer', const: 1 },
-      operation: { type: 'string', enum: ['cleanup-review', 'code-review'] },
+      operation: { type: 'string', const: 'code-review' },
       targetRevision: { type: 'integer', minimum: 1 },
       targetFingerprint: { type: 'string', pattern: '^[0-9a-f]{64}$' },
       verdict: { type: 'string', enum: ['approved', 'needs-work', 'rejected'] },
@@ -273,7 +273,7 @@ function sortedUniqueStrings(value: unknown, field: string): string[] {
 }
 
 function assertOperation(value: unknown): asserts value is ReviewOperation {
-  if (value !== 'cleanup-review' && value !== 'code-review') throw new Error('review operation is invalid');
+  if (value !== 'code-review') throw new Error('review operation is invalid');
 }
 
 function assertPositiveInteger(value: unknown, field: string): asserts value is number {

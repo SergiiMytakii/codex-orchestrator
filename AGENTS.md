@@ -12,7 +12,6 @@ policy own TDD, review order, commit behavior, and response style.
   `docs/adr/0001-runner-owned-loop-policy.md`.
 - Issues, triage, and domain language: `docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and `CONTEXT.md`.
-- Optional recurring lessons: `docs/agents/memory/README.md`.
 - Live-smoke scenarios and release history: `docs/live-smoke-checklist.md` and
   `CHANGELOG.md`.
 

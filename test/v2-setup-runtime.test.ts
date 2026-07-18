@@ -33,33 +33,3 @@ test('production Setup composition derives canonical GitHub origin and owns dura
     assert.deepEqual(await setup.execute({ targetRoot, operation: 'configure', dryRun: false }), { status: 'unchanged' });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-
-test('production Setup observes the same owner-control fence as live runs', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-setup-owner-'));
-  const targetRoot = join(root, 'target');
-  const home = join(root, 'home');
-  try {
-    await execFileAsync('git', ['init', '-q', '-b', 'main', targetRoot]);
-    await writeFile(join(targetRoot, 'package.json'), '{"private":true}\n');
-    await execFileAsync('git', ['-C', targetRoot, 'add', 'package.json']);
-    await execFileAsync('git', ['-C', targetRoot, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
-    await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', 'git@github.com:owner/repo.git']);
-    await execFileAsync('git', ['-C', targetRoot, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
-    await execFileAsync('git', ['-C', targetRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main']);
-    const setup = createProductionSetup({ orchestratorHome: home, bootId: 'boot-fixture' });
-    assert.equal((await setup.execute({ targetRoot, operation: 'configure', dryRun: false })).status, 'created');
-    const configPath = join(targetRoot, '.codex-orchestrator', 'config.json');
-    const config = JSON.parse(await readFile(configPath, 'utf8'));
-    config.version = 1;
-    delete config.github.labels.waitingHuman;
-    await writeFile(configPath, `${JSON.stringify(config)}\n`);
-    const live = await acquireOwnerControlLock({
-      orchestratorHome: home, canonicalRepository: 'owner/repo', bootId: 'boot-fixture', host: (await import('node:os')).hostname(),
-      pid: process.pid, now: () => new Date().toISOString(), createToken: () => 'live-token', processAlive: () => true,
-    });
-    try {
-      assert.equal((await createProductionSetup({ orchestratorHome: home, bootId: 'boot-fixture' })
-        .execute({ targetRoot, operation: 'configure', dryRun: false })).status, 'blocked-active');
-    } finally { await live.release(); }
-  } finally { await rm(root, { recursive: true, force: true }); }
-});

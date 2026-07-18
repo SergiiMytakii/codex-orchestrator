@@ -13,7 +13,7 @@
     }
   },
   "bin": {
-    "codex-orchestrator": "dist/src/v2/candidate-cli.js"
+    "codex-orchestrator": "dist/src/v2/cli.js"
   },
   "files": [
     "dist/src",
@@ -31,10 +31,10 @@
     "url": "git+https://github.com/SergiiMytakii/codex-orchestrator.git"
   },
   "scripts": {
-    "orchestrator:doctor": "npm run build --silent && node dist/src/v2/candidate-cli.js doctor --target \"$PWD\"",
-    "orchestrator:status": "npm run build --silent && node dist/src/v2/candidate-cli.js status --target \"$PWD\"",
-    "orchestrator:daemon": "npm run build --silent && node dist/src/v2/candidate-cli.js daemon --target \"$PWD\"",
-    "orchestrator:daemon:once": "npm run build --silent && node dist/src/v2/candidate-cli.js daemon --target \"$PWD\" --once",
+    "orchestrator:doctor": "npm run build --silent && node dist/src/v2/cli.js doctor --target \"$PWD\"",
+    "orchestrator:status": "npm run build --silent && node dist/src/v2/cli.js status --target \"$PWD\"",
+    "orchestrator:daemon": "npm run build --silent && node dist/src/v2/cli.js daemon --target \"$PWD\"",
+    "orchestrator:daemon:once": "npm run build --silent && node dist/src/v2/cli.js daemon --target \"$PWD\" --once",
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
     "build": "npm run clean --silent && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
