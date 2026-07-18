@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import {
@@ -198,6 +199,11 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
   );
   assert.throws(() => unwrapAgentReportEnvelope(completedImplementation), /report envelope/u);
   assert.throws(() => unwrapAgentReportEnvelope({ report: completedImplementation, extra: true }), /report envelope/u);
+});
+
+test('checked-in proof workflow schema matches its TypeScript owner', async () => {
+  const checkedIn = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/proof-report-v1.json', 'utf8'));
+  assert.deepEqual(checkedIn, proofReportOutputSchema());
 });
 
 test('contained adapters preserve malformed report bytes for owner-level validation and repair', () => {
