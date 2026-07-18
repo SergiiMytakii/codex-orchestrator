@@ -11,7 +11,7 @@
 
 ## Change routing
 
-- Behavior-changing TypeScript: use TDD, then `npm run typecheck` and `npm test`.
+- Apply the global TDD Fit Gate in `${CODEX_HOME:-$HOME/.codex}/docs/agents/coding-skill-routing.md`; when it does not fit, use affected regression validation instead.
 - Import, export, package, or script changes: run typecheck, focused contract tests, and `npm pack --dry-run --json`.
 - Proof changes: run the relevant proof tests and preserve credential, path, freshness, diff, and lease checks.
 - Process or authorization changes: prove the environment allowlist, process-group quiescence, and finite Runner action boundary.
