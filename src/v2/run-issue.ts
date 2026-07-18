@@ -589,7 +589,6 @@ export class RunIssue {
       }
 
       if (!resumeAtChecks) {
-      const implementationBaseline = await this.dependencies.git.snapshot(worktreePath);
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
       let implementation = await this.runImplementation({
         runId,
@@ -628,10 +627,6 @@ export class RunIssue {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
       }
       if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
-        const afterTransport = await this.dependencies.git.snapshot(worktreePath);
-        if (!sameFreshness(implementationBaseline, afterTransport)) {
-          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'transport-baseline-changed');
-        }
         active = await this.persist(active, { transportRetries: 1 });
         continue attemptLoop;
       }

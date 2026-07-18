@@ -379,6 +379,20 @@ test('malformed report repair and clean transport retry use separate budgets wit
   assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
 });
 
+test('resumable implementation transport retries once when the interrupted attempt changed the worktree', async () => {
+  const fixture = await runFixture({
+    transportWrites: true,
+    implementationResults: [
+      { kind: 'transport-failed', resumable: true },
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
+    ],
+  });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
+});
+
 test('invoked publication rejection is resumable, retains intent, and starts no later effect', async () => {
   const fixture = await runFixture({ rejectEffect: 'push' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -610,6 +624,7 @@ interface FixtureOptions {
   proof?: (checkedChange: CheckedChange) => Promise<ProveChangeResult>;
   implementationResult?: ImplementationAgentResult;
   implementationResults?: ImplementationAgentResult[];
+  transportWrites?: boolean;
   agentWrites?: boolean;
   agentWritesDeniedIgnoredPath?: boolean;
   checkReject?: boolean;
@@ -893,6 +908,9 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push('agent');
         const sequenced = options.implementationResults?.shift();
         const selected = sequenced ?? options.implementationResult;
+        if (options.transportWrites && selected?.kind === 'transport-failed') {
+          await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
+        }
         if (selected?.kind !== 'completed' && selected) return selected;
         if (options.agentWrites !== false) await writeFile(join(path, 'feature.txt'), 'implemented\n');
         if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
