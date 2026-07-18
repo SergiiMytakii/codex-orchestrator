@@ -1,6 +1,6 @@
 {
   "name": "codex-orchestrator",
-  "version": "0.1.51",
+  "version": "2.0.1",
   "description": "Reusable GitHub Issues runner for Codex.",
   "type": "module",
   "license": "MIT",
@@ -10,19 +10,14 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
-    },
-    "./config/schema": {
-      "types": "./dist/src/config/schema.d.ts",
-      "import": "./dist/src/config/schema.js"
     }
   },
   "bin": {
-    "codex-orchestrator": "dist/src/cli.js"
+    "codex-orchestrator": "dist/src/v2/candidate-cli.js"
   },
   "files": [
     "dist/src",
-    "bridge-runtime.json",
-    "runtime-skills",
+    "internal-workflow",
     "docs/deep-dive.md",
     "CHANGELOG.md",
     "README.md",
@@ -36,22 +31,20 @@
     "url": "git+https://github.com/SergiiMytakii/codex-orchestrator.git"
   },
   "scripts": {
-    "orchestrator:doctor": "npm run build --silent && node dist/src/cli.js doctor --target .",
-    "orchestrator:status": "npm run build --silent && node dist/src/cli.js status --target .",
-    "orchestrator:status:json": "npm run build --silent && node dist/src/cli.js status --target . --json",
-    "orchestrator:daemon": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target .",
-    "orchestrator:daemon:once": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --once",
-    "orchestrator:daemon:fast": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --interval-seconds 60",
-    "orchestrator:daemon:max3": "npm run build --silent && node dist/src/cli.js doctor --target . && node dist/src/cli.js daemon --target . --max-runs 3",
-    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean --silent && tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/src/cli.js',0o755)\"",
+    "orchestrator:doctor": "npm run build --silent && node dist/src/v2/candidate-cli.js doctor --target \"$PWD\"",
+    "orchestrator:status": "npm run build --silent && node dist/src/v2/candidate-cli.js status --target \"$PWD\"",
+    "orchestrator:daemon": "npm run build --silent && node dist/src/v2/candidate-cli.js daemon --target \"$PWD\"",
+    "orchestrator:daemon:once": "npm run build --silent && node dist/src/v2/candidate-cli.js daemon --target \"$PWD\" --once",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean --silent && tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:v2-containment": "npm run build --silent && node dist/test/v2-containment.canary.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sync:workflow": "node scripts/sync-agent-auto-workflow.mjs sync --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
+    "check:workflow": "node scripts/sync-agent-auto-workflow.mjs check --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
+    "verify:workflow": "node scripts/sync-agent-auto-workflow.mjs verify --output-root internal-workflow",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "runtime-skills:import": "node scripts/import-runtime-skills.mjs",
-    "runtime-skills:validate": "node scripts/validate-runtime-skills.mjs",
-    "bridge:manifest": "npm run build --silent && node scripts/generate-bridge-runtime.mjs",
-    "prepack": "npm run bridge:manifest && npm run runtime-skills:validate"
+    "prepack": "npm run verify:workflow --silent && npm run build --silent"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

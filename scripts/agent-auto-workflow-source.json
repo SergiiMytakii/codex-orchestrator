@@ -1,0 +1,209 @@
+{
+  "version": 1,
+  "personalSkills": [
+    "cleanup-review",
+    "code-review",
+    "codebase-design",
+    "diagnosing-bugs",
+    "implementation-spec-maker",
+    "implementation-spec-review",
+    "research",
+    "small-task-implementer",
+    "spec-implementer",
+    "tdd",
+    "triage",
+    "ui-evidence-proof"
+  ],
+  "repositorySkills": ["acceptance-proof", "agent-auto"],
+  "sharedDocs": [
+    "artifact-review-loop.md",
+    "bug-workflow-routing.md",
+    "coding-skill-routing.md",
+    "confidence-rubric.md",
+    "contract-test-ledger.md",
+    "implementation-review-loop.md",
+    "review-gates.md",
+    "review-protocol.md"
+  ],
+  "profiles": {
+    "analyst_deep": "analyst-deep.toml",
+    "implementer_deep": "implementer-deep.toml",
+    "implementer_standard": "implementer-standard.toml",
+    "researcher_standard": "researcher-standard.toml",
+    "reviewer_deep": "reviewer-deep.toml",
+    "reviewer_fast": "reviewer-fast.toml",
+    "reviewer_standard": "reviewer-standard.toml"
+  },
+  "overlayRoot": "scripts/runtime-workflow-overlays",
+  "adaptations": [
+    { "id": "resolved-codex-home", "from": "<resolved-codex-home>", "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT" },
+    { "id": "default-codex-skills", "from": "${CODEX_HOME:-$HOME/.codex}/skills", "to": "../../skills" },
+    { "id": "codex-home-skills", "from": "$CODEX_HOME/skills", "to": "../../skills" },
+    { "id": "default-codex-docs", "from": "${CODEX_HOME:-$HOME/.codex}/docs/agents/", "to": "../../docs/agents/" },
+    { "id": "codex-home-docs", "from": "$CODEX_HOME/docs/agents/", "to": "../../docs/agents/" }
+  ],
+  "operations": {
+    "acceptance-proof": {
+      "entry": "operations/acceptance-proof/SKILL.md",
+      "sourceSkill": "acceptance-proof",
+      "outputSchema": "schemas/proof-report-v1.json",
+      "profile": "proof_agent",
+      "policy": {
+        "sandboxMode": "workspace-write",
+        "cwdClass": "worktree",
+        "worktreeAccess": "write",
+        "writableRootClasses": ["worktree"],
+        "runnerPostcondition": "proof-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "ambiguity-review": {
+      "entry": "operations/ambiguity-review/SKILL.md",
+      "sourceSkill": null,
+      "outputSchema": "schemas/ambiguity-review-v1.json",
+      "profile": "reviewer_deep",
+      "policy": {
+        "sandboxMode": "read-only",
+        "cwdClass": "worktree",
+        "worktreeAccess": "read-only",
+        "writableRootClasses": [],
+        "runnerPostcondition": "report-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "cleanup-review": {
+      "entry": "operations/cleanup-review/SKILL.md",
+      "sourceSkill": "cleanup-review",
+      "outputSchema": "schemas/code-review-v1.json",
+      "profile": "reviewer_standard",
+      "policy": {
+        "sandboxMode": "read-only",
+        "cwdClass": "worktree",
+        "worktreeAccess": "read-only",
+        "writableRootClasses": [],
+        "runnerPostcondition": "report-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "code-review": {
+      "entry": "operations/code-review/SKILL.md",
+      "sourceSkill": "code-review",
+      "outputSchema": "schemas/code-review-v1.json",
+      "profile": "reviewer_deep",
+      "policy": {
+        "sandboxMode": "read-only",
+        "cwdClass": "worktree",
+        "worktreeAccess": "read-only",
+        "writableRootClasses": [],
+        "runnerPostcondition": "report-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "implementation": {
+      "entry": "operations/implementation/SKILL.md",
+      "sourceSkill": "agent-auto",
+      "outputSchema": "schemas/implementation-report-v1.json",
+      "profile": "implementer_standard",
+      "policy": {
+        "sandboxMode": "workspace-write",
+        "cwdClass": "worktree",
+        "worktreeAccess": "write",
+        "writableRootClasses": ["worktree"],
+        "runnerPostcondition": "change-set",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "spec-author": {
+      "entry": "operations/spec-author/SKILL.md",
+      "sourceSkill": "implementation-spec-maker",
+      "outputSchema": "schemas/spec-author-v1.json",
+      "profile": "implementer_standard",
+      "policy": {
+        "sandboxMode": "workspace-write",
+        "cwdClass": "target-state",
+        "worktreeAccess": "write",
+        "writableRootClasses": ["target-state"],
+        "runnerPostcondition": "spec-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "spec-implementation": {
+      "entry": "operations/spec-implementation/SKILL.md",
+      "sourceSkill": "spec-implementer",
+      "outputSchema": "schemas/implementation-report-v1.json",
+      "profile": "implementer_standard",
+      "policy": {
+        "sandboxMode": "workspace-write",
+        "cwdClass": "worktree",
+        "worktreeAccess": "write",
+        "writableRootClasses": ["worktree"],
+        "runnerPostcondition": "change-set",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "spec-review": {
+      "entry": "operations/spec-review/SKILL.md",
+      "sourceSkill": "implementation-spec-review",
+      "outputSchema": "schemas/spec-review-v1.json",
+      "profile": "reviewer_deep",
+      "policy": {
+        "sandboxMode": "read-only",
+        "cwdClass": "worktree",
+        "worktreeAccess": "read-only",
+        "writableRootClasses": [],
+        "runnerPostcondition": "report-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
+    "triage": {
+      "entry": "operations/triage/SKILL.md",
+      "sourceSkill": "triage",
+      "outputSchema": "schemas/triage-route-v1.json",
+      "profile": "analyst_deep",
+      "policy": {
+        "sandboxMode": "read-only",
+        "cwdClass": "worktree",
+        "worktreeAccess": "read-only",
+        "writableRootClasses": [],
+        "runnerPostcondition": "report-only",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    }
+  }
+}

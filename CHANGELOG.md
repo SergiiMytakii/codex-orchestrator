@@ -6,27 +6,47 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
-### Added
-- Added the immutable package-owned skill bundle, signed operation/review
-  graphs, exact Codex `0.144.4` app-server transport, pinned tool catalog, and
-  package-only auth/runtime home.
-- Added `auth login` and atomic prepared-consumer config/state v2 activation
-  with candidate preflight, exact v1 backup, and interrupted-activation retry.
-- Added durable graph attempts with process/thread/report/cleanup evidence,
-  bounded baseline-aware recovery, and mandatory A/B/C review joins.
-
 ### Changed
-- Production `run` and `daemon` now require activated config/state v2 and fail
-  before issue discovery when bundle, CLI, app-server, auth, config, or state
-  proof is unavailable.
-- Planning, implementation, proof, repair, and fresh review select only package
-  graph nodes; config v2 stores no workflow prompt or raw exec routing.
+- Added durable `agent:waiting-human` questions, current-WRITE trusted answers,
+  conflict clarification, permission revocation, and same-run rerouting before
+  implementation. Exact Config V1 now migrates atomically to Config V2.
+- Replaced the two-file runtime skill lookup with one generated, manifest-bound
+  package workflow containing the declared skills, profiles, operation wrappers,
+  schemas, and shared review contracts.
+- New runs pin an immutable workflow generation across implementation retries,
+  restart, and Acceptance Proof; contained attempts enforce the operation's
+  package-declared sandbox and no-external-authority policy.
 
 ### Security
-- App-server runs with package `HOME`/`CODEX_HOME`, approval `never`, disabled
-  ambient apps/plugins/native agents, empty initial MCP policy, fail-closed
-  server-request responses, supervised process-group cleanup, and per-thread
-  background-terminal quiescence before report acceptance.
+- Workflow generation and attempt snapshots now fail closed on inventory,
+  path, mode, owner, hash, policy, concurrent-publication, and tamper drift.
+
+## [2.0.1] - 2026-07-17
+
+### Fixed
+- `setup --fresh` now checks for a pre-existing V2 owner before acquiring its
+  own setup lock, so a safe Legacy cutover no longer blocks on itself.
+
+## [2.0.0] - 2026-07-17
+
+### Changed
+- Replaced the compatibility and experimental runtimes with one public V2 CLI,
+  one strict configuration contract, and one `runIssue` lifecycle shared by
+  direct runs and the serial daemon.
+- Reduced the default live release smoke to package install, normal default
+  Codex, browser proof, and safety-negative scenarios; broader policy scenarios
+  remain opt-in.
+
+### Removed
+- Removed the Legacy CLI, bridge manifest, bundled workflow prompts, alternate
+  planning/scoped execution paths, and their compiled/test assets from the npm
+  package.
+
+### Security
+- Contained tool environments exclude GitHub, SSH, npm, and cloud publication
+  credentials while preserving the explicitly accepted shared Codex-auth and
+  same-user local-read behavior. Proof rejects credentials in every text
+  artifact and applies public-only host-identity restrictions to evidence.
 
 ## [0.1.51] - 2026-07-15
 

@@ -1,859 +1,93 @@
-# codex-orchestrator Deep Dive
+# Runner architecture
 
-This document is the technical companion to the main README. The README explains
-what problem `codex-orchestrator` solves and how to start using it. This file
-describes how the package works internally, what features it provides, and where
-the main control points are.
+## One public runtime
 
-## System Role
+The package bin is `dist/src/v2/candidate-cli.js`; `candidate-cli` is only the historical source filename. It is the sole public CLI and routes `setup`, `doctor`, `status`, direct `run`, and serial `daemon` commands. The root package export exposes only V2 contracts.
 
-`codex-orchestrator` is a local runner that connects four things:
+The runtime is split into a policy core under `src/v2/` and a small package-owned adapter closure under `src/v2/adapters/`. No earlier runner implementation is shipped or executed.
 
-- GitHub Issues as the work queue;
-- GitHub labels as the authorization and state model;
-- git worktrees as isolated implementation workspaces;
-- pinned Codex app-server as the implementation agent transport.
+`internal-workflow/manifest.json` is the sole workflow inventory. Release-time sync imports an explicit skill/profile/doc closure and assigns each operation one entrypoint, schema, profile, file closure, and authority policy. At runtime the Runner verifies the full package tree, publishes one immutable generation with a no-replace receipt, pins that receipt in the run record, and creates operation-scoped attempt snapshots only from the pin. Package updates and conflicting user skills cannot change an active run.
 
-The runner does not replace human review. It prepares work for review. A
-successful run ends with a pushed branch, a draft pull request, issue comments,
-and review labels. It does not auto-merge.
+## Trust boundary
 
-## Package vs Repository Policy
+The Runner is trusted. It owns:
 
-The npm package contains reusable orchestration logic:
+- issue discovery and authorization;
+- worktree and durable state ownership;
+- finite check execution;
+- process launch, timeout, cancellation, and quiescence;
+- Git commits, branches, pushes, pull requests, labels, and comments;
+- mobile leases and proof artifact validation.
 
-- CLI commands;
-- config schema and validation;
-- GitHub issue and PR operations;
-- worktree and branch management;
-- immutable package skill graphs and app-server execution;
-- validation and review-gate evaluation;
-- durable local state and recovery reports.
+Implementation and proof Codex processes are untrusted workers. They receive bounded input, a dedicated tool home, a safe `PATH`, and only explicitly allowed non-secret tool environment values. Ordinary Codex execution and native Codex subagents may use the same user-owned Codex authentication and can read files available to the same local OS user; the containment certificate records this explicitly. GitHub, SSH, npm, and cloud publication credentials are scrubbed, and operations that require external authority remain finite Runner-owned actions.
 
-Each target repository owns its policy under `.codex-orchestrator/`:
+This boundary prevents prompt content or repository code from receiving external publication authority. It does not claim OS-level secrecy from the current local user, so reports and artifacts are separately checked for credential/path disclosure. A child can implement, inspect, test, and report; the Runner performs authorized publication after validation.
 
-- `config.json` for labels, branches, checks, gates, deny rules, and runner
-  behavior;
-- target execution-policy ceilings that can narrow package node authority;
-- proof and artifact directories created during runs.
+## Configuration
 
-This split keeps the package generic while letting each repository choose how
-strict autonomous work should be.
+`.codex-orchestrator/config.json` is an exact, versioned contract. Unknown keys and removed policy surfaces are rejected. It names one GitHub repository, five labels (`auto`, `running`, `blocked`, `review`, `waitingHuman`), one branch template, a serial polling interval, five implementation cycles, one Codex command contract, finite checks, one proof artifact directory, and deny lists.
 
-## CLI Commands
+The committed config contains policy, never live run state or credentials. Durable runtime state is stored beneath the configured state directory and the Runner's private home.
 
-### `health`
+## `runIssue`
 
-Checks whether the CLI can run in the current environment. It is intended as a
-quick sanity check after installation.
+Direct runs and daemon-discovered runs call the same lifecycle:
 
-### `setup`
+1. Snapshot issue and repository identity.
+2. Verify authorization and acquire fenced ownership.
+3. Create or reconcile the issue worktree.
+4. Persist a reviewed route. An `awaiting-user` route publishes one durable question, freezes only a current WRITE+ answer, restores running labels, and reruns triage in the same Run before implementation.
+5. Run one implementation attempt and validate its structured report.
+6. Inspect all tracked, staged, unstaged, untracked, and ignored denied-path changes.
+7. Commit the validated implementation candidate locally.
+8. Run configured checks and create a nominal `CheckedChange` bound to exact Git and content hashes.
+9. Run Acceptance Proof against that binding.
+10. Publish with durable intents and postcondition reconciliation.
+11. Persist and return one typed terminal or resumable result.
 
-Creates bridge-era project config and migration inputs under
-`.codex-orchestrator/`; prepared consumers activate config v2 separately.
+Implementation findings return to the same worktree for at most five cycles. A malformed report gets one report-only repair; a clean transport disconnect gets one separate transport retry. Neither budget silently becomes another implementation cycle.
 
-Important behavior:
+## Durable effects
 
-- infers GitHub owner and repo from `git remote origin` by default;
-- can override owner, repo, or target path with flags;
-- can create missing GitHub labels with `--prepare-labels`;
-- can preview changes with `--dry-run`;
-- supports explicit bridge preparation and structural activation modes;
-- does not launch Codex, commit files, or open pull requests.
+Every external or non-idempotent operation uses intent-before-effect and confirmation-after-observation. On restart, the Runner inspects the durable intent and remote/local postcondition before deciding whether to retry. It does not infer failure merely from a lost response.
 
-### `status`
+Atomic files use write, flush, rename, and directory synchronization where supported. Locks and leases carry fencing tokens and process/boot identity. Unknown ownership or inability to prove process-group absence is a safe halt, not permission to continue.
 
-Reads GitHub Issues and local runner state, then reports:
+Workflow generation and attempt publication use hard-link claims, recovery chains, sealed file evidence, and ready receipts. Existing content is reused only after full path, mode, owner, size, and hash verification; active pre-generation V1 state fails closed while terminal V1 history remains readable.
 
-- issues eligible for autonomous work;
-- skipped issues and the reason they were skipped;
-- blocked or recoverable local state.
+## Checks and publication
 
-`status` is read-only. It does not mutate GitHub or launch Codex.
+Checks are configured finite commands executed by the Runner. Arbitrary agent-proposed shell commands do not become Runner authority. A check result is bound into `CheckedChange`; any later Git, index, tracked-content, untracked-content, worktree, or check-policy drift invalidates proof.
 
-### `run`
-
-Executes one selected issue when its labels and state allow autonomous work.
-
-`run` supports both authorization modes:
-
-- `agent:auto` for one scoped implementation issue;
-- `agent:plan-auto` for parent planning and issue-tree execution.
-
-### `daemon`
-
-Polls GitHub Issues for eligible autonomous work. Scoped `agent:auto` issues can
-run concurrently up to the daemon concurrency limit when their runner metadata
-declares non-overlapping ownership. `agent:plan-auto` parent runs are exclusive.
-
-The daemon applies the configured issue selection policy after safety filters.
-By default, priority labels sort eligible issues and issue number is the
-deterministic tie-breaker.
-
-Parallel scoped issue selection uses the issue body section
-`## codex-orchestrator metadata` and its `Ownership:` bullet list. Issues without
-that metadata are treated as unknown ownership and run one at a time. Two scoped
-issues cannot share a batch when their ownership entries are the same path or
-match each other as supported path globs.
-
-After polling, the daemon can clean up runner-owned worktrees whose pull
-requests have already been merged. Dirty, blocked, active, or unpublished
-worktrees are preserved.
-
-### `acceptance-proof validate`
-
-Validates the machine-readable Acceptance Proof report shape from a local file.
-Proof agents use this command before returning their final JSON, and the runner
-uses the same report contract when it reads `acceptance-proof-report.json`.
-
-## Issue Authorization Model
-
-The runner only starts work that is explicitly authorized.
-
-Default labels:
-
-- `agent:auto` authorizes one standalone scoped implementation run;
-- `agent:plan-auto` authorizes parent planning and child issue execution;
-- `agent:child` marks child issues that belong to an autonomous parent tree
-  and is not a standalone authorization label;
-- `agent:running` means a runner has claimed the issue;
-- `agent:blocked` means maintainer input or manual recovery is needed;
-- `agent:manual` reserves the issue for human work;
-- `agent:review` means the result is ready for human review.
-
-Issues are skipped when they are closed, manual, blocked, already running,
-already in review, or otherwise not authorized by policy.
-
-Child issues are not inferred from ordinary GitHub links, milestones, project
-fields, or casual references. They must carry the configured child label and the
-runner-owned parent marker. Child issues do not use `agent:auto`; the parent
-`agent:plan-auto` flow owns child execution through the marker, child label, and
-AFK/HITL metadata.
-
-## Scoped Issue Run
-
-For an `agent:auto` issue, the runner follows this lifecycle:
-
-1. Load config v2 and prove bundle, catalog, exact CLI, app-server account, and
-   runner state before issue discovery.
-2. Fetch the issue from GitHub.
-3. Check labels and state.
-4. Claim the issue with the running label.
-5. Create a runner-owned branch and git worktree.
-6. Write a literal Runner-owned context artifact and select the signed
-   implementation graph entry.
-7. Run exact package graph nodes through Codex app-server.
-8. Read the Codex completion report.
-9. Collect the full local change set.
-10. Run configured validation checks.
-11. Run acceptance proof when required.
-12. Evaluate quality gates and deny rules.
-13. Optionally run one report/evidence repair for safe runner-owned evidence gaps.
-14. Optionally run bounded rework for machine-checkable blockers.
-15. Optionally run Fresh-Context Review.
-16. Write durable run evidence.
-17. Push the branch.
-18. Open a draft pull request.
-19. Post the review report and move the issue to review.
-
-If a blocking condition is found, the runner does not publish the result. It
-marks the issue blocked, preserves useful local evidence, and reports the
-reason.
-
-## Parent Planning and Child Waves
-
-`agent:plan-auto` is for larger work that should be planned before
-implementation.
-
-The parent flow can:
-
-- ask Codex to produce or update the PRD;
-- break the parent into child implementation issues;
-- review the breakdown;
-- triage child issues;
-- identify which children are safe for autonomous execution;
-- run children in dependency-aware waves;
-- merge successful child branches into one integration branch;
-- validate the integration branch;
-- open one integration draft PR.
-
-Parallel child execution is bounded by `runner.maxParallelChildren`. Parallel
-standalone scoped execution is bounded by `runner.maxParallelScopedIssues` or
-the daemon `--concurrency` override. Child and standalone work use separate
-worktrees so concurrent runs do not share a mutable workspace.
-
-## Full Change-Set Awareness
-
-The runner evaluates the whole result of an agent run:
-
-- local commits;
-- staged files;
-- unstaged files;
-- untracked files.
-
-This matters because Codex may be allowed to create local commits. Those commits
-are still treated as untrusted agent output until the runner validates them.
-
-The runner owns external publication:
-
-- pushing branches;
-- opening draft PRs;
-- moving labels;
-- posting comments;
-- merging child branches into integration branches;
-- publishing packages or deploying.
-
-If agent output attempts to bypass those boundaries, the run is blocked.
-
-## Validation Checks
-
-Configured checks live in `.codex-orchestrator/config.json`.
-
-Typical checks include commands such as:
-
-```json
-{
-  "checks": {
-    "test": "npm test",
-    "typecheck": "npm run typecheck"
-  }
-}
-```
-
-Setup and runtime config loading adapt package-owned default `npm run <script>`
-checks to the target `package.json`: unsupported default npm checks are omitted
-when `checksPolicy.missingNpmScript` is `skip`, while custom checks are
-preserved. Repositories can make missing scripts fail with
-`checksPolicy.missingNpmScript`.
-
-For repositories with existing lint debt, `checksPolicy.lintBaseline.mode` can
-be set to `touched-only`. In that mode, a repo-wide lint failure can be
-downgraded when a separate touched-files lint command passes.
-
-In scoped child publishability, failed configured checks are recorded as
-residual-risk warnings instead of blocking publication when the completion
-report already carries the agent's focused validation and proof evidence. This
-keeps unrelated repo-wide baseline failures visible without making small scoped
-work brittle. Failed validation that the agent reports as its own proof still
-blocks publication, and parent integration configured checks can still block the
-parent handoff.
-
-## Review Gates
-
-Review gates are runner-enforced checks that decide whether a result can be
-published for human review.
-
-The quality gate can require:
-
-- strict TDD red-to-green evidence;
-- a changed test file when runtime code changed;
-- code review evidence;
-- cleanup review evidence for larger runtime changes.
-
-TDD proof can be reported as structured validation evidence inside the existing
-completion-report `validation[]` array:
-`evidence.kind: "tdd-red-green"` with a failed red command and a passed green
-command. Legacy summary text is still accepted as a fallback, but structured
-evidence is the primary path.
-
-Runtime and test paths are configurable through:
-
-- `reviewGates.quality.runtimeChangedPathGlobs`;
-- `reviewGates.quality.testChangedPathGlobs`.
-
-The acceptance proof gate can require runner-owned proof artifacts when issue
-text or changed paths indicate UI, API, worker, CLI, or smoke-verifiable work.
-`reviewGates.acceptanceProof` is canonical; `reviewGates.visualProof` remains a
-configuration migration adapter for existing screenshot and mobile proof policy.
-
-The risk-routing gate checks declared review metadata instead of inferring risk
-with an LLM. `reviewGates.riskRouting` defaults to enabled `warn` mode so older
-repositories surface findings without unexpected publication blocks. In
-`block` mode, the same findings become publication blockers.
-
-For scoped runs, risk routing checks the completion report `reviewHandoff`:
-
-- required handoff fields must be present and non-empty;
-- `agentVerifiedChecks` must identify checks the agent completed before handoff;
-- `maintainerOnlyChecks` may be empty, but every listed item must include
-  `reasonAgentCouldNotVerify`, and runnable commands or code-inspection checks
-  belong in validation/proof evidence instead of maintainer-only work;
-- low-risk claims must use an allowed low-risk flow;
-- configured `riskyChangedPathGlobs` can flag low-risk claims that changed
-  risky paths;
-- high-risk claims require passed code-review validation when
-  `highRiskRequiresCodeReview` is true.
-
-Low-risk routing never weakens existing quality, acceptance proof, visual proof,
-deny, or configured-check gates. It can only add warnings or blockers.
-Scoped risk-routing blockers are retryable only when
-`loopPolicy.rework.retryableBlockers` explicitly includes
-`risk-routing-policy`.
-
-For parent `agent:plan-auto` runs, risk routing checks the planning report after
-it is read and before parent content or child issues are mutated. Parent
-`sizeRisk` must partition every child stable id exactly once across
-`small`, `medium`, and `high`; `parentReviewHandoff` must include risks, proof
-strategy, and human review focus. In warn mode, findings render under
-`Risk routing warnings` in the parent PR body and review report while execution
-continues. In block mode, the parent stops at that point and does not create
-child issues, execute children, create a draft PR, or attempt parent planning
-rework.
+Only the Runner publishes. The implementation and proof processes cannot push, open a pull request, alter labels, or post comments. Publication is resumable and verifies exact repository, branch, commit, and remote postconditions.
 
 ## Acceptance Proof
 
-Acceptance proof is intentionally runner-owned. Codex can implement product
-behavior, but the runner decides whether proof is required, starts the proof
-phase after implementation, validates the proof report, and makes the final
-publishability decision. Runtime config loading still preserves package-owned
-visual proof behavior for older configs where visual proof is enabled but no
-runner command is set, but screenshot-only command success is not sufficient for
-Acceptance Proof.
+Acceptance Proof receives the issue snapshot, frozen criteria, and nominal checked-change capability. It runs in a separate contained Codex process and writes only proof-owned artifacts.
 
-Adaptive Acceptance Proof is the canonical proof model. Instead of treating a
-screenshot or a final agent sentence as enough evidence, the runner can launch a
-separate `acceptance-proof` Codex phase with the issue, changed files,
-implementation evidence, and repository proof policy. Repositories opt into that
-adaptive Codex proof session by configuring `codex.profiles.acceptance-proof`;
-existing runner-owned visual/mobile proof commands remain evidence producers, not
-standalone pass conditions. The adaptive phase can navigate a browser, inspect
-mobile UI state, run API or CLI checks, inspect logs, or create a focused
-live-smoke check for observable product behavior. The proof phase writes
-artifacts under the runner-owned proof directory and writes a machine-readable
-`acceptance-proof-report.json`.
+The Runner validates:
 
-The gate is selected when `reviewGates.acceptanceProof.enabled` is true and
-either:
+- exact report schema and criterion IDs;
+- artifact root containment, size, hash, UTF-8, and freshness;
+- credentials in every text artifact;
+- host identity and publication type for public artifacts;
+- no product diff during proof;
+- browser workflow and viewport evidence when visual;
+- exact Android or iOS lease ownership for mobile evidence;
+- unchanged checked-change freshness after proof.
 
-- the issue title or body matches `reviewGates.acceptanceProof.issueTextPatterns`;
-  or
-- the implementation changed a path matched by
-  `reviewGates.acceptanceProof.changedPathGlobs`.
+Command output and static inspection may remain local and include machine paths. They are not public evidence. Screenshots and sanitized generated summaries may be publishable when their stricter checks pass.
 
-The proof phase is not an implementation phase. It has no publication authority
-and must not edit GitHub issues, labels, comments, branches, pull requests,
-releases, or deployments. If a proof script needs repair, edits must stay inside
-`reviewGates.acceptanceProof.proofOwnedPathGlobs`. Product-code changes during
-proof are blockers, even when the proof report claims success.
+## Setup and cutover
 
-The proof report has three top-level outcomes:
+`setup` creates or verifies V2 config. `--prepare-labels` performs only the requested GitHub label preparation. `doctor` and `status` are read-only inspections.
 
-- `passed` means every required acceptance criterion has `status: "passed"`,
-  `confidence: "high"`, and at least one artifact reference.
-- `needs-rework` means proof found missing or uncertain product behavior and
-  returns a concrete rework request for the next implementation attempt.
-- `blocked` means proof could not continue safely, for example because the
-  environment is missing required credentials or tooling.
+Exact Config V1 is upgraded atomically by `setup configure` only after the shared run-owner fence and remote running claims are proven absent. Operational commands return `migration-required` until that upgrade completes.
 
-The runner validates the report independently. It rejects malformed JSON, empty
-criteria, low or medium confidence, failed or unknown criteria, missing artifact
-references, artifact paths that do not exist, and forbidden product-code diffs
-from the proof phase.
+Recognized earlier config is parsed only by the bounded cutover reader. `setup --fresh` acquires both ownership fences, proves no active old claims, saves immutable backup evidence, and publishes V2 config last. The old runtime never executes as part of this process.
 
-Adaptive proof prompts include a minimal report template and require the proof
-agent to validate the report with `codex-orchestrator acceptance-proof validate
---report "$CODEX_ORCHESTRATOR_PROOF_REPORT_PATH"` before returning the final
-JSON. If an adaptive proof report is structurally invalid, the runner may ask
-the proof phase to repair the report once; repeated schema failure blocks rather
-than consuming another product implementation rework attempt.
+## Live validation
 
-For UI proof, the proof report must satisfy the UI Evidence Contract. Screenshot
-or UI-dump artifacts must be mapped to:
+Local validation is `npm run typecheck`, `npm test`, and `npm pack --dry-run --json`. Build removes `dist` first so deleted modules cannot leak into tests or tarballs.
 
-- the exact user workflow under test, including the relevant entrypoint and
-  create/edit/detail context;
-- viewport coverage, with wide desktop required for web layout proof and mobile
-  required when the issue or acceptance criteria mention responsive or mobile
-  behavior;
-- artifact freshness, so the report identifies the current post-run artifact
-  rather than an old or intermediate screenshot;
-- visual layout review for spacing, padding, clipping, overlap, alignment, and
-  the specific visual complaint being verified;
-- user-facing copy review, including absence of rejected implementation terms
-  when copy is part of the acceptance path;
-- source inputs that show how the proof derived task-specific checks from issue
-  criteria, implementation evidence, reproduction signals, runtime validation,
-  and any Manual QA Plan content.
-
-If authentication is required and smoke or admin credentials are available
-through configured environment variables, UI proof should use the real sign-in
-flow. Session or cookie seeding is allowed only when the report records why the
-normal UI login path is unavailable or irrelevant to the acceptance criteria.
-
-This borrows workflow discipline from UI proof systems such as Symphony:
-user-facing changes should have an end-to-end UI walkthrough, a reproduction
-signal when one exists, runtime/media evidence for app-touching work, and Manual
-QA Plan expectations when provided. Codex Orchestrator enforces those inputs
-through the runner-validated Proof Report rather than requiring Symphony's
-Linear workpad or PR media workflow.
-
-When proof returns `needs-rework`, the runner feeds the rework request back into
-the bounded implementation loop. The maximum number of implementation-plus-proof
-iterations is controlled by `reviewGates.acceptanceProof.maxIterations`; the
-runner keeps the issue claimed while the loop continues. A successful proof can
-continue to the normal publishability gates and draft PR handoff. A terminal
-proof blocker marks the issue blocked and preserves the proof prompt, report
-path, artifact directory, validation line, residual risks, and blocker summary in
-runner evidence.
-
-Child Codex processes receive a mobile-device guard directory at the front of
-`PATH`. The guard blocks direct device/emulator control through `adb`,
-`emulator`, Flutter device-control subcommands, and `xcrun simctl`. Adaptive
-proof Codex phases keep that guard, so they can inspect and verify behavior
-without independently owning shared devices. Runner-owned mobile proof commands
-use the shared mobile lease described below.
-
-The proof phase often runs browser automation, such as Playwright, but the same
-contract applies to non-visual proof. A live-smoke proof can exercise an API,
-worker, CLI, or other observable behavior and save the command output as a
-`smoke-output` artifact.
-
-Implementation agents declare the intended proof mode in the scoped completion
-report `proofPlan`. Supported modes are `none`, `non-visual-smoke`, `cli`,
-`api`, `worker`, `browser-visual`, and `mobile-visual`. The child agent must
-choose the narrowest mode that proves the issue; this is an implementation
-intent signal, not proof by itself. The runner remains the authority and
-validates that plan against the issue `Proof Strategy` before publication.
-Changed files and issue-text patterns decide whether Acceptance Proof applies;
-under `Proof Strategy: auto`, they are routing hints rather than proof-mode
-requirements.
-
-For accepted non-visual modes, the runner uses a report-validation proof path
-instead of dispatching browser or mobile proof. Report validation checks the
-completion report itself:
-
-- `proofPlan.validationCommands` must contain non-empty command strings, and
-  each command must exactly match a passed `validation[].command`;
-- `proofPlan.requiredArtifacts` must contain non-empty artifact targets, and
-  each target must exactly match a reported artifact `path` or `url`;
-- `reviewHandoff.proofByAcceptanceCriteria` must map the evidence to the
-  acceptance criteria.
-
-If those checks pass, the acceptance proof evidence records
-`completion-report:proofPlan` and `completion-report:artifacts` as the proof
-source. If they fail, publication blocks and the next implementation attempt must
-repair the report or provide real evidence. A non-visual `proofPlan` cannot
-downgrade an explicit `visual`, `browser-visual`, or `mobile-visual` issue
-strategy. Under `auto`, however, frontend or mobile paths do not independently
-create a visual requirement: a non-visual refactor with mapped CLI, API, worker,
-or smoke evidence remains on report validation. Issue generators should emit an
-explicit non-`auto` strategy when acceptance criteria actually require browser
-or device behavior. Once a non-visual plan is accepted, the legacy visual review
-gate cannot re-infer a screenshot requirement from changed paths, including when
-`visualProof.requireWhenDesirable` is enabled.
-
-For browser, mobile, and adaptive proof phases, the runner provides environment
-variables for:
-
-- issue number;
-- artifact directory;
-- proof directory;
-- Playwright profile directory;
-- worktree path;
-- changed files;
-- target root and shared state directory when the runner knows them;
-- mobile device lock directory for runner-owned Android proof.
-
-Proof artifacts created under the proof directory are attached to the PR and
-issue review report. Supported artifact types include screenshots, UI dumps,
-logs, smoke outputs, and other explicit artifacts. Screenshots remain supported
-for visual proof, but screenshot existence alone is not sufficient: each required
-criterion must map to high-confidence artifact evidence in the proof report, and
-UI artifacts must satisfy the UI Evidence Contract.
-
-Scoped issue review comments render a concise human digest first: outcome,
-changed-file count, proof status, key artifacts, review focus, and audit links.
-Full validation details, policy suggestions, and proof records remain in the
-durable run summary, proof report, and log artifacts instead of being duplicated
-as a long issue-comment transcript.
-
-Visual proof reporting separates desire from capability. UI-like issue text or
-changed frontend paths can make visual proof desirable, but the runner only emits
-missing-screenshot artifact warnings when a runner-owned provider is configured
-and has not reported a tooling/provider capability gap. If proof is desirable
-but no command, device, emulator, or platform tooling is available, the review
-report records a capability note instead of an actionable-looking artifact
-warning. Repositories that intentionally want visual-desirable work to block
-review-ready publication until proof is produced can set
-`reviewGates.visualProof.requireWhenDesirable` to `true`.
-
-Setup now uses the package-owned
-`codex-orchestrator visual-proof auto --issue ${issueNumber}` command. Auto
-dispatch uses one shared policy owner after a visual proof plan has been selected:
-web/frontend paths route to browser proof, while Android, iOS, Flutter, and
-mobile app paths remain device-backed. Those path matches do not convert an
-accepted non-visual plan into visual proof. For runner-owned command proof, the
-validated `proofPlan.mode` is passed to `visual-proof auto` and is authoritative;
-path inference remains only a fallback for direct command use without a validated
-plan.
-When acceptance proof is required but the changed paths are backend/API/CLI-only
-and visual proof is not desirable, auto proof does not force a browser or mobile
-target; the runner validates the child completion report `proofPlan`, validation
-lines, artifacts, and review handoff instead. Acceptance-proof command selection
-uses only the canonical acceptance-proof policy; `visualProof` command settings
-are not treated as Acceptance Proof compatibility input.
-
-For web UI work, `codex-orchestrator visual-proof browser` reads a proof-owned
-browser scenario, drives Playwright Core against an explicit base URL, and
-writes screenshots, DOM snapshots, console logs, network failure logs, a run
-summary, and `acceptance-proof-report.json` under the runner proof directory.
-Before downloading a browser, the command first uses an explicit
-`CODEX_ORCHESTRATOR_BROWSER_EXECUTABLE_PATH` when provided, then looks for an
-installed Chrome, Chromium, or Edge executable. If no installed browser is
-available, Playwright's existing browser cache is tried; only a missing-browser
-launch failure triggers `playwright-core install chromium` and one retry.
-Scenarios are versioned and must map criteria to named screenshot or DOM
-checkpoints. Missing scenarios, malformed scenarios, missing Playwright/browser
-runtime, blocked auth metadata, or browser launch failures produce blocked
-proof. Assertion failures produce `needs-rework`. Console and network failures
-are always recorded and can be configured as blockers through
-`reviewGates.acceptanceProof.browserProof`.
-
-For mobile UI work, the auto command selects the package-owned mobile proof
-path. The mobile command detects Flutter, native Android, and native iOS
-projects. It tries
-Android first when an Android target exists, resolving SDK tools from
-environment variables, `PATH`, and the default macOS, Linux, and Windows SDK
-locations. Android proof takes a runner-owned mobile device lease under the
-shared state directory before selecting a connected device, starting an AVD, or
-using adb, so parallel issue work cannot race over one emulator. If Android
-tooling or devices are unavailable on macOS and an iOS target exists, it falls
-back to the iOS simulator. Native iOS projects go directly through Xcode
-simulator tooling with a writable DerivedData path. Repos that need a specific
-Flutter launch config, flavor, Gradle install task, package name, iOS scheme, or
-bundle id pass that through command flags or `CODEX_ORCHESTRATOR_*` environment
-variables. Missing mobile tooling or no usable device is reported as a concrete
-warning instead of a release blocker by itself.
-
-## Loop Policy
-
-Loop Policy controls runner-owned automation around retries and evidence.
-
-It includes:
-
-- issue selection priority labels and tie-breaker;
-- bounded rework attempts;
-- retryable blocker types;
-- Fresh-Context Review;
-- Durable Run Summaries;
-- non-mutating Policy Suggestions.
-
-Bounded rework is limited to machine-checkable blockers such as missing or
-invalid completion reports, incomplete progress after an exact idle timeout, no
-changed files, parent integration configured-check failures, or missing
-quality-gate evidence.
-`ReworkDecision` classifies each blocked attempt as `retry`, `exhausted`, or
-`hard-block` from typed `RunnerBlocker` evidence. Legacy reason strings still go
-through one compatibility adapter, but runner-owned gates should emit typed
-blockers so wording changes do not change retry behavior. Retry uses zero-based
-attempts: attempt `0` is the original run, and retry continues only while
-`attempt < maxAttempts`.
-
-Before implementation rework, publishability may run bounded evidence repair:
-
-- Missing or invalid completion reports can be repaired once after the runner has
-  proven non-empty safe changed files, deny policy, scope isolation, and
-  publication boundaries.
-- Missing review-gate evidence such as TDD, cleanup/code-review, or scoped
-  `reviewHandoff` can be repaired once after changed files, configured checks,
-  and acceptance proof have already passed.
-- Repair sessions write only the original completion report path. They cannot
-  edit product files, create commits, mutate GitHub, weaken deny/scope gates, or
-  bypass configured checks, acceptance proof, or review gates.
-- The runner captures `HEAD` and a content fingerprint of the protected worktree
-  changes before and after repair. If `HEAD` changes, or protected content
-  changes, repair terminal-blocks. When the report path is inside the worktree,
-  only that exact normalized path is excluded from the protected fingerprint.
-- Completion-report and evidence repair attempts are recorded in durable
-  summaries, blocked reports, and review-ready handoff evidence with prompt,
-  report, log, status, and blocker keys.
-
-Exact idle timeouts use runner-classified blockers, not raw Codex exit strings.
-The runner emits one only when all of these are true:
-
-- Codex exits with code `124` and stdout or stderr contains an exact line
-  `Command idle timed out after <positive integer>ms.`;
-- the scoped completion report is missing;
-- runner-owned publication has not been violated.
-
-When the collected change set is empty, the blocker is
-`idle-timeout-before-change`. Its default retry starts once from the clean
-worktree and preserves that reason in the rework prompt and terminal evidence.
-This is distinct from `no-changed-files`, which means Codex produced a normal
-completion report but did not implement a change.
-
-When the change set contains files, the runner additionally requires that
-changed paths do not match denied path policy and scope isolation has no
-blockers. A safe non-empty change set becomes `incomplete-after-progress`, and
-the retry continues from the existing worktree.
-
-If the same idle timeout produced a valid completion report, publishability
-continues through the normal report-based path. If the report is invalid, paths
-are denied or out of scope, publication was violated, or the exit is a generic
-command timeout or arbitrary exit code `124`, the runner keeps the existing
-hard blocker. Idle recovery runs only when `loopPolicy.rework.retryableBlockers`
-includes the corresponding typed key and the bounded rework budget has not been
-exhausted. Terminal blocked or exhausted evidence preserves the collected
-`changedFiles` when a change set was available, so
-maintainers can see what partial work the retry decision was based on.
-Runtime config loading backfills `idle-timeout-before-change` so existing target
-configs receive this package-owned recovery policy without requiring a setup
-rewrite.
-
-Hard blockers always stop publication. These include denied paths,
-runner-owned publication violations, destructive database/cache actions,
-production deploy/release actions, unknown Codex exits, and required Figma MCP
-failures. Optional Figma MCP failures are retryable when configured; the next
-attempt disables optional Figma MCP while required Figma access remains a hard
-dependency.
-
-Figma MCP routing is configured with optional and required issue-text patterns.
-Optional matches add Figma MCP as helpful context; required matches treat design
-access as part of the issue contract. Legacy `issueTextPatterns` are migrated to
-optional patterns by setup/config compatibility handling.
-
-Fresh-Context Review runs a separate Codex session with the issue, diff, and
-validation evidence. It does not reuse the implementation transcript. In the
-current config model, the mode is advisory; repositories can choose whether
-high-confidence policy violations block publication.
-
-Durable Run Summaries record the outcome, confirmed facts, validation, blockers,
-residual risks, next action, and policy suggestions. They reference existing
-logs and reports; they do not replace them.
-
-Policy Suggestions are report-only. They never edit prompts, config, labels, or
-issue state.
-
-## Deny Rules
-
-Deny rules block publication when the agent result touches forbidden areas or
-attempts unsafe actions.
-
-The default policy can block:
-
-- secret files;
-- destructive database or cache actions;
-- production deploy or release actions;
-- additional repository-defined path globs.
-
-These rules are evaluated before a result is published.
-
-## Durable State and Recovery
-
-The runner keeps local state so interrupted work can be inspected and recovered.
-
-Durable evidence can include:
-
-- agent output;
-- completion reports;
-- validation results;
-- skipped checks;
-- blocked reasons;
-- visual artifacts;
-- run summaries;
-- preserved worktrees.
-
-The runner preserves worktrees when deleting them would hide useful evidence,
-for example when they are dirty, blocked, active, or unpublished.
-
-### Interrupted Scoped Handoff Recovery
-
-The main recovery case is an interrupted scoped issue run. This can happen when
-Codex already wrote a completed report and left valid local changes in the
-issue worktree, but the outer runner stopped before it pushed the branch,
-opened the draft PR, posted the review report, and moved the issue from
-`agent:running` to `agent:review`.
-
-Recovery is runner-owned. It does not ask Codex to implement the issue again.
-Instead, the runner treats the preserved worktree and completion report as the
-candidate output, then runs the same publication gates used by a normal scoped
-handoff.
-
-```mermaid
-flowchart TD
-  A["status / daemon / targeted run --issue"] --> B["Read runner-state.json"]
-  B --> C["Fetch matching GitHub issue"]
-  C --> D{"Local metadata proves ownership?"}
-  D -- "no" --> E["unknown-or-foreign: report only"]
-  D -- "yes" --> F{"Live runner still plausible?"}
-  F -- "yes" --> G["active: do not mutate"]
-  F -- "no" --> H{"Completed report + base evidence?"}
-  H -- "yes" --> I["completed-pending-handoff"]
-  I --> J["Reuse worktree and completed report"]
-  J --> K["Run normal publishability gates"]
-  K --> L{"Gates pass?"}
-  L -- "yes" --> M["Push branch, create/reuse draft PR"]
-  M --> N["agent:running -> agent:review, post report, clear local run"]
-  L -- "no" --> O["agent:blocked with recovery evidence"]
-  H -- "no" --> P{"Stale runner-owned failure?"}
-  P -- "yes" --> O
-  P -- "no" --> E
-```
-
-The local run metadata must match the GitHub issue and the preserved workspace:
-issue number, mode, branch, worktree path, report path, session id, and base
-evidence. New scoped runs also record a runner lease with host, process id, and
-timestamps. Daemon recovery mutates GitHub only when that lease is stale and the
-same-host process is gone. If the process still looks alive, the host is
-unknown, or the metadata is incomplete, recovery stays read-only.
-
-Targeted `run --issue <number>` can recover a legacy interrupted run when the
-local context snapshot contains the base SHA and the operator explicitly picked
-that issue. This is how old runs that predate lease metadata can still be
-finished without allowing the daemon to mutate them automatically.
-
-Recoverable runs are classified with explicit states:
-
-- `active` means a live runner may still own the issue, so nothing changes.
-- `completed-pending-handoff` means the completed report, worktree, branch, and
-  base evidence are sufficient to retry runner-owned publication.
-- `failed-pending-block` means the stale runner-owned run cannot satisfy
-  publication preconditions and should be moved to `agent:blocked` with concrete
-  evidence. Missing completion reports get one bounded recovery retry first when
-  `missing-completion-report` is configured as retryable, the stale attempt has
-  remaining rework budget, same-host stale ownership is proven, and the branch
-  has no committed, staged, unstaged, or untracked changes since the recovered
-  base SHA. If any of those checks fail, recovery blocks instead of resetting or
-  building on unreported work.
-- `unknown-or-foreign` means ownership or safety cannot be proven, so the runner
-  does not mutate GitHub.
-
-When a matching open draft PR already exists for the branch and base, recovery
-verifies those refs and completes the remaining label, comment, lifecycle, and
-local-state cleanup instead of creating a duplicate PR. Blocked recovery uses a
-stable marker in the GitHub comment so repeated recovery attempts do not post
-the same blocked report again.
-
-Recovery is intentionally narrow. It does not scan every `agent:running` issue
-blindly, does not recover runs from another repository, does not recover
-plan-parent or tree-child publication in the scoped path, does not auto-merge,
-and does not rerun Codex just to finish a handoff. The package live-smoke suite
-is not part of the default recovery gate because it creates or updates real
-GitHub issues and pull requests.
-
-### Plan-Auto Tree Recovery
-
-`agent:plan-auto` has its own tree recovery path because parent branches and
-child branches have different safety contracts than standalone scoped issues.
-Before creating the parent worktree, the runner classifies local tree evidence.
-A parent tree resumes only when runner metadata proves `plan-parent` ownership,
-the issue number, branch, worktree path, session, stale same-host lease, clean
-worktree, and configured base SHA all match. Ambiguous evidence, dirty
-worktrees, foreign hosts, active or unknown processes, missing base evidence,
-or branch drift hard-block with a stable recovery marker and preserve the local
-worktree.
-
-During child scheduling, a closed child can be treated as recovered only when
-the current GitHub child issue still has the child label and parent marker,
-tree-child runner metadata matches the parent, a current durable run summary is
-`review-ready`, and Git proves the child branch is already merged into the
-parent branch. Recovered children satisfy dependency ordering and render as
-recovered evidence in the parent handoff instead of being re-executed.
-
-Blocked children resume only when their tree-child metadata, existing branch and
-worktree, blocked durable summary, and `decideImplementationRework()` all prove
-that the next bounded rework attempt is allowed. The retry reuses the existing
-worktree, starts with the normal automatic rework prompt, and still passes
-through the usual publishability, quality, acceptance-proof, durable-summary,
-and parent integration gates.
-
-## Package Skill Runtime
-
-Config v2 does not route target prompts or raw `codex exec` arguments. The
-package ships an immutable content-addressed `runtime-skills/` closure with
-strict operation graphs, result schemas, review templates, Node-only helper
-tools, and the pinned Codex `0.144.4` tool-catalog fixture. The runner
-materializes that exact bundle below target state, intersects each signed node
-policy with target and phase restrictions, and sends only a Runner-owned
-context-file path plus structured package skill items to app-server.
-
-Planning is the signed `to-spec -> to-tickets -> tickets-breakdown-review ->
-triage` graph. Implementation begins with read-only classification, admits
-write authority only for small/spec implementation nodes, then requires
-cleanup, bounded A/B/C code review, and final aggregation. Acceptance proof,
-report repair, evidence repair, and fresh-context review are separate signed
-operations without implementation authority.
-
-One supervised app-server process is reused per run. Parallel reviewers use
-separate threads in that process. Every logical attempt persists its baseline,
-PID/PGID, thread/turn, report hash, terminal cleanup proof, and transition in
-runner state v2. A successor cannot start until the completed turn has cleaned
-its background terminals and an empty list is observed. Recovery is bounded to
-one unchanged-baseline clean retry and one write-node partial continuation with
-unchanged HEAD/index ownership; ambiguous or read-only mutation blocks.
-
-## Skill Runtime V2 Bridge Fence
-
-The bridge generation keeps the current prompt and `codex exec` behavior but
-adds a target-scoped activity fence around daemon lifetime, targeted run/claim,
-and setup. Shared daemon/run holders may coexist; preparation and setup require
-exclusive ownership. Ownership metadata uses canonical target identity plus
-host, boot nonce, PID, and release token, and its generation increases whenever
-new runner activity is admitted. A stale same-host holder is reclaimed only
-when PID/boot evidence proves that owner is gone; foreign or ambiguous owners
-block.
-
-`setup --prepare-skill-runtime-v2` verifies the installed
-`bridge-runtime.json`, inspects supported Darwin or Linux processes, requires
-an empty legacy runner-state union, and queries GitHub for every open issue with
-the configured running label while holding the exclusive fence. It then writes
-one fsynced canonical `prepared-generation.json` beneath the configured state
-directory. GitHub read failure, relative daemon targets, process identity
-ambiguity, active local state, or a package hash mismatch fail closed without
-publishing generation evidence.
-
-The bridge can read and preserve an empty state-v2 envelope while config remains
-v1, but it stores only legacy run records in that envelope. It does not perform
-the structural migration, change transport, or disable target workflow prompts.
-The structural phase must start later from an actually released bridge commit
-and must verify the canonical prepared generation and exact package hash before
-any config-v2 write.
-
-Structural activation revalidates that evidence and the current drain, runs
-package bundle/catalog/CLI/app-server/auth candidate preflight, writes
-`config.json.v1.backup`, commits empty state v2, and atomically publishes config
-v2 as the product commit point. Interrupted activation before config rename is
-retryable. Production `run` and `daemon` reject config v1; they never silently
-migrate it in memory.
-
-Authentication belongs to the package runtime home at
-`${CODEX_ORCHESTRATOR_HOME:-$HOME/.codex-orchestrator}/codex-home/v1`, not the
-personal Codex tree. `codex-orchestrator auth login` uses app-server
-`account/read` and correlated ChatGPT browser login. Persisted auth owns an
-exclusive supervised-process lease; each run has a distinct SQLite home.
-
-## Config Surface
-
-The top-level config areas are:
-
-- `github` for owner, repo, label preparation, and label definitions;
-- `runner` for workspace root, child concurrency, state directory, local commit
-  policy, and worktree cleanup;
-- `codex` for the pinned app-server command/version, timeouts, phase profiles,
-  and target authority ceilings;
-- `project` for the config directory;
-- `checks` and `checksPolicy` for validation commands;
-- `reviewGates` for quality, risk-routing, and acceptance proof requirements;
-- `loopPolicy` for issue selection, rework, review, summaries, and suggestions;
-- `deny` for secret and unsafe-action protection;
-- `branches` for branch templates;
-- `pullRequests` for PR title templates;
-- `issueClassification` for promotion criteria and clarification behavior.
-
-Runtime state must not be committed as config. The schema rejects known runtime
-keys in committed config files.
-
-## Current Boundaries
-
-The package currently focuses on local runner workflows:
-
-- explicit one-off runs;
-- daemon polling;
-- project-local config;
-- runner-owned worktree cleanup;
-- GitHub Issues and Pull Requests;
-- pinned Codex app-server as the agent backend.
-
-Hosted infrastructure, non-GitHub issue trackers, and non-Codex agents are not
-part of the current package, although the code keeps adapter boundaries for
-future expansion.
+The default live smoke packs and installs the exact candidate bytes in a temporary consumer and uses a scratch GitHub repository. Its compact release profile proves package installation, one normal default Codex run, browser evidence, and a safety-negative path. Cleanup verifies that run-owned issues, pull requests, branches, labels, and temporary directories are absent.

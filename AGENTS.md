@@ -18,11 +18,10 @@ policy own TDD, review order, commit behavior, and response style.
 
 ## Repository Boundaries
 
-- Reusable TypeScript orchestration belongs in `src/`; tests in `test/`;
-  package-bundled workflow prompts in `prompts/`.
+- Reusable TypeScript orchestration belongs in `src/v2/`, its package-owned
+  adapters in `src/v2/adapters/`, and tests in `test/v2-*.test.ts`.
 - Target-repository policy belongs under `.codex-orchestrator/`; its
-  `config.json` is this repo's live checks, review, branch, deny, and prompt
-  policy.
+  `config.json` is the exact V2 checks, branch, proof, deny, and label policy.
 - Never read, print, or edit `.env` or `.env.*` files.
 - A requested intermediate commit is not a final handoff; final review gates do
   not block that commit.

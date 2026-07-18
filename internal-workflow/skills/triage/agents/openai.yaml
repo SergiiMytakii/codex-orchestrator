@@ -1,0 +1,6 @@
+interface:
+  display_name: "Triage"
+  short_description: "Triage raw incoming issues and PRs"
+  default_prompt: "Use $triage to verify, classify, and prepare raw incoming issues or configured external PRs; skip generated planning tickets."
+policy:
+  allow_implicit_invocation: false

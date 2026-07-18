@@ -1,128 +1,46 @@
-# Agent Execution Routing
+# Agent execution routing
 
-This document holds repo-specific execution rules that are too detailed for
-`AGENTS.md`.
+## Sources of truth
 
-## Source Of Truth
+- `README.md`: public commands and lifecycle.
+- `docs/deep-dive.md`: trust, containment, durability, proof, and publication.
+- `.codex-orchestrator/config.json`: this repository's exact live V2 policy.
+- `src/v2/`: reusable policy core.
+- `src/v2/adapters/`: package-owned transport and persistence closure.
+- `package.json`: scripts and npm publication boundary.
 
-- `README.md` explains the product workflow and user-facing commands.
-- `docs/deep-dive.md` explains package vs repository policy, the runner
-  lifecycle, validation checks, review gates, deny rules, durable state, and the
-  current architecture boundaries.
-- `docs/adr/0001-runner-owned-loop-policy.md` records the decision that loop
-  policy, rework bounds, durable memory, and publication remain runner-owned.
-- `.codex-orchestrator/config.json` is this repository's live runner policy for
-  checks, review gates, acceptance proof, deny rules, branches, issue labels,
-  and target execution-policy ceilings.
-- `package.json` is the source of truth for local npm scripts.
-- `tsconfig.json` is the source of truth for TypeScript strictness and module
-  resolution.
+## Change routing
 
-## Quality And Boundary Preflight
+- Behavior-changing TypeScript: use TDD, then `npm run typecheck` and `npm test`.
+- Import, export, package, or script changes: run typecheck, focused contract tests, and `npm pack --dry-run --json`.
+- Proof changes: run the relevant proof tests and preserve credential, path, freshness, diff, and lease checks.
+- Process or authorization changes: prove the environment allowlist, process-group quiescence, and finite Runner action boundary.
+- Docs-only changes: inspect authoritative-doc terminology and `git diff --check`.
 
-Run this preflight before changing imports, module ownership, runner jobs,
-services, scripts, cross-module wiring, validation behavior, review gates,
-branch policy, or publication behavior.
+The build must clean `dist` before compilation. Stale compiled modules are a package-boundary failure even when current source is correct.
 
-1. Read the relevant source of truth first:
-   - `docs/deep-dive.md` for package/repository policy, validation, review
-     gates, deny rules, and current boundaries.
-   - `docs/adr/0001-runner-owned-loop-policy.md` for loop ownership and
-     publication authority.
-   - `.codex-orchestrator/config.json` for configured checks, review gates,
-     acceptance proof, deny paths, branch templates, and runtime policy.
-   - `package.json` before adding, removing, or relying on npm scripts.
-   - `tsconfig.json` before changing TypeScript module or import behavior.
-2. Confirm whether the change affects runtime paths covered by
-   `reviewGates.quality.runtimeChangedPathGlobs` or test paths covered by
-   `reviewGates.quality.testChangedPathGlobs`.
-3. After code changes, run the smallest relevant local guard:
-   - `npm run typecheck` for imports, types, module boundaries, config shape,
-     and script wiring.
-   - `npm test` for behavior, runner policy, validation, branch, publication,
-     safety, prompt, or lifecycle changes.
-4. Report any skipped guard with a concrete reason.
+## Ownership rules
 
-There is currently no dedicated lint script and no dedicated architecture-check
-script in `package.json`. If a spec or prompt asks for one, state that none is
-configured and use the relevant source-of-truth docs plus `npm run typecheck`
-or `npm test` instead.
+- Agent processes may change only their assigned worktree and structured report/artifact paths.
+- Tool environments do not inherit GitHub, SSH, npm, or cloud publication
+  credentials. Shared user-owned Codex auth and same-user host-file reads are an
+  explicit accepted local risk and must never be copied into output.
+- Only Runner adapters may perform GitHub writes, publication, durable ownership, or device lease actions.
+- All direct and daemon work must enter the same `runIssue` lifecycle.
+- Target policy belongs under `.codex-orchestrator/`; reusable behavior belongs under `src/v2/`.
+- Never read, print, or edit `.env` or `.env.*`.
 
-Do not run `npm run smoke:live` unless the user explicitly asks for it. The live
-smoke suite creates or updates real GitHub issues, branches, and draft PRs. When
-live smoke is requested after implementation, choose the narrowest profile that
-matches the changed contract:
+## Live smoke
 
-- default / ordinary release gate: `npm run smoke:live -- --profile core-release`
-  (or just `npm run smoke:live`);
-- loop policy, remote base branch, blocking parent planning, or extra policy
-  edge cases: `npm run smoke:live -- --profile extended-policy`;
-- browser, Acceptance Proof, UI Evidence, or proof-loop changes:
-  `npm run smoke:live -- --profile proof-matrix`;
-- release-signoff after changing policy, proof, publication, or scenario
-  selection behavior itself: `npm run smoke:live -- --profile full`;
-- one known contract only: `npm run smoke:live -- --scenario <name>`.
+`npm run smoke:live` mutates the configured scratch GitHub repository. Run it only with explicit user authorization.
 
-If multiple categories apply, run the broader matching profile. Always report
-when live smoke is skipped and give the concrete reason.
+- Default release gate: `npm run smoke:live` or `--profile core-release`.
+- One focused integration: repeat `--scenario <name>`.
+- Broader policy matrix: `--profile extended-policy`.
+- Every run uses strict cleanup unless the user explicitly requests retained evidence.
 
-## Ownership Boundaries
+Do not substitute a production repository for the scratch repository. The smoke script must pack and execute the current package rather than invoke a nearby source checkout.
 
-- Runner-owned publication means only runner code should push branches, open
-  draft PRs, merge child branches into integration branches, change labels,
-  post comments, publish packages, or deploy.
-- Codex agent output is untrusted until the runner validates the full local
-  change set: committed, staged, unstaged, and untracked paths.
-- Deny rules and completion-report safety are publication blockers. Keep
-  `src/runner/safety.ts` and related tests as the single enforcement path for
-  changed-path safety.
-- Target repository policy belongs under `.codex-orchestrator/`; reusable
-  orchestration behavior belongs in `src/`.
-- Package-owned skills, operation graphs, schemas, tools, and catalog fixtures
-  live in `runtime-skills/`. Config v2 targets cannot replace them; target
-  policy can only narrow signed node authority.
+## Release
 
-## Validation Routing
-
-- Docs-only restructuring: inspect the diff and line counts; skip tests with
-  the reason `docs-only`.
-- Behavior-changing TypeScript: use TDD, then run `npm test` before handoff.
-- Type-only, import-only, or script-wiring changes: run `npm run typecheck`; run
-  `npm test` too when behavior or runner policy could change.
-- Release changes: update `CHANGELOG.md`, keep release guidance concise in
-  `AGENTS.md`, and avoid manual `npm publish` unless the GitHub release
-  workflow is unavailable.
-- Acceptance proof work: follow `reviewGates.acceptanceProof` in
-  `.codex-orchestrator/config.json`; `reviewGates.visualProof` is a
-  compatibility adapter for screenshot/mobile proof. Missing local
-  browser/device tooling must be reported as a concrete limitation.
-
-## Skill Runtime V2 Release Boundary
-
-- Bridge work is a terminal release slice: validate the target activity fence,
-  preparation command, state-v2 forward compatibility, and
-  `bridge-runtime.json`, then stop.
-- Do not combine the bridge and structural runtime changes in one diff. The
-  structural phase requires a separately published bridge plus canonical
-  consumer `prepared-generation.json` evidence whose package hash matches the
-  released bridge.
-- `setup --prepare-skill-runtime-v2` is a real consumer migration action. Run it
-  only after the target's daemon and targeted runs are stopped; GitHub read or
-  process-identity ambiguity is an expected fail-closed blocker.
-- `auth login` writes only the package-owned runtime home. Structural
-  `setup --activate-skill-runtime-v2` is a separate exclusive-fence action and
-  must pass candidate bundle/CLI/app-server/auth preflight before config/state
-  writes.
-- Production `run` and `daemon` require config/state v2. Legacy target prompts
-  are inactive rollback artifacts after activation and must not be read.
-- Local bridge validation does not authorize commit, push, npm publication,
-  consumer preparation, structural migration, or live smoke.
-
-## Review Gates
-
-- Runtime code changes should include matching test changes unless the quality
-  gate policy is intentionally changed.
-- Medium or larger runtime changes should include cleanup-review and code-review
-  evidence before final handoff.
-- Fresh-context review, durable run summaries, and policy suggestions are
-  runner-controlled behavior; do not turn them into agent-owned GitHub actions.
+Update `CHANGELOG.md`, verify the clean tarball, and use the repository's GitHub release workflow. Do not run `npm publish` manually unless that workflow is unavailable and the user authorizes the fallback.

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Spec Implementer"
+  short_description: "Execute approved specs with lean delivery"
+  default_prompt: "Use $spec-implementer to execute the approved spec continuously, default to no Git checkpoints, validate proportionately, and launch only stable required review gates."
+policy:
+  allow_implicit_invocation: true

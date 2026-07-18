@@ -1,0 +1,6 @@
+interface:
+  display_name: "Cleanup Review"
+  short_description: "Exceptional independent simplification review"
+  default_prompt: "Use $cleanup-review only when an explicit concrete cleanup risk cannot fit the final code-review standards lens."
+policy:
+  allow_implicit_invocation: true

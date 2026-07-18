@@ -199,6 +199,37 @@ function parseJson(stdout, fallback) {
   return JSON.parse(text || 'null');
 }
 
+export function parseV2RunResult(stdout) {
+  const envelope = JSON.parse(String(stdout));
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+    || envelope.schema !== 'codex-orchestrator.agent-auto-run-result' || envelope.version !== 1
+    || Object.keys(envelope).sort().join(',') !== 'result,schema,version') {
+    throw new Error('V2 run result envelope is invalid');
+  }
+  const result = envelope.result;
+  if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.status !== 'string') {
+    throw new Error('V2 run result is invalid');
+  }
+  const shapes = {
+    'review-ready': ['evidencePath', 'pullRequestUrl', 'status'],
+    'not-eligible': ['evidencePath', 'reason', 'status'],
+    blocked: ['evidencePath', 'kind', 'resumable', 'status'],
+    'transport-failed': ['evidencePath', 'resumable', 'status'],
+    cancelled: ['evidencePath', 'status'],
+    'internal-error': ['evidencePath', 'status'],
+  };
+  const expected = shapes[result.status];
+  if (!expected || Object.keys(result).sort().join(',') !== [...expected].sort().join(',')
+    || !nonEmptyString(result.evidencePath)) throw new Error('V2 run result shape is invalid');
+  if (result.status === 'review-ready' && !nonEmptyString(result.pullRequestUrl)) throw new Error('V2 review-ready result is invalid');
+  if (result.status === 'not-eligible' && !nonEmptyString(result.reason)) throw new Error('V2 not-eligible result is invalid');
+  if (result.status === 'blocked' && (!['external', 'safety', 'exhausted'].includes(result.kind) || typeof result.resumable !== 'boolean')) {
+    throw new Error('V2 blocked result is invalid');
+  }
+  if (result.status === 'transport-failed' && typeof result.resumable !== 'boolean') throw new Error('V2 transport result is invalid');
+  return result;
+}
+
 function issueNumberFromUrl(value) {
   const match = String(value).match(/\/issues\/(\d+)/);
   return match ? Number(match[1]) : undefined;
@@ -333,6 +364,7 @@ export const dailyPhase = Object.freeze({
 
 export function createRunner(options = {}) {
   const cwd = options.cwd ?? DEFAULT_CWD;
+  const repository = options.repo ?? REPO;
   const localDir = options.localDir ?? path.join(cwd, '.codex-orchestrator/local/self-improvement');
   const exec = options.exec ?? defaultExec;
   const now = options.now ?? (() => new Date());
@@ -411,7 +443,7 @@ export function createRunner(options = {}) {
   }
 
   async function preflight() {
-    const repo = await exec('gh', ['repo', 'view', REPO, '--json', 'nameWithOwner'], { cwd });
+    const repo = await exec('gh', ['repo', 'view', repository, '--json', 'nameWithOwner'], { cwd });
     if (repo.code !== 0) return { ok: false, reason: `repo identity check failed: ${summarizeOutput(repo)}` };
     let repoJson;
     try {
@@ -419,12 +451,12 @@ export function createRunner(options = {}) {
     } catch {
       return { ok: false, reason: 'repo identity check returned invalid JSON' };
     }
-    if (repoJson?.nameWithOwner !== REPO) return { ok: false, reason: `repo identity mismatch: ${repoJson?.nameWithOwner ?? 'unknown'}` };
+    if (repoJson?.nameWithOwner !== repository) return { ok: false, reason: `repo identity mismatch: ${repoJson?.nameWithOwner ?? 'unknown'}` };
 
     const auth = await exec('gh', ['auth', 'status'], { cwd });
     if (auth.code !== 0) return { ok: false, reason: `gh auth status failed: ${summarizeOutput(auth)}` };
 
-    const labels = await exec('gh', ['label', 'list', '--repo', REPO, '--limit', '1000', '--json', 'name'], { cwd });
+    const labels = await exec('gh', ['label', 'list', '--repo', repository, '--limit', '1000', '--json', 'name'], { cwd });
     if (labels.code !== 0) return { ok: false, reason: `gh label list failed: ${summarizeOutput(labels)}` };
     let labelNames;
     try {
@@ -441,7 +473,7 @@ export function createRunner(options = {}) {
         'create',
         'self-improvement',
         '--repo',
-        REPO,
+        repository,
         '--color',
         '5319E7',
         '--description',
@@ -496,7 +528,7 @@ export function createRunner(options = {}) {
       'issue',
       'list',
       '--repo',
-      REPO,
+      repository,
       '--state',
       state,
       '--limit',
@@ -579,7 +611,7 @@ export function createRunner(options = {}) {
       'issue',
       'create',
       '--repo',
-      REPO,
+      repository,
       '--title',
       title,
       '--body-file',
@@ -639,13 +671,17 @@ export function createRunner(options = {}) {
     if (!Number.isInteger(Number(issue))) return { status: 'skipped', reason: 'missing issue number' };
     const build = await exec('npm', ['run', 'build', '--silent'], { cwd });
     if (build.code !== 0) return { status: 'failed', exitCode: build.code, reason: `build failed: ${summarizeOutput(build)}` };
-    const result = await exec('node', ['dist/src/cli.js', 'run', '--target', '.', '--issue', String(issue)], { cwd });
-    const summary = summarizeOutput(result);
-    if (result.code === 0 && /blocked scoped execution|outcome:\s*blocked|status:\s*blocked/iu.test(summary)) {
-      return { status: 'blocked', exitCode: 0, reason: summary, issueNumber: Number(issue) };
-    }
-    if (result.code === 0) return { status: 'passed', exitCode: 0, summary, issueNumber: Number(issue) };
-    return { status: 'failed', exitCode: result.code, reason: summarizeOutput(result), issueNumber: Number(issue) };
+    const result = await exec('node', ['dist/src/v2/candidate-cli.js', 'run', '--target', cwd, '--issue', String(issue)], { cwd });
+    let typed;
+    try { typed = parseV2RunResult(result.stdout); }
+    catch { return { status: 'failed', exitCode: result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }
+    const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, 'internal-error': 70, cancelled: 130 }[typed.status];
+    if (result.code !== expectedExit) return { status: 'failed', exitCode: result.code, reason: 'candidate CLI exit did not match typed V2 result', issueNumber: Number(issue) };
+    if (typed.status === 'review-ready') return { status: 'passed', exitCode: 0, summary: typed, issueNumber: Number(issue) };
+    if (typed.status === 'blocked') return { status: 'blocked', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    if (typed.status === 'not-eligible') return { status: 'skipped', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    if (typed.status === 'cancelled') return { status: 'cancelled', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    return { status: 'failed', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
   }
 
   async function runLiveSmoke({ implementation } = {}) {
@@ -671,7 +707,7 @@ export function createRunner(options = {}) {
       'view',
       String(number),
       '--repo',
-      REPO,
+      repository,
       '--json',
       'number,title,body,state,url,labels,comments,closedByPullRequestsReferences',
     ], { cwd });
@@ -804,7 +840,10 @@ export function createRunner(options = {}) {
 }
 
 async function main() {
-  const runner = createRunner();
+  const runner = createRunner({
+    cwd: process.env.CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_CWD,
+    repo: process.env.CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_REPO,
+  });
   const [command, ...args] = process.argv.slice(2);
   if (!command || !['daily', 'discover', 'implement', 'review'].includes(command)) {
     console.error('Usage: node runner.mjs <daily|discover|implement --issue <number>|review>');
