@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-07-18
+
+### Changed
+- Re-published the current V2 package line for downstream workspace upgrades.
+
 ## [2.0.1] - 2026-07-17
 
 ### Fixed
