@@ -1,81 +1,178 @@
 # Codex Orchestrator
 
-Codex Orchestrator is a runner-owned GitHub Issue loop for Codex. The public runtime has one path: select an issue carrying the configured `auto` label, execute bounded implementation cycles in an isolated worktree, run configured checks, obtain independent Acceptance Proof, and publish a review-ready branch and draft pull request.
+Codex Orchestrator turns an authorized GitHub Issue into a controlled Codex delivery run. It reads the issue, decides whether the work is ready to implement, works in an isolated Git worktree, validates the result, and—only after all required gates pass—pushes a branch and opens a draft pull request.
+
+The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, checks, recovery, and publication; Codex owns the bounded analysis, implementation, review, and proof tasks assigned to it.
+
+## What happens to an issue
+
+Add the configured `agent:auto` label to an open issue, then run the orchestrator. It will choose one of three routes:
+
+- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, configured checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
+- **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; the Runner freezes the approved revision and returns `spec-frozen`. Implementation is intentionally a separate follow-up run or workflow.
+- **Human decision required:** the repository does not contain enough authority to choose between materially different product outcomes. The package posts one precise question, applies `agent:waiting-human`, and resumes the same run after an authorized repository writer answers with the requested prefix.
+
+Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
 ## Requirements
 
 - Node.js 18 or newer
-- `git`, `gh`, and the configured Codex CLI
-- an authenticated parent Codex installation and GitHub CLI
+- `git`
+- an authenticated [GitHub CLI](https://cli.github.com/) (`gh auth status`)
+- the configured Codex CLI version and an authenticated parent Codex installation
+- a GitHub repository with a usable `origin` remote
 
-GitHub, SSH, npm, and cloud publication credentials remain in the trusted Runner and are not forwarded through the child environment. Ordinary Codex execution and native Codex subagents may use the same user-owned Codex authentication and may read files available to the same local OS user; this is an explicit accepted local-read risk, not an external-publication grant.
+The target path passed to every command must be absolute.
 
-## Install and configure
+## Quick start
+
+Install the package in the repository you want to automate:
 
 ```sh
 npm install --save-dev codex-orchestrator
+```
+
+Create the repository policy and GitHub labels:
+
+```sh
 npx codex-orchestrator setup --target "$PWD"
 npx codex-orchestrator setup --target "$PWD" --prepare-labels
 npx codex-orchestrator doctor --target "$PWD"
 ```
 
-`setup` writes the exact V2 policy to `.codex-orchestrator/config.json`. Use `--github-owner` and `--github-repo` together only when repository inference is unavailable. Exact Config V1 is migrated by `setup`; older recognized runtime state remains detect-only and requires `setup --fresh` while all old activity is stopped.
+`setup` infers the GitHub repository and base branch from the target checkout. If that is not possible, provide both repository fields:
 
-## Run
+```sh
+npx codex-orchestrator setup \
+  --target "$PWD" \
+  --github-owner your-org \
+  --github-repo your-repo
+```
 
-Run one authorized issue:
+It writes `.codex-orchestrator/config.json` and adds the generated workspace, state, and proof directories to `.gitignore`. If the repository has `test` or `typecheck` npm scripts, setup adds them as default checks. Review the generated config before the first run.
+
+Now create or choose a clear GitHub Issue, include acceptance criteria when possible, and add the `agent:auto` label. Run it directly:
 
 ```sh
 npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
-Poll and run matching issues serially:
+The command prints one JSON result. A successful direct delivery returns `review-ready` with the draft PR URL. A complex issue may instead return `spec-frozen`; a genuine product decision returns `awaiting-user` with the answer prefix to use in the issue comment.
+
+## Main commands
+
+### `setup`
+
+Create or verify the strict repository policy:
+
+```sh
+npx codex-orchestrator setup --target "$PWD"
+```
+
+Preview setup writes without changing files or labels:
+
+```sh
+npx codex-orchestrator setup --target "$PWD" --dry-run
+npx codex-orchestrator setup --target "$PWD" --prepare-labels --dry-run
+```
+
+Setup accepts the current exact configuration schema only. Unknown or older configuration shapes are rejected rather than guessed or executed through a compatibility runtime.
+
+### `doctor`
+
+Check that the config is valid, the configured repository matches `origin`, no active owner makes setup unsafe, and all configured labels exist:
+
+```sh
+npx codex-orchestrator doctor --target "$PWD"
+```
+
+### `status`
+
+Run the same read-only operational inspection in a status-oriented command:
+
+```sh
+npx codex-orchestrator status --target "$PWD"
+```
+
+Both `doctor` and `status` return structured JSON and make no repository or GitHub changes.
+
+### `run`
+
+Run or safely resume one issue:
+
+```sh
+npx codex-orchestrator run --target "$PWD" --issue 123
+```
+
+Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
+
+### `daemon`
+
+Poll for open issues carrying `agent:auto` and process them serially:
 
 ```sh
 npx codex-orchestrator daemon --target "$PWD"
 ```
 
-Perform one polling pass:
+Run exactly one polling pass—for example from cron or another scheduler—with:
 
 ```sh
 npx codex-orchestrator daemon --target "$PWD" --once
 ```
 
-All commands require an absolute target. `doctor`, `status`, `run`, and `daemon` read the same strict config and use the same `runIssue` lifecycle.
+The daemon uses the same lifecycle as `run`; it does not have a less strict execution path.
 
-## Lifecycle
+## Labels and visible outcomes
 
-1. Read the issue and confirm the exact `auto` authorization label.
-2. Acquire runner ownership and create or resume one issue worktree.
-3. Triage the issue. An approved product ambiguity publishes one marker-bound question and moves the issue to `agent:waiting-human`; only an unedited, post-question answer from a current repository writer can resume the same run.
-4. Pin one verified package-owned workflow generation and invoke its `implementation` operation in a contained Codex process.
-5. Validate the structured implementation report and the complete worktree diff.
-6. Run the configured finite checks.
-7. Freeze the checked change and invoke the pinned generation's `acceptance-proof` operation in a separate contained process.
-8. Validate fresh proof artifacts and criterion coverage.
-9. Publish through runner-owned Git and GitHub adapters, then mark the issue review-ready.
+The default labels are:
 
-Implementation and proof retries are bounded. Crashes resume from durable intents instead of repeating already-confirmed external effects. Ambiguous ownership, process quiescence, repository identity, credentials, denied paths, or publication state fails closed with a typed result.
+| Label | Meaning |
+| --- | --- |
+| `agent:auto` | The issue is authorized for orchestration. |
+| `agent:running` | A Runner has claimed the issue. |
+| `agent:waiting-human` | One approved product question is waiting for an authorized answer. |
+| `agent:blocked` | The run stopped on an external, safety, or exhausted-budget blocker. |
+| `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 
-## Acceptance Proof
+Important command results:
 
-Proof is independent from implementation. The proof process receives a frozen description of the checked change and may write only under its proof artifact root. It cannot publish, mutate issue state, or reuse implementation authority.
+| Result | What to do |
+| --- | --- |
+| `review-ready` | Open the returned draft PR URL and review the change. |
+| `spec-frozen` | Use the returned frozen specification receipt as the authority for a later implementation workflow. |
+| `awaiting-user` | Reply to the issue using the returned answer prefix. Re-run the command or let the daemon pick it up. |
+| `not-eligible` | Check that the issue is open, has only the appropriate authorization label, and has no existing open PR for its branch. |
+| `requeued` | Another known Runner owns the repository; retry later. |
+| `blocked` | Read `kind`, `resumable`, and `evidencePath`; fix the external condition only when the evidence says it is safe to resume. |
+| `transport-failed` | A local or remote effect could not be confirmed. Re-run only when `resumable` is true; the Runner will reconcile durable intent first. |
 
-Artifacts always receive size, hash, UTF-8, path-containment, and credential checks. Public artifacts have the stricter publication contract: screenshots or sanitized generated summaries only, with host identity removed. Local command output may retain machine paths because it is never published, but credentials remain forbidden everywhere.
+All outcomes include structured evidence or a path to local evidence. Quiet terminal output is not the source of truth—the JSON result and persisted state are.
 
-Browser and mobile proof additionally require current workflow evidence. Mobile proof uses runner-owned Android or iOS leases and refuses to take over a user-owned device or app session.
+## Configuration you will usually edit
 
-## Package boundary
+`.codex-orchestrator/config.json` is intentionally strict: unknown keys are errors. The most useful fields are:
 
-The npm package ships only:
+- `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
+- `runner.pollIntervalSeconds`: daemon polling interval.
+- `checks`: finite Runner-owned commands that must pass before proof and publication.
+- `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
+- `deny.readPaths`: paths the worker must not read or modify.
+- `deny.commands`: absolute command paths that must not be exposed to the worker.
 
-- the compiled V2 runtime and adapter closure;
-- one generated `internal-workflow` inventory containing declared skills, profiles, schemas, operation wrappers, and their exact manifest;
-- this README, the architecture deep dive, changelog, and license.
+`runner.maxCycles`, the branch template, required Codex version, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs.
 
-The runtime materializes an immutable generation from that manifest before a new run and persists its receipt through every retry and proof attempt. Consumer `CODEX_HOME` skills and profiles are never workflow authority. There is no compatibility bridge, alternate public runtime, or Legacy CLI export.
+## Safety model in plain language
 
-## Development
+The package separates two roles:
+
+- The **Runner** is trusted. It owns GitHub reads and writes, labels, comments, worktrees, configured checks, process lifecycle, commits, pushes, draft PRs, proof validation, and recovery state.
+- Codex **workers** are bounded. They receive operation-specific instructions and a contained environment. They can inspect and change the assigned worktree or create proof-owned artifacts, but they do not receive publication credentials or permission to publish.
+
+Codex and native Codex subagents still run as your local OS user and may use your existing Codex authentication. This is containment of authority, not an OS-level secrecy boundary. Credentials are scrubbed from worker environments and rejected in reports and proof artifacts.
+
+## Development and release checks
+
+For package maintainers:
 
 ```sh
 npm run refresh:workflow
@@ -84,12 +181,8 @@ npm test
 npm pack --dry-run --json
 ```
 
-`npm run refresh:workflow` is the maintainer entrypoint for workflow updates. It imports the allowlisted skills and their accompanying files from `${CODEX_HOME:-$HOME/.codex}`, imports declared shared routing documents and eval suites, rebuilds `internal-workflow`, rejects stale or invalid bindings, and runs the focused workflow contract tests. The allowlist and operation dependency/resource bindings live in `scripts/agent-auto-workflow-source.json`; change that file only when the package's workflow structure should change.
+`npm run refresh:workflow` rebuilds the package-owned workflow inventory from the explicit allowlist in `scripts/agent-auto-workflow-source.json`, validates operation bindings, and runs focused contract tests. `npm run check:workflow` is the non-writing drift check; `npm run verify:workflow` verifies the committed generated workflow without reading local skills.
 
-The refresh is fail-fast rather than rollback-based: if a validation fails, the generated candidate remains visible in the working tree for inspection and must not be committed. Release publication independently runs source-free workflow verification and the full test suite before npm publication.
+`npm run smoke:live` packs the current candidate and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
-Operation adapters must link every declared primary skill, dependency skill, and shared resource. Eval files are packaged and schema-validated for maintainer evaluation, but are intentionally excluded from operation snapshots so workers do not receive unevaluated test context. `npm run check:workflow` is the non-writing drift check and `npm run verify:workflow` validates the committed generated package without consulting local skills.
-
-`npm test` starts from a clean `dist` directory. `npm run smoke:live` packs the current package and mutates the configured scratch GitHub repository; run it only with explicit authorization. The default `core-release` profile contains the four external release proofs: package installation, real Codex, browser proof, and a safety-negative case.
-
-See [docs/deep-dive.md](docs/deep-dive.md) for the trust and durability model and [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md) for live validation.
+For the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model, see [docs/deep-dive.md](docs/deep-dive.md). For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).
