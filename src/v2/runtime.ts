@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
-import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { GitWorktreeManager } from './adapters/worktree.js';
@@ -1258,52 +1258,133 @@ export async function materializeReportReadView(input: {
   destination: string;
   deniedPaths: string[];
 }): Promise<string> {
+  await assertDisjointReadViewPaths(input.worktreePath, input.destination);
+  const deniedPaths = normalizeReadViewDeniedPaths(input.deniedPaths);
   await rm(input.destination, { recursive: true, force: true });
   await mkdir(input.destination, { recursive: true, mode: 0o700 });
-  await extractHeadArchive(input.worktreePath, input.destination);
-  for (const relativePath of input.deniedPaths) {
-    if (isAbsolute(relativePath)) continue;
-    const deniedPath = resolve(input.destination, relativePath);
-    const contained = relative(input.destination, deniedPath);
-    if (contained === '' || contained === '..' || contained.startsWith('../') || isAbsolute(contained)) {
-      throw new Error('report read-view denied path escapes destination');
-    }
-    await rm(deniedPath, { recursive: true, force: true });
-  }
+  await materializeCurrentReadView(input.worktreePath, input.destination, deniedPaths);
   await scrubReportReadView(input.destination);
   return input.destination;
 }
 
-async function extractHeadArchive(worktreePath: string, destination: string): Promise<void> {
-  await new Promise<void>((resolveExtract, reject) => {
-    const archive = spawn('git', ['-C', worktreePath, 'archive', '--format=tar', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const extract = spawn('tar', ['-xf', '-', '-C', destination], { stdio: ['pipe', 'ignore', 'pipe'] });
-    const failures: string[] = [];
-    archive.once('error', reject);
-    extract.once('error', reject);
-    archive.stderr.on('data', (chunk: Buffer) => {
-      if (failures.join('').length < 8 * 1024) failures.push(chunk.toString('utf8'));
-    });
-    extract.stderr.on('data', (chunk: Buffer) => {
-      if (failures.join('').length < 8 * 1024) failures.push(chunk.toString('utf8'));
-    });
-    archive.stdout.pipe(extract.stdin);
-    let archiveCode: number | null = null;
-    let extractCode: number | null = null;
-    const settle = () => {
-      if (archiveCode === null || extractCode === null) return;
-      if (archiveCode !== 0 || extractCode !== 0) reject(new Error(`report read-view archive failed: ${failures.join('').slice(0, 8 * 1024)}`));
-      else resolveExtract();
-    };
-    archive.once('close', (code) => { archiveCode = code ?? 1; settle(); });
-    extract.once('close', (code) => { extractCode = code ?? 1; settle(); });
+async function assertDisjointReadViewPaths(worktreePath: string, destination: string): Promise<void> {
+  const worktree = await realpath(resolve(worktreePath));
+  const readView = await canonicalProspectivePath(destination);
+  if (isPathWithin(worktree, readView) || isPathWithin(readView, worktree)) {
+    throw new Error('report read-view destination must not overlap its source worktree');
+  }
+}
+
+async function canonicalProspectivePath(path: string): Promise<string> {
+  let current = resolve(path);
+  const suffix: string[] = [];
+  while (true) {
+    try {
+      return resolve(await realpath(current), ...suffix);
+    } catch (error) {
+      if (!isErrorCode(error, 'ENOENT')) throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isPathWithin(parent: string, child: string): boolean {
+  const contained = relative(parent, child);
+  return contained === '' || (contained !== '..' && !contained.startsWith('../') && !isAbsolute(contained));
+}
+
+function normalizeReadViewDeniedPaths(paths: string[]): string[] {
+  return paths.flatMap((path) => {
+    if (isAbsolute(path)) return [];
+    if (path.length === 0 || posix.normalize(path) !== path
+      || path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new Error('report read-view denied path escapes destination');
+    }
+    return [path];
   });
+}
+
+async function materializeCurrentReadView(worktreePath: string, destination: string, deniedPaths: string[]): Promise<void> {
+  const paths = new Set(await readGitPathList(worktreePath, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']));
+  for (const path of [...paths].sort()) {
+    if (isExcludedReadViewPath(path, deniedPaths)) continue;
+    const target = resolve(destination, path);
+    const contained = relative(destination, target);
+    if (contained === '' || contained === '..' || contained.startsWith('../') || isAbsolute(contained)) {
+      throw new Error('report read-view path escapes destination');
+    }
+    const source = resolve(worktreePath, path);
+    let metadata;
+    try {
+      metadata = await lstat(source);
+    } catch (error) {
+      if (!isErrorCode(error, 'ENOENT')) throw error;
+      await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    await copyRegularFileNoFollow(source, target, metadata.mode);
+  }
+}
+
+function isExcludedReadViewPath(path: string, deniedPaths: string[]): boolean {
+  if (path.split('/').some((segment) => segment.startsWith('.env'))) return true;
+  return deniedPaths.some((deniedPath) => path === deniedPath || path.startsWith(`${deniedPath}/`));
+}
+
+async function readGitPathList(worktreePath: string, args: string[]): Promise<string[]> {
+  return new Promise((resolvePaths, reject) => {
+    const child = spawn('git', ['-C', worktreePath, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.once('error', reject);
+    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); });
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`report read-view inventory failed: ${Buffer.concat(stderr).toString('utf8').slice(0, 8 * 1024)}`));
+        return;
+      }
+      resolvePaths(Buffer.concat(stdout).toString('utf8').split('\0').filter((path) => path.length > 0));
+    });
+  });
+}
+
+async function copyRegularFileNoFollow(sourcePath: string, targetPath: string, mode: number): Promise<void> {
+  const source = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let target;
+  try {
+    const metadata = await source.stat();
+    if (!metadata.isFile()) throw new Error('report read-view source must be a regular file');
+    await rm(targetPath, { recursive: true, force: true });
+    await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+    target = await open(targetPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode & 0o777);
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    while (true) {
+      const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      let offset = 0;
+      while (offset < bytesRead) {
+        const { bytesWritten } = await target.write(buffer, offset, bytesRead - offset, null);
+        offset += bytesWritten;
+      }
+    }
+  } finally {
+    await target?.close();
+    await source.close();
+  }
 }
 
 async function scrubReportReadView(directory: string): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
-    if (entry.name === '.env' || entry.name.startsWith('.env.') || entry.isSymbolicLink()) {
+    if (entry.name.startsWith('.env') || entry.isSymbolicLink()) {
       await rm(path, { recursive: true, force: true });
     } else if (entry.isDirectory()) {
       await scrubReportReadView(path);

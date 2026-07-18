@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -21,20 +21,52 @@ test('report read view excludes env, denied paths, and symlinks before triage la
   await mkdir(repository);
   await execFileAsync('git', ['init', '-b', 'main', repository]);
   await writeFile(join(repository, 'README.md'), 'visible\n');
+  await writeFile(join(repository, 'removed.txt'), 'remove me\n');
   await writeFile(join(repository, '.env.local'), 'removed\n');
   await writeFile(join(repository, 'denied.txt'), 'removed\n');
   await symlink('/tmp', join(repository, 'outside-link'));
   await writeFile(absoluteSentinel, 'must remain\n');
   await execFileAsync('git', ['-C', repository, 'add', '--all']);
   await execFileAsync('git', ['-C', repository, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+  await writeFile(join(repository, 'README.md'), 'current checked change\n');
+  await writeFile(join(repository, 'untracked.txt'), 'current untracked change\n');
+  await rm(join(repository, 'removed.txt'));
+  const sourceStatus = (await execFileAsync('git', ['-C', repository, 'status', '--porcelain=v1', '-z'])).stdout;
 
   await materializeReportReadView({ worktreePath: repository, destination, deniedPaths: ['denied.txt', absoluteSentinel] });
 
-  assert.equal(await readFile(join(destination, 'README.md'), 'utf8'), 'visible\n');
+  assert.equal(await readFile(join(destination, 'README.md'), 'utf8'), 'current checked change\n');
+  assert.equal(await readFile(join(destination, 'untracked.txt'), 'utf8'), 'current untracked change\n');
   assert.equal(await readFile(absoluteSentinel, 'utf8'), 'must remain\n');
-  for (const path of ['.env.local', 'denied.txt', 'outside-link']) {
+  for (const path of ['.env.local', 'denied.txt', 'outside-link', 'removed.txt']) {
     await assert.rejects(lstat(join(destination, path)), { code: 'ENOENT' });
   }
+  assert.equal((await execFileAsync('git', ['-C', repository, 'status', '--porcelain=v1', '-z'])).stdout, sourceStatus);
+});
+
+test('report read view rejects a destination inside the source worktree before mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'report-read-view-overlap-'));
+  const repository = join(root, 'repository');
+  await mkdir(repository);
+  await execFileAsync('git', ['init', '-b', 'main', repository]);
+  await writeFile(join(repository, 'README.md'), 'preserved\n');
+  await execFileAsync('git', ['-C', repository, 'add', '--all']);
+  await execFileAsync('git', ['-C', repository, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+
+  await assert.rejects(materializeReportReadView({
+    worktreePath: repository,
+    destination: join(repository, '.report-read-view'),
+    deniedPaths: [],
+  }), /overlap/iu);
+  const alias = join(root, 'repository-alias');
+  await symlink(repository, alias);
+  await assert.rejects(materializeReportReadView({
+    worktreePath: repository,
+    destination: join(alias, '.report-read-view'),
+    deniedPaths: [],
+  }), /overlap/iu);
+  assert.equal(await readFile(join(repository, 'README.md'), 'utf8'), 'preserved\n');
+  assert.equal((await execFileAsync('git', ['-C', repository, 'status', '--porcelain=v1'])).stdout, '');
 });
 
 test('operation snapshot copies one pinned generation closure and concurrent publishers reuse it', async () => {
