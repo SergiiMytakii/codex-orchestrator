@@ -192,18 +192,13 @@ export function createProofReceipt(input: {
 }
 
 export function proofReportOutputSchema(): Record<string, unknown> {
-  return agentReportEnvelopeSchema(
-    (['passed', 'needs-rework', 'external-block'] as const)
-      .flatMap((status) => PROOF_MODES.map((mode) => proofReportBranchSchema(status, mode))),
-  );
+  return agentReportEnvelopeSchema([
+    proofReportGenerationBranch(true),
+    proofReportGenerationBranch(false),
+  ]);
 }
 
-function proofReportBranchSchema(
-  status: ProofReportV1['status'],
-  mode: typeof PROOF_MODES[number],
-): Record<string, unknown> {
-  const passed = status === 'passed';
-  const externalBlock = status === 'external-block';
+function proofReportGenerationBranch(passed: boolean): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
@@ -213,21 +208,25 @@ function proofReportBranchSchema(
     ],
     properties: {
       version: { type: 'integer', const: 1 },
-      status: { type: 'string', const: status },
-      decision: proofModeDecisionSchema(mode),
+      status: passed
+        ? { type: 'string', const: 'passed' }
+        : { type: 'string', enum: ['needs-rework', 'external-block'] },
+      decision: { anyOf: PROOF_MODES.map((mode) => proofModeDecisionSchema(mode)) },
       criteria: {
         type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH,
-        items: criterionSchema(passed, mode === 'non-visual' ? ['non-visual'] : ['non-visual', mode]),
+        items: criterionSchema(passed, SURFACES),
       },
       checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: checkSchema(passed) },
       artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: artifactSchema() },
-      visualEvidence: externalBlock || mode === 'non-visual' ? { type: 'null' } : proofModeVisualEvidenceSchema(mode),
-      findings: {
-        ...stringArraySchema(),
-        ...(passed ? { maxItems: 0 } : status === 'needs-rework' ? { minItems: 1 } : {}),
+      visualEvidence: {
+        anyOf: [
+          { type: 'null' },
+          ...TARGETS.map((mode) => proofModeVisualEvidenceSchema(mode)),
+        ],
       },
+      findings: passed ? { ...stringArraySchema(), maxItems: 0 } : stringArraySchema(),
       residualRisks: stringArraySchema(),
-      blocker: externalBlock ? externalBlockerSchema() : { type: 'null' },
+      blocker: passed ? { type: 'null' } : { anyOf: [{ type: 'null' }, externalBlockerSchema()] },
     },
   };
 }

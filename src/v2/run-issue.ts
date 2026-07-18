@@ -682,7 +682,50 @@ export class RunIssue {
       }
       const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
       if (changedFiles.length === 0 || !sameStrings(changedFiles, report.changedFiles)) {
-        return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
+        if (changedFiles.length === 0 || active.record.reportRepairs >= 1) {
+          return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
+        }
+        const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
+        active = await this.persist(active, { reportRepairs: 1 });
+        implementation = await this.runImplementation({
+          runId,
+          worktreePath,
+          issue: publicIssueSnapshot(issueSnapshot),
+          frozenCriteria,
+          cycle: active.record.cycle,
+          reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
+          repairOnly: true,
+          workflowGeneration: active.record.workflowGeneration,
+        });
+        if (implementation.kind === 'safe-halt') {
+          active = await this.persist(active, {
+            lifecycle: 'safe-halt',
+            process: {
+              ...implementation.process,
+              purpose: 'implementation',
+              resumeLifecycle: 'implementing',
+              resumeReviewStage: null,
+            },
+          });
+          while (true) {
+            try { await implementation.waitForAbsence(); break; }
+            catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
+          }
+          return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+        }
+        if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
+        const afterRepair = await this.dependencies.git.snapshot(worktreePath);
+        if (!sameFreshness(repairBaseline, afterRepair)) {
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
+        }
+        try { report = validateImplementationReport(implementation.report); }
+        catch { return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' }); }
+        if (report.status === 'external-block') {
+          return await this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
+        }
+        if (!sameStrings(changedFiles, report.changedFiles)) {
+          return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
+        }
       }
 
       if (active.record.routeReceipt?.route === 'direct') {

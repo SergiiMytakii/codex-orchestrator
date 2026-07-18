@@ -95,6 +95,10 @@ export class CodexProcess {
   async run(input: CodexProcessInput, signal: AbortSignal): Promise<CodexProcessResult> {
     validateInput(input);
     await clearPriorReport(input.reportPath);
+    const liveSmokeModel = input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL;
+    if (liveSmokeModel !== undefined && !/^[a-z0-9._-]+$/u.test(liveSmokeModel)) {
+      throw new Error('live smoke model must be one canonical model slug');
+    }
     const spec: SpawnSpec = {
       file: input.codexPath,
       args: buildContainmentCodexArgs({
@@ -104,9 +108,11 @@ export class CodexProcess {
         tmpDir: input.tmpDir,
         safePath: input.safePath,
         operationPolicy: input.operationPolicy,
-        executionProfile: input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL === '1'
-          ? undefined
-          : input.executionProfile,
+        executionProfile: liveSmokeModel
+          ? { ...input.executionProfile, model: liveSmokeModel }
+          : input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL === '1'
+            ? undefined
+            : input.executionProfile,
       }),
       cwd: input.cwd,
       env: buildContainmentCodexEnvironment({
@@ -166,6 +172,9 @@ export class CodexProcess {
       && settled.exit.exitCode !== 0
       && isConfirmedTransportFailure(settled.streams.stderr)
     ) {
+      return finalizeResult('transport-failed', child, settled, report);
+    }
+    if (report.kind === 'missing' && settled.exit.exitCode === 0 && settled.exit.signal === null) {
       return finalizeResult('transport-failed', child, settled, report);
     }
     if (report.kind !== 'available') return finalizeResult('report-failed', child, settled, report);

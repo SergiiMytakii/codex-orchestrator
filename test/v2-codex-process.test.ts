@@ -76,6 +76,34 @@ test('live smoke default-model mode leaves model selection to Codex', async () =
   });
 });
 
+test('live smoke explicit model overrides every packaged workflow role', async () => {
+  await withRunFixture(async (fixture) => {
+    let captured: SpawnSpec | undefined;
+    const processRunner = new CodexProcess(async (spec) => {
+      captured = spec;
+      return new FakeChild({ reportPath: fixture.reportPath });
+    });
+
+    const result = await processRunner.run(fixture.input({
+      parentEnv: {
+        ...fixture.parentEnv,
+        CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: 'gpt-5.6-luna',
+      },
+    }), new AbortController().signal);
+
+    assert.equal(result.kind, 'completed');
+    assert.deepEqual(captured?.args, buildContainmentCodexArgs({
+      schemaPath: fixture.schemaPath,
+      reportPath: fixture.reportPath,
+      toolHome: fixture.toolHome,
+      tmpDir: fixture.attemptTmp,
+      safePath: fixture.safePath,
+      operationPolicy: defaultContainmentOperationPolicy(),
+      executionProfile: { model: 'gpt-5.6-luna', reasoningEffort: 'medium' },
+    }));
+  });
+});
+
 test('contained argv rejects operation policy widening and honors a declared read-only sandbox', () => {
   const base = {
     schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
@@ -176,6 +204,19 @@ test('classifies confirmed Codex stream disconnect without a report as transport
         stderr: Buffer.from('ERROR: stream disconnected before completion: retry the request'),
         truncated: false,
       },
+    })).run(fixture.input(), new AbortController().signal);
+
+    assert.equal(result.kind, 'transport-failed');
+    assert.equal(result.report.kind, 'missing');
+  });
+});
+
+test('classifies successful Codex exit without its output report as resumable transport failure', async () => {
+  await withRunFixture(async (fixture) => {
+    const result = await new CodexProcess(async () => new FakeChild({
+      reportPath: fixture.reportPath,
+      exit: { exitCode: 0, signal: null },
+      writeReport: false,
     })).run(fixture.input(), new AbortController().signal);
 
     assert.equal(result.kind, 'transport-failed');

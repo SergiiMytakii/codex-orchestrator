@@ -62,6 +62,11 @@ behavior-preserving repairs, root may verify after checking the cited failure
 path and affected validation. Closure-triggering defects require affected
 independent verification.
 
+In Closure, copy each supplied canonical defect's `id`, `class`, `invariant`,
+`failure`, and introduced target revision byte-for-byte. Never paraphrase those
+immutable fields while describing verification. Record the Closure decision in
+the status, status target revision, evidence, and repair-finding outcome fields.
+
 ## Repair And Stop
 
 Repair compatible findings in one consolidated batch. Before repeating review,

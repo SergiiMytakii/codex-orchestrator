@@ -206,6 +206,21 @@ test('checked-in proof workflow schema matches its TypeScript owner', async () =
   assert.deepEqual(checkedIn, proofReportOutputSchema());
 });
 
+test('proof generation schema stays compact while runtime owns platform combinations', () => {
+  const schema = proofReportOutputSchema();
+  assert.ok(Buffer.byteLength(JSON.stringify(schema), 'utf8') < 25_000);
+
+  const mediumConfidencePassed = {
+    ...passedProof,
+    criteria: [{ ...passedProof.criteria[0], confidence: 'medium' }],
+  };
+  const wrongPlatformEvidence = { ...visualProof, visualEvidence: androidVisualProof.visualEvidence };
+  assert.equal(schemaAccepts(schema, { report: generatedProofReport(mediumConfidencePassed) }), false);
+  assert.equal(schemaAccepts(schema, { report: generatedProofReport(wrongPlatformEvidence) }), true);
+  assert.equal(runtimeAccepts(validateProofReport, mediumConfidencePassed), false);
+  assert.equal(runtimeAccepts(validateProofReport, wrongPlatformEvidence), false);
+});
+
 test('contained adapters preserve malformed report bytes for owner-level validation and repair', () => {
   assert.deepEqual(
     decodeAgentReportForValidation(Buffer.from(JSON.stringify({ report: completedImplementation }))),
@@ -297,7 +312,7 @@ test('proof output schema covers valid terminal reports and runtime validator re
   assertRuntimeContract(fixtures, proofReportOutputSchema(), validateProofReport, generatedProofReport);
 });
 
-test('proof generation schema rejects semantic failures before report repair', () => {
+test('proof generation keeps passed semantics while runtime owns remaining semantic failures', () => {
   const mediumConfidencePassed = {
     ...passedProof,
     criteria: [{ ...passedProof.criteria[0], confidence: 'medium' }],
@@ -309,9 +324,11 @@ test('proof generation schema rejects semantic failures before report repair', (
 
   assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(mediumConfidencePassed) }), false);
   assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(publishableLocalArtifact) }), false);
+  assert.equal(runtimeAccepts(validateProofReport, mediumConfidencePassed), false);
+  assert.equal(runtimeAccepts(validateProofReport, publishableLocalArtifact), false);
 });
 
-test('proof generation schema binds decisions to matching visual evidence', () => {
+test('proof runtime binds decisions to matching visual evidence omitted from the compact generation schema', () => {
   const visualWithoutEvidence = { ...visualProof, visualEvidence: undefined };
   const nonVisualWithEvidence = { ...passedProof, visualEvidence: visualProof.visualEvidence };
   const wrongPlatformEvidence = { ...visualProof, visualEvidence: androidVisualProof.visualEvidence };
@@ -327,11 +344,19 @@ test('proof generation schema binds decisions to matching visual evidence', () =
     blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['inspect service'] },
   };
 
-  for (const [name, invalid] of Object.entries({
+  const invalidReports = {
     visualWithoutEvidence, nonVisualWithEvidence, wrongPlatformEvidence, multipleVisualTargets,
     externalBlockWithMultipleTargets,
-  })) {
-    assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(invalid) }), false, name);
+  };
+  const generationAllowsRuntimeSemantics = new Set([
+    'visualWithoutEvidence', 'nonVisualWithEvidence', 'wrongPlatformEvidence',
+  ]);
+  for (const [name, invalid] of Object.entries(invalidReports)) {
+    assert.equal(
+      schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(invalid) }),
+      generationAllowsRuntimeSemantics.has(name),
+      name,
+    );
     assert.equal(runtimeAccepts(validateProofReport, invalid), false, `${name} runtime`);
   }
 });

@@ -29,10 +29,9 @@ async function source(): Promise<string> {
 }
 
 const retainedScenarios = [
-  'baseline', 'package-install', 'discovery-matrix', 'real-codex', 'remote-base-branch',
-  'scoped-runner-commit', 'commit-policy', 'run-scoped', 'loop-policy', 'incomplete-progress-rework',
-  'report-repair', 'diagnostics', 'browser-proof', 'acceptance-proof-positive',
-  'proof-strategy-non-visual-smoke', 'acceptance-proof-rework', 'acceptance-proof-negative',
+  'package-install', 'discovery-matrix', 'real-codex', 'commit-policy',
+  'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
+  'acceptance-proof-positive', 'acceptance-proof-rework', 'acceptance-proof-negative',
   'android-proof', 'ios-proof', 'quality-gates', 'safety-negative',
 ];
 
@@ -40,13 +39,36 @@ test('live smoke help pins the V2 scenario and profile matrix', async () => {
   const result = await runLiveSmoke(['--help']);
   assert.equal(result.status, 0); assert.equal(result.stderr, '');
   assert.deepEqual(listedValues(result.stdout, 'Scenarios'), retainedScenarios);
-  assert.deepEqual(listedValues(result.stdout, 'Profiles'), ['core-release', 'extended-policy', 'proof-matrix', 'mobile-proof', 'full']);
+  assert.deepEqual(listedValues(result.stdout, 'Profiles'), ['core-release', 'v2-regression', 'mobile-proof', 'full']);
   assert.match(result.stdout, /Default core-release/);
+});
+
+test('V2 regression profile covers each supplemental non-mobile behavior once', async () => {
+  const text = await source();
+  const profile = text.slice(text.indexOf("['v2-regression'"), text.indexOf("['mobile-proof'"));
+  assert.deepEqual(
+    [...profile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
+    [
+      'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
+      'report-repair', 'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
+      'acceptance-proof-negative', 'quality-gates',
+    ],
+  );
+});
+
+test('live smoke omits legacy scenario aliases without distinct V2 behavior', async () => {
+  const result = await runLiveSmoke(['--help']);
+  for (const alias of [
+    'baseline', 'remote-base-branch', 'scoped-runner-commit', 'run-scoped',
+    'loop-policy', 'proof-strategy-non-visual-smoke',
+  ]) {
+    assert.doesNotMatch(result.stdout, new RegExp(`\\b${alias}\\b`, 'u'));
+  }
 });
 
 test('default core release keeps only external integration proofs', async () => {
   const text = await source();
-  const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['extended-policy'"));
+  const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['v2-regression'"));
   assert.deepEqual(
     [...coreProfile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
     ['core-release', 'package-install', 'real-codex', 'browser-proof', 'safety-negative'],
@@ -56,7 +78,7 @@ test('default core release keeps only external integration proofs', async () => 
 test('live smoke rejects unknown profile before package or GitHub work', async () => {
   const result = await runLiveSmoke(['--profile', 'missing-profile']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Known profiles: core-release, extended-policy, proof-matrix, mobile-proof, full/);
+  assert.match(result.stderr, /Known profiles: core-release, v2-regression, mobile-proof, full/);
   assert.doesNotMatch(result.stdout, /npm pack|scenario/u);
 });
 
@@ -64,6 +86,12 @@ test('generated fake agent emits exact V2 implementation, code-review, and proof
   const result = await runLiveSmoke(['--self-test-fake-agent']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'V2 fake agent self-test passed.\n');
+});
+
+test('generated live Codex wrapper pins Luna, records the invocation, and injects faults after it', async () => {
+  const result = await runLiveSmoke(['--self-test-live-codex']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'V2 live Codex wrapper self-test passed.\n');
 });
 
 test('mobile-proof is explicit and non-skippable', async () => {
@@ -112,18 +140,29 @@ test('real Codex scenario keeps routing markers outside frozen acceptance criter
   assert.match(text, /markersAsCriteria \? markers : \[\]/u);
 });
 
-test('real Codex smoke uses the normal Codex default without changing target defaults', async () => {
+test('every model-backed live smoke invocation pins GPT-5.6 Luna', async () => {
   const text = await source();
-  assert.match(text, /overrides\.realCodex \? 'codex' : context\.fakeCodexPath/u);
-  assert.match(text, /runIssue\(context, issue\.number, \{ useCodexDefaultModel: true \}\)/u);
-  assert.match(text, /CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL/u);
-  assert.doesNotMatch(text, /realCodexSmokeModel|model_reasoning_effort/u);
+  assert.match(text, /const liveSmokeModel = 'gpt-5\.6-luna'/u);
+  assert.match(text, /CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: liveSmokeModel/u);
+  assert.match(text, /context\.liveCodexPath/u);
+  assert.doesNotMatch(text, /context\.fakeCodexPath/u);
 });
 
 test('real Codex smoke budgets cover the complete multi-operation workflow', async () => {
   const text = await source();
   assert.match(text, /const defaultTimeoutMs = 1_800_000;/u);
-  assert.match(text, /config\.codex\.timeoutMs = overrides\.realCodex \? 600_000 : 180_000;/u);
+  assert.match(text, /config\.codex\.timeoutMs = 600_000;/u);
+});
+
+test('quality-gates deterministically reopens the failed check at the fifth closure', async () => {
+  const text = await source();
+  const normalization = text.slice(text.indexOf('function normalizeClosureReview'), text.indexOf('function applyFault'));
+  assert.match(normalization, /report\.coverage = capsule\.mandatoryCoverage/u);
+  assert.match(normalization, /capsule\.fixedRepairFindings/u);
+  assert.match(normalization, /report\.targetRevision === 5/u);
+  assert.match(normalization, /prompt\.includes\('quality-gates'\)/u);
+  assert.match(normalization, /report\.verdict = 'needs-work'/u);
+  assert.match(normalization, /status: 'reopened'/u);
 });
 
 test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {
@@ -137,6 +176,32 @@ test('incomplete-progress retry uses a deterministic clean transport failure bef
   const fixture = text.slice(text.indexOf("scenario === 'incomplete-progress-rework'"), text.indexOf("if (scenario === 'safety-negative')"));
   assert.match(fixture, /stream disconnected before completion/u);
   assert.doesNotMatch(fixture, /setInterval/u);
+  const scenarioRunner = text.slice(text.indexOf('async function runReviewReadyScenario'), text.indexOf('async function runPackageInstallScenario'));
+  assert.doesNotMatch(scenarioRunner, /idleTimeoutMs/u);
+});
+
+test('proof rework fault discards transient proof evidence before a minimal needs-rework report', async () => {
+  const text = await source();
+  const applyFault = text.indexOf('function applyFault');
+  const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-rework'", applyFault), text.indexOf("if (scenario === 'browser-proof')", applyFault));
+  assert.match(fixture, /discardProofArtifacts\(prompt\)/u);
+  assert.match(text, /rmSync\(artifactRoot, \{ recursive: true, force: true \}\)/u);
+  assert.match(fixture, /src\/live-smoke\/acceptance-proof-rework-complete\.txt/u);
+  assert.match(fixture, /evidenceRefs: \[\]/u);
+  assert.match(fixture, /checks: \[\], artifacts: \[\]/u);
+  assert.match(text, /acceptance-proof-rework: expected cycle=2/u);
+});
+
+test('negative proof fault discards transient evidence before the external blocker report', async () => {
+  const text = await source();
+  const applyFault = text.indexOf('function applyFault');
+  const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-negative'", applyFault), text.indexOf("scenario === 'acceptance-proof-rework'", applyFault));
+  assert.match(fixture, /discardProofArtifacts\(prompt\)/u);
+});
+
+test('implementation operation defines changedFiles as the cumulative run change set', async () => {
+  const operation = await readFile(fileURLToPath(new URL('../../scripts/runtime-workflow-overlays/operations/implementation/SKILL.md', import.meta.url)), 'utf8');
+  assert.match(operation, /changedFiles.*complete current product\s+change set across all implementation cycles/isu);
 });
 
 test('strict cleanup retries eventually consistent observations before failing', async () => {

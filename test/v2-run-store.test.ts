@@ -193,13 +193,13 @@ test('waiting lifecycle rejects phase drift, missing awaiting route, and duplica
 
 test('resumed waiting history is retained through ordinary non-waiting delivery lifecycles', async () => {
   for (const lifecycle of ['triaging', 'routed', 'implementing', 'spec-authoring', 'reworking', 'checking'] as const) {
-    const run = waitingRecord('resumed');
+    const waitingHuman = waitingRecord('resumed').waitingHuman;
+    const run = lifecycle === 'spec-authoring' ? specRoutedRecord() : directRoutedRecord();
+    run.waitingHuman = waitingHuman;
     run.lifecycle = lifecycle;
-    if (lifecycle !== 'routed') {
+    if (lifecycle === 'triaging') {
       delete run.routeExecution;
       delete run.routeReceipt;
-    }
-    if (lifecycle === 'triaging') {
       run.routeExecution = {
         version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
         candidateReviews: 0, phase: 'triage-ready', previousAttemptId: null,
@@ -463,6 +463,38 @@ function directRoutedRecord(): RunRecordV1 {
   };
   const routeReceipt: RouteReceiptV1 = {
     version: 1, route: 'direct', triage, review: null, artifact, decisionSha256: '', decidedAt: timestamp(), assumptions: [],
+  };
+  routeReceipt.decisionSha256 = hashRouteDecision(routeReceipt);
+  return {
+    ...base,
+    lifecycle: 'routed',
+    routeExecution: {
+      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      candidateReviews: 0, phase: 'route-complete', triage, review: null,
+    },
+    routeReceipt,
+  };
+}
+
+function specRoutedRecord(): RunRecordV1 {
+  const base = record();
+  const artifact = {
+    version: 1 as const, status: 'spec-required' as const,
+    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
+    direct: null,
+    specRequired: {
+      summary: 'Specification required.', complexityReasons: ['Shared contract changes.'],
+      specMode: 'compact' as const, reviewFocus: ['Contract compatibility.'],
+    },
+    awaitingUser: null, blocker: null,
+  };
+  const triage = {
+    operation: 'triage' as const, attemptId: 'triage-spec-1', artifactSha256: hashTriageArtifact(artifact),
+    generationHash: base.workflowGeneration.generationHash,
+  };
+  const routeReceipt: RouteReceiptV1 = {
+    version: 1, route: 'spec-required', triage, review: null, artifact,
+    decisionSha256: '', decidedAt: timestamp(), assumptions: [],
   };
   routeReceipt.decisionSha256 = hashRouteDecision(routeReceipt);
   return {

@@ -6,6 +6,25 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Replaced overlapping legacy live-smoke profiles and scenario aliases with a
+  single supplemental `v2-regression` matrix whose scenarios each exercise a
+  distinct current V2 policy, recovery, diagnostics, proof, or quality gate.
+- Pinned every model-backed live-smoke operation to real `gpt-5.6-luna`, with
+  per-scenario model audit evidence and deterministic fault injection retained
+  only around the real model result.
+- Reduced the universal proof generation schema from 52 KB to 22 KB by keeping
+  successful-proof semantics in generation while moving duplicated platform
+  combinations to the existing strict runtime validator, reducing
+  structured-output load without weakening final proof acceptance.
+- Treats a zero-exit Codex invocation with a missing output report as a
+  resumable transport failure, allowing the existing bounded retry to recover
+  without weakening malformed-report validation.
+- Repairs one schema-valid implementation report whose cumulative
+  `changedFiles` omits current product changes, without consuming another
+  implementation cycle or permitting worktree mutation; repeated mismatch
+  remains fail-closed.
+
 ### Removed
 - Removed unsupported configuration conversion, old workflow-manifest readers,
   obsolete run-state fallbacks, superseded prompts, and historical workflow

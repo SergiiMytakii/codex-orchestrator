@@ -379,6 +379,31 @@ test('malformed report repair and clean transport retry use separate budgets wit
   assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
 });
 
+test('incomplete cumulative changedFiles gets one report-only repair without consuming a cycle', async () => {
+  const fixture = await runFixture({
+    implementationResults: [
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'delta only', changedFiles: ['repair-only.txt'], residualRisks: [] } },
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'cumulative', changedFiles: ['feature.txt'], residualRisks: [] } },
+    ],
+  });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 1 });
+});
+
+test('repeated cumulative changedFiles mismatch remains fail-closed', async () => {
+  const mismatch = { kind: 'completed' as const, report: { version: 1 as const, status: 'completed' as const, summary: 'delta only', changedFiles: ['repair-only.txt'], residualRisks: [] } };
+  const fixture = await runFixture({ implementationResults: [mismatch, mismatch] });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(result.status, 'internal-error');
+  const outcome = (await fixture.store.read()).runs[0]?.terminalOutcome;
+  assert.equal(outcome?.status, 'internal-error');
+  if (outcome?.status === 'internal-error') assert.equal(outcome.code, 'implementation-change-set-invalid');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+});
+
 test('resumable implementation transport retries once when the interrupted attempt changed the worktree', async () => {
   const fixture = await runFixture({
     transportWrites: true,

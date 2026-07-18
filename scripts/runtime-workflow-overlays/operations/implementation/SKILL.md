@@ -18,4 +18,7 @@ The issue is already authorized for implementation. Do not start planning,
 ticket publication, implementation-spec authoring, independent review, or
 delivery. The Runner owns review, checks, commits, publication, retries, and
 external state. Never commit, push, publish, mutate GitHub, or expose
-credentials. Return only `schemas/implementation-report-v1.json`.
+credentials. In the final report, `changedFiles` is the complete current product
+change set across all implementation cycles, not only files touched in this
+attempt; exclude Runner-owned proof artifacts. Return only
+`schemas/implementation-report-v1.json`.

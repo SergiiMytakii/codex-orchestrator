@@ -11,11 +11,26 @@ npm run smoke:live
 The default `core-release` profile is intentionally small:
 
 - `package-install`: pack, install in a clean consumer, and run the public CLI.
-- `real-codex`: complete one issue with the normal default Codex model and strict structured reports.
+- `real-codex`: complete one issue with the explicitly pinned live-smoke model
+  `gpt-5.6-luna` and strict structured reports.
 - `browser-proof`: exercise a current browser workflow and validate proof artifacts.
 - `safety-negative`: confirm a forbidden path/effect is blocked without publication.
 
-The local policy matrix remains available through `--profile extended-policy` or explicit `--scenario` values. Use a broader profile only when its policy surface changed.
+The supplemental non-mobile V2 matrix remains available through
+`--profile v2-regression` or explicit `--scenario` values. It covers each
+distinct discovery, policy, recovery, diagnostics, non-visual proof, and
+quality-gate behavior once. Use it when those surfaces change.
+
+Mobile proof remains explicit through `--profile mobile-proof`. The `full`
+profile is the union of core release, V2 regression, and mobile scenarios; it
+does not retain historical aliases that exercise the same fixture and result.
+
+Every model-backed scenario launches the real Codex CLI with
+`gpt-5.6-luna`, overriding package role defaults. Deterministic recovery and
+negative cases inject their fault only around the real model result. The report
+records the observed Luna invocation count per scenario. Discovery and mobile
+device gates are explicitly model-free and fail if they unexpectedly launch a
+model.
 
 ## Preconditions
 

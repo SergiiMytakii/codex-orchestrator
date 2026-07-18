@@ -36,7 +36,8 @@ The build must clean `dist` before compilation. Stale compiled modules are a pac
 
 - Default release gate: `npm run smoke:live` or `--profile core-release`.
 - One focused integration: repeat `--scenario <name>`.
-- Broader policy matrix: `--profile extended-policy`.
+- Supplemental non-mobile V2 policy, recovery, and proof matrix:
+  `--profile v2-regression`.
 - Every run uses strict cleanup unless the user explicitly requests retained evidence.
 
 Do not substitute a production repository for the scratch repository. The smoke script must pack and execute the current package rather than invoke a nearby source checkout.
