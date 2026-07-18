@@ -78,12 +78,17 @@ The runtime materializes an immutable generation from that manifest before a new
 ## Development
 
 ```sh
+npm run refresh:workflow
 npm run typecheck
-npm run check:workflow
-npm run verify:workflow
 npm test
 npm pack --dry-run --json
 ```
+
+`npm run refresh:workflow` is the maintainer entrypoint for workflow updates. It imports the allowlisted skills and their accompanying files from `${CODEX_HOME:-$HOME/.codex}`, imports declared shared routing documents and eval suites, rebuilds `internal-workflow`, rejects stale or invalid bindings, and runs the focused workflow contract tests. The allowlist and operation dependency/resource bindings live in `scripts/agent-auto-workflow-source.json`; change that file only when the package's workflow structure should change.
+
+The refresh is fail-fast rather than rollback-based: if a validation fails, the generated candidate remains visible in the working tree for inspection and must not be committed. Release publication independently runs source-free workflow verification and the full test suite before npm publication.
+
+Operation adapters must link every declared primary skill, dependency skill, and shared resource. Eval files are packaged and schema-validated for maintainer evaluation, but are intentionally excluded from operation snapshots so workers do not receive unevaluated test context. `npm run check:workflow` is the non-writing drift check and `npm run verify:workflow` validates the committed generated package without consulting local skills.
 
 `npm test` starts from a clean `dist` directory. `npm run smoke:live` packs the current package and mutates the configured scratch GitHub repository; run it only with explicit authorization. The default `core-release` profile contains the four external release proofs: package installation, real Codex, browser proof, and a safety-negative case.
 

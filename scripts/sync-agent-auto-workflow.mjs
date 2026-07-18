@@ -7,7 +7,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v1\0';
 const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v1\0';
-const PRODUCTION_OPERATION_BINDINGS = {
+const SOURCE_MAGIC_V2 = 'codex-orchestrator-workflow-source-v2\0';
+const GENERATION_MAGIC_V2 = 'codex-orchestrator-workflow-generation-v2\0';
+const PRODUCTION_OPERATION_BINDINGS_V1 = {
   'acceptance-proof': ['acceptance-proof', 'schemas/proof-report-v1.json', 'proof_agent'],
   'ambiguity-review': [null, 'schemas/ambiguity-review-v1.json', 'reviewer_deep'],
   'cleanup-review': ['cleanup-review', 'schemas/code-review-v1.json', 'reviewer_standard'],
@@ -17,6 +19,15 @@ const PRODUCTION_OPERATION_BINDINGS = {
   'spec-implementation': ['spec-implementer', 'schemas/implementation-report-v1.json', 'implementer_standard'],
   'spec-review': ['implementation-spec-review', 'schemas/spec-review-v1.json', 'reviewer_deep'],
   triage: ['triage', 'schemas/triage-route-v1.json', 'analyst_deep'],
+};
+const PRODUCTION_OPERATION_BINDINGS_V2 = {
+  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'proof_agent'],
+  'ambiguity-review': [null, [], 'schemas/ambiguity-review-v1.json', 'reviewer_deep'],
+  'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'reviewer_standard'],
+  implementation: ['agent-auto', ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],
+  'spec-author': ['implementation-spec-maker', [], 'schemas/spec-author-v1.json', 'implementer_standard'],
+  'spec-review': ['implementation-spec-review', [], 'schemas/spec-review-v1.json', 'reviewer_deep'],
+  triage: ['triage', [], 'schemas/triage-route-v1.json', 'analyst_deep'],
 };
 
 const options = parseArgs(process.argv.slice(2));
@@ -107,6 +118,21 @@ async function buildExpected(input) {
     });
   }
 
+  if (config.version === 2) {
+    for (const evalName of config.sharedEvals) {
+      await copyFileEntry({
+        source: join(codexHome, 'docs', 'agents', ...evalName.split('/')),
+        target: `evals/${evalName}`,
+        entries,
+        sourceRecords,
+        sourceBase: codexHome,
+        adapt: false,
+        codexHome,
+        adaptations: config.adaptations,
+      });
+    }
+  }
+
   const docsRoot = await requireContainedDirectory(join(codexHome, 'docs', 'agents'), join(codexHome, 'docs'));
   sourceInventories.push({ root: docsRoot, inventory: await snapshotSourceTree(docsRoot) });
   const docs = await collectSharedDocs(config.sharedDocs, codexHome, entries);
@@ -158,7 +184,9 @@ async function buildExpected(input) {
   const sharedDocFiles = [...entries.keys()].filter((path) => path.startsWith('docs/agents/')).sort(compareUtf8);
   for (const skill of [...config.repositorySkills, ...config.personalSkills].sort(compareUtf8)) {
     const prefix = `skills/${skill}/`;
-    const files = [...entries.keys()].filter((path) => path.startsWith(prefix)).concat(sharedDocFiles).sort(compareUtf8);
+    const owned = [...entries.keys()].filter((path) => path.startsWith(prefix)
+      && (config.version === 1 || !path.startsWith(`${prefix}evals/`)));
+    const files = (config.version === 1 ? owned.concat(sharedDocFiles) : owned).sort(compareUtf8);
     const entry = `${prefix}SKILL.md`;
     const metadata = `${prefix}agents/openai.yaml`;
     if (!entries.has(entry) || !entries.has(metadata)) throw new Error(`Skill ${skill} is missing SKILL.md or agents/openai.yaml.`);
@@ -179,19 +207,85 @@ async function buildExpected(input) {
       throw new Error(`Operation ${id} references an undeclared entry, schema, or profile.`);
     }
     if (operation.sourceSkill !== null && !(operation.sourceSkill in skills)) throw new Error(`Operation ${id} source skill is invalid.`);
-    const files = [operation.entry, operation.outputSchema, profiles[operation.profile],
-      ...(operation.sourceSkill === null ? [] : skills[operation.sourceSkill].files)].sort(compareUtf8);
+    const dependencies = config.version === 2 ? operation.dependencySkills : [];
+    if (dependencies.some((skill) => !(skill in skills))) throw new Error(`Operation ${id} dependency skill is invalid.`);
+    const resources = config.version === 2 ? operation.resources : [];
+    if (resources.some((path) => !entries.has(path))) throw new Error(`Operation ${id} resource is invalid.`);
+    const files = [operation.entry, operation.outputSchema, profiles[operation.profile], ...resources,
+      ...(operation.sourceSkill === null ? [] : skills[operation.sourceSkill].files),
+      ...dependencies.flatMap((skill) => skills[skill].files)].sort(compareUtf8);
+    if (config.version === 2) validateOperationEntryBindings(id, operation, entries, skills);
     operations[id] = { id, ...operation, files: [...new Set(files)].sort(compareUtf8) };
   }
+
+  const evals = config.version === 2 ? collectEvals(entries, config) : undefined;
 
   const files = [...entries.entries()].sort(([left], [right]) => compareUtf8(left, right)).map(([path, entry]) => ({
     path, mode: entry.mode, size: entry.bytes.length, sha256: sha(entry.bytes),
   }));
-  const sourceFingerprint = sha(Buffer.from(`${SOURCE_MAGIC}${canonicalJson({ files })}`, 'utf8'));
-  const manifest = { version: 1, sourceFingerprint, generationHash: '', files, skills, profiles, operations };
-  manifest.generationHash = sha(Buffer.from(`${GENERATION_MAGIC}${canonicalJson(manifest)}`, 'utf8'));
+  const sourceFingerprint = sha(Buffer.from(`${config.version === 2 ? SOURCE_MAGIC_V2 : SOURCE_MAGIC}${canonicalJson({ files })}`, 'utf8'));
+  const manifest = config.version === 2
+    ? { version: 2, sourceFingerprint, generationHash: '', files, skills, profiles, operations, evals }
+    : { version: 1, sourceFingerprint, generationHash: '', files, skills, profiles, operations };
+  manifest.generationHash = sha(Buffer.from(`${config.version === 2 ? GENERATION_MAGIC_V2 : GENERATION_MAGIC}${canonicalJson(manifest)}`, 'utf8'));
   const manifestBytes = Buffer.from(`${canonicalJson(manifest)}\n`, 'utf8');
   return { entries, manifest, manifestBytes, sourceRecords, sourceInventories };
+}
+
+function collectEvals(entries, config) {
+  const evals = {};
+  const ids = new Set();
+  for (const evalName of config.sharedEvals) {
+    const path = `evals/${evalName}`;
+    const id = `shared/${evalName.replace(/\.json$/u, '')}`;
+    evals[id] = validateEvalEntry(entries, path, null, ids);
+  }
+  for (const skill of [...config.repositorySkills, ...config.personalSkills].sort(compareUtf8)) {
+    const path = `skills/${skill}/evals/evals.json`;
+    if (entries.has(path)) evals[`skill/${skill}`] = validateEvalEntry(entries, path, skill, ids);
+  }
+  return evals;
+}
+
+function validateEvalEntry(entries, path, owner, allIds) {
+  const entry = entries.get(path);
+  if (!entry) throw new Error(`Workflow eval is missing: ${path}`);
+  let value;
+  try { value = JSON.parse(entry.bytes.toString('utf8')); }
+  catch { throw new Error(`Workflow eval JSON is invalid: ${path}`); }
+  if (!isRecord(value) || value.schema_version !== 1 || !Array.isArray(value.cases) || value.cases.length === 0
+    || (owner !== null && value.skill !== owner)) throw new Error(`Workflow eval contract is invalid: ${path}`);
+  for (const item of value.cases) {
+    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0 || allIds.has(item.id)
+      || typeof item.prompt !== 'string' || item.prompt.length === 0
+      || !textList(item.expected) || !textList(item.forbidden)) throw new Error(`Workflow eval case is invalid: ${path}`);
+    allIds.add(item.id);
+  }
+  return { owner, path };
+}
+
+function textList(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'string' && item.length > 0);
+}
+
+function validateOperationEntryBindings(id, operation, entries, skills) {
+  const entry = entries.get(operation.entry);
+  if (!entry) throw new Error(`Operation ${id} entry is missing.`);
+  const linked = new Set();
+  const text = entry.bytes.toString('utf8');
+  for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
+    const target = match[1];
+    if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
+    linked.add(normalizePath(relative('/', resolve('/', dirname(operation.entry), target)).split(sep).join('/')));
+  }
+  const required = [
+    ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, skills[operation.sourceSkill].entry]]),
+    ...operation.dependencySkills.map((skill) => [skill, skills[skill].entry]),
+    ...operation.resources.map((path) => [path, path]),
+  ];
+  for (const [name, path] of required) {
+    if (!linked.has(path)) throw new Error(`Operation ${id} does not reference declared dependency ${name}.`);
+  }
 }
 
 async function runAfterConfigReadTestHook() {
@@ -254,7 +348,9 @@ async function collectSharedDocs(initial, codexHome, entries) {
     for (const match of text.matchAll(/\]\(([^)#]+\.md)(?:#[^)]+)?\)/gu)) {
       const target = match[1];
       if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const resolved = normalizePath(relative(root, resolve(dirname(path), target)).split(sep).join('/'));
+      const absolute = resolve(dirname(path), target);
+      if (absolute === root || !absolute.startsWith(`${root}${sep}`)) continue;
+      const resolved = normalizePath(relative(root, absolute).split(sep).join('/'));
       enqueue(resolved);
     }
   }
@@ -399,12 +495,14 @@ async function verifyGenerated(root) {
   const manifestEntry = tree.get('manifest.json');
   if (!manifestEntry || manifestEntry.mode !== 0o644) throw new Error('Workflow manifest is missing or has invalid mode.');
   const manifest = JSON.parse(manifestEntry.bytes.toString('utf8'));
-  assertExactKeys(manifest, ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations']);
-  if (manifest.version !== 1 || !isHash(manifest.sourceFingerprint) || !isHash(manifest.generationHash)) throw new Error('Workflow manifest identity is invalid.');
+  assertExactKeys(manifest, manifest.version === 2
+    ? ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations', 'evals']
+    : ['version', 'sourceFingerprint', 'generationHash', 'files', 'skills', 'profiles', 'operations']);
+  if (![1, 2].includes(manifest.version) || !isHash(manifest.sourceFingerprint) || !isHash(manifest.generationHash)) throw new Error('Workflow manifest identity is invalid.');
   if (!manifestEntry.bytes.equals(Buffer.from(`${canonicalJson(manifest)}\n`, 'utf8'))) throw new Error('Workflow manifest bytes are not canonical.');
-  const expectedSource = sha(Buffer.from(`${SOURCE_MAGIC}${canonicalJson({ files: manifest.files })}`, 'utf8'));
+  const expectedSource = sha(Buffer.from(`${manifest.version === 2 ? SOURCE_MAGIC_V2 : SOURCE_MAGIC}${canonicalJson({ files: manifest.files })}`, 'utf8'));
   if (expectedSource !== manifest.sourceFingerprint) throw new Error('Workflow source fingerprint mismatch.');
-  const expectedGeneration = sha(Buffer.from(`${GENERATION_MAGIC}${canonicalJson({ ...manifest, generationHash: '' })}`, 'utf8'));
+  const expectedGeneration = sha(Buffer.from(`${manifest.version === 2 ? GENERATION_MAGIC_V2 : GENERATION_MAGIC}${canonicalJson({ ...manifest, generationHash: '' })}`, 'utf8'));
   if (expectedGeneration !== manifest.generationHash) throw new Error('Workflow generation hash mismatch.');
   const names = [...tree.keys()].filter((path) => path !== 'manifest.json').sort(compareUtf8);
   if (!Array.isArray(manifest.files) || names.length !== manifest.files.length) throw new Error('Workflow file closure mismatch.');
@@ -416,10 +514,10 @@ async function verifyGenerated(root) {
       throw new Error(`Workflow file mismatch: ${file.path}`);
     }
   }
-  validateGeneratedAuthority(manifest, new Set(names));
+  validateGeneratedAuthority(manifest, new Set(names), tree);
 }
 
-function validateGeneratedAuthority(manifest, physical) {
+function validateGeneratedAuthority(manifest, physical, tree) {
   if (!isRecord(manifest.skills) || !isRecord(manifest.profiles) || !isRecord(manifest.operations)) throw new Error('Workflow authority inventory is invalid.');
   for (const [id, skill] of Object.entries(manifest.skills)) {
     assertExactKeys(skill, ['entry', 'metadata', 'files']);
@@ -431,27 +529,55 @@ function validateGeneratedAuthority(manifest, physical) {
     if (path !== `profiles/${id}.toml` || !physical.has(path)) throw new Error(`Workflow profile binding is invalid: ${id}`);
   }
   for (const [id, operation] of Object.entries(manifest.operations)) {
-    assertExactKeys(operation, ['id', 'entry', 'sourceSkill', 'outputSchema', 'profile', 'policy', 'files']);
+    assertExactKeys(operation, manifest.version === 2
+      ? ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy', 'files']
+      : ['id', 'entry', 'sourceSkill', 'outputSchema', 'profile', 'policy', 'files']);
     if (operation.id !== id || operation.entry !== `operations/${id}/SKILL.md`
       || !(operation.sourceSkill === null || operation.sourceSkill in manifest.skills)
       || !(operation.profile in manifest.profiles) || !physical.has(operation.outputSchema)) throw new Error(`Workflow operation binding is invalid: ${id}`);
     validateClosure(operation.files, physical, `operation ${id}`);
-    const expected = [operation.entry, operation.outputSchema, manifest.profiles[operation.profile],
-      ...(operation.sourceSkill === null ? [] : manifest.skills[operation.sourceSkill].files)];
+    const dependencies = manifest.version === 2 ? operation.dependencySkills : [];
+    const resources = manifest.version === 2 ? operation.resources : [];
+    if (!Array.isArray(dependencies) || dependencies.some((skill) => !(skill in manifest.skills))
+      || !Array.isArray(resources) || resources.some((path) => !physical.has(path))) throw new Error(`Workflow operation dependency binding is invalid: ${id}`);
+    const expected = [operation.entry, operation.outputSchema, manifest.profiles[operation.profile], ...resources,
+      ...(operation.sourceSkill === null ? [] : manifest.skills[operation.sourceSkill].files),
+      ...dependencies.flatMap((skill) => manifest.skills[skill].files)];
     if (canonicalJson(operation.files) !== canonicalJson([...new Set(expected)].sort(compareUtf8))) throw new Error(`Workflow operation closure is invalid: ${id}`);
+    if (manifest.version === 2) validateOperationEntryBindings(id, operation, tree, manifest.skills);
     validateGeneratedPolicy(operation.policy, id);
   }
+  if (manifest.version === 2) validateGeneratedEvals(manifest.evals, manifest.skills, physical, tree);
   if ('implementation' in manifest.operations) {
     const actualIds = Object.keys(manifest.operations).sort(compareUtf8);
-    const expectedIds = Object.keys(PRODUCTION_OPERATION_BINDINGS).sort(compareUtf8);
+    const bindings = manifest.version === 2 ? PRODUCTION_OPERATION_BINDINGS_V2 : PRODUCTION_OPERATION_BINDINGS_V1;
+    const expectedIds = Object.keys(bindings).sort(compareUtf8);
     if (canonicalJson(actualIds) !== canonicalJson(expectedIds)) throw new Error('Production workflow operation inventory is invalid.');
     for (const id of expectedIds) {
       const operation = manifest.operations[id];
-      const [sourceSkill, outputSchema, profile] = PRODUCTION_OPERATION_BINDINGS[id];
-      if (operation.sourceSkill !== sourceSkill || operation.outputSchema !== outputSchema || operation.profile !== profile) {
+      const binding = bindings[id];
+      const [sourceSkill, dependencySkills, outputSchema, profile] = manifest.version === 2
+        ? binding : [binding[0], [], binding[1], binding[2]];
+      if (operation.sourceSkill !== sourceSkill || canonicalJson(operation.dependencySkills ?? []) !== canonicalJson(dependencySkills)
+        || operation.outputSchema !== outputSchema || operation.profile !== profile) {
         throw new Error(`Production workflow operation binding is invalid: ${id}`);
       }
     }
+  }
+}
+
+function validateGeneratedEvals(evals, skills, physical, tree) {
+  if (!isRecord(evals)) throw new Error('Workflow eval inventory is invalid.');
+  const caseIds = new Set();
+  const paths = new Set();
+  for (const [id, entry] of Object.entries(evals)) {
+    assertExactKeys(entry, ['owner', 'path']);
+    if (typeof id !== 'string' || id.length === 0 || !(entry.owner === null || (typeof entry.owner === 'string' && entry.owner in skills))
+      || typeof entry.path !== 'string' || !physical.has(entry.path) || paths.has(entry.path)) {
+      throw new Error(`Workflow eval binding is invalid: ${id}`);
+    }
+    paths.add(entry.path);
+    validateEvalEntry(tree, entry.path, entry.owner, caseIds);
   }
 }
 
@@ -529,10 +655,25 @@ async function requireContainedFile(path, root) {
 }
 
 function validateConfig(value) {
-  assertExactKeys(value, ['version', 'personalSkills', 'repositorySkills', 'sharedDocs', 'profiles', 'overlayRoot', 'adaptations', 'operations']);
-  if (value.version !== 1 || !Array.isArray(value.personalSkills) || !Array.isArray(value.repositorySkills)
+  assertExactKeys(value, value.version === 2
+    ? ['version', 'personalSkills', 'repositorySkills', 'sharedDocs', 'sharedEvals', 'profiles', 'overlayRoot', 'adaptations', 'operations']
+    : ['version', 'personalSkills', 'repositorySkills', 'sharedDocs', 'profiles', 'overlayRoot', 'adaptations', 'operations']);
+  if (![1, 2].includes(value.version) || !Array.isArray(value.personalSkills) || !Array.isArray(value.repositorySkills)
     || !Array.isArray(value.sharedDocs) || !isRecord(value.profiles) || !isRecord(value.operations)
     || typeof value.overlayRoot !== 'string' || !Array.isArray(value.adaptations)) throw new Error('Workflow source config is invalid.');
+  if (value.version === 2 && !Array.isArray(value.sharedEvals)) throw new Error('Workflow source eval config is invalid.');
+  for (const [id, operation] of Object.entries(value.operations)) {
+    assertExactKeys(operation, value.version === 2
+      ? ['entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy']
+      : ['entry', 'sourceSkill', 'outputSchema', 'profile', 'policy']);
+    if (typeof id !== 'string' || typeof operation.entry !== 'string'
+      || !(operation.sourceSkill === null || typeof operation.sourceSkill === 'string')
+      || typeof operation.outputSchema !== 'string' || typeof operation.profile !== 'string'
+      || !isRecord(operation.policy)) throw new Error(`Workflow source operation is invalid: ${id}`);
+    if (value.version === 2 && (!uniqueTextList(operation.dependencySkills, true) || !uniqueTextList(operation.resources, true))) {
+      throw new Error(`Workflow source operation dependencies are invalid: ${id}`);
+    }
+  }
   const expected = [
     ['resolved-codex-home', '<resolved-codex-home>', '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT'],
     ['default-codex-skills', '${CODEX_HOME:-$HOME/.codex}/skills', '../../skills'],
@@ -544,6 +685,12 @@ function validateConfig(value) {
     assertExactKeys(entry, ['id', 'from', 'to']);
     return entry.id !== expected[index][0] || entry.from !== expected[index][1] || entry.to !== expected[index][2];
   })) throw new Error('Workflow adaptations are invalid.');
+}
+
+function uniqueTextList(value, allowEmpty = false) {
+  return Array.isArray(value) && (allowEmpty || value.length > 0)
+    && value.every((item) => typeof item === 'string' && item.length > 0)
+    && new Set(value).size === value.length;
 }
 
 function assertExactKeys(value, keys) {

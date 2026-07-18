@@ -62,7 +62,7 @@ review_passes: "0"
 - [ ] **Live/Manual Proof:** <exact flow or Not applicable with reason>
 - [ ] **Behavior Proof:** <observable acceptance proof>
 - [ ] **Reconciliation:** every unchecked item is unfinished, blocked with evidence, or intentionally not applicable.
-- [ ] **Final Handoff Requirements:** <medium/high only: standard `$spec-implementer` Final Risk Handoff plus task-specific deviations or None>
+- [ ] **Final Handoff Requirements:** <high only: extended `$spec-implementer` Final Risk Handoff plus task-specific deviations; omit for ordinary medium work>
 ```
 
 ## Conditional Blocks
@@ -136,7 +136,7 @@ Add only when review returns defects:
 
 ## Terminal Review Metadata
 
-Replace the temporary frontmatter values after the Artifact Review Module returns a real terminal outcome:
+Replace the temporary frontmatter values after the owner review loop returns a real terminal outcome:
 
 ```yaml
 review_outcome: "Approved | Blocked | Waived"

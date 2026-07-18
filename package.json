@@ -43,6 +43,9 @@
     "sync:workflow": "node scripts/sync-agent-auto-workflow.mjs sync --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
     "check:workflow": "node scripts/sync-agent-auto-workflow.mjs check --codex-home \"${CODEX_HOME:-$HOME/.codex}\" --repo-root \"$PWD\" --config scripts/agent-auto-workflow-source.json --output-root internal-workflow",
     "verify:workflow": "node scripts/sync-agent-auto-workflow.mjs verify --output-root internal-workflow",
+    "test:workflow:contracts": "npm run build --silent && node --test dist/test/v2-workflow-import.test.js dist/test/v2-workflow-assets.test.js dist/test/v2-runtime-assets.test.js",
+    "test:workflow": "npm run test:workflow:contracts --silent && node --test dist/test/v2-package-consumer.test.js",
+    "refresh:workflow": "npm run sync:workflow --silent && npm run check:workflow --silent && npm run verify:workflow --silent && npm run test:workflow --silent",
     "smoke:live": "node scripts/live-smoke.mjs",
     "prepack": "npm run verify:workflow --silent && npm run build --silent"
   },

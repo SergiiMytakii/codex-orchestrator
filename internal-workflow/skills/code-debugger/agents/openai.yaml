@@ -1,0 +1,7 @@
+interface:
+  display_name: "Code Debugger"
+  short_description: "Implement and verify an approved bug fix"
+  default_prompt: "Use $code-debugger to implement the user-approved bug fix path and verify the result. If the user wants diagnosis first, use $bug-root-cause-explainer."
+
+policy:
+  allow_implicit_invocation: true

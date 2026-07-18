@@ -17,6 +17,12 @@ lenses to one reviewer for `simple` and `medium`, and splits them across two
 independent reviewers only for `high`. It verifies the strongest findings,
 applies only safe fixes, and returns a concise findings-first report.
 
+Full review is bounded to the settled diff, its authority, changed owners, and
+callers or contracts with plausible fan-out. `Full` means complete coverage of
+that assigned scope once; it does not mean a repository-wide audit. Do not load
+unrelated modules or activate optional lenses without a diff signal or mandatory
+Review Focus.
+
 ## When To Use
 
 Use this skill when the user asks for:
@@ -29,25 +35,27 @@ Use this skill when the user asks for:
 For every implementation profile, the spec/standards lens includes bounded
 cleanup for duplication, obsolete paths, workaround branches, and unjustified
 abstractions. High-risk work assigns that lens to its own reviewer in the same
-parallel final wave. Run separate `$cleanup-review` first only for an explicit
-concrete evidenced reason that cannot fit this bounded lens.
+parallel final wave. A concrete evidenced simplification risk named by the
+user, approved source, or repo policy amplifies this lens inside the same review
+activation; it never creates a separate cleanup gate.
 
 Exception for approved spec execution: follow
-`../../docs/agents/implementation-review-loop.md`. Intermediate code-review
-checkpoints do not automatically run cleanup first; final cleanup and final code
-review use the durable Review Plan and canonical Defect Ledger.
+`../spec-implementer/references/review-loop.md`. Intermediate code-review
+checkpoints activate only their assigned Review Focus; final cleanup coverage
+uses the durable Review Plan and canonical Defect Ledger.
 
 ## Implementation Review Adapter
 
 When this skill is called from `$spec-implementer`:
 
-- read the Module and persisted `## Implementation Review State`
+- read `../spec-implementer/references/review-loop.md` and the persisted
+  `## Implementation Review State`
 - accept the scheduled mode, session, revision, and lenses from that state
-- pin the target and give reviewers the Module-defined capsule
+- pin the target and give reviewers the owner-defined capsule
 - return the usable result and stable defect updates to the executor
-- when exceptional separate cleanup ran, consume its settled decisions/IDs and avoid broad hygiene rediscovery unless a code-review repair caused a concrete regression
+- keep cleanup findings in the spec/standards lineage and canonical Defect Ledger
 
-Do not infer a fresh review loop, choose another mode, or make the Module's
+Do not infer a fresh review loop, choose another mode, or make the owner's
 terminal decision inside this Adapter.
 
 ## Progressive References
@@ -55,12 +63,16 @@ terminal decision inside this Adapter.
 Read only the references the current review needs:
 
 - Detailed bug classes: `references/bug-classes.md`
+- Cleanup lens method: `references/cleanup-lens.md`
 - Framework lenses for Next.js, NestJS, Flutter, and Dart: `references/framework-lenses.md`
 - Targeted recipes for recurring diff shapes: `references/targeted-recipes.md`
 - Contract test ledger: `../../docs/agents/contract-test-ledger.md`
 - Shared confidence rubric: `../../docs/agents/confidence-rubric.md`
 
 Load `references/framework-lenses.md` when the user names a framework or files/configs strongly imply one. Load `references/targeted-recipes.md` and `../../docs/agents/contract-test-ledger.md` when the diff shape matches new fields, retries, DTO/schema/runtime contracts, caches, state merge precedence, ordering, evidence/snapshots, determinism, or aggregation summaries. Load `references/bug-classes.md` for substantial reviews or broad bug hunts.
+Load `references/cleanup-lens.md` when the spec/standards lens is assigned. Use
+its bounded method by default and its amplified method only for a concrete
+evidenced simplification risk supplied as mandatory Review Focus.
 
 ## Coordinator Workflow
 
@@ -111,6 +123,8 @@ Machine-enforced config matters as context, but do not spend review findings on 
 Before deep review, decide which lenses apply.
 
 - Always activate the general correctness and spec/standards lenses.
+- Always apply bounded cleanup inside spec/standards; amplify it only for a
+  concrete evidenced Review Focus, never from size or risk labels alone.
 - Add framework lenses when explicit or strongly implied by files/configs.
 - Add targeted recipes when the diff shape matches them.
 - If the user, plan, or implementation spec provides `Review Focus`, treat each listed lens, targeted recipe, invariant, and risk as mandatory. Do not replace it with a generic review; report any focus item that cannot be verified as a verification gap.
@@ -141,6 +155,10 @@ revert unrelated work.
 For spec-driven checkpoints, obey the track assignment in the persisted Review
 Plan instead of automatically launching both default tracks.
 
+Medium is the normal review profile. API, persistence, multiple files, or a
+shared-looking name do not select `high` unless evidence proves both a material
+failure consequence and an uncertainty amplifier.
+
 When already inside an assigned reviewer child, execute its assigned lens set
 inline and return it to root; do not spawn a grandchild.
 If the user forbids delegation, report the independent review gate as waived or
@@ -159,6 +177,7 @@ Include the exact diff command or commit under review, changed file list, commit
 Include the exact diff command or commit under review, spec source path/content or "no spec found", standards source list, changed file list, commit list, any `Review Focus`, and an instruction to cite the spec or standard behind each finding.
 
 > Review the change against the requested work and repo standards. Check missing requirements, partial behavior, scope creep, undocumented contract changes, architecture drift, duplicate source-of-truth logic, dead/legacy branches, and workaround-shaped implementation. If a Review Focus is provided, explicitly verify each named ownership, scope, validation, and invariant risk against the spec. Cite the spec or standard when available. If there is no spec, skip requirement claims and focus on documented standards and architecture evidence.
+> Apply `references/cleanup-lens.md`: use bounded cleanup by default, or the amplified method when a concrete evidenced simplification risk is mandatory Review Focus. Keep cleanup findings in this review's normal Defect Ledger. Do not create a cleanup-only verdict or separate pass.
 
 ### 5. Aggregate And Verify
 
@@ -175,8 +194,11 @@ The coordinator must not blindly relay reviewer output.
 
 Keep the two axes visible in your own notes, but present the final report by severity unless the user explicitly asked for side-by-side Standards/Spec output.
 
-For a Module-scheduled Closure, send the bounded capsule to the reviewer lineage
-and session selected by the shared protocol, then return its defect updates.
+After repairs, verify medium or low findings through the coordinator's direct
+failure-path check plus affected validation. Launch Closure only for the
+severity, protected-contract, or invalidated-coverage triggers owned by
+`review-protocol.md`. For a scheduled Closure, send the bounded capsule to the
+selected reviewer lineage and return its defect updates.
 
 ## Evidence Standard
 

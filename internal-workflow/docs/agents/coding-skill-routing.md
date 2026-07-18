@@ -1,203 +1,113 @@
 # Coding Skill Routing
 
-Global coding skills own reusable engineering process. Local repo skills and docs own repository-specific facts.
-
-The single personal-skill root is `../../skills` for root
-agents and subagents in every repository. Invocation policy lives in each
-skill's `agents/openai.yaml`; do not encode a second policy in `SKILL.md`
-frontmatter or copy global workflow skills into repositories.
-
-Use this routing policy before adding more instructions to a global skill.
+This file is the normative global route and ownership policy. Keep repository
+commands, domain facts, credentials, deployment assumptions, and product
+behavior in repository `AGENTS.md`, `CONTEXT.md`, ADRs, or local skills.
 
 ## Ownership
 
-Global skills own reusable process:
+- Personal skills live only in `../../skills`.
+- `agents/openai.yaml` owns invocation metadata; `agents/*.toml` owns named-role
+  model and effort.
+- A shared rule has one owner. Callers link to it instead of copying its prose.
+- Skill-specific detail belongs in that skill's `references/` and loads only
+  when its branch is active.
+- Root owns the user dialogue, decisions, critical path, integration, and final
+  handoff. A reviewer child owns independent review.
 
-- planning, external research, diagnosis, implementation, review, cleanup,
-  smoke-test, and commit workflows
-- reusable gates such as TDD, contract test ledger, confidence handling, evidence standards, and review order
-- deterministic fact collection that does not encode product knowledge
-- progressive references for framework-agnostic or broadly reusable guidance
+## Default Implementation Route
 
-Local repo skills and docs own repository facts:
+`medium` is the default for behavior-changing implementation. Use:
 
-- package manager and project commands
-- domain language, product behavior, fixtures, and smoke scenarios
-- environment variables, credential sources, service topology, and deployment assumptions
-- local architecture decisions, ADRs, and repo-specific validation rules
+- `simple` only for a tiny local change with one obvious proof;
+- `medium` for a clear coherent outcome with settled authority, one ownership
+  path, and credible affected validation—even across several files, modules,
+  API, persistence, or shared state;
+- `high` only when a sensitive mechanism has both a material failure
+  consequence and an uncertainty amplifier such as unclear ownership,
+  cross-trust effects, non-local recovery, an unproven external contract, or
+  proof that cannot isolate the dangerous state.
 
-Do not move those local facts into a global skill.
+Prefer direct root implementation for `simple` and ordinary `medium` work. Use
+`$implementation-spec-maker` only for a real execution decision or coordination
+gap. Use `$tickets-orchestrator` only for an approved ticket graph, real delivery
+dependencies or disjoint parallel slices, or an explicit orchestration request.
+Do not manufacture PRDs, tickets, specs, agents, or review checkpoints from
+file count or generic risk labels.
 
-## Execution Modes
+## Core Routes
 
-- **Inline:** root performs non-review work. This is the default for small and ordinary authoring or implementation work.
-- **Delegate:** use one named custom agent when independent review or deeper isolated analysis is required.
-- **Parallel:** use multiple agents only for independent tracks with disjoint responsibilities.
-
-Automatic routing never authorizes automatic spawning. Spawn only when the user, an invoked skill, or applicable repo instructions authorize delegation. Root owns decisions, integration, user communication, and the critical path.
-
-Root must never perform review inline. Every review gate launches the reviewer
-role selected by the review profile. Because `agents.max_depth = 1`, a review
-Adapter executes inline only after it is already inside that assigned reviewer
-child; this is child execution, not root self-review.
-
-## Platform UI QA Routing
-
-Load the platform QA skill first; use `$flutter-attach-session` only as the
-runtime ownership and reload/restart layer. Detailed safety rules live in
-[`tool-usage.md`](tool-usage.md).
-
-- Android: `$flutter-android-debug` plus
-  `test-android-apps:android-emulator-qa`.
-- iOS: `$flutter-ios-debug`.
-- Live, IDE-owned, machine-owned, or ambiguous runtimes are user-owned. UI
-  inspection alone never authorizes replacement, termination, install, or launch.
-
-## Named Agent Profiles
-
-| Role | Contract |
+| Situation | Route |
 | --- | --- |
-| `explorer_quick` | Mechanical inventory of files, symbols, usages, tests, and registrations |
-| `explorer_fast` | Bounded cross-module execution tracing with file:symbol evidence |
-| `analyst_deep` | Read-only architecture, causal, contract, and root-cause synthesis |
-| `researcher_standard` | Read-only external primary-source research with claim-level citations |
-| `reviewer_fast` | Fast independent review for `simple` profiles |
-| `reviewer_standard` | Independent review for `medium` profiles |
-| `reviewer_deep` | Deep independent review for `high` profiles and security |
-| `implementer_standard` | Write-capable worker for one approved bounded ticket slice |
-| `implementer_deep` | Write-capable worker for a rare isolated slice with material technical uncertainty |
+| Tiny, clear, low-risk edit | `$small-task-implementer` after its Fit Gate |
+| Clear feature or fix | Root + one `$tdd` activation + affected validation |
+| Missing execution detail | `$implementation-spec-maker` -> artifact review -> `$spec-implementer` |
+| Approved implementation spec | `$spec-implementer` |
+| Approved dependency graph or explicit orchestration | `$tickets-orchestrator` |
+| Product discovery or ticket decomposition | `$to-spec`, `$spec-to-tickets`, or `$wayfinder` as applicable; stop before delivery |
+| Explain-only bug | `$bug-root-cause-explainer`; no edits |
+| Confirmed bounded bug fix | `$tdd` + `$code-debugger` unless already inside an authorized implementation flow |
+| Hard, flaky, unclear, or performance bug | `$diagnosing-bugs` before the explain/fix route |
+| Review request | `$code-review` in the profile-selected reviewer child |
+| External multi-source uncertainty | `$research`; narrow documentation lookup stays inline |
+| Commit request | `$commit`; push/PR still require separate authority |
 
-The role files in `agents/*.toml` own model, effort, nickname, and instructions.
-Skills request exact role names and never override model or effort. Artifact and
-implementation review Modules own Full/Closure topology; Approval Packet review
-owns its axis split. Analysis routing remains independent of review profile.
+Generated planning artifacts and labels never authorize implementation. One
+deterministic approved ticket may run directly; a graph follows the authorized
+delivery workflow.
 
-## Routing Table
+## TDD And Review
 
-| Skill or workflow | Default mode | Named-agent routing |
-| --- | --- | --- |
-| `$grilling` | Root owns the interactive session | Optional `explorer_fast` for bounded evidence and `analyst_deep` for proven ambiguity; children never conduct the user dialogue |
-| `$codebase-design` | Bounded reference lens for a named Module Interface or Seam; never a standalone scan, mutation, or implementation workflow | None for bounded reference use; Design It Twice runs 3+ isolated `analyst_deep` children in parallel for a selected consequential candidate, with any inline fallback labelled non-independent |
-| `$research` | Root prepares the Research Capsule, verifies decision-driving claims, and saves one artifact | One `researcher_standard`; root may use the documented inline fallback when the role is unavailable |
-| `$plans-maker` | Explicit-only root-authored Architecture RFC | Profile-selected reviewer topology from `artifact-review-loop.md`; optional `analyst_deep` only for unresolved architecture |
-| `$plan-review` | Inline only inside the assigned reviewer child | Root launches the profile-selected reviewer |
-| `$implementation-spec-maker` | Root authors inline | Profile-selected reviewer topology from `artifact-review-loop.md`; optional `analyst_deep` only for proven ambiguity |
-| `$implementation-spec-review` | Inline only inside the assigned reviewer child | Root launches the profile-selected reviewer |
-| `$to-spec` | Root authors a human-readable PRD inline; combined flow keeps it in context until final publication | Standalone reviewed PRD uses `$tickets-breakdown-review` PRD-only mode |
-| `$to-tickets` | Root drafts the ticket graph, obtains one approval, and publishes generated children directly in final AFK/HITL states | One direct low-risk ticket skips independent review; other packets use `$tickets-breakdown-review` |
-| `$tickets-breakdown-review` | Root prepares and aggregates only when the caller's review gate applies | One profile-selected child covers both axes by default; two `reviewer_deep` children only when both axes are independently high-risk; PRD-only uses one child |
-| `$triage` | Root verifies raw incoming issues or configured external PRs and prepares durable briefs | No implementation worker; never post-processes generated `$to-tickets` children |
-| `$small-task-implementer` | Always inline after Fit Gate | None by default |
-| `$spec-implementer` | Inline for compact and normal specs | Profile-selected reviewers at required checkpoints; parallel workers only for an explicit multi-agent spec |
-| `$tdd` | Inline in the active implementation flow | Never spawns its own agent |
-| `$code-debugger` | Inline for reproduced, bounded bugs | `analyst_deep` only while causal or contract ambiguity remains unresolved |
-| `$bug-root-cause-explainer` | Root coordinates read-only diagnosis | Optional `explorer_fast`; `analyst_deep` for ambiguous causal synthesis |
-| `$diagnosing-bugs` | Root owns the feedback loop | Optional `explorer_fast`; no implementation worker |
-| `$code-review` | Root prepares and aggregates | One reviewer for `simple`/`medium`; two disjoint `reviewer_deep` tracks for `high` |
-| `$cleanup-review` | Root prepares and integrates | One profile-selected reviewer child |
-| `$security-best-practices` | Root coordinates explicit security review | One `reviewer_deep` |
-| `$improve-codebase-architecture` | Inline for bounded analysis | `analyst_deep` only for broad or ambiguous architecture |
-| `$commit` | Inline | No agent unless another policy already requires review |
-| `$tickets-orchestrator` | Root owns ticket graph, user decisions, integration, and delivery | One ready ticket stays root-owned; launch at most two independent disjoint implementers; prepare later tickets only after blockers settle; reuse issue authority or route through maker/spec Modules |
-| `$smoke-test-orchestrator` | Inline unless the scenario explicitly requires workers | Follow the scenario's disjoint ownership contract |
+Apply `$tdd` before behavior-changing features, fixes, logic, persistence,
+APIs, or risky refactors. Do not manufacture RED tests for docs, copy,
+formatting, simple config, builds, or read-only work.
 
-## Artifact Review Loop
+Review applicability lives in [`review-gates.md`](review-gates.md). Shared
+Full/Closure mechanics live in [`review-protocol.md`](review-protocol.md).
+Artifact review is owned by
+[`implementation-spec-review/references/review-loop.md`](../../skills/implementation-spec-review/references/review-loop.md);
+approved-spec implementation review is owned by
+[`spec-implementer/references/review-loop.md`](../../skills/spec-implementer/references/review-loop.md).
 
-Plan and implementation-spec authoring use
-[`artifact-review-loop.md`](artifact-review-loop.md) as the single review Module.
-It owns artifact risk, scope conservation, reviewer topology, and outcome
-mapping while applying [`review-protocol.md`](review-protocol.md) for common
-review mechanics. Maker skills supply authority and repairs; review Adapters
-supply artifact-specific lenses and output.
+Root never substitutes self-review for a required independent reviewer. Use one
+`reviewer_fast` for `simple`, one `reviewer_standard` for `medium`, and two
+disjoint `reviewer_deep` tracks for `high`. A reviewer Adapter executes inline
+only after it is already inside that assigned child.
 
-## Implementation Review Loop
+## Delegation
 
-Approved implementation-spec execution uses
-[`implementation-review-loop.md`](implementation-review-loop.md) as the single
-review Module. It owns approved-spec authority, durable state, whole-spec
-topology, validation reuse, gate ordering, final coverage, and audit epochs while
-applying [`review-protocol.md`](review-protocol.md). `spec-implementer`, review
-Adapters, repo policy, and specs may define lenses and applicability but never
-another review protocol or retry loop.
+Run work inline by default. Delegate only when the user, an invoked skill, or
+repository policy authorizes it and the task benefits from independent review,
+isolated deep analysis, or disjoint implementation ownership.
 
-`$tickets-orchestrator` is an outer delivery caller. Each ticket selects
-`direct`, `compact spec`, or `standard spec`. Direct tickets keep the `$tdd` and
-repo-review flow without manufacturing Implementation Review State. For each
-compact/standard ticket, root invokes `$implementation-spec-maker` and then
-`$spec-implementer`; the orchestrator must not reproduce either review Module
-or combine approved tickets into a wave-level implementation spec.
-
-## External Research Preflight
-
-Read local evidence before searching externally. Keep one narrow documentation
-lookup inline with the owning specialized docs skill or tool unless the user
-explicitly requests delegation or a durable artifact. Invoke `$research` for
-either explicit request, or when a material coding decision requires
-multi-source comparison, freshness checking, or external contract synthesis.
-
-`$research` authorizes one `researcher_standard` child. Root supplies a bounded
-Research Capsule, verifies every claim that drives architecture, scope,
-implementation, security, cost, or compatibility, and saves one artifact under
-the repository convention or `docs/research/YYYY-MM-DD/HHMM-<slug>.md`.
-Research is evidence, not implementation authority. Downstream plans, PRDs,
-tickets, and specs cite the artifact; behavior-changing work still follows the
-normal TDD, implementation, and review routes.
-
-## Precedence
-
-1. If the user asks not to edit code, use diagnosis or review skills and stop before implementation.
-2. If the user asks to fix, implement, or build, apply `$tdd` before planning or editing.
-3. If a bug is hard, flaky, or performance-related, use `$diagnosing-bugs` to build a feedback loop before fixing.
-4. If a fix path has already been approved, use `$code-debugger` to implement and verify it.
-5. Run one final `$code-review` wave with bounded cleanup in its spec/standards lens. High-risk work uses two disjoint reviewers in parallel. Run separate `$cleanup-review` only for an explicit concrete evidenced reason that cannot fit that lens; size or risk alone is insufficient.
-
-Reviewer repairs inside an active authorized implementation/TDD flow follow
-[`bug-workflow-routing.md`](bug-workflow-routing.md) and do not automatically
-start `code-debugger`; standalone or ambiguous fixes retain the normal route.
-
-## Local Fact Rule
-
-When a global skill needs a repo fact, it should read local evidence first: `AGENTS.md`, `CONTEXT.md`, ADRs, package manifests, lockfiles, existing tests, scripts, and local skill docs. If the fact is not present, say it is not confirmed instead of inventing it.
-
-## Availability, Depth, And Fallback
-
-- Request the exact role name and always start it without inherited conversation; put the necessary verified context in a self-contained brief because full-history forks can inherit the parent profile.
-- `agents.max_depth = 1`: children never spawn grandchildren. Root directly owns mandatory reviewer and worker launches.
-- After collecting a child's result, root must close it in a finally-equivalent path. Parallel launch must preserve every fulfilled handle (use `allSettled` or equivalent), then close partial launches after timeout, cancellation, or error so completed agents do not consume `max_threads` slots.
-- If a required reviewer role is unavailable, do not silently substitute a generic child, inherit root settings, or self-review inline. Report the gate as unavailable or blocked. Non-review skills may keep their explicit inline fallback rules.
-- Never override a named role's model or effort at spawn time. Change and revalidate the role file instead.
-
-## Broad Exploration Delegation
-
-Route discovery by required output:
-
-| Need | Route |
+| Need | Named role |
 | --- | --- |
-| Known path or one narrow execution path | Root reads inline |
-| Mechanical inventory or large diff/log scan | `explorer_quick` |
-| Bounded cross-module execution trace | `explorer_fast` |
-| Material external docs/API/spec question | `$research` with `researcher_standard` |
-| Ambiguous architecture, root cause, or contract synthesis | `analyst_deep` |
+| Mechanical inventory | `explorer_quick` |
+| Bounded cross-module trace | `explorer_fast` |
+| Ambiguous architecture, contract, or cause | `analyst_deep` |
+| Primary-source external research | `researcher_standard` |
+| Independent review | `reviewer_fast`, `reviewer_standard`, or `reviewer_deep` by profile |
+| Approved isolated implementation slice | `implementer_standard`; `implementer_deep` only for material uncertainty |
 
-Give each child one **Discovery Capsule**: question, known entrypoint, scope,
-excluded areas, and expected `answer -> execution path -> file:symbol evidence ->
-uncertainty`. Stop when the question is answered or missing evidence is proven.
-Use at most two explorer children, only for disjoint questions, and reuse the
-same child for follow-up instead of restarting discovery.
+Keep the root critical path local. Use at most two explorers for disjoint
+questions and at most two parallel implementers with disjoint write scopes.
+Children do not conduct user dialogue or spawn grandchildren.
 
-Root verifies evidence that drives edits and keeps a compact **Evidence Map**
-for reuse by plan, spec, and implementation. Re-read only entries invalidated by
-changed files, contracts, or external sources. `analyst_deep` remains a final
-synthesis escalation, not a substitute for evidence collection.
+## Validation And Runtime Safety
 
-## Contract Test Ledger Rule
+Use targeted behavior proof plus the smallest affected integration check for
+simple and medium work. Run a full repository suite only when repository policy
+requires it, a broad shared contract cannot be isolated, or the task is `high`.
 
-Use [`contract-test-ledger.md`](contract-test-ledger.md) for behavior-changing
-tasks with contract risk. It maps each invariant to the first failing test or
-observable proof before implementation.
+For Flutter UI, follow [`tool-usage.md`](tool-usage.md): platform QA owns UI
+work and `$flutter-attach-session` is only the attach-safe runtime layer. Treat
+live app, IDE, VM Service, and `flutter run` sessions as user-owned.
 
-## Progressive Disclosure Rule
+Read local evidence before external search: applicable `AGENTS.md`, `CONTEXT.md`,
+ADRs, manifests, lockfiles, tests, scripts, and code owners. Mark missing facts
+unconfirmed rather than inventing them.
 
-Keep main skill files focused on routing, workflow, safety, and output. Load
-long checklists, framework lenses, recipes, examples, and rubrics from references
-only when their trigger applies.
+Contract-risk implementation uses
+[`contract-test-ledger.md`](contract-test-ledger.md) only for material
+invariants. Long framework lenses, examples, and recipes remain skill-local and
+load on demand.

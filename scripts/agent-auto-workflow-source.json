@@ -1,30 +1,27 @@
 {
-  "version": 1,
+  "version": 2,
   "personalSkills": [
-    "cleanup-review",
+    "code-debugger",
     "code-review",
     "codebase-design",
     "diagnosing-bugs",
     "implementation-spec-maker",
     "implementation-spec-review",
-    "research",
     "small-task-implementer",
     "spec-implementer",
     "tdd",
-    "triage",
-    "ui-evidence-proof"
+    "triage"
   ],
   "repositorySkills": ["acceptance-proof", "agent-auto"],
   "sharedDocs": [
-    "artifact-review-loop.md",
     "bug-workflow-routing.md",
     "coding-skill-routing.md",
     "confidence-rubric.md",
     "contract-test-ledger.md",
-    "implementation-review-loop.md",
     "review-gates.md",
     "review-protocol.md"
   ],
+  "sharedEvals": ["coding-skill-evals.json"],
   "profiles": {
     "analyst_deep": "analyst-deep.toml",
     "implementer_deep": "implementer-deep.toml",
@@ -46,6 +43,8 @@
     "acceptance-proof": {
       "entry": "operations/acceptance-proof/SKILL.md",
       "sourceSkill": "acceptance-proof",
+      "dependencySkills": [],
+      "resources": [],
       "outputSchema": "schemas/proof-report-v1.json",
       "profile": "proof_agent",
       "policy": {
@@ -64,26 +63,10 @@
     "ambiguity-review": {
       "entry": "operations/ambiguity-review/SKILL.md",
       "sourceSkill": null,
+      "dependencySkills": [],
+      "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/ambiguity-review-v1.json",
       "profile": "reviewer_deep",
-      "policy": {
-        "sandboxMode": "read-only",
-        "cwdClass": "worktree",
-        "worktreeAccess": "read-only",
-        "writableRootClasses": [],
-        "runnerPostcondition": "report-only",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
-    "cleanup-review": {
-      "entry": "operations/cleanup-review/SKILL.md",
-      "sourceSkill": "cleanup-review",
-      "outputSchema": "schemas/code-review-v1.json",
-      "profile": "reviewer_standard",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",
@@ -100,8 +83,15 @@
     "code-review": {
       "entry": "operations/code-review/SKILL.md",
       "sourceSkill": "code-review",
+      "dependencySkills": [],
+      "resources": [
+        "docs/agents/confidence-rubric.md",
+        "docs/agents/contract-test-ledger.md",
+        "docs/agents/review-gates.md",
+        "docs/agents/review-protocol.md"
+      ],
       "outputSchema": "schemas/code-review-v1.json",
-      "profile": "reviewer_deep",
+      "profile": "reviewer_standard",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",
@@ -118,6 +108,14 @@
     "implementation": {
       "entry": "operations/implementation/SKILL.md",
       "sourceSkill": "agent-auto",
+      "dependencySkills": ["code-debugger", "diagnosing-bugs", "small-task-implementer", "tdd"],
+      "resources": [
+        "docs/agents/bug-workflow-routing.md",
+        "docs/agents/coding-skill-routing.md",
+        "docs/agents/contract-test-ledger.md",
+        "docs/agents/review-gates.md",
+        "docs/agents/tool-usage.md"
+      ],
       "outputSchema": "schemas/implementation-report-v1.json",
       "profile": "implementer_standard",
       "policy": {
@@ -136,6 +134,11 @@
     "spec-author": {
       "entry": "operations/spec-author/SKILL.md",
       "sourceSkill": "implementation-spec-maker",
+      "dependencySkills": [],
+      "resources": [
+        "docs/agents/confidence-rubric.md",
+        "docs/agents/contract-test-ledger.md"
+      ],
       "outputSchema": "schemas/spec-author-v1.json",
       "profile": "implementer_standard",
       "policy": {
@@ -151,27 +154,15 @@
         "externalWrite": false
       }
     },
-    "spec-implementation": {
-      "entry": "operations/spec-implementation/SKILL.md",
-      "sourceSkill": "spec-implementer",
-      "outputSchema": "schemas/implementation-report-v1.json",
-      "profile": "implementer_standard",
-      "policy": {
-        "sandboxMode": "workspace-write",
-        "cwdClass": "worktree",
-        "worktreeAccess": "write",
-        "writableRootClasses": ["worktree"],
-        "runnerPostcondition": "change-set",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
     "spec-review": {
       "entry": "operations/spec-review/SKILL.md",
       "sourceSkill": "implementation-spec-review",
+      "dependencySkills": [],
+      "resources": [
+        "docs/agents/confidence-rubric.md",
+        "docs/agents/contract-test-ledger.md",
+        "docs/agents/review-protocol.md"
+      ],
       "outputSchema": "schemas/spec-review-v1.json",
       "profile": "reviewer_deep",
       "policy": {
@@ -190,6 +181,8 @@
     "triage": {
       "entry": "operations/triage/SKILL.md",
       "sourceSkill": "triage",
+      "dependencySkills": [],
+      "resources": ["docs/agents/coding-skill-routing.md"],
       "outputSchema": "schemas/triage-route-v1.json",
       "profile": "analyst_deep",
       "policy": {

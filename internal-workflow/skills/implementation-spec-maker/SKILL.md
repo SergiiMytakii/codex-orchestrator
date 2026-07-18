@@ -23,7 +23,8 @@ Create or revise an execution-ready specification for a downstream coding agent.
 4. Classify and record these independent facts:
    - `spec_mode`: `compact | full` — document and coordination density.
    - `implementation_size`: `small | medium | large` — expected delivery shape.
-   - `review_profile`: `simple | medium | high` — consequence and uncertainty, resolved through the Artifact Review Module.
+   - `review_profile`: `simple | medium | high` — consequence and uncertainty,
+     resolved through the review loop owned by `$implementation-spec-review`.
    - `expected_repositories`: exact positive integer from approved scope.
 
 Do not infer one classification from another. For ticket work, `direct` returns
@@ -63,16 +64,24 @@ Read [the spec template](references/spec-template.md) before drafting, then remo
 - State exact manual/live proof when automation is not applicable.
 - Name one source of truth when behavior or data can drift. Reuse existing owners and public seams; invoke `$codebase-design` only when ownership or a public seam changes.
 - Add task-specific review checkpoints only when a risky slice becomes stable before later work. Otherwise assign its mandatory lenses, applicable targeted recipes, and concrete bug classes to final review coverage.
-- For medium/high-risk specs, point `Final Handoff Requirements` to the standard `$spec-implementer` Final Risk Handoff and add only task-specific deviations; do not copy its field list.
+- For medium-risk specs, rely on the normal concise `$spec-implementer` completion summary unless a task-specific deviation is needed. For high-risk specs, point `Final Handoff Requirements` to the extended `$spec-implementer` Final Risk Handoff and add only task-specific deviations; do not copy its field list.
 - Keep optional cleanup, compatibility logic, feature flags, telemetry, rollout machinery, generic fallbacks, and speculative abstractions out of the spec unless source authority or a proven failure path requires them.
 
 ## Review And Save
 
 1. Save the draft at `docs/implementation-specs/YYYY-MM-DD/HHMM-<slug>.md` with temporary `status: "draft"` and `review_outcome: "Pending"` so review applies to a stable artifact path without presenting it as approved.
-2. Invoke `../../docs/agents/artifact-review-loop.md` with `$implementation-spec-review` as its Adapter. Supply the saved spec, source authority, approved decisions, and evidence; do not restate or replace the Module's topology, defect lifecycle, or convergence rules.
-3. Apply consolidated, scope-preserving repairs in place until the Module returns `Approved`, `Blocked`, or an eligible user-authorized `Waived` outcome.
+2. Read `../implementation-spec-review/references/review-loop.md` and invoke
+   `$implementation-spec-review` as its Adapter. Supply the saved spec, source
+   authority, approved decisions, and evidence; do not restate its topology or
+   defect lifecycle.
+3. Apply one consolidated, scope-preserving repair batch, then follow the owner
+   loop until it returns `Approved`, `Blocked`, or an eligible user-authorized
+   `Waived` outcome.
 4. A preflight-blocked spec may be saved with zero reviews and `review_verdict: "Not run"`. Never fabricate approval or use `Not required`.
-5. Replace temporary lifecycle metadata with the Module outcome, last real Adapter verdict, review coverage/counts, accepted risks, and open stable IDs. Any substantive post-approval edit invalidates approval until reviewed again.
+5. Replace temporary lifecycle metadata with outcome, last Adapter verdict,
+   mandatory coverage, accepted risks, and open stable IDs. Keep pass/session
+   counts only for high, Closure, or interrupted review. Any substantive
+   post-approval edit invalidates approval until reviewed again.
 
 ## Final Response
 
@@ -82,7 +91,7 @@ Return only:
 Spec Status: Ready | Blocked
 Saved Path: <path>
 Execution: <single-agent | multi-agent>; <compact | full>; <small | medium | large>; <n> repository/repositories
-Review: <Approved | Blocked | Waived>; <simple | medium | high>; <pass counts and coverage>
+Review: <Approved | Blocked | Waived>; <simple | medium | high>; <coverage or gaps>
 Adapter Verdict: <Approved | Needs Work | Rejected | Not run>
 Verified Defects: <stable IDs or None>
 Accepted Risks: <stable IDs, authority, and reason or None>

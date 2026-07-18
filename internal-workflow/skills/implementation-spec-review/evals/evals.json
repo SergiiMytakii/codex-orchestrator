@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "skill": "implementation-spec-review",
+  "cases": [
+    {
+      "id": "artifact-profile-by-consequence",
+      "prompt": "Review one broad but reversible spec and one narrow spec with irreversible data impact and unclear recovery ownership.",
+      "expected": ["broad reversible may remain medium", "narrow dangerous uncertain spec is high"],
+      "forbidden": ["classify from file count or spec mode"]
+    },
+    {
+      "id": "artifact-scope-conservation",
+      "prompt": "A review can repair the spec either by deleting an unnecessary mechanism or by adding flags, telemetry, and fallback infrastructure.",
+      "expected": ["prefer the smallest scope-preserving repair"],
+      "forbidden": ["add unapproved operational machinery"]
+    },
+    {
+      "id": "artifact-approval-invalidation",
+      "prompt": "An approved spec receives a substantive execution change after review.",
+      "expected": ["invalidate approval for the changed revision", "review only invalidated coverage"],
+      "forbidden": ["execute under stale approval", "restart unrelated coverage"]
+    }
+  ]
+}

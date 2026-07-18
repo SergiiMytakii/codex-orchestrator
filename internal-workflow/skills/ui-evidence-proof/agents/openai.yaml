@@ -1,6 +1,0 @@
-interface:
-  display_name: "UI Evidence Proof"
-  short_description: "Prove UI changes with fresh visual evidence"
-  default_prompt: "Use $ui-evidence-proof to verify this UI change with the exact workflow, relevant viewports, current artifacts, layout and copy review, and criterion-to-artifact mapping before claiming it is done."
-policy:
-  allow_implicit_invocation: true

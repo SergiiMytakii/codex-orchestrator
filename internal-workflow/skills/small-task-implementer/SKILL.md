@@ -16,15 +16,21 @@ Proceed only when all are true:
 - There is a narrow validation path: targeted test, lint/typecheck, build check, UI proof, or direct command.
 - The task does not require a new plan, PRD, issue breakdown, implementation spec, migration, rollout, or multi-agent orchestration.
 
-Escalate instead of implementing when the task touches:
-
-- state transitions, queues, retries, idempotency, background jobs, persistence, migrations, schemas, DTO/API contracts, auth, permissions, payments, caching, or shared cross-module behavior;
-- multi-service, multi-repo, multi-agent, production/live-data, or external-contract work;
-- unclear product intent, ambiguous scope, no credible validation path, or likely broad refactoring.
+Escalate out of the tiny-task route when the work has more than one coherent
+behavior, a broad ownership boundary, material rollback/recovery risk, unclear
+product intent, no credible affected validation, or genuine multi-agent/live
+coordination. Statefulness alone does not require escalation into planning or
+orchestration; a clear API, persistence, cache, queue, or DTO change normally
+becomes direct medium implementation.
 
 Escalation rule:
 
-- Escalate into the single canonical delivery flow: optional `$grilling` for unresolved product decisions, then `$spec-to-tickets` for the reviewed Approval Packet, then `$tickets-orchestrator` for approved ticket delivery.
+- For clear authority and one coherent outcome, escalate to direct medium root
+  implementation under `$tdd`, affected validation, and one final review when
+  `review-gates.md` applies.
+- Use optional `$grilling`, then `$spec-to-tickets` and `$tickets-orchestrator`,
+  only for unresolved product decisions or a real approved ticket graph,
+  delivery dependency, or explicit orchestration request.
 - For one risky behavior or technical contract, prefer one approved ticket and mark `compact spec` or `standard spec` only when the ticket plus repository evidence cannot remove execution ambiguity.
 - For several tickets sharing one unresolved contract or validation path, make the contract-defining ticket block its consumers; merge tickets that cannot be specified or verified independently instead of creating a wave-level implementation spec.
 - Escalate if the bug requires Bugfix Quality Gate analysis across multiple paths, states, async events, persistence, auth, cache, retries, workers, or contracts.
@@ -58,7 +64,8 @@ Validation:
    - Do not run full CI unless local policy or the changed surface makes it necessary.
 
 5. Stop and escalate if implementation reveals hidden risk.
-   - Examples: shared contract drift, duplicate source of truth, missing test seam, broad file spread, concurrency, persistence, or product ambiguity.
+   - Examples: shared contract drift, duplicate source of truth, missing test
+     seam, material concurrency/recovery uncertainty, or product ambiguity.
    - Leave a short explanation of what was discovered and which heavier flow should take over.
 
 ## Output
@@ -90,7 +97,7 @@ Reason:
 - ...
 
 Recommended flow:
-- Canonical ticket delivery / direct small task
+- Direct medium implementation / canonical ticket delivery
 
 Evidence:
 - ...

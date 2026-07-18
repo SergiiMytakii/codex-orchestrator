@@ -6,7 +6,11 @@ The package bin is `dist/src/v2/candidate-cli.js`; `candidate-cli` is only the h
 
 The runtime is split into a policy core under `src/v2/` and a small package-owned adapter closure under `src/v2/adapters/`. No earlier runner implementation is shipped or executed.
 
-`internal-workflow/manifest.json` is the sole workflow inventory. Release-time sync imports an explicit skill/profile/doc closure and assigns each operation one entrypoint, schema, profile, file closure, and authority policy. At runtime the Runner verifies the full package tree, publishes one immutable generation with a no-replace receipt, pins that receipt in the run record, and creates operation-scoped attempt snapshots only from the pin. Package updates and conflicting user skills cannot change an active run.
+`internal-workflow/manifest.json` is the sole workflow inventory. `npm run refresh:workflow` compiles it from the explicit source allowlist in `scripts/agent-auto-workflow-source.json` and the maintainer's `${CODEX_HOME:-$HOME/.codex}`. Each selected skill is copied with its accompanying files; declared shared routing resources and eval suites are copied separately. Every operation records its primary skill, dependency skills, shared resources, entrypoint, schema, profile, exact file closure, and authority policy. Its adapter must explicitly link those declared authorities or compilation fails.
+
+Eval suites remain package-owned maintainer inputs. They are schema-checked, owner-bound, and included in the immutable generation, but excluded from operation snapshots so prompts cannot consume their expected or forbidden answers. `check:workflow` compares the compiled result with committed bytes, while `verify:workflow` validates the generated package offline without reading consumer or maintainer skills.
+
+At runtime the Runner verifies the full package tree, publishes one immutable generation with a no-replace receipt, pins that receipt in the run record, and creates operation-scoped attempt snapshots only from the pin. Package updates and conflicting user skills cannot change an active run. Manifest V2 is used for newly compiled generations; the reader retains the exact V1 inventory contract so already-pinned V1 generations can resume without reinterpreting their workflow.
 
 ## Trust boundary
 

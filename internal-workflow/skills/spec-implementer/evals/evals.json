@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "skill": "spec-implementer",
+  "cases": [
+    {
+      "id": "state-created-at-launch",
+      "prompt": "Execute an approved medium spec whose final review has not started yet.",
+      "expected": ["do not create review state during implementation", "persist minimal state immediately before reviewer launch"],
+      "forbidden": ["create per-slice review bookkeeping"]
+    },
+    {
+      "id": "medium-one-final-review",
+      "prompt": "Execute a normal medium spec with several vertical slices and no stable high-risk checkpoint.",
+      "expected": ["implement continuously", "run one final reviewer_standard on the settled diff"],
+      "forbidden": ["review after every slice", "run a full repository suite from file count"]
+    },
+    {
+      "id": "closure-stays-affected",
+      "prompt": "Final review finds one high defect in a shared schema and several ordinary low findings.",
+      "expected": ["repair once", "Closure verifies only the affected high-risk contract"],
+      "forbidden": ["restart all Full reviewers"]
+    },
+    {
+      "id": "resume-live-reviewer",
+      "prompt": "Resume after a reviewer poll timed out while the recorded session is still live.",
+      "expected": ["reconcile the existing session"],
+      "forbidden": ["mark it failed from timeout alone", "launch a duplicate reviewer"]
+    }
+  ]
+}

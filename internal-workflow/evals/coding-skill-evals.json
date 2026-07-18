@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "purpose": "Cross-skill routing and handoff regressions only; skill-local behavior belongs in each owner's evals directory.",
+  "cases": [
+    {
+      "id": "route-feature-tdd",
+      "prompt": "Implement a behavior-changing feature in this repository.",
+      "expected": ["read local evidence", "activate tdd before behavior edits", "run affected validation"],
+      "forbidden": ["invent repository commands", "create planning artifacts without an execution gap"]
+    },
+    {
+      "id": "route-diagnosis-only",
+      "prompt": "Explain the root cause and do not fix it yet.",
+      "expected": ["use bug-root-cause-explainer", "cite concrete evidence", "stop before edits"],
+      "forbidden": ["edit files", "present an inference as proven"]
+    },
+    {
+      "id": "route-flaky-bug",
+      "prompt": "Debug a failure that only happens intermittently.",
+      "expected": ["use diagnosing-bugs", "improve reproduction or signal before repair"],
+      "forbidden": ["jump directly to a fix"]
+    },
+    {
+      "id": "profile-medium-default",
+      "prompt": "Implement one clear stateful feature touching an API, persistence, and several files.",
+      "expected": ["select medium", "implement directly when authority and proof are clear"],
+      "forbidden": ["select high from statefulness or file count", "manufacture a PRD, tickets, or spec"]
+    },
+    {
+      "id": "profile-high-threshold",
+      "prompt": "Classify one broad ordinary refactor and one change with irreversible data loss plus unclear recovery ownership.",
+      "expected": ["keep the broad ordinary refactor medium", "select high only for material consequence plus uncertainty"],
+      "forbidden": ["accumulate generic risk labels into high"]
+    },
+    {
+      "id": "planning-does-not-deliver",
+      "prompt": "Use wayfinder to resolve the decision frontier and publish the resulting tickets.",
+      "expected": ["stop after the planning package", "require separate delivery authorization"],
+      "forbidden": ["start implementation from publication or labels"]
+    },
+    {
+      "id": "spec-only-for-gap",
+      "prompt": "Choose the route for a clear implementation request and for the same request with an unresolved execution contract.",
+      "expected": ["route the clear request directly", "use implementation-spec-maker for the unresolved execution delta"],
+      "forbidden": ["require a spec for every medium change"]
+    },
+    {
+      "id": "ticket-direct-vs-graph",
+      "prompt": "Choose delivery for one deterministic approved ticket and for an approved dependency graph.",
+      "expected": ["allow direct execution for the single ticket", "use tickets-orchestrator for the graph"],
+      "forbidden": ["manufacture a wave-level spec"]
+    },
+    {
+      "id": "review-topology",
+      "prompt": "Choose reviewer topology for simple, medium, and high profiles.",
+      "expected": ["simple uses one reviewer_fast when gated", "medium uses one reviewer_standard", "high uses two disjoint reviewer_deep tracks"],
+      "forbidden": ["root self-review", "two reviewers for ordinary medium"]
+    },
+    {
+      "id": "review-closure-bounded",
+      "prompt": "A medium Full review reports one low cleanup issue and one high shared DTO contract defect.",
+      "expected": ["repair findings in one batch", "coordinator verifies the low repair", "Closure covers only the high affected contract"],
+      "forbidden": ["restart broad Full review", "launch a separate cleanup gate"]
+    }
+  ]
+}
