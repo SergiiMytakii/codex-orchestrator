@@ -45,6 +45,7 @@ test('builds the exact contained argv and allowlisted process environment withou
     }));
     assert.equal(captured?.args.includes('--ignore-user-config'), true);
     assert.equal(captured?.args.includes('--ignore-rules'), true);
+    assert.equal(captured?.args.includes('--skip-git-repo-check'), true);
     assert.equal(captured?.args.some((arg) => arg.includes('skills.include_instructions=false')), true);
     assert.equal(captured?.args.some((arg) => arg.includes('features.apps=false')), true);
     assert.equal(captured?.args.some((arg) => arg.includes('web_search="disabled"')), true);

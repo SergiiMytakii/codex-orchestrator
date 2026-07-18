@@ -75,6 +75,7 @@ export function buildContainmentCodexArgs(input: {
     '--strict-config',
     '--ignore-user-config',
     '--ignore-rules',
+    '--skip-git-repo-check',
     '--sandbox',
     operationPolicy.sandboxMode,
     '--output-schema',
