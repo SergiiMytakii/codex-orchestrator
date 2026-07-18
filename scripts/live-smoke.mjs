@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const defaultTimeoutMs = 600_000;
+const defaultTimeoutMs = 1_800_000;
 const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
   ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
 const cleanupModes = new Set(['delete', 'close']);
@@ -208,7 +208,7 @@ async function configureTarget(context, overrides = {}) {
   config.runner.stateDir = `.codex-orchestrator/v2/state-${context.runId}`;
   config.proof.artifactDir = `.codex-orchestrator/v2/proofs-${context.runId}`;
   config.codex.command = overrides.realCodex ? 'codex' : context.fakeCodexPath;
-  config.codex.timeoutMs = 180_000;
+  config.codex.timeoutMs = overrides.realCodex ? 600_000 : 180_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.failingCheck
     ? { smoke: `${process.execPath} -e "process.exit(1)"` }

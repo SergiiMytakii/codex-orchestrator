@@ -129,6 +129,12 @@ test('real Codex smoke uses the normal Codex default without changing target def
   assert.doesNotMatch(text, /realCodexSmokeModel|model_reasoning_effort/u);
 });
 
+test('real Codex smoke budgets cover the complete multi-operation workflow', async () => {
+  const text = await source();
+  assert.match(text, /const defaultTimeoutMs = 1_800_000;/u);
+  assert.match(text, /config\.codex\.timeoutMs = overrides\.realCodex \? 600_000 : 180_000;/u);
+});
+
 test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {
   const text = await source();
   const fixture = text.slice(text.indexOf('function writeBrowserProof'), text.indexOf('function writeAgentReport'));
