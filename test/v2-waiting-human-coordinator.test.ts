@@ -117,10 +117,11 @@ test('WaitingHumanCoordinator rejects old, edited, missing-prefix, empty, and as
     { status: 'awaiting-answer' }
   >;
   const receipt = (await state.read()) as Extract<WaitingHumanExecutionV1, { phase: 'awaiting-answer' }>;
+  const beforeQuestion = new Date(Date.parse(receipt.questionReceipt.createdAt) - 1).toISOString();
   const afterQuestion = new Date(Date.parse(receipt.questionReceipt.createdAt) + 1).toISOString();
   const prefix = waiting.answerPrefix;
   issues.extraComments = [
-    answerComment('200', `${prefix} Too old`, '2020-01-01T00:00:00.000Z'),
+    answerComment('200', `${prefix} Too old`, beforeQuestion),
     answerComment('201', `${prefix} Edited`, afterQuestion, { updatedAt: new Date(Date.parse(afterQuestion) + 1).toISOString() }),
     answerComment('202', 'Choose A', afterQuestion),
     answerComment('203', `${prefix}   `, afterQuestion),
