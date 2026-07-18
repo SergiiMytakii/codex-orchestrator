@@ -17,6 +17,7 @@ import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfigV1 } from './config.js';
 import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
+  assertContainmentCertificateMatchesRuntime,
   canonicalJson,
   containmentArgvPolicySha256,
   containmentCertificatePath,
@@ -801,12 +802,12 @@ export function createV2Runtime(input: {
     readConfig,
     validateContainment: async (config) => {
       const certificate = await readContainmentCertificate(containmentCertificatePath(orchestratorHome));
-      if (certificate.packageVersion !== input.packageVersion) throw new Error('containment package version mismatch');
-      if (certificate.argvPolicySha256 !== containmentArgvPolicySha256()) throw new Error('containment argv policy mismatch');
       const version = await commandExecutor(config.codex.command, ['--version']);
-      if (version.exitCode !== 0 || version.stdout.trim() !== `codex-cli ${config.codex.requiredVersion}`) {
-        throw new Error('current Codex version does not match the containment certificate');
-      }
+      if (version.exitCode !== 0) throw new Error('Codex version is unavailable');
+      assertContainmentCertificateMatchesRuntime(certificate, {
+        codexVersion: version.stdout.trim(),
+        argvPolicySha256: containmentArgvPolicySha256(),
+      });
     },
     ownerLock: {
       acquire: async ({ canonicalRepository }) => acquireOwnerLock({

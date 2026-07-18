@@ -237,6 +237,18 @@ export function validateContainmentCertificate(value: unknown): ContainmentCerti
   return value as unknown as ContainmentCertificateV2;
 }
 
+export function assertContainmentCertificateMatchesRuntime(
+  certificate: ContainmentCertificateV2,
+  runtime: { codexVersion: string; argvPolicySha256: string },
+): void {
+  if (certificate.argvPolicySha256 !== runtime.argvPolicySha256) {
+    throw new Error('containment argv policy mismatch');
+  }
+  if (runtime.codexVersion !== `codex-cli ${certificate.codexVersion}`) {
+    throw new Error('Codex version does not match the containment certificate');
+  }
+}
+
 export async function writeContainmentCertificate(
   path: string,
   certificate: ContainmentCertificateV2,
