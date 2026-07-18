@@ -21,6 +21,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 - Workflow generation and attempt snapshots now fail closed on inventory,
   path, mode, owner, hash, policy, concurrent-publication, and tamper drift.
 
+## [2.0.2] - 2026-07-18
+
+### Changed
+- Re-published the current V2 package line for downstream workspace upgrades.
+
 ## [2.0.1] - 2026-07-17
 
 ### Fixed
