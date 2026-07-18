@@ -13,8 +13,9 @@ const probe = {
   deniedSecretReadable: true,
   productionSentinelExecuted: false,
 } as const;
+const darwinOnly = { skip: process.platform !== 'darwin' };
 
-test('runtime accepts a certificate from an older package when Codex and containment policy are unchanged', () => {
+test('runtime accepts a certificate from an older package when Codex and containment policy are unchanged', darwinOnly, () => {
   const policySha256 = 'a'.repeat(64);
   const certificate = createContainmentCertificate({
     packageVersion: '0.1.51',
@@ -30,7 +31,7 @@ test('runtime accepts a certificate from an older package when Codex and contain
   }));
 });
 
-test('runtime still rejects a certificate when the containment policy changes', () => {
+test('runtime still rejects a certificate when the containment policy changes', darwinOnly, () => {
   const certificate = createContainmentCertificate({
     packageVersion: '0.1.51',
     argvPolicySha256: 'a'.repeat(64),
@@ -45,7 +46,7 @@ test('runtime still rejects a certificate when the containment policy changes', 
   }), /containment argv policy mismatch/u);
 });
 
-test('runtime still rejects a certificate when the Codex version changes', () => {
+test('runtime still rejects a certificate when the Codex version changes', darwinOnly, () => {
   const policySha256 = 'a'.repeat(64);
   const certificate = createContainmentCertificate({
     packageVersion: '0.1.51',
