@@ -25,14 +25,14 @@ Use when: A self-improvement task touches `.codex-orchestrator/local/self-improv
 Do not use when: The diff is limited to ignored outputs such as local reports or runner state, or when the task is intentionally read-only.
 Review after: 2026-08-03
 
-## 2026-06-12 - Verify proof commands against the package-local CLI
+## 2026-06-12 - Verify the resolved Codex binary before treating command gaps as regressions
 
-Scope: acceptance proof
-Evidence: `.codex-orchestrator/local/self-improvement/reports/review-773.json` says issue `#773` was blocked by `Unknown command: visual-proof` from an ambient `codex-orchestrator`, while the later review confirmed `node dist/src/cli.js --help | rg "visual-proof"` passed and the runner prepended a package-local CLI shim.
-Lesson: When proof or review reports say a `codex-orchestrator` subcommand does not exist, verify which binary actually ran before treating it as a product or workflow regression. A stale global install can produce a false blocker even when the built package-local CLI already supports the command.
-Use when: Local review, proof, or self-improvement evidence reports an unknown or missing `codex-orchestrator` command in this repository.
-Do not use when: The failure was reproduced against the current package-local build or the error is about command arguments, auth, or runtime behavior after the correct binary is confirmed.
-Review after: 2026-07-12
+Scope: agent workflow
+Evidence: `.codex-orchestrator/local/self-improvement/reports/review-773.json` recorded a false `Unknown command: visual-proof` blocker from an ambient `codex-orchestrator` even though `node dist/src/cli.js --help | rg "visual-proof"` passed, and commit `e05dc48` later hardened the local self-improvement runner to use the PATH-resolved `codex` command explicitly.
+Lesson: When local proof, review, or runner evidence says a `codex` or `codex-orchestrator` command is missing, first confirm which binary path and contract actually ran. In this repo, stale ambient installs or mismatched command resolution can create false workflow regressions even when the built package or intended CLI already supports the command.
+Use when: A local runner, proof, doctor, or self-improvement step reports an unknown or missing Codex-family command in this repository.
+Do not use when: The failure was reproduced against the exact intended package-local or configured binary, or the problem is clearly about arguments, auth, or runtime behavior after the binary path is confirmed.
+Review after: 2026-08-17
 
 ## Retired Lessons
 
