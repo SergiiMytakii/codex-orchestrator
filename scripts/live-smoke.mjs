@@ -386,10 +386,21 @@ process.stdin.on('end', () => {
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'baseline';
   mkdirSync(dirname(reportPath), { recursive: true });
-  if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
+  if (prompt.includes('/triage/')) writeTriage(reportPath);
+  else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
   else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
   else writeImplementation(marker, reportPath, prompt);
 });
+
+function writeTriage(reportPath) {
+  writeAgentReport(reportPath, {
+    version: 1, status: 'direct',
+    inspectedEvidence: [{ kind: 'issue', location: 'live-smoke issue', summary: 'Synthetic live-smoke delivery fixture.' }],
+    assumptions: [],
+    direct: { summary: 'Deliver the bounded live-smoke fixture.', behaviors: ['Create the scenario marker.'], verification: ['Run the scenario proof.'] },
+    specRequired: null, awaitingUser: null, blocker: null,
+  });
+}
 
 function writeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
@@ -634,6 +645,15 @@ async function selfTestFakeAgent() {
     if (implementation.version !== 1 || implementation.status !== 'completed'
       || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
       throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
+    }
+    const triagePath = join(root, 'triage.json');
+    await runCommand(fakePath, ['exec', '--output-last-message', triagePath], {
+      cwd: root,
+      stdin: 'Follow the exact operation at /operations/triage/SKILL.md.\n',
+    });
+    const triage = JSON.parse(await readFile(triagePath, 'utf8')).report;
+    if (triage.version !== 1 || triage.status !== 'direct' || triage.direct?.behaviors?.length !== 1) {
+      throw new Error(`fake triage report contract failed: ${JSON.stringify(triage)}`);
     }
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {
