@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-07-18
+
 ### Changed
 - Added durable `agent:waiting-human` questions, current-WRITE trusted answers,
   conflict clarification, permission revocation, and same-run rerouting before
