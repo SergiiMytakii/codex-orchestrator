@@ -18,13 +18,21 @@ test('GhCliIssueAdapter preserves decimal REST comment and author IDs above MAX_
   let observedArgs: string[] = [];
   const executor: CommandExecutor = async (_file, args) => {
     observedArgs = args;
-    return { stdout: JSON.stringify([[restComment]]), stderr: '' };
+    if (args.includes('--slurp') && args.includes('--jq')) {
+      throw new Error('the --slurp option is not supported with --jq or --template');
+    }
+    return { stdout: `${JSON.stringify(restComment)}\n`, stderr: '' };
   };
   const comments = await new GhCliIssueAdapter('owner', 'repo', executor).listAllComments(12);
   assert.equal(comments[0]!.id, restComment.id);
   assert.equal(comments[0]!.author.id, restComment.user.id);
   assert.equal(comments[0]!.updatedAt, restComment.updated_at);
-  assert.deepEqual(observedArgs.slice(-2), ['--jq', 'map(map(.id |= tostring | .user.id |= tostring))']);
+  assert.equal(observedArgs.includes('--paginate'), true);
+  assert.equal(observedArgs.includes('--slurp'), false);
+  assert.deepEqual(observedArgs.slice(-2), [
+    '--jq',
+    '.[] | .id = (.id | tostring) | .user.id = (.user.id | tostring)',
+  ]);
 });
 
 test('GhCliIssueAdapter checks permission against the immutable author ID and types 404 as none', async () => {
@@ -54,7 +62,7 @@ test('GhCliIssueAdapter returns the posted comment only after REST reread observ
     calls.push(args);
     return args[0] === 'issue'
       ? { stdout: '', stderr: '' }
-      : { stdout: JSON.stringify([[restComment]]), stderr: '' };
+      : { stdout: `${JSON.stringify(restComment)}\n`, stderr: '' };
   };
   const observed = await new GhCliIssueAdapter('owner', 'repo', executor).postComment(12, 'answer');
   assert.equal(observed.id, restComment.id);

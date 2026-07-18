@@ -88,16 +88,15 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
 
   public async listAllComments(issueNumber: number): Promise<GitHubIssueComment[]> {
     const result = await this.executor('gh', [
-      'api', '--paginate', '--slurp', '--method', 'GET',
+      'api', '--paginate', '--method', 'GET',
       `repos/${this.repo}/issues/${issueNumber}/comments`,
       '-f', 'per_page=100',
-      '--jq', 'map(map(.id |= tostring | .user.id |= tostring))',
+      '--jq', '.[] | .id = (.id | tostring) | .user.id = (.user.id | tostring)',
     ]);
-    const pages = JSON.parse(result.stdout) as unknown;
-    if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
-      throw new Error('GitHub issue comment pagination payload must be an array of pages');
-    }
-    return pages.flatMap((page) => (page as unknown[]).map(normalizeRestComment));
+    return result.stdout
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => normalizeRestComment(JSON.parse(line) as unknown));
   }
 
   public async getRepositoryPermission(login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation> {
