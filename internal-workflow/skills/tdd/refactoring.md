@@ -1,10 +1,8 @@
-# Refactor Candidates
+# Refactoring After GREEN
 
-After TDD cycle, look for:
+Stop when GREEN code is clear and local. Refactor only when the current change
+introduced concrete duplication, confusion, or misplaced ownership and the edit
+reduces total complexity.
 
-- **Duplication** → Extract function/class
-- **Long methods** → Break into private helpers (keep tests on public interface)
-- **Shallow modules** → Combine or deepen
-- **Feature envy** → Move logic to where data lives
-- **Primitive obsession** → Introduce value objects
-- **Existing code** the new code reveals as problematic
+Keep it local. Do not add helpers, classes, value objects, deeper modules, or
+unrelated cleanup from pattern preference alone. Rerun affected tests.

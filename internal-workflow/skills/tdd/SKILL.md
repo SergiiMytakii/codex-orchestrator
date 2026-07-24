@@ -26,7 +26,8 @@ cleanup are validation, not RED proofs.
 - Derive expected values from an independent source, never from the production algorithm.
 - Prove RED on the old behavior for the same observable reason the user reported or requested.
 - Add only enough implementation to make the current test pass; do not anticipate later tests.
-- Keep tests stable across behavior-preserving refactors and refactor only while GREEN.
+- Keep tests stable across behavior-preserving refactors.
+- After sufficient GREEN, stop by default. Refactor only to reduce concrete complexity introduced by the change.
 
 Read [tests.md](tests.md) when choosing or reviewing test shape. Read [mocking.md](mocking.md) before introducing test doubles.
 
@@ -36,7 +37,7 @@ Read [tests.md](tests.md) when choosing or reviewing test shape. Read [mocking.m
 2. List the prioritized observable behaviors, not implementation steps.
 3. Select the public seam where callers observe each behavior.
 4. Ask the user only when the seam changes the public contract, product intent is unclear, or behavior priorities materially conflict.
-5. For contract-risk changes, create or update the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) and map each invariant to its first failing test or observable proof.
+5. Use the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) only when its material-delta and missed-failure gate passes.
 6. If no natural public seam exists, stop the TDD route. Consult [interface-design.md](interface-design.md) only when changing the interface is itself required by the task.
 
 For UI behavior, define proof at the rendered seam: visible content and order, interaction result, semantics, or screenshot when layout direction or scrolling matters.
@@ -56,7 +57,7 @@ Handle reviewer repairs inside the same activation only under [bug workflow rout
 
 ## After GREEN
 
-Refactor as a separate review-stage activity, never while RED. Use [refactoring.md](refactoring.md) for candidates and rerun affected tests after each step.
+GREEN is a valid stopping point. If the current change created concrete local complexity, use [refactoring.md](refactoring.md) and rerun affected tests.
 
 ## Cycle Checklist
 
@@ -68,5 +69,5 @@ Refactor as a separate review-stage activity, never while RED. Use [refactoring.
 [ ] GREEN uses only the code needed for the current behavior
 [ ] Final outcome and relevant competing condition are proved
 [ ] Contract Test Ledger is current when applicable
-[ ] Refactoring starts only after GREEN
+[ ] Any refactor is local and reduces current-change complexity
 ```

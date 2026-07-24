@@ -1,6 +1,6 @@
 interface:
   display_name: "Implementation Spec Maker"
   short_description: "Create lean deterministic implementation specs"
-  default_prompt: "Use $implementation-spec-maker to create the smallest deterministic spec while classifying document mode, implementation size, repository count, and review risk independently."
+  default_prompt: "Use $implementation-spec-maker only for a named execution decision or coordination gap; otherwise keep the direct route. Create the smallest deterministic spec and classify mode, size, repository count, and review risk independently."
 policy:
   allow_implicit_invocation: true

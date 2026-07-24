@@ -9,7 +9,7 @@ description: Implement and verify an explicit or approved bug fix end-to-end. Us
 
 Treat every bug report as an engineering investigation, not a prompt to guess. Start by proving whether each reported problem is valid and still current, then narrow the failing path, patch the root cause with the smallest correct change, and verify the result before closing the task. Always plan your actions explicitly before executing them.
 
-For confirmed contract defects, use the shared Contract Test Ledger at `../../docs/agents/contract-test-ledger.md`.
+For confirmed contract defects, apply the shared Contract Test Ledger gate at `../../docs/agents/contract-test-ledger.md`.
 
 ## Activation Rule
 
@@ -47,8 +47,8 @@ Default execution mode is inline; use `analyst_deep` only while causal or contra
    - If full reproduction is impossible, establish the strongest available failing signal and state what is missing.
    - If no red-capable signal can be built for an unclear or flaky bug, switch to `diagnosing-bugs` before patching.
 
-5. Create the regression contract row for confirmed defects.
-   - For each confirmed review finding or contract bug, record the invariant, the concrete risk, and the first regression test/proof before patching.
+5. Create a regression contract row only when the ledger gate passes.
+   - Record the invariant, concrete missed failure, and first regression test/proof before patching.
    - The preferred sequence is `planned -> red -> green`: show the regression signal fails, apply the fix, then verify it passes.
    - If no correct public seam exists, mark the ledger row `blocked` with the missing seam or fixture instead of writing an implementation-detail test by default.
 

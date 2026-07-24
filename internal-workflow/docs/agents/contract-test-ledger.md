@@ -4,13 +4,23 @@ Use this shared ledger for behavior-changing work where a passing happy-path tes
 
 ## When Required
 
-Create or update a contract test ledger when the task changes any of these:
+Create or update a ledger only when both are true:
+
+1. The task materially changes an observable or shared contract.
+2. You can name a realistic failure that ordinary targeted proof could miss.
+
+Relevant contract areas include:
 
 - API, DTO, schema, serialization, persistence, or externally visible response shape
 - ordering, lifecycle events, state transitions, retries, idempotency, timeout, cancellation, or background jobs
 - cache keys, invalidation, state merge precedence, fallback behavior, profile/global/mobile overrides, defaults, or feature flags
 - evidence, trace, snapshot, audit, summary, aggregation, score, winner, or generated artifacts
 - shared behavior read by multiple callers, tenants, users, groups, children, or projections
+
+Category alone does not activate the ledger. Ordinary API/DTO edits use targeted
+proof when no missed failure is named. Retry, idempotency, auth, payment,
+shared-trust, and recovery changes usually pass the gate when happy-path proof
+cannot expose their failure mode.
 
 For narrow UI copy, docs-only, formatting, tests-only, or isolated styling changes, the ledger is not required.
 

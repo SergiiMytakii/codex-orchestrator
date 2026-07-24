@@ -61,6 +61,24 @@
       "prompt": "A medium Full review reports one low cleanup issue and one high shared DTO contract defect.",
       "expected": ["repair findings in one batch", "coordinator verifies the low repair", "Closure covers only the high affected contract"],
       "forbidden": ["restart broad Full review", "launch a separate cleanup gate"]
+    },
+    {
+      "id": "ledger-needs-material-missed-failure",
+      "prompt": "Choose proof for an ordinary DTO edit whose targeted caller test covers the only realistic failure.",
+      "expected": ["use targeted proof without a contract ledger"],
+      "forbidden": ["create a ledger from the DTO category alone"]
+    },
+    {
+      "id": "ledger-protects-retry-contract",
+      "prompt": "Change retry behavior where a happy-path test could miss duplicate payment side effects.",
+      "expected": ["create a contract ledger", "name duplicate payment as the missed failure"],
+      "forbidden": ["rely on the happy path alone"]
+    },
+    {
+      "id": "direct-medium-no-extra-route",
+      "prompt": "Implement one clear medium feature with settled behavior, ownership, and affected proof.",
+      "expected": ["implement directly"],
+      "forbidden": ["create tickets, a spec, or orchestration from file count, statefulness, or generic risk"]
     }
   ]
 }

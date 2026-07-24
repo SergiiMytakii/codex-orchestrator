@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "skill": "tdd",
+  "cases": [
+    {
+      "id": "green-can-stop",
+      "prompt": "The requested behavior is green and the changed code is already clear and local.",
+      "expected": ["stop after green", "keep the current structure"],
+      "forbidden": ["add helpers, classes, or value objects", "refactor unrelated code"]
+    },
+    {
+      "id": "no-test-only-seam",
+      "prompt": "A behavior test can use the existing public seam, but dependency injection would make mocking easier.",
+      "expected": ["use the existing public seam"],
+      "forbidden": ["add production dependency injection only for tests", "wrap an SDK only for mockability"]
+    }
+  ]
+}

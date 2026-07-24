@@ -69,7 +69,7 @@ Read only the references the current review needs:
 - Contract test ledger: `../../docs/agents/contract-test-ledger.md`
 - Shared confidence rubric: `../../docs/agents/confidence-rubric.md`
 
-Load `references/framework-lenses.md` when the user names a framework or files/configs strongly imply one. Load `references/targeted-recipes.md` and `../../docs/agents/contract-test-ledger.md` when the diff shape matches new fields, retries, DTO/schema/runtime contracts, caches, state merge precedence, ordering, evidence/snapshots, determinism, or aggregation summaries. Load `references/bug-classes.md` for substantial reviews or broad bug hunts.
+Load `references/framework-lenses.md` when the user names a framework or files/configs strongly imply one. Load `references/targeted-recipes.md` when the diff shape matches them. Load `../../docs/agents/contract-test-ledger.md` only for a material contract delta with a named failure ordinary targeted proof could miss. Load `references/bug-classes.md` for substantial reviews or broad bug hunts.
 Load `references/cleanup-lens.md` when the spec/standards lens is assigned. Use
 its bounded method by default and its amplified method only for a concrete
 evidenced simplification risk supplied as mandatory Review Focus.
@@ -187,7 +187,7 @@ The coordinator must not blindly relay reviewer output.
 2. Re-read the relevant code for the strongest findings.
 3. Drop findings that lack a concrete trigger path.
 4. Reclassify severity/confidence using `../../docs/agents/confidence-rubric.md` if evidence does not support the label.
-5. For real contract defects, identify the missing or inadequate Contract Test Ledger invariant when TDD/spec evidence is available.
+5. For real contract defects that pass the ledger gate, identify the missing or inadequate invariant when TDD/spec evidence is available.
 6. Confirm every mandatory `Review Focus` item and mandatory delta lens was reviewed; if not, report the unverified item as a verification gap.
 7. Decide whether auto-fix is allowed.
 8. Run the narrowest meaningful verification after any fix.
@@ -233,7 +233,7 @@ Automatically fix only when all are true:
 When auto-fixing:
 
 - patch only the bug
-- add/update behavior tests when regression risk is meaningful and the codebase supports it; for contract defects, add the missing ledger invariant first when a ledger exists or is being created
+- add/update behavior tests when regression risk is meaningful and the codebase supports it; update a ledger only when its gate passes
 - rerun relevant verification
 - never revert unrelated user changes
 
