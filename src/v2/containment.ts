@@ -1,16 +1,8 @@
 import { createHash } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
-import { homedir, platform } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
-import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
-export const CONTAINMENT_PLATFORM = 'darwin' as const;
-export const CONTAINMENT_SCHEMA = 'codex-orchestrator.containment' as const;
-const CERTIFICATE_FILE = 'containment.json';
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const MAX_CERTIFICATE_BYTES = 1024 * 1024;
 const DENIED_TOOL_ENV_KEYS = [
   'GH_TOKEN',
   'GITHUB_TOKEN',
@@ -30,35 +22,6 @@ const DENIED_TOOL_ENV_KEYS = [
   'AZURE_CONFIG_DIR',
   'AZURE_CLIENT_SECRET',
 ] as const;
-
-export interface ContainmentProbeResultV2 {
-  parentAuthReadable: true;
-  parentAuthUsable: true;
-  externalCredentialsUsable: false;
-  deniedSecretReadable: true;
-  productionSentinelExecuted: false;
-}
-
-export interface ContainmentCertificateV2 {
-  schema: typeof CONTAINMENT_SCHEMA;
-  version: 2;
-  codexVersion: string;
-  codexExecutablePath: string;
-  codexExecutableSha256: string;
-  platform: typeof CONTAINMENT_PLATFORM;
-  packageVersion: string;
-  argvPolicySha256: string;
-  root: ContainmentProbeResultV2;
-  nativeChild: ContainmentProbeResultV2;
-  completedAt: string;
-  resultSha256: string;
-}
-
-export function containmentCertificatePath(
-  orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator')),
-): string {
-  return join(orchestratorHome, 'v2', 'certifications', CERTIFICATE_FILE);
-}
 
 export function buildContainmentCodexArgs(input: {
   schemaPath: string;
@@ -161,165 +124,6 @@ export function buildContainmentCodexEnvironment(input: {
   return env;
 }
 
-export function containmentArgvPolicySha256(): string {
-  const args = buildContainmentCodexArgs({
-    schemaPath: '<snapshot-schema>',
-    reportPath: '<attempt-report>',
-    toolHome: '<isolated-tool-home>',
-    tmpDir: '<attempt-tmp>',
-    safePath: '<fixed-safe-path>',
-  });
-  return sha256(canonicalJson({ command: 'codex', args, promptTransport: 'stdin' }));
-}
-
-export function createContainmentCertificate(input: {
-  codexVersion: string;
-  codexExecutablePath: string;
-  codexExecutableSha256: string;
-  packageVersion: string;
-  argvPolicySha256: string;
-  root: ContainmentProbeResultV2;
-  nativeChild: ContainmentProbeResultV2;
-  completedAt: string;
-}): ContainmentCertificateV2 {
-  assertCodexVersion(input.codexVersion);
-  assertAbsolutePath(input.codexExecutablePath, 'codexExecutablePath');
-  assertSha256(input.codexExecutableSha256, 'codexExecutableSha256');
-  assertNonEmptyString(input.packageVersion, 'packageVersion');
-  assertSha256(input.argvPolicySha256, 'argvPolicySha256');
-  validateProbeResult(input.root, 'root');
-  validateProbeResult(input.nativeChild, 'nativeChild');
-  assertIsoTimestamp(input.completedAt);
-  assert.equalPlatform();
-  const unsigned = {
-    schema: CONTAINMENT_SCHEMA,
-    version: 2 as const,
-    codexVersion: input.codexVersion,
-    codexExecutablePath: input.codexExecutablePath,
-    codexExecutableSha256: input.codexExecutableSha256,
-    platform: CONTAINMENT_PLATFORM,
-    packageVersion: input.packageVersion,
-    argvPolicySha256: input.argvPolicySha256,
-    root: input.root,
-    nativeChild: input.nativeChild,
-    completedAt: input.completedAt,
-  };
-  return { ...unsigned, resultSha256: sha256(canonicalJson(unsigned)) };
-}
-
-export function validateContainmentCertificate(value: unknown): ContainmentCertificateV2 {
-  assertExactObject(value, [
-    'schema',
-    'version',
-    'codexVersion',
-    'codexExecutablePath',
-    'codexExecutableSha256',
-    'platform',
-    'packageVersion',
-    'argvPolicySha256',
-    'root',
-    'nativeChild',
-    'completedAt',
-    'resultSha256',
-  ], 'containment certificate');
-  if (value.schema !== CONTAINMENT_SCHEMA) throw new Error('invalid containment schema');
-  if (value.version !== 2) throw new Error('invalid containment version');
-  assertCodexVersion(value.codexVersion);
-  assertAbsolutePath(value.codexExecutablePath, 'codexExecutablePath');
-  assertSha256(value.codexExecutableSha256, 'codexExecutableSha256');
-  if (value.platform !== CONTAINMENT_PLATFORM) throw new Error('invalid containment platform');
-  assertNonEmptyString(value.packageVersion, 'packageVersion');
-  assertSha256(value.argvPolicySha256, 'argvPolicySha256');
-  validateProbeResult(value.root, 'root');
-  validateProbeResult(value.nativeChild, 'nativeChild');
-  assertIsoTimestamp(value.completedAt);
-  assertSha256(value.resultSha256, 'resultSha256');
-  const unsigned = {
-    schema: value.schema,
-    version: value.version,
-    codexVersion: value.codexVersion,
-    codexExecutablePath: value.codexExecutablePath,
-    codexExecutableSha256: value.codexExecutableSha256,
-    platform: value.platform,
-    packageVersion: value.packageVersion,
-    argvPolicySha256: value.argvPolicySha256,
-    root: value.root,
-    nativeChild: value.nativeChild,
-    completedAt: value.completedAt,
-  };
-  if (sha256(canonicalJson(unsigned)) !== value.resultSha256) {
-    throw new Error('containment result digest mismatch');
-  }
-  return value as unknown as ContainmentCertificateV2;
-}
-
-export function assertContainmentCertificateMatchesRuntime(
-  certificate: ContainmentCertificateV2,
-  runtime: {
-    codexVersion: string;
-    codexExecutablePath: string;
-    codexExecutableSha256: string;
-    packageVersion: string;
-    argvPolicySha256: string;
-  },
-): void {
-  if (certificate.argvPolicySha256 !== runtime.argvPolicySha256) {
-    throw new Error('containment argv policy mismatch');
-  }
-  if (runtime.codexVersion !== certificate.codexVersion) {
-    throw new Error('Codex version does not match the containment certificate');
-  }
-  if (runtime.codexExecutablePath !== certificate.codexExecutablePath
-    || runtime.codexExecutableSha256 !== certificate.codexExecutableSha256) {
-    throw new Error('Codex executable does not match the containment certificate');
-  }
-  if (runtime.packageVersion !== certificate.packageVersion) {
-    throw new Error('orchestrator package version does not match the containment certificate');
-  }
-}
-
-export async function writeContainmentCertificate(
-  path: string,
-  certificate: ContainmentCertificateV2,
-): Promise<void> {
-  validateContainmentCertificate(certificate);
-  await writeDurableAtomicFile(path, `${canonicalJson(certificate)}\n`);
-}
-
-export async function readContainmentCertificate(path: string): Promise<ContainmentCertificateV2> {
-  const bytes = await readFile(path);
-  if (bytes.length > MAX_CERTIFICATE_BYTES) throw new Error('containment certificate exceeds 1 MiB');
-  return validateContainmentCertificate(parseJsonWithoutDuplicateKeys(bytes.toString('utf8')));
-}
-
-export async function removeMatchingContainmentCertificate(
-  path: string,
-  expected: {
-    codexVersion: string;
-    codexExecutablePath: string;
-    codexExecutableSha256: string;
-    packageVersion: string;
-    argvPolicySha256: string;
-  },
-): Promise<void> {
-  let certificate: ContainmentCertificateV2;
-  try {
-    certificate = await readContainmentCertificate(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    return;
-  }
-  if (
-    certificate.codexVersion === expected.codexVersion
-    && certificate.codexExecutablePath === expected.codexExecutablePath
-    && certificate.codexExecutableSha256 === expected.codexExecutableSha256
-    && certificate.packageVersion === expected.packageVersion
-    && certificate.argvPolicySha256 === expected.argvPolicySha256
-  ) {
-    await rm(path, { force: true });
-  }
-}
-
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
   if (typeof value === 'number') {
@@ -351,62 +155,6 @@ export function containsCredentialEvidence(value: string): boolean {
     /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*["']?[A-Za-z0-9_./+=-]{8,}/iu,
   ].some((pattern) => pattern.test(value));
 }
-
-function validateProbeResult(value: unknown, field: string): asserts value is ContainmentProbeResultV2 {
-  assertExactObject(value, [
-    'parentAuthReadable',
-    'parentAuthUsable',
-    'externalCredentialsUsable',
-    'deniedSecretReadable',
-    'productionSentinelExecuted',
-  ], field);
-  if (value.parentAuthReadable !== true) throw new Error(`${field}.parentAuthReadable must be true`);
-  if (value.parentAuthUsable !== true) throw new Error(`${field}.parentAuthUsable must be true`);
-  if (value.deniedSecretReadable !== true) throw new Error(`${field}.deniedSecretReadable must be true`);
-  for (const key of ['externalCredentialsUsable', 'productionSentinelExecuted'] as const) {
-    if (value[key] !== false) throw new Error(`${field}.${key} must be false`);
-  }
-}
-
-function assertExactObject(value: unknown, expectedKeys: string[], field: string): asserts value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} must be an object`);
-  const actualKeys = Object.keys(value).sort();
-  const sortedExpected = [...expectedKeys].sort();
-  if (actualKeys.length !== sortedExpected.length || actualKeys.some((key, index) => key !== sortedExpected[index])) {
-    throw new Error(`${field} has unknown or missing keys`);
-  }
-}
-
-function assertNonEmptyString(value: unknown, field: string): asserts value is string {
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`${field} must be a non-empty string`);
-}
-
-function assertAbsolutePath(value: unknown, field: string): asserts value is string {
-  assertNonEmptyString(value, field);
-  if (!isAbsolute(value) || resolve(value) !== value) throw new Error(`${field} must be a canonical absolute path`);
-}
-
-function assertCodexVersion(value: unknown): asserts value is string {
-  if (typeof value !== 'string' || !/^codex-cli \S+$/u.test(value)) {
-    throw new Error('codexVersion must be the exact installed Codex version');
-  }
-}
-
-function assertSha256(value: unknown, field: string): asserts value is string {
-  if (typeof value !== 'string' || !SHA256_PATTERN.test(value)) throw new Error(`${field} must be lowercase SHA-256`);
-}
-
-function assertIsoTimestamp(value: unknown): asserts value is string {
-  if (typeof value !== 'string' || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
-    throw new Error('completedAt must be an ISO timestamp');
-  }
-}
-
-const assert = {
-  equalPlatform(): void {
-    if (platform() !== CONTAINMENT_PLATFORM) throw new Error('containment certificate requires darwin');
-  },
-};
 
 function tomlString(value: string): string {
   return JSON.stringify(value);

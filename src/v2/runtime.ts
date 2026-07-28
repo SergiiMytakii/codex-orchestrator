@@ -20,12 +20,8 @@ import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
-  assertContainmentCertificateMatchesRuntime,
   canonicalJson,
-  containmentArgvPolicySha256,
-  containmentCertificatePath,
   parseJsonWithoutDuplicateKeys,
-  readContainmentCertificate,
   sha256,
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
@@ -958,19 +954,6 @@ export function createV2Runtime(input: {
   };
   const runner = new RunIssue({
     readConfig,
-    validateContainment: async (config) => {
-      const certificate = await readContainmentCertificate(containmentCertificatePath(orchestratorHome));
-      const executablePath = await resolveRuntimeCodex(config.codex.command);
-      const version = await commandExecutor(executablePath, ['--version']);
-      if (version.exitCode !== 0) throw new Error('Codex version is unavailable');
-      assertContainmentCertificateMatchesRuntime(certificate, {
-        codexVersion: version.stdout.trim(),
-        codexExecutablePath: executablePath,
-        codexExecutableSha256: sha256(await readFile(executablePath)),
-        packageVersion: input.packageVersion,
-        argvPolicySha256: containmentArgvPolicySha256(),
-      });
-    },
     ownerLock: {
       acquire: async ({ canonicalRepository }) => acquireOwnerLock({
         orchestratorHome,

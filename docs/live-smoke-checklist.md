@@ -49,8 +49,7 @@ unresolved feedback is frozen,
 affected Closure/checks/proof rerun, one fast-forward commit updates the same PR,
 one summary marker is posted, replay is effect-free, and cleanup leaves no
 unexpected branch or PR. Its one-shot daemon invocation is constrained to the
-run-owned issue, and the wrapper is containment-certified in a run-isolated
-orchestrator home before GitHub mutation. Live execution remains explicit-only;
+run-owned issue and uses a run-isolated orchestrator home. Live execution remains explicit-only;
 local tests must not substitute a production repository.
 
 The `full` profile is the union of core release and the supplemental V2

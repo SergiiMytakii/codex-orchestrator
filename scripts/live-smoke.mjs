@@ -61,7 +61,6 @@ async function main() {
   try {
     context.cliPath = await preparePackagedCandidate(context);
     context.liveCodexPath = await writeLiveCodex(context);
-    await certifyLiveCodex(context);
     context.targetRoot = await prepareTarget(context);
     await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
     context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
@@ -606,17 +605,6 @@ async function writeLiveCodex(context) {
   return path;
 }
 
-async function certifyLiveCodex(context) {
-  await runCommand(process.execPath, [join(sourceRoot, 'dist', 'test', 'v2-containment.canary.js')], {
-    cwd: sourceRoot,
-    timeoutMs: context.options.timeoutMs,
-    env: {
-      ...liveSmokeEnv(context),
-      CODEX_ORCHESTRATOR_CONTAINMENT_CODEX: context.liveCodexPath,
-    },
-  });
-}
-
 function liveSmokeEnv(context) {
   return {
     ...process.env,
@@ -660,8 +648,7 @@ else {
 }
 
 function forward(prompt) {
-  const containmentCanary = prompt.startsWith('This is a containment feasibility canary.');
-  if (!administrative && !containmentCanary && !args.includes('model="' + expectedModel + '"')) {
+  if (!administrative && !args.includes('model="' + expectedModel + '"')) {
     process.stderr.write('live smoke model pin is missing\\n'); process.exitCode = 64; return;
   }
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
@@ -690,7 +677,7 @@ function forward(prompt) {
     });
     child.on('error', (error) => { stderr = (stderr + String(error)).slice(-4096); });
     child.on('close', (code, signal) => {
-      if (!administrative && !containmentCanary) {
+      if (!administrative) {
         appendFileSync(auditPath, JSON.stringify({
           model: expectedModel, scenario, operation, wrapperAttempt, exitCode: code, signal,
           stderrTail: stderr.replaceAll(process.cwd(), '<worktree>'),

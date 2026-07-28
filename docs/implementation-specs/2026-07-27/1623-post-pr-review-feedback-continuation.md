@@ -21,6 +21,8 @@ review_coverage: "Architecture/Execution and Failure/Contracts; trust, migration
 review_passes: "6; 2 Full / 4 Closure"
 ---
 
+> Post-delivery supersession (2026-07-28): the certificate and canary gate recorded below were removed from runtime policy. The original implementation and review record is preserved unchanged for audit; the replacement contract is recorded in `docs/contract-test-ledgers/2026-07-28-runtime-containment-without-certification.md`.
+
 ## 1. Execution Context
 
 - **Goal:** When a marker-bound draft PR created by a direct-delivery run receives new trusted unresolved review feedback, resume that same run, freeze one immutable feedback batch, repair it, perform affected Closure, rerun checks and Acceptance Proof, and fast-forward the same branch and PR back to `review-ready` without duplicate effects.

@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Removed
+- Removed the local containment certificate, canary command, and pre-claim
+  certification gate. Authorized runs now start without operator-managed
+  certification while retaining the fixed worker sandbox, scrubbed
+  environment, denied network, and external-authority restrictions. This also
+  removes the exported `RunIssueDependencies.validateContainment` member and is
+  a breaking change for direct consumers of the low-level Runner API.
+
 ## [2.0.6] - 2026-07-28
 
 ### Changed

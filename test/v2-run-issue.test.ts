@@ -224,7 +224,6 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready', `${JSON.stringify(result)}\n${fixture.events.join('\n')}`);
   assertSubsequence(fixture.events, [
-    'containment',
     'issue-read:initial',
     'state:claimed:claim-labels',
     'effect:claim-labels',
@@ -1223,7 +1222,6 @@ async function runFixture(options: FixtureOptions = {}) {
       bytes: configBytes,
       config: options.invalidConfig ? { ...config, unknown: true } as AgentAutoConfig : config,
     }),
-    validateContainment: async () => { events.push('containment'); },
     ownerLock: {
       acquire: async () => {
         if (options.ownerContention) throw new OwnerLockContentionError('live');

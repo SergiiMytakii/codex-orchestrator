@@ -186,7 +186,7 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `deny.readPaths`: paths the worker must not read or modify.
 - `deny.commands`: absolute command paths that must not be exposed to the worker.
 
-`runner.maxCycles`, the branch template, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs. There is no configured Codex version pin: the Runner uses the installed `codex` command, and the containment canary binds its actual version, canonical executable path and digest, plus the orchestrator package version in the certificate.
+`runner.maxCycles`, the branch template, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs. There is no configured Codex version pin or local certification step: the Runner uses the installed `codex` command and applies the fixed sandbox, environment, network, and authority restrictions to every worker invocation.
 
 ## Safety model in plain language
 

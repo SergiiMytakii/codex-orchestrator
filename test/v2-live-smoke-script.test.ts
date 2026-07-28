@@ -146,13 +146,11 @@ test('every model-backed live smoke invocation pins GPT-5.6 Luna', async () => {
   assert.doesNotMatch(text, /context\.fakeCodexPath/u);
 });
 
-test('live smoke certifies its wrapper in an isolated orchestrator home', async () => {
+test('live smoke starts the packaged runtime without a certification step', async () => {
   const text = await source();
   assert.match(text, /orchestratorHome: join\(root, 'orchestrator-home'\)/u);
-  assert.match(text, /await certifyLiveCodex\(context\)/u);
-  assert.match(text, /CODEX_ORCHESTRATOR_CONTAINMENT_CODEX: context\.liveCodexPath/u);
   assert.match(text, /CODEX_ORCHESTRATOR_HOME: context\.orchestratorHome/u);
-  assert.match(text, /args\[0\] === 'login' && args\[1\] === 'status'/u);
+  assert.doesNotMatch(text, /certifyLiveCodex|CODEX_ORCHESTRATOR_CONTAINMENT_CODEX|v2-containment\.canary/u);
 });
 
 test('real Codex smoke budgets cover the complete multi-operation workflow', async () => {

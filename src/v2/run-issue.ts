@@ -126,7 +126,6 @@ export type ImplementationAgentResult =
 
 export interface RunIssueDependencies {
   readConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }>;
-  validateContainment(config: AgentAutoConfig): Promise<void>;
   ownerLock: {
     acquire(input: { canonicalRepository: string; targetRoot: string }): Promise<{ release(): Promise<void> }>;
   };
@@ -858,16 +857,6 @@ export class RunIssue {
         return await this.preClaimInternal('config-changed-during-owner-acquire', input.issueNumber);
       }
       const config = confirmedConfig.config;
-      try {
-        await this.dependencies.validateContainment(config);
-      } catch {
-        const evidence = await this.dependencies.writeEvidence({
-          runId: `issue-${input.issueNumber}`,
-          code: 'containment-certificate-invalid',
-          summary: 'Containment certification is unavailable or stale.',
-        });
-        return { status: 'blocked', kind: 'safety', resumable: true, evidencePath: evidence.path };
-      }
       if (this.signal.aborted) return await this.preClaimCancelled(input.issueNumber);
 
       let issue: RunIssueSnapshot | undefined;

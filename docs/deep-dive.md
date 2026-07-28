@@ -37,7 +37,7 @@ Codex processes are operation-scoped workers. The current internal workflow defi
 
 Workers do not receive GitHub, SSH, npm, or cloud publication credentials. They cannot turn a proposed shell command into Runner authority and cannot directly push, create a pull request, alter issue labels, or publish comments.
 
-This is an authority-containment boundary, not an OS sandbox. Ordinary Codex execution and native Codex subagents use the same local OS account and may use the user's existing Codex authentication or read files available to that user. The containment certificate records that accepted local-read risk and binds the installed `codex` command's reported version, canonical executable path and digest, plus the orchestrator package version; configuration does not pin a Codex release. Environment scrubbing, denied paths, isolated read views, and report/artifact validation prevent those local capabilities from becoming an external publication grant.
+This is an authority-containment boundary, not an OS sandbox. Ordinary Codex execution and native Codex subagents use the same local OS account and may use the user's existing Codex authentication or read files available to that user. Configuration does not pin a Codex release and execution does not depend on a local certificate. Environment scrubbing, fixed sandbox and network policy, denied paths, isolated read views, and report/artifact validation prevent those local capabilities from becoming an external publication grant.
 
 ## 3. Strict repository configuration
 
@@ -93,10 +93,9 @@ For a new run, the Runner performs these checks before allowing worker execution
 1. Parse the strict config and derive the lowercase canonical repository identity.
 2. Acquire the repository owner lock. A known live owner returns `requeued`; ambiguous ownership returns a resumable safety block.
 3. Re-read the config after lock acquisition and require byte-identical policy and repository identity.
-4. Validate the current containment certificate.
-5. Read the issue and durable run state.
-6. Require an open issue with `agent:auto`, without running, blocked, review, or waiting-human labels.
-7. Require that no open pull request already owns `codex/issue-${issueNumber}` against the configured base branch.
+4. Read the issue and durable run state.
+5. Require an open issue with `agent:auto`, without running, blocked, review, or waiting-human labels.
+6. Require that no open pull request already owns `codex/issue-${issueNumber}` against the configured base branch.
 
 For an eligible issue, the Runner freezes the issue snapshot and acceptance criteria, resolves the base SHA, creates the run record, and persists an intent to claim labels before changing GitHub. The issue is moved to the exact running label set and receives one marker-bound claim comment. Only then does the Runner create `.codex-orchestrator/workspaces-v2/issue-${issueNumber}` on `codex/issue-${issueNumber}`.
 
