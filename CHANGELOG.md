@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.7] - 2026-07-28
+
 ### Changed
 - Blocked terminal outcomes now durably reconcile GitHub issue status before
   completion. Recovery removes stale `agent:running`, preserves unrelated
