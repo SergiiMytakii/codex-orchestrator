@@ -1177,7 +1177,7 @@ async function selfTestFakeAgent() {
     await runCommand('git', ['-C', root, 'add', 'README.md']);
     await runCommand('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
     const fakePath = join(root, 'fake-codex');
-    const installedVersion = (await runCommand('codex', ['--version'])).stdout.trim();
+    const installedVersion = 'codex-cli self-test';
     await writeFile(fakePath, fakeCodexSource(process.execPath, installedVersion));
     await chmod(fakePath, 0o700);
     await runCommand('git', ['-C', root, 'add', 'fake-codex']);
