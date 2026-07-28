@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-07-28
+
 ### Added
 - Added durable continuation of successful direct runs from newly observed,
   trusted unresolved pull-request feedback. The same run now freezes an
