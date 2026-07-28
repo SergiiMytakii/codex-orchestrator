@@ -180,7 +180,10 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite Runner-owned commands that must pass before proof and publication.
+- `checks`: finite Runner-owned commands. The Runner snapshots them on the clean
+  base and reruns them after implementation; only a new or changed failure is
+  task-owned rework, while a byte-identical base failure is retained as an
+  explicit `unchanged-failure` warning.
 - `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
 - `proof.android`: optional Runner-owned Android recipe. It selects `avdName`, creates an ephemeral clean data directory, requires fixed `build apk` arguments, removes any old `apkPath`, snapshots a fresh no-symlink APK outside the worker-writable tree, and binds its digest to the checked change. It installs and launches that exact snapshot, repeatedly verifies emulator process identity, waits up to `navigationTimeoutMs` for each exact `tapText` accessibility label, and captures proof-bound screenshot, hierarchy, PID log, and lease artifacts. Commands are bounded, cancellable, and process-group quiescent; URI query/fragment credentials are rejected. The contained proof worker never receives `adb`, emulator, Flutter, or durable lease authority. Emulator or Android-tool startup failure is retained as an explicit unfinished-UI-proof warning and does not by itself block delivery.
 - `deny.readPaths`: paths the worker must not read or modify.

@@ -35,7 +35,7 @@ export interface ProofReportV1 {
   checks: Array<{
     id: string;
     command: string;
-    status: 'passed' | 'failed';
+    status: 'passed' | 'failed' | 'unchanged-failure';
     summary: string;
     outputSha256: string;
   }>;
@@ -330,7 +330,9 @@ function checkSchema(passed: boolean): Record<string, unknown> {
     properties: {
       id: boundedStringSchema(MAX_STRING_LENGTH),
       command: boundedStringSchema(MAX_STRING_LENGTH),
-      status: passed ? { type: 'string', const: 'passed' } : { type: 'string', enum: ['passed', 'failed'] },
+      status: passed
+        ? { type: 'string', enum: ['passed', 'unchanged-failure'] }
+        : { type: 'string', enum: ['passed', 'failed', 'unchanged-failure'] },
       summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
       outputSha256: sha256Schema(),
     },
@@ -531,8 +533,8 @@ function validateChecks(value: unknown, reportStatus: unknown): asserts value is
     assertExactObject(check, ['id', 'command', 'status', 'summary', 'outputSha256'], field);
     assertBoundedString(check.id, `${field}.id`, MAX_STRING_LENGTH, true);
     assertBoundedString(check.command, `${field}.command`, MAX_STRING_LENGTH, true);
-    if (check.status !== 'passed' && check.status !== 'failed') throw new Error(`${field}.status is invalid`);
-    if (reportStatus === 'passed' && check.status !== 'passed') throw new Error('passed proof forbids failed checks');
+    if (!['passed', 'failed', 'unchanged-failure'].includes(check.status as string)) throw new Error(`${field}.status is invalid`);
+    if (reportStatus === 'passed' && check.status === 'failed') throw new Error('passed proof forbids task-introduced failed checks');
     assertBoundedString(check.summary, `${field}.summary`, MAX_SUMMARY_LENGTH, true);
     assertSha256(check.outputSha256, `${field}.outputSha256`);
     ids.push(check.id);

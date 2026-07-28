@@ -5,11 +5,14 @@ import {
   acceptApprovedDirectReview,
   acceptNeedsWorkDirectReview,
   beginDirectReviewRepair,
+  canRecoverTerminalDirectReviewReport,
   createInitialDirectReview,
   directReviewTargetFingerprint,
   launchDirectReviewInvocation,
   prepareDirectReviewInvocation,
   prepareDirectReviewClosure,
+  projectTerminalDirectReview,
+  recoverTerminalDirectReviewReport,
   validateDirectReview,
   type DirectReviewV1,
 } from '../src/v2/direct-delivery.js';
@@ -52,7 +55,7 @@ test('direct review validator rejects impossible stage, budget, Closure, and saf
     codeReviewerSessionId: 'review-session-1',
   });
   const invalid = [
-    { ...initial, review: { ...initial.review, reportRepairs: 2 } },
+    { ...initial, review: { ...initial.review, reportRepairs: 5 } },
     { ...initial, review: { ...initial.review, mode: 'closure' } },
   ];
   for (const value of invalid) assert.throws(() => validateDirectReview(value, { lifecycle: 'implementing' }));
@@ -78,6 +81,38 @@ test('terminal projection preserves review evidence without retaining an invocat
   } }, { lifecycle: 'blocked' }), /terminal/u);
 });
 
+test('malformed report terminal recovery is cause-specific and bounded', () => {
+  const initial = createInitialDirectReview({
+    targetFingerprint: fingerprint, codeReviewerSessionId: 'review-session-1',
+  });
+  const repairable: DirectReviewV1 = {
+    ...initial,
+    review: { ...initial.review, reportRepairs: 1 },
+  };
+  const malformed = projectTerminalDirectReview(
+    repairable,
+    { status: 'internal-error' },
+    'direct-review-report-malformed',
+  );
+  assert.equal(recoverTerminalDirectReviewReport(malformed).review.reportRepairs, 1);
+  assert.equal(canRecoverTerminalDirectReviewReport(malformed), true);
+  assert.throws(() => recoverTerminalDirectReviewReport(projectTerminalDirectReview(
+    repairable,
+    { status: 'internal-error' },
+    'unrelated-internal-error',
+  )), /not recoverable/u);
+  assert.equal(canRecoverTerminalDirectReviewReport(projectTerminalDirectReview(
+    repairable,
+    { status: 'internal-error' },
+    'unrelated-internal-error',
+  )), false);
+  assert.throws(() => recoverTerminalDirectReviewReport(projectTerminalDirectReview(
+    { ...repairable, review: { ...repairable.review, reportRepairs: 4 } },
+    { status: 'internal-error' },
+    'direct-review-report-malformed',
+  )), /not recoverable/u);
+});
+
 test('target fingerprint and prepared-launched-accepted review transition are exact', () => {
   const targetFingerprint = directReviewTargetFingerprint({
     snapshot: { headSha: '1', indexTreeSha: '2', trackedContentSha256: '3', untrackedContentSha256: '4', worktreeIdentity: '5' },
@@ -101,12 +136,18 @@ test('target fingerprint and prepared-launched-accepted review transition are ex
   assert.equal('invocation' in clear, false);
   assert.deepEqual(validateDirectReview(clear, { lifecycle: 'checking' }), clear);
 
+  assert.deepEqual(validateDirectReview({ ...clear, review: { ...clear.review, coverage: [] } }, { lifecycle: 'checking' }).review.coverage, []);
+
   const repair = beginDirectReviewRepair(clear, [{
     id: 'finding-1', provenance: 'check', sourceId: 'typecheck', targetRevision: 1,
     summary: 'Typecheck failed.', affectedContracts: ['configured-checks'], status: 'open',
   }]);
+  repair.review.reportRepairs = 4;
+  repair.review.transportRetries = 1;
   const closure = prepareDirectReviewClosure(repair, 'e'.repeat(64));
   assert.equal(closure.state.stage, 'review-closure');
+  assert.equal(closure.state.review.reportRepairs, 0);
+  assert.equal(closure.state.review.transportRetries, 0);
   assert.deepEqual(validateDirectReview(closure.state, { lifecycle: 'implementing' }), closure.state);
   const closureLaunched = launchDirectReviewInvocation(prepareDirectReviewInvocation(closure.state, {
     attemptId: 'closure-attempt-1', operation: 'code-review', mode: 'closure', reviewerSessionId: 'review-session-1',
@@ -154,12 +195,20 @@ test('needs-work defects become fixed only after implementation and enter correl
   const closureLaunched = launchDirectReviewInvocation(closurePrepared, {
     attemptId: 'closure-attempt-1', pid: 43, processGroupId: 43,
   });
-  assert.throws(() => acceptApprovedDirectReview(closureLaunched, {
+  const accepted = acceptApprovedDirectReview(closureLaunched, {
     version: 1, operation: 'code-review', targetRevision: 2, targetFingerprint: 'c'.repeat(64),
-    verdict: 'approved', mode: 'closure', coverage: ['correctness'], defects: [], residualRisks: [],
+    verdict: 'approved', mode: 'closure', coverage: ['correctness'], defects: [{
+      ...defect,
+      invariant: 'Equivalent wording from the Closure reviewer.',
+      failure: 'Equivalent failure wording from the Closure reviewer.',
+      status: 'verified', statusTargetRevision: 2,
+    }], residualRisks: [],
     reviewerSessionId: 'review-session-1', closureRequestSha256: closure.closureRequestSha256,
     repairFindingOutcomes: [],
-  }, 'd'.repeat(64)), /unresolved defects/u);
+  }, 'd'.repeat(64));
+  assert.equal(accepted.review.defects[0]?.status, 'verified');
+  assert.equal(accepted.review.defects[0]?.invariant, defect.invariant);
+  assert.equal(accepted.review.defects[0]?.failure, defect.failure);
 });
 
 test('maps PR findings through repair and affected Closure', () => {

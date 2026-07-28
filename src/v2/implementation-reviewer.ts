@@ -34,7 +34,7 @@ export interface ImplementationReviewerInput {
   defects: CodeReviewDefectV1[];
   affectedDefectIds: string[];
   fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
-  mandatoryCoverage: string[];
+  reviewFocus: string[];
   workflowGeneration: WorkflowGenerationReceipt;
   repairOnly: boolean;
   originalReportSha256: string | null;
@@ -99,7 +99,6 @@ export class ContainedImplementationReviewer {
           targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
           closureRequestSha256: input.closureRequestSha256,
           fixedRepairFindingIds: input.fixedRepairFindings.map((finding) => finding.id).sort(),
-          mandatoryCoverage: [...input.mandatoryCoverage].sort(),
         },
         onPrepared: () => input.onPrepared(structuredClone(invocation)),
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
@@ -125,7 +124,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
       id: finding.id,
       affectedContracts: sortedUnique(finding.affectedContracts, 'fixed repair finding contracts'),
     })).sort((left, right) => left.id.localeCompare(right.id)),
-    mandatoryCoverage: sortedUnique(input.mandatoryCoverage, 'mandatory coverage'),
+    reviewFocus: sortedUnique(input.reviewFocus, 'review focus'),
     repairOnly: input.repairOnly, repair,
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_CAPSULE_BYTES || containsCredentialEvidence(text)) {

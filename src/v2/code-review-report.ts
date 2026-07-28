@@ -58,7 +58,6 @@ export interface CodeReviewValidationContext {
   reviewerSessionId: string;
   closureRequestSha256: string | null;
   fixedRepairFindingIds?: string[];
-  mandatoryCoverage?: string[];
 }
 
 export interface ClosureRequestInput {
@@ -67,7 +66,7 @@ export interface ClosureRequestInput {
   targetFingerprint: string;
   affectedDefectIds: string[];
   fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
-  mandatoryCoverage: string[];
+  reviewFocus: string[];
 }
 
 export function hashClosureRequest(input: ClosureRequestInput): string {
@@ -75,7 +74,7 @@ export function hashClosureRequest(input: ClosureRequestInput): string {
   assertPositiveInteger(input.targetRevision, 'closure request.targetRevision');
   assertSha256(input.targetFingerprint, 'closure request.targetFingerprint');
   const affectedDefectIds = sortedUniqueStrings(input.affectedDefectIds, 'closure request.affectedDefectIds');
-  const mandatoryCoverage = sortedUniqueStrings(input.mandatoryCoverage, 'closure request.mandatoryCoverage');
+  const reviewFocus = sortedUniqueStrings(input.reviewFocus, 'closure request.reviewFocus');
   if (!Array.isArray(input.fixedRepairFindings) || input.fixedRepairFindings.length > MAX_ITEMS) {
     throw new Error('closure request.fixedRepairFindings is invalid');
   }
@@ -88,13 +87,13 @@ export function hashClosureRequest(input: ClosureRequestInput): string {
     };
   }).sort((left, right) => left.id.localeCompare(right.id));
   assertUnique(fixedRepairFindings.map((finding) => finding.id), 'closure request fixed finding IDs');
-  return domainHash('codex-orchestrator-review-closure-v1', canonicalJson({
+  return domainHash('codex-orchestrator-review-closure-v2', canonicalJson({
     operation: input.operation,
     targetRevision: input.targetRevision,
     targetFingerprint: input.targetFingerprint,
     affectedDefectIds,
     fixedRepairFindings,
-    mandatoryCoverage,
+    reviewFocus,
   }));
 }
 
@@ -114,8 +113,6 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
   if (!['approved', 'needs-work', 'rejected'].includes(value.verdict as string)) throw new Error('code review report.verdict is invalid');
   if (value.mode !== 'full' && value.mode !== 'closure') throw new Error('code review report.mode is invalid');
   const coverage = sortedUniqueStrings(value.coverage, 'code review report.coverage');
-  const mandatoryCoverage = sortedUniqueStrings(context.mandatoryCoverage ?? [], 'code review mandatory coverage');
-  if (!mandatoryCoverage.every((item) => coverage.includes(item))) throw new Error('code review report is missing mandatory coverage');
   const residualRisks = sortedUniqueStrings(value.residualRisks, 'code review report.residualRisks');
   assertText(value.reviewerSessionId, 'code review report.reviewerSessionId');
   if (value.closureRequestSha256 !== null) assertSha256(value.closureRequestSha256, 'code review report.closureRequestSha256');
@@ -133,8 +130,8 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
     }
   } else {
     if (value.closureRequestSha256 === null) throw new Error('Closure review requires correlation hash');
-    const actual = repairFindingOutcomes.map((outcome) => outcome.id);
-    if (!sameStrings(actual, expectedFindingIds)) throw new Error('Closure repair finding outcomes must match sorted request IDs');
+    const actual = repairFindingOutcomes.map((outcome) => outcome.id).sort();
+    if (!sameStrings(actual, expectedFindingIds)) throw new Error('Closure repair finding outcomes must match request IDs');
   }
   const unresolved = defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
     && defect.status !== 'verified' && defect.status !== 'superseded');
@@ -260,8 +257,7 @@ function validateRepairFindingOutcomes(value: unknown): RepairFindingOutcomeV1[]
   });
   const ids = output.map((item) => item.id);
   assertUnique(ids, 'repair finding outcome IDs');
-  if (!sameStrings(ids, [...ids].sort())) throw new Error('repair finding outcomes must be sorted');
-  return output;
+  return output.sort((left, right) => left.id.localeCompare(right.id));
 }
 
 function sortedUniqueStrings(value: unknown, field: string): string[] {

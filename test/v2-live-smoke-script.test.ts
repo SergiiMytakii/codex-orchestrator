@@ -162,7 +162,7 @@ test('real Codex smoke budgets cover the complete multi-operation workflow', asy
 test('quality-gates deterministically reopens the failed check at the fifth closure', async () => {
   const text = await source();
   const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function applyFault'));
-  assert.match(normalization, /coverage: capsule\.mandatoryCoverage/u);
+  assert.match(normalization, /coverage: capsule\.reviewFocus/u);
   assert.match(normalization, /capsule\.fixedRepairFindings/u);
   assert.match(normalization, /capsule\.targetRevision === 5/u);
   assert.match(normalization, /prompt\.includes\('quality-gates'\)/u);

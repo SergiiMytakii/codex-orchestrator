@@ -19,6 +19,14 @@ test('code review report accepts one exact Full report bound to operation and ta
   }), report);
 });
 
+test('approved review may leave free-form coverage empty', () => {
+  const report = { ...fullReport(), coverage: [] };
+  assert.deepEqual(validateCodeReviewReport(report, {
+    operation: 'code-review', mode: 'full', targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'review-session-1', closureRequestSha256: null,
+  }), report);
+});
+
 test('Closure hash and repair outcomes bind the exact sorted defect/finding coverage', () => {
   const closureRequestSha256 = hashClosureRequest({
     operation: 'code-review', targetRevision: 2, targetFingerprint: fingerprint,
@@ -27,11 +35,11 @@ test('Closure hash and repair outcomes bind the exact sorted defect/finding cove
       { id: 'proof:p1:bbb', affectedContracts: ['acceptance:b', 'acceptance:a'] },
       { id: 'check:typecheck:aaa', affectedContracts: ['checks'] },
     ],
-    mandatoryCoverage: ['spec', 'correctness'],
+    reviewFocus: ['spec', 'correctness'],
   });
   const report: CodeReviewReportV1 = {
     ...fullReport(), verdict: 'needs-work', mode: 'closure', targetRevision: 2, closureRequestSha256,
-    coverage: ['correctness', 'spec'],
+    coverage: ['Acceptance criteria and correctness were reviewed together.'],
     repairFindingOutcomes: [
       { id: 'check:typecheck:aaa', status: 'verified' },
       { id: 'proof:p1:bbb', status: 'reopened' },
@@ -42,14 +50,14 @@ test('Closure hash and repair outcomes bind the exact sorted defect/finding cove
     reviewerSessionId: 'review-session-1', closureRequestSha256,
     fixedRepairFindingIds: ['check:typecheck:aaa', 'proof:p1:bbb'],
   }), report);
-  assert.throws(() => validateCodeReviewReport({
+  assert.deepEqual(validateCodeReviewReport({
     ...report,
     repairFindingOutcomes: [...report.repairFindingOutcomes].reverse(),
   }, {
     operation: 'code-review', mode: 'closure', targetRevision: 2, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', closureRequestSha256,
     fixedRepairFindingIds: ['check:typecheck:aaa', 'proof:p1:bbb'],
-  }), /sorted/u);
+  }), report);
 });
 
 test('review reports reject stale correlation, unknown keys, invalid supersession, and false approval', () => {

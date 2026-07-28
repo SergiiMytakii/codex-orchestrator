@@ -129,7 +129,8 @@ export interface RunRecordV1 {
     resumeLifecycle: Lifecycle;
     resumeReviewStage: DirectReviewStage | null;
   };
-  checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
+  baselineChecks?: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
+  checks: Array<{ id: string; command: string; status: 'passed' | 'failed' | 'unchanged-failure'; outputSha256: string }>;
   checkedChangeSha256?: string;
   proofId?: string;
   proofReceipt?: ProofReceipt;
@@ -252,6 +253,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'directReview',
     'specDelivery',
     'reviewFeedback',
+    'baselineChecks',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -285,6 +287,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
   if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
+  if (hasOwn(value, 'baselineChecks')) validateChecks(value.baselineChecks, `${field}.baselineChecks`, false);
   validateChecks(value.checks, `${field}.checks`);
   if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
   if (hasOwn(value, 'checkedChangeSha256')) assertSha256(value.checkedChangeSha256, `${field}.checkedChangeSha256`);
@@ -347,7 +350,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   const terminal = ['review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(value.lifecycle);
   if (terminal !== hasOwn(value, 'terminalOutcome')) throw new Error(`${field} terminal lifecycle requires terminalOutcome`);
   if (terminal && (value.terminalOutcome as RunTerminalOutcome).status !== value.lifecycle) throw new Error(`${field} terminalOutcome does not match lifecycle`);
-  if (value.lifecycle === 'proving' && (!hasOwn(value, 'checkedChangeSha256') || !hasOwn(value, 'proofId') || value.checks.some((check) => check.status !== 'passed'))) {
+  if (value.lifecycle === 'proving' && (!hasOwn(value, 'checkedChangeSha256') || !hasOwn(value, 'proofId')
+    || value.checks.some((check) => check.status === 'failed'))) {
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);
   }
   if (value.lifecycle === 'publishing' && !hasOwn(value, 'proofReceipt')) throw new Error(`${field} publishing requires proofReceipt`);
@@ -414,14 +418,15 @@ function validateProcess(value: unknown, field: string): void {
   ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
 }
 
-function validateChecks(value: unknown, field: string): asserts value is RunRecordV1['checks'] {
+function validateChecks(value: unknown, field: string, allowUnchangedFailure = true): asserts value is RunRecordV1['checks'] {
   if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
   const ids = new Set<string>();
   for (const [index, check] of value.entries()) {
     assertExactObject(check, ['id', 'command', 'status', 'outputSha256'], `${field}[${index}]`);
     assertNonEmptyString(check.id, `${field}[${index}].id`);
     assertNonEmptyString(check.command, `${field}[${index}].command`);
-    if (check.status !== 'passed' && check.status !== 'failed') throw new Error(`${field}[${index}].status is invalid`);
+    if (check.status !== 'passed' && check.status !== 'failed'
+      && (check.status !== 'unchanged-failure' || !allowUnchangedFailure)) throw new Error(`${field}[${index}].status is invalid`);
     assertSha256(check.outputSha256, `${field}[${index}].outputSha256`);
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);

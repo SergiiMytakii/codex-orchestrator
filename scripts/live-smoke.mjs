@@ -711,7 +711,7 @@ function normalizeCodeReview(reportPath, prompt) {
   const report = {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
     targetFingerprint: capsule.targetFingerprint, verdict: reopen ? 'needs-work' : 'approved', mode: capsule.mode,
-    coverage: capsule.mandatoryCoverage ?? [], defects: capsule.defects ?? [], residualRisks: [],
+    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
     reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
     repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({
       id: finding.id, status: reopen ? 'reopened' : 'verified',
@@ -903,7 +903,7 @@ function writeReview(reportPath, prompt) {
   writeAgentReport(reportPath, {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
     targetFingerprint: capsule.targetFingerprint, verdict: 'approved', mode: capsule.mode,
-    coverage: capsule.mandatoryCoverage ?? [], defects: capsule.defects ?? [], residualRisks: [],
+    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
     reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
     repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({ id: finding.id, status: 'verified' })),
   });
@@ -1194,7 +1194,7 @@ async function selfTestFakeAgent() {
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {
       operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1', targetRevision: 1,
-      targetFingerprint: 'a'.repeat(64), closureRequestSha256: null, mandatoryCoverage: ['correctness'],
+      targetFingerprint: 'a'.repeat(64), closureRequestSha256: null, reviewFocus: ['correctness'],
       defects: [], fixedRepairFindings: [],
     };
     await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {

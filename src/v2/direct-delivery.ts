@@ -5,6 +5,9 @@ import { hashClosureRequest, validateCodeReviewDefects, type CodeReviewDefectV1,
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_ITEMS = 256;
+export const MAX_DIRECT_REVIEW_REPORT_REPAIRS = 4;
+
+export type DirectReviewReportRepairCount = 0 | 1 | 2 | 3 | 4;
 
 export type DirectReviewStage =
   | 'review-full' | 'review-repair' | 'review-closure';
@@ -28,7 +31,7 @@ export interface ReviewTrackV1 {
   profile: 'simple' | 'medium' | 'high';
   reviewerSessionId: string | null;
   mode: ReviewMode | null;
-  reportRepairs: 0 | 1;
+  reportRepairs: DirectReviewReportRepairCount;
   transportRetries: 0 | 1;
   coverage: string[];
   defects: CodeReviewDefectV1[];
@@ -55,6 +58,7 @@ export interface DirectReviewV1 {
   review: ReviewTrackV1;
   invocation?: ReviewInvocationV1;
   repairFindings: DirectRepairFindingV1[];
+  terminalCode?: string;
   terminalOutcome?:
     | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted' }
     | { status: 'transport-failed' | 'cancelled' | 'internal-error' };
@@ -217,18 +221,20 @@ function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): C
       if (!affected.has(existing.id)) return structuredClone(existing);
       return { ...structuredClone(existing), status: 'reopened' as const, statusTargetRevision: state.targetRevision, supersededBy: null };
     }
-    for (const field of ['id', 'class', 'invariant', 'failure', 'introducedTargetRevision'] as const) {
-      if (canonicalJson(existing[field]) !== canonicalJson(next[field])) throw new Error(`review defect immutable field changed: ${field}`);
-    }
-    if (!affected.has(existing.id) && canonicalJson(existing) !== canonicalJson(next)) {
-      throw new Error('Closure changed an unaffected defect');
-    }
+    reported.delete(existing.id);
+    if (!affected.has(existing.id)) return structuredClone(existing);
     if (affected.has(existing.id) && existing.status === 'fixed'
       && !['verified', 'reopened', 'superseded'].includes(next.status)) {
       throw new Error('Closure defect transition is invalid');
     }
-    reported.delete(existing.id);
-    return structuredClone(next);
+    return {
+      ...structuredClone(next),
+      id: existing.id,
+      class: existing.class,
+      invariant: existing.invariant,
+      failure: existing.failure,
+      introducedTargetRevision: existing.introducedTargetRevision,
+    };
   });
   for (const added of reported.values()) {
     if (added.status !== 'open' || added.introducedTargetRevision !== state.targetRevision
@@ -297,7 +303,14 @@ export function prepareDirectReviewClosure(
     stage: 'review-closure',
     targetRevision,
     targetFingerprint,
-    review: { ...structuredClone(state.review), mode: 'closure', defects, affectedDefectIds: affectedIds },
+    review: {
+      ...structuredClone(state.review),
+      mode: 'closure',
+      reportRepairs: 0,
+      transportRetries: 0,
+      defects,
+      affectedDefectIds: affectedIds,
+    },
     repairFindings,
   };
   const closureRequestSha256 = directReviewClosureRequestSha256(nextState);
@@ -318,17 +331,60 @@ export function directReviewClosureRequestSha256(state: DirectReviewV1): string 
     affectedDefectIds: state.review.affectedDefectIds,
     fixedRepairFindings: state.repairFindings.filter((finding) => finding.status === 'fixed')
       .map((finding) => ({ id: finding.id, affectedContracts: finding.affectedContracts })),
-    mandatoryCoverage: state.review.coverage,
+    reviewFocus: ['acceptance-criteria', 'correctness', 'test-quality'],
   });
 }
 
 export function projectTerminalDirectReview(
   state: DirectReviewV1,
   terminalOutcome: NonNullable<DirectReviewV1['terminalOutcome']>,
+  terminalCode?: string,
 ): DirectReviewV1 {
   if (state.status === 'terminal') throw new Error('direct review terminal projection is immutable');
-  const { invocation: _invocation, terminalOutcome: _priorOutcome, ...preserved } = structuredClone(state);
-  return { ...preserved, status: 'terminal', terminalOutcome: structuredClone(terminalOutcome) };
+  if (terminalCode !== undefined) assertText(terminalCode, 'direct review terminal code');
+  const {
+    invocation: _invocation,
+    terminalCode: _priorCode,
+    terminalOutcome: _priorOutcome,
+    ...preserved
+  } = structuredClone(state);
+  return {
+    ...preserved,
+    status: 'terminal',
+    ...(terminalCode ? { terminalCode } : {}),
+    terminalOutcome: structuredClone(terminalOutcome),
+  };
+}
+
+export function canRecoverTerminalDirectReviewReport(
+  state: DirectReviewV1,
+  options: { allowLegacyMalformed?: boolean } = {},
+): boolean {
+  return state.status === 'terminal' && state.terminalOutcome?.status === 'internal-error'
+    && !state.invocation && state.stage !== null && state.stage !== 'review-repair'
+    && state.review.disposition === 'active' && state.review.reportRepairs > 0
+    && state.review.reportRepairs < MAX_DIRECT_REVIEW_REPORT_REPAIRS
+    && (state.terminalCode === 'direct-review-report-malformed'
+      || (state.terminalCode === undefined && options.allowLegacyMalformed === true));
+}
+
+export function recoverTerminalDirectReviewReport(
+  state: DirectReviewV1,
+  options: { allowLegacyMalformed?: boolean } = {},
+): DirectReviewV1 {
+  if (!canRecoverTerminalDirectReviewReport(state, options)) {
+    throw new Error('direct review terminal report is not recoverable');
+  }
+  const {
+    terminalCode: _terminalCode,
+    terminalOutcome: _terminalOutcome,
+    ...withoutTerminal
+  } = structuredClone(state);
+  return {
+    ...withoutTerminal,
+    status: 'active',
+    review: { ...withoutTerminal.review, transportRetries: 0 },
+  };
 }
 
 export function createInitialDirectReview(input: {
@@ -351,6 +407,7 @@ export function createInitialDirectReview(input: {
 export function validateDirectReview(value: unknown, context: DirectReviewValidationContext): DirectReviewV1 {
   const optional = [
     ...(hasOwn(value, 'invocation') ? ['invocation'] : []),
+    ...(hasOwn(value, 'terminalCode') ? ['terminalCode'] : []),
     ...(hasOwn(value, 'terminalOutcome') ? ['terminalOutcome'] : []),
   ];
   assertExactObject(value, [
@@ -365,6 +422,8 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
   const review = validateTrack(value.review, 'review', value.targetRevision as number);
   const invocation = hasOwn(value, 'invocation') ? validateInvocation(value.invocation) : undefined;
   const repairFindings = validateRepairFindings(value.repairFindings, value.targetRevision as number);
+  const terminalCode = hasOwn(value, 'terminalCode') ? value.terminalCode : undefined;
+  if (terminalCode !== undefined) assertText(terminalCode, 'direct review terminal code');
   const terminalOutcome = hasOwn(value, 'terminalOutcome') ? validateTerminalProjection(value.terminalOutcome, context.lifecycle) : undefined;
   if (terminalOutcome && context.terminalOutcome && canonicalJson(terminalOutcome) !== canonicalJson(context.terminalOutcome)) {
     throw new Error('direct review terminal outcome does not match run terminal outcome');
@@ -376,6 +435,7 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
     review,
     invocation,
     repairFindings,
+    terminalCode: terminalCode as string | undefined,
     terminalOutcome,
   }, context);
   return {
@@ -387,6 +447,7 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
     review,
     ...(invocation ? { invocation } : {}),
     repairFindings,
+    ...(terminalCode ? { terminalCode: terminalCode as string } : {}),
     ...(terminalOutcome ? { terminalOutcome } : {}),
   };
 }
@@ -399,7 +460,7 @@ function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFinger
     }
     return;
   }
-  if (value.terminalOutcome) throw new Error('non-terminal direct review has terminal projection');
+  if (value.terminalOutcome || value.terminalCode) throw new Error('non-terminal direct review has terminal projection');
   if (value.stage === null || value.targetRevision < 1) throw new Error('active direct review requires a stage and revision');
   if (value.status === 'active') {
     if (context.lifecycle !== 'implementing' && context.lifecycle !== 'safe-halt') throw new Error('active direct review lifecycle is invalid');
@@ -475,7 +536,7 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
   ], `direct review ${field} track`);
   if (value.version !== 1 || !['active', 'clear'].includes(value.disposition as string)
     || !['simple', 'medium', 'high'].includes(value.profile as string)
-    || !isBit(value.reportRepairs) || !isBit(value.transportRetries)) throw new Error(`direct review ${field} track is invalid`);
+    || !isReportRepairCount(value.reportRepairs) || !isBit(value.transportRetries)) throw new Error(`direct review ${field} track is invalid`);
   if (value.reviewerSessionId !== null) assertText(value.reviewerSessionId, `${field} reviewer session ID`);
   if (value.mode !== null && value.mode !== 'full' && value.mode !== 'closure') throw new Error(`${field} review mode is invalid`);
   const coverage = sortedUniqueStrings(value.coverage, `${field} coverage`);
@@ -484,7 +545,7 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
   if (value.acceptedReportSha256 !== null) assertSha256(value.acceptedReportSha256, `${field} accepted report hash`);
   if (value.disposition === 'active' && (value.reviewerSessionId === null || value.mode === null)) throw new Error(`${field} active track lacks identity`);
   if (value.disposition === 'clear' && (value.reviewerSessionId === null || value.mode === null || value.acceptedReportSha256 === null
-    || affectedDefectIds.length !== 0 || coverage.length === 0 || defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
+    || affectedDefectIds.length !== 0 || defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
       && defect.status !== 'verified' && defect.status !== 'superseded'))) throw new Error(`${field} clear track is invalid`);
   return {
     version: 1,
@@ -492,7 +553,7 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
     profile: value.profile as ReviewTrackV1['profile'],
     reviewerSessionId: value.reviewerSessionId as string | null,
     mode: value.mode as ReviewMode | null,
-    reportRepairs: value.reportRepairs as 0 | 1,
+    reportRepairs: value.reportRepairs as DirectReviewReportRepairCount,
     transportRetries: value.transportRetries as 0 | 1,
     coverage,
     defects,
@@ -552,6 +613,10 @@ function isStage(value: unknown): value is DirectReviewStage {
 }
 
 function isBit(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }
+
+function isReportRepairCount(value: unknown): value is DirectReviewReportRepairCount {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX_DIRECT_REVIEW_REPORT_REPAIRS;
+}
 
 function sortedUniqueStrings(value: unknown, field: string): string[] {
   if (!Array.isArray(value) || value.length > MAX_ITEMS) throw new Error(`${field} is invalid`);

@@ -97,9 +97,9 @@ For a new run, the Runner performs these checks before allowing worker execution
 5. Require an open issue with `agent:auto`, without running, blocked, review, or waiting-human labels.
 6. Require that no open pull request already owns `codex/issue-${issueNumber}` against the configured base branch.
 
-For an eligible issue, the Runner freezes the issue snapshot and acceptance criteria, resolves the base SHA, creates the run record, and persists an intent to claim labels before changing GitHub. The issue is moved to the exact running label set and receives one marker-bound claim comment. Only then does the Runner create `.codex-orchestrator/workspaces-v2/issue-${issueNumber}` on `codex/issue-${issueNumber}`.
+For an eligible issue, the Runner freezes the issue snapshot and acceptance criteria, resolves the base SHA, creates the run record, and persists an intent for one marker-bound claim comment. After that trusted comment is observed, the issue is moved to the exact running label set. Only then does the Runner create `.codex-orchestrator/workspaces-v2/issue-${issueNumber}` on `codex/issue-${issueNumber}`.
 
-Every later externally meaningful phase, including every triage launch, revalidates authorization from a fresh issue observation. The open issue must still carry `agent:auto` and `agent:running`, and exactly one trusted claim comment must bind the run ID, issue, and branch. Valid claim comments frozen before the current run remain historical audit evidence, bound to their immutable GitHub comment IDs. Legacy snapshots without IDs additionally require the live comment's creation and last-update timestamps to predate the run. A malformed current marker, duplicate current claim, replaced historical comment, or foreign claim first observed after the run was created is conflicting authority and fails closed. The fresh pre-triage observation also refreshes ordinary issue comments supplied to routing.
+Every later externally meaningful phase, including every triage launch, revalidates authorization from a fresh issue observation. The open issue must still carry `agent:auto`, must not carry blocked/review/waiting-human labels, and exactly one trusted claim comment must bind the run ID, issue, and branch. `agent:running` remains status and may be restored without becoming authorization. Valid claim comments frozen before the current run remain historical audit evidence, bound to their immutable GitHub comment IDs. Legacy snapshots without IDs additionally require the live comment's creation and last-update timestamps to predate the run. A malformed current marker, duplicate current claim, replaced historical comment, or foreign claim first observed after the run was created is conflicting authority and fails closed. The fresh pre-triage observation also refreshes ordinary issue comments supplied to routing.
 
 Issue-worktree creation is an idempotent local effect. If it fails before the
 worktree exists, the Runner keeps the run in `claimed`, writes a bounded local
@@ -176,6 +176,11 @@ The first unanswered pass returns `awaiting-user`. At most one follow-up questio
 
 The direct route uses one issue worktree for at most five implementation cycles. Each cycle is bound to the same run, frozen issue criteria, route receipt, and workflow generation.
 
+After the trusted claim exists, `agent:auto` is the durable authorization.
+`agent:running` is status only; losing that status label does not revoke an
+otherwise authorized run. Explicit blocked, review, or waiting-human states do
+prevent ordinary execution.
+
 An `implementation` worker receives the current cycle and any findings from prior review, checks, or proof. It must return a structured implementation report. The Runner then:
 
 - verifies that denied paths did not change;
@@ -193,15 +198,17 @@ Before configured checks, a separate `code-review` worker reviews a fingerprint 
 
 Review maintains an append-preserving defect ledger. If review returns `needs-work`, open defects become implementation findings and consume the next implementation cycle. After repair, the same reviewer session performs closure review only for affected defects while preserving unrelated and previously accepted findings. Approved review requires every blocker or execution risk to be verified or explicitly superseded.
 
+Coverage text is descriptive, not an identity contract: Closure may paraphrase or omit it. Stable defect and repair-finding IDs, target revision, target fingerprint, and Closure hash carry correlation. Each target revision receives up to four report-only format repairs. Starting a new Closure revision resets that local budget. An eligible legacy terminal malformed-review report can resume only when its evidence ID proves that cause, its per-revision budget remains, and issue authorization, trusted claim, worktree identity, head, changed files, and target fingerprint still match. Current exhausted revisions remain terminal and replay without new effects.
+
 Review invocation intent, process IDs, report hashes, transport retries, report repairs, target revisions, and target fingerprints are durable. A crash after launch cannot cause a replacement review until process absence is proven. Review target drift after approval is a safety failure.
 
 ## 8. Configured checks and `CheckedChange`
 
-After review clears, the Runner executes the finite commands in `config.checks`. Workers cannot add commands to this set. Each result records its ID, exact command, pass/fail status, and output hash.
+For a new direct run, the Runner first executes the finite commands in `config.checks` on the clean base worktree and records their output hashes. After review clears, it executes the same commands against the implementation. Workers cannot add commands to this set.
 
-A failed check becomes a durable repair finding and starts another implementation cycle if the five-cycle budget remains. Passed checks are reused on a safe resume, but any new repair cycle clears stale check and proof bindings.
+A new failure, or a failure whose output differs from the clean-base result, becomes a durable repair finding and starts another implementation cycle if the five-cycle budget remains. A byte-identical failure already present on the base is recorded as `unchanged-failure`; it remains visible in `CheckedChange` and proof evidence but does not become task-owned rework. Passed and unchanged-base results are reused on a safe resume, while any new repair cycle clears stale changed-check and proof bindings.
 
-Once all checks pass, the Runner fingerprints the reviewed files and content, stages the complete validated change, and verifies that staging did not change either binding. It then mints a `CheckedChange` capability containing:
+Once no task-owned check failure remains, the Runner fingerprints the reviewed files and content, stages the complete validated change, and verifies that staging did not change either binding. It then mints a `CheckedChange` capability containing:
 
 - canonical repository, run ID, issue number, and cycle;
 - base and head SHA;

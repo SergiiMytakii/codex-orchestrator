@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { access, lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
@@ -1149,14 +1149,20 @@ async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }>
   }
 }
 
-async function runShellCheck(command: string, cwd: string, signal: AbortSignal): Promise<{ status: 'passed' | 'failed'; output: Buffer }> {
+async function runShellCheck(
+  command: string,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
   return new Promise((resolveCheck, rejectCheck) => {
     const child = spawn('/bin/sh', ['-lc', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let retained = 0;
+    const outputHash = createHash('sha256');
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
     const collect = (chunk: Buffer) => {
+      outputHash.update(chunk);
       if (retained >= 1024 * 1024) return;
       const kept = chunk.subarray(0, 1024 * 1024 - retained);
       chunks.push(kept);
@@ -1186,7 +1192,11 @@ async function runShellCheck(command: string, cwd: string, signal: AbortSignal):
       settled = true;
       signal.removeEventListener('abort', terminate);
       if (killTimer) clearTimeout(killTimer);
-      resolveCheck({ status: code === 0 ? 'passed' : 'failed', output: Buffer.concat(chunks) });
+      resolveCheck({
+        status: code === 0 ? 'passed' : 'failed',
+        output: Buffer.concat(chunks),
+        outputSha256: outputHash.digest('hex'),
+      });
     });
   });
 }

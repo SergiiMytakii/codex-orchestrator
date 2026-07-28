@@ -6,6 +6,22 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Code-review coverage is now descriptive instead of byte-correlated. Closure
+  normalizes outcome order, preserves stable defect identity across paraphrased
+  prose, gives each target revision four report-only repairs, and can safely
+  recover eligible legacy malformed-report terminals without rerunning
+  implementation. Exhausted current revisions remain terminal.
+- Configured checks now establish a clean-base baseline. A byte-identical
+  failure on the changed worktree is retained as `unchanged-failure` evidence
+  instead of being misclassified as task-owned rework; new or changed failures
+  still consume the normal repair loop.
+- After a trusted claim is established, `agent:auto` alone carries execution
+  authorization; disappearance of the `agent:running` status label no longer
+  causes an unrelated safety block.
+- The trusted claim comment is now observed before adding the `agent:running`
+  status label, with crash-safe compatibility for older label-first runs.
+
 ### Removed
 - Removed the local containment certificate, canary command, and pre-claim
   certification gate. Authorized runs now start without operator-managed

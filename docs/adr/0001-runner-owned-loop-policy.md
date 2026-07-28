@@ -6,7 +6,7 @@ Status: accepted and implemented by the V2 runtime.
 
 One trusted Runner owns issue selection, authorization, worktree state, bounded retries, checks, proof validation, GitHub mutations, and publication. A contained Codex Agent implements one selected issue and returns a structured report; it never owns external publication.
 
-Direct `run` and serial `daemon` discovery call the same `runIssue` lifecycle. The initial loop allows at most five implementation cycles, one report-only repair, and one separate clean transport retry. A successful direct run may later resume from a frozen trusted PR-feedback batch for at most three separate repair rounds without changing the initial cycle count. Durable intent and postcondition reconciliation own recovery after interruption.
+Direct `run` and serial `daemon` discovery call the same `runIssue` lifecycle. The initial loop allows at most five implementation cycles, one implementation-report repair, up to four code-review report repairs per target revision, and one separate clean transport retry. A successful direct run may later resume from a frozen trusted PR-feedback batch for at most three separate repair rounds without changing the initial cycle count. Durable intent and postcondition reconciliation own recovery after interruption.
 
 ## Why
 

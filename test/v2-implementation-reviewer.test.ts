@@ -90,7 +90,7 @@ function input(overrides: Partial<ImplementationReviewerInput> = {}): Implementa
     targetFingerprint: fingerprint, closureRequestSha256: null, issue: { number: 1, title: 'Issue' },
     frozenCriteria: ['works'], routeReceipt: { route: 'direct' }, defects: [], affectedDefectIds: [],
     fixedRepairFindings: [],
-    mandatoryCoverage: ['correctness'], workflowGeneration, repairOnly: false, originalReportSha256: null,
+    reviewFocus: ['correctness'], workflowGeneration, repairOnly: false, originalReportSha256: null,
     validationDiagnostic: null, originalReportBytes: null, signal: new AbortController().signal,
     onPrepared: async () => {}, onLaunched: async () => {}, ...overrides,
   };
