@@ -6,7 +6,22 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Added durable continuation of successful direct runs from newly observed,
+  trusted unresolved pull-request feedback. The same run now freezes an
+  immutable batch, reuses affected Closure, reruns checks and Acceptance Proof,
+  and appends one fast-forward commit plus one marker-bound summary to the same
+  draft PR.
+
 ### Changed
+- Removed the configured Codex CLI version pin. Setup and runtime now use the
+  installed `codex` command, while the containment canary binds its actual
+  version, canonical executable path and digest, plus the orchestrator package
+  version, and rejects a stale certificate after any of those identities change.
+- The daemon now discovers both `agent:auto` and `agent:review` issues, while
+  suppressing unchanged `review-ready` output only within the current process.
+- Run state now emits schema version 2 and losslessly reads version 1; migrated
+  `review-ready` runs baseline existing feedback without executing it.
 - Replaced overlapping legacy live-smoke profiles and scenario aliases with a
   single supplemental `v2-regression` matrix whose scenarios each exercise a
   distinct current V2 policy, recovery, diagnostics, proof, or quality gate.
@@ -30,6 +45,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   obsolete run-state fallbacks, superseded prompts, and historical workflow
   planning artifacts. The repository and package now contain only the current
   V2 runtime and contracts.
+
+### Security
+- Review bodies can authorize repair only when bound to the exact PR head and a
+  fresh immutable-user `write` or `admin` permission receipt. Source, permission,
+  ref, worktree, or publication drift fails closed; no thread-resolution or
+  force-push authority was added.
 
 ## [2.0.3] - 2026-07-18
 

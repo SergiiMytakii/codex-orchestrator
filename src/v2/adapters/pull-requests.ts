@@ -14,6 +14,68 @@ export interface GitHubPullRequestDetails extends GitHubPullRequest {
   authorAssociation: string;
 }
 
+export interface GitHubRepositoryIdentity {
+  nodeId: string;
+  name: string;
+  owner: {
+    nodeId: string;
+    login: string;
+  };
+}
+
+export interface GitHubPullRequestReviewTarget extends GitHubPullRequestDetails {
+  repository: GitHubRepositoryIdentity;
+  isCrossRepository: boolean;
+  headRefOid: string;
+}
+
+export interface GitHubReviewActor {
+  id: string;
+  login: string;
+  isBot: boolean;
+  nodeId?: string;
+}
+
+export interface GitHubPullRequestReviewComment {
+  nodeId: string;
+  databaseId: string;
+  url: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  commitId: string | null;
+  author: GitHubReviewActor | null;
+}
+
+export interface GitHubPullRequestReviewThread {
+  nodeId: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  line: number | null;
+  comments: GitHubPullRequestReviewComment[];
+}
+
+export interface GitHubSubmittedPullRequestReview {
+  nodeId: string;
+  databaseId: string;
+  url: string;
+  body: string;
+  state: 'PENDING' | 'COMMENTED' | 'APPROVED' | 'CHANGES_REQUESTED' | 'DISMISSED';
+  commitId: string;
+  submittedAt: string | null;
+  author: GitHubReviewActor | null;
+}
+
+export interface GitHubPullRequestConversationComment {
+  id: string;
+  url: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  author: GitHubReviewActor | null;
+}
+
 export interface CreateDraftPullRequestInput {
   title: string;
   body: string;
@@ -27,11 +89,20 @@ export interface GitHubPullRequestAdapter {
   getPullRequest(number: number): Promise<GitHubPullRequest | undefined>;
   findMergedPullRequestByHeadBranch(headBranch: string): Promise<GitHubPullRequest | undefined>;
   findOpenPullRequestByHeadAndBase(headBranch: string, baseBranch: string): Promise<GitHubPullRequest | undefined>;
+  getReviewTarget(number: number): Promise<GitHubPullRequestReviewTarget | undefined>;
+  listReviewThreads(number: number): Promise<GitHubPullRequestReviewThread[]>;
+  listSubmittedReviews(number: number): Promise<GitHubSubmittedPullRequestReview[]>;
+  listConversationComments(number: number): Promise<GitHubPullRequestConversationComment[]>;
+  postConversationComment(number: number, body: string): Promise<GitHubPullRequestConversationComment>;
 }
 
 export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapter {
   public createdPullRequests: CreateDraftPullRequestInput[] = [];
   public mergedPullRequests: GitHubPullRequest[] = [];
+  public reviewTargets = new Map<number, GitHubPullRequestReviewTarget>();
+  public reviewThreads = new Map<number, GitHubPullRequestReviewThread[]>();
+  public submittedReviews = new Map<number, GitHubSubmittedPullRequestReview[]>();
+  public conversationComments = new Map<number, GitHubPullRequestConversationComment[]>();
 
   public constructor(
     private readonly owner = 'SergiiMytakii',
@@ -95,6 +166,56 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
         authorAssociation: 'MEMBER',
       }));
   }
+
+  public async getReviewTarget(number: number): Promise<GitHubPullRequestReviewTarget | undefined> {
+    const fixture = this.reviewTargets.get(number);
+    if (fixture) return clone(fixture);
+    const pullRequest = (await this.listAllByHeadBranch(
+      this.createdPullRequests[number - 1]?.headBranch ?? '',
+    )).find((candidate) => candidate.number === number);
+    if (!pullRequest) return undefined;
+    return {
+      ...pullRequest,
+      repository: {
+        nodeId: `R_${this.owner}_${this.repo}`,
+        name: this.repo,
+        owner: { nodeId: `O_${this.owner}`, login: this.owner },
+      },
+      isCrossRepository: false,
+      headRefOid: '',
+    };
+  }
+
+  public async listReviewThreads(number: number): Promise<GitHubPullRequestReviewThread[]> {
+    return clone(this.reviewThreads.get(number) ?? []);
+  }
+
+  public async listSubmittedReviews(number: number): Promise<GitHubSubmittedPullRequestReview[]> {
+    return clone(this.submittedReviews.get(number) ?? []);
+  }
+
+  public async listConversationComments(number: number): Promise<GitHubPullRequestConversationComment[]> {
+    return clone(this.conversationComments.get(number) ?? []);
+  }
+
+  public async postConversationComment(number: number, body: string): Promise<GitHubPullRequestConversationComment> {
+    const comments = this.conversationComments.get(number) ?? [];
+    const comment: GitHubPullRequestConversationComment = {
+      id: String(comments.length + 1),
+      url: `https://github.com/${this.owner}/${this.repo}/pull/${number}#issuecomment-${comments.length + 1}`,
+      body,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      author: { id: 'runner', login: this.owner, isBot: false },
+    };
+    comments.push(comment);
+    this.conversationComments.set(number, comments);
+    return clone(comment);
+  }
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 export async function verifyPullRequestRefs(

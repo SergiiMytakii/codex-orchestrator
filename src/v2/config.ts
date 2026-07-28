@@ -34,7 +34,6 @@ export interface AgentAutoConfig {
   };
   codex: {
     command: string;
-    requiredVersion: '0.144.4';
     timeoutMs: number;
     idleTimeoutMs: number;
     toolNetwork: 'deny';
@@ -77,13 +76,11 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
 
   assertExactObject(value.codex, [
     'command',
-    'requiredVersion',
     'timeoutMs',
     'idleTimeoutMs',
     'toolNetwork',
   ], 'config.codex');
   assertNonEmptyString(value.codex.command, 'config.codex.command');
-  if (value.codex.requiredVersion !== '0.144.4') throw new Error('config.codex.requiredVersion is invalid');
   assertPositiveSafeInteger(value.codex.timeoutMs, 'config.codex.timeoutMs');
   assertPositiveSafeInteger(value.codex.idleTimeoutMs, 'config.codex.idleTimeoutMs');
   if (value.codex.toolNetwork !== 'deny') throw new Error('config.codex.toolNetwork must be deny');

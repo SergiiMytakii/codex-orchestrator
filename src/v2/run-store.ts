@@ -12,6 +12,11 @@ import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import { validateWaitingHumanExecution, type WaitingHumanExecutionV1 } from './waiting-human.js';
 import { posix } from 'node:path';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
+import {
+  createReviewFeedbackBootstrap,
+  validateReviewFeedbackExecution,
+  type ReviewFeedbackExecutionV1,
+} from './review-feedback.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const GIT_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -41,10 +46,23 @@ export type PublicationIntent =
   | { kind: 'push'; branch: string; sha: string }
   | { kind: 'pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
   | { kind: 'comment'; issueNumber: number; marker: string; bodySha256: string }
-  | { kind: 'labels'; issueNumber: number; expected: string[] };
+  | { kind: 'labels'; issueNumber: number; expected: string[] }
+  | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
+  | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string }
+  | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
+  | { kind: 'review-summary'; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; marker: string; bodySha256: string; epochHeadSha: string }
+  | { kind: 'review-final-labels'; issueNumber: number; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; epochHeadSha: string; expected: string[] }
+  | {
+    kind: 'review-blocked-labels';
+    issueNumber: number;
+    batchId: string;
+    expected: string[];
+    blockKind: 'safety' | 'exhausted';
+    evidenceCode: string;
+  };
 
 export type RunTerminalOutcome =
-  | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string }
+  | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
@@ -88,6 +106,7 @@ export interface RunRecordV1 {
   waitingHuman?: WaitingHumanExecutionV1;
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
+  reviewFeedback?: ReviewFeedbackExecutionV1;
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -117,7 +136,7 @@ export interface RunRecordV1 {
 
 export interface RunStateFileV1 {
   schema: 'codex-orchestrator.agent-auto-state';
-  version: 1;
+  version: 2;
   generation: number;
   runs: RunRecordV1[];
 }
@@ -177,15 +196,28 @@ export class InMemoryRunRecordWriter implements RunRecordWriter {
 
 export function validateRunStateFile(value: unknown): RunStateFileV1 {
   assertExactObject(value, ['schema', 'version', 'generation', 'runs'], 'run state');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || value.version !== 1) throw new Error('run state schema/version is invalid');
+  if (value.schema !== 'codex-orchestrator.agent-auto-state' || (value.version !== 1 && value.version !== 2)) throw new Error('run state schema/version is invalid');
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) throw new Error('run state generation is invalid');
   validateRuns(value.runs);
+  if (value.version === 1) {
+    for (const run of value.runs as RunRecordV1[]) {
+      if (hasOwn(run, 'reviewFeedback')) throw new Error('V1 run state cannot contain review feedback');
+    }
+    return {
+      schema: 'codex-orchestrator.agent-auto-state',
+      version: 2,
+      generation: value.generation as number,
+      runs: (value.runs as RunRecordV1[]).map((run) => run.lifecycle === 'review-ready'
+        ? { ...structuredClone(run), reviewFeedback: createReviewFeedbackBootstrap() }
+        : structuredClone(run)),
+    };
+  }
   return value as unknown as RunStateFileV1;
 }
 
 function validateRunStateBody(value: unknown): asserts value is RunStateBodyV1 {
   assertExactObject(value, ['schema', 'version', 'runs'], 'run state body');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || value.version !== 1) throw new Error('run state schema/version is invalid');
+  if (value.schema !== 'codex-orchestrator.agent-auto-state' || value.version !== 2) throw new Error('run state schema/version is invalid');
   validateRuns(value.runs);
 }
 
@@ -213,6 +245,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'waitingHuman',
     'directReview',
     'specDelivery',
+    'reviewFeedback',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -297,6 +330,10 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       || spec.workflowGenerationSha256 !== routeGenerationHash) {
       throw new Error(`${field}.specDelivery identity binding is invalid`);
     }
+  }
+  if (hasOwn(value, 'reviewFeedback')) {
+    validateReviewFeedbackExecution(value.reviewFeedback);
+    validateReviewFeedbackRunInvariant(value as unknown as RunRecordV1, field);
   }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
@@ -448,6 +485,47 @@ function validateIntent(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
     assertSha256(value.bodySha256, `${field}.bodySha256`);
+  } else if (kind === 'review-activation-labels') {
+    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'expected'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertSha256(value.batchId, `${field}.batchId`);
+    validateStringArray(value.expected, `${field}.expected`);
+  } else if (kind === 'review-update-commit') {
+    assertExactObject(value, ['kind', 'batchId', 'parentSha', 'treeSha', 'message'], field);
+    assertSha256(value.batchId, `${field}.batchId`);
+    assertGitSha(value.parentSha, `${field}.parentSha`);
+    assertGitSha(value.treeSha, `${field}.treeSha`);
+    assertNonEmptyString(value.message, `${field}.message`);
+  } else if (kind === 'review-update-push') {
+    assertExactObject(value, ['kind', 'batchId', 'branch', 'priorRemoteSha', 'sha', 'treeSha'], field);
+    assertSha256(value.batchId, `${field}.batchId`);
+    assertNonEmptyString(value.branch, `${field}.branch`);
+    assertGitSha(value.priorRemoteSha, `${field}.priorRemoteSha`);
+    assertGitSha(value.sha, `${field}.sha`);
+    assertGitSha(value.treeSha, `${field}.treeSha`);
+  } else if (kind === 'review-summary') {
+    assertExactObject(value, ['kind', 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'marker', 'bodySha256', 'epochHeadSha'], field);
+    assertSha256(value.batchId, `${field}.batchId`);
+    assertPositiveInteger(value.pullRequestNumber, `${field}.pullRequestNumber`);
+    assertNonEmptyString(value.pullRequestNodeId, `${field}.pullRequestNodeId`);
+    assertNonEmptyString(value.marker, `${field}.marker`);
+    assertSha256(value.bodySha256, `${field}.bodySha256`);
+    assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
+  } else if (kind === 'review-final-labels') {
+    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'epochHeadSha', 'expected'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertSha256(value.batchId, `${field}.batchId`);
+    assertPositiveInteger(value.pullRequestNumber, `${field}.pullRequestNumber`);
+    assertNonEmptyString(value.pullRequestNodeId, `${field}.pullRequestNodeId`);
+    assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
+    validateStringArray(value.expected, `${field}.expected`);
+  } else if (kind === 'review-blocked-labels') {
+    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'expected', 'blockKind', 'evidenceCode'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertSha256(value.batchId, `${field}.batchId`);
+    validateStringArray(value.expected, `${field}.expected`);
+    if (value.blockKind !== 'safety' && value.blockKind !== 'exhausted') throw new Error(`${field}.blockKind is invalid`);
+    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else {
     throw new Error(`${field}.kind is invalid`);
   }
@@ -457,8 +535,9 @@ function validateTerminalOutcome(value: unknown, field: string): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid`);
   const status = (value as { status?: unknown }).status;
   if (status === 'review-ready') {
-    assertExactObject(value, ['status', 'pullRequestUrl', 'evidencePath'], field);
+    assertExactObject(value, ['status', 'pullRequestUrl', 'evidencePath', ...(hasOwn(value, 'continuationEpoch') ? ['continuationEpoch'] : [])], field);
     assertNonEmptyString(value.pullRequestUrl, `${field}.pullRequestUrl`);
+    if (hasOwn(value, 'continuationEpoch')) assertGitSha(value.continuationEpoch, `${field}.continuationEpoch`);
   } else if (status === 'blocked') {
     assertExactObject(value, ['status', 'kind', 'resumable', 'evidencePath'], field);
     if (!['external', 'safety', 'exhausted'].includes(value.kind as string)) throw new Error(`${field}.kind is invalid`);
@@ -510,7 +589,47 @@ function validateStringArray(value: unknown, field: string): void {
 }
 
 function emptyRunState(): RunStateFileV1 {
-  return { schema: 'codex-orchestrator.agent-auto-state', version: 1, generation: 0, runs: [] };
+  return { schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 0, runs: [] };
+}
+
+function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): void {
+  const feedback = run.reviewFeedback!;
+  const batch = feedback.activeBatch;
+  if (batch && (batch.runId !== run.runId || batch.canonicalRepository !== run.canonicalRepository
+    || batch.pullRequest.headRefName !== run.branchName
+    || batch.priorPublishedHeadSha !== feedback.previousPublishedHeadSha)) {
+    throw new Error(`${field}.reviewFeedback active batch identity binding is invalid`);
+  }
+  const retainedQuiescentHistory = (feedback.phase === 'idle' || feedback.phase === 'bootstrap-required') && !batch
+    && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
+  if ((feedback.phase === 'bootstrap-required' || feedback.phase === 'idle')
+    && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
+    throw new Error(`${field}.reviewFeedback quiescent phase requires review-ready lifecycle`);
+  }
+  if (['frozen', 'repairing'].includes(feedback.phase) && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    throw new Error(`${field}.reviewFeedback active repair phase has invalid lifecycle`);
+  }
+  if (feedback.phase === 'verified' && run.lifecycle !== 'publishing') {
+    throw new Error(`${field}.reviewFeedback verified phase requires publishing lifecycle`);
+  }
+  if (feedback.phase === 'publishing' && run.lifecycle !== 'publishing') {
+    throw new Error(`${field}.reviewFeedback publishing phase requires publishing lifecycle`);
+  }
+  if (feedback.phase === 'verified' || feedback.phase === 'publishing') {
+    const verified = feedback.verifiedReceipt;
+    if (!verified || verified.batchId !== batch?.batchId
+      || verified.checkedChangeSha256 !== run.checkedChangeSha256
+      || verified.proofId !== run.proofId
+      || verified.proofId !== run.proofReceipt?.proofId) {
+      throw new Error(`${field}.reviewFeedback verification receipt binding is invalid`);
+    }
+  }
+  if (feedback.phase === 'blocked-safety' || feedback.phase === 'blocked-exhausted') {
+    if (run.lifecycle !== 'blocked' || run.terminalOutcome?.status !== 'blocked' || run.terminalOutcome.resumable
+      || run.terminalOutcome.kind !== (feedback.phase === 'blocked-safety' ? 'safety' : 'exhausted')) {
+      throw new Error(`${field}.reviewFeedback terminal projection mismatch`);
+    }
+  }
 }
 
 function isLifecycle(value: unknown): value is Lifecycle {

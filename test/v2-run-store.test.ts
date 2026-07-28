@@ -38,6 +38,29 @@ test('run state performs absent-state CAS and rejects stale or concurrent writer
   await assert.rejects(left.compareAndSwap(0, body([record()])), /generation/u);
 });
 
+test('migrates V1 run state to V2 on the next atomic write', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const prior = reviewReadyRecord();
+  await writeFile(path, `${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 1, generation: 7, runs: [prior],
+  })}\n`);
+
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  const migrated = await writer.read();
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.generation, 7);
+  assert.deepEqual(migrated.runs[0]!.terminalOutcome, prior.terminalOutcome);
+  assert.equal(migrated.runs[0]!.reviewFeedback?.phase, 'bootstrap-required');
+
+  const saved = await writer.compareAndSwap(7, {
+    schema: migrated.schema, version: 2, runs: migrated.runs,
+  });
+  assert.equal(saved.version, 2);
+  assert.equal(saved.generation, 8);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 2);
+});
+
 test('run state rejects malformed and lifecycle-inconsistent records', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
@@ -342,7 +365,21 @@ test('state publication rejects symlinked parent directories before writing outs
 });
 
 function body(runs: RunRecordV1[]): RunStateBodyV1 {
-  return { schema: 'codex-orchestrator.agent-auto-state', version: 1, runs };
+  return { schema: 'codex-orchestrator.agent-auto-state', version: 2, runs };
+}
+
+function reviewReadyRecord(): RunRecordV1 {
+  return {
+    ...record(),
+    lifecycle: 'review-ready',
+    proofReceipt: {
+      proofId: 'proof-1', bindingSha256: '8'.repeat(64), summary: 'Passed.',
+      publishableEvidence: [], localEvidenceId: 'evidence-1',
+    },
+    terminalOutcome: {
+      status: 'review-ready', pullRequestUrl: 'https://github.com/owner/repo/pull/17', evidencePath: 'evidence/review-ready.json',
+    },
+  };
 }
 
 function record(): RunRecordV1 {

@@ -38,7 +38,7 @@ export interface ReviewTrackV1 {
 
 export interface DirectRepairFindingV1 {
   id: string;
-  provenance: 'code-review' | 'check' | 'proof';
+  provenance: 'code-review' | 'check' | 'proof' | 'pr-review';
   sourceId: string;
   targetRevision: number;
   summary: string;
@@ -414,8 +414,14 @@ function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFinger
     }
   }
   if (value.status === 'active' && context.lifecycle === 'safe-halt') {
-    if (!context.process || context.process.purpose !== 'code-review' || context.process.resumeLifecycle !== 'implementing'
-      || context.process.resumeReviewStage !== value.stage) throw new Error('safe-halt review stage/process mismatch');
+    const reviewProcess = context.process?.purpose === 'code-review'
+      && context.process.resumeLifecycle === 'implementing'
+      && context.process.resumeReviewStage === value.stage;
+    const feedbackImplementationProcess = value.stage === 'review-repair'
+      && context.process?.purpose === 'implementation'
+      && context.process.resumeLifecycle === 'implementing'
+      && context.process.resumeReviewStage === null;
+    if (!reviewProcess && !feedbackImplementationProcess) throw new Error('safe-halt review stage/process mismatch');
   }
 }
 
@@ -521,7 +527,7 @@ function validateRepairFindings(value: unknown, targetRevision: number): DirectR
   const findings = value.map((finding, index) => {
     assertExactObject(finding, ['id', 'provenance', 'sourceId', 'targetRevision', 'summary', 'affectedContracts', 'status'], `repair finding[${index}]`);
     for (const field of ['id', 'sourceId', 'summary'] as const) assertText(finding[field], `repair finding.${field}`);
-    if (!['code-review', 'check', 'proof'].includes(finding.provenance as string)
+    if (!['code-review', 'check', 'proof', 'pr-review'].includes(finding.provenance as string)
       || !['open', 'fixed', 'verified', 'reopened'].includes(finding.status as string)
       || !Number.isSafeInteger(finding.targetRevision) || (finding.targetRevision as number) < 1
       || (finding.targetRevision as number) > targetRevision) throw new Error('repair finding fields are invalid');

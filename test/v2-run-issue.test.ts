@@ -24,14 +24,83 @@ import {
   WorkflowGenerationUnrecoverableError,
   type RunRecordWriter,
 } from '../src/v2/run-store.js';
-import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
+import { ContainedImplementationAgent, LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import { SpecCoordinator } from '../src/v2/spec-coordinator.js';
 import { createSpecRevision } from '../src/v2/spec-delivery.js';
 import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
+import { createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
+import type { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
+
+test('attempt-owned continuation report recovery rejects foreign paths and reuses the completed report', async () => {
+  const orchestratorHome = await mkdtemp(join(tmpdir(), 'codex-v2-recover-report-'));
+  const runId = '00000000-0000-4000-8000-000000000001';
+  const attemptId = 'feedback-attempt-1';
+  const reportPath = join(orchestratorHome, 'v2', sha256('owner/repo'), 'runs', runId, 'attempts', attemptId, 'report.json');
+  await mkdir(join(reportPath, '..'), { recursive: true });
+  await writeFile(reportPath, canonicalJson({ report: {
+    version: 1, status: 'completed', summary: 'recovered', changedFiles: ['feature.txt'], residualRisks: [],
+  } }));
+  const agent = new ContainedImplementationAgent({
+    config: configFixture,
+    orchestratorHome,
+    parentCodexHome: '/tmp/codex-home',
+    safePath: '/usr/bin:/bin',
+    bootId: 'boot-1',
+    git: new LocalGitRunIssueAdapter(),
+  });
+  const invocation = {
+    phase: 'launched' as const,
+    attemptId,
+    reportPath,
+    preparedAt: '2026-07-16T12:00:00.000Z',
+    baseline: {
+      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
+      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
+    },
+    pid: 123,
+    processGroupId: 123,
+    launchedAt: '2026-07-16T12:00:01.000Z',
+  };
+  const recovered = await agent.recover({ runId, canonicalRepository: 'owner/repo', invocation });
+  assert.equal(recovered?.kind, 'completed');
+  assert.equal((recovered?.report as { summary?: string }).summary, 'recovered');
+  await assert.rejects(agent.recover({
+    runId, canonicalRepository: 'owner/repo', invocation: { ...invocation, reportPath: '/tmp/foreign-report.json' },
+  }), /attempt-owned/u);
+});
+
+test('continuation worktree restoration proves exact local and remote refs before creation', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const record = (await fixture.store.read()).runs[0]!;
+  const publishedHead = record.reviewFeedback!.previousPublishedHeadSha!;
+  await execFileAsync('git', ['-C', fixture.targetRoot, 'worktree', 'remove', fixture.worktreePath]);
+
+  const git = new LocalGitRunIssueAdapter();
+  await git.ensureContinuationWorktree({
+    targetRoot: fixture.targetRoot,
+    worktreePath: fixture.worktreePath,
+    branchName: record.branchName,
+    baseBranch: 'main',
+    publishedHeadSha: publishedHead,
+  });
+  assert.equal(await git.getHead(fixture.worktreePath), publishedHead);
+
+  await execFileAsync('git', ['-C', fixture.targetRoot, 'worktree', 'remove', fixture.worktreePath]);
+  await execFileAsync('git', ['-C', fixture.targetRoot, 'update-ref', `refs/heads/${record.branchName}`, fixture.baseSha]);
+  await assert.rejects(git.ensureContinuationWorktree({
+    targetRoot: fixture.targetRoot,
+    worktreePath: fixture.worktreePath,
+    branchName: record.branchName,
+    baseBranch: 'main',
+    publishedHeadSha: publishedHead,
+  }), /exactly match/u);
+  await assert.rejects(readFile(join(fixture.worktreePath, 'feature.txt')));
+});
 
 test('proof freshness snapshot excludes only the configured untracked artifact root', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-v2-proof-freshness-'));
@@ -142,6 +211,12 @@ test('runner commit preserves the checked pre-proof index and leaves proof artif
   const committed = (await execFileAsync('git', ['-C', root, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])).stdout.trim();
   assert.equal(committed, 'feature.txt');
   assert.deepEqual(await git.listChangedFiles(root), ['.codex-orchestrator/proofs/proof-1/evidence.txt']);
+  assert.deepEqual(await git.listChangedFilesIgnoringUntrackedRoot(root, '.codex-orchestrator/proofs'), []);
+  await execFileAsync('git', ['-C', root, 'add', '.codex-orchestrator/proofs/proof-1/evidence.txt']);
+  assert.deepEqual(
+    await git.listChangedFilesIgnoringUntrackedRoot(root, '.codex-orchestrator/proofs'),
+    ['.codex-orchestrator/proofs/proof-1/evidence.txt'],
+  );
 });
 
 test('public runIssue reaches review-ready only after ordered durable checks, proof, and publication', async () => {
@@ -212,6 +287,233 @@ test('repeated runIssue replays the durable terminal outcome without a second cl
   assert.deepEqual(second, first);
   assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length, effectsBefore);
   assert.equal((await fixture.store.read()).runs.length, 1);
+});
+
+test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const before = (await fixture.store.read()).runs[0]!;
+  const previousHead = before.reviewFeedback?.previousPublishedHeadSha;
+  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
+
+  const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.reviewFeedback?.phase, 'idle');
+  assert.equal(after.reviewFeedback?.previousPublishedHeadSha, previousHead);
+  assert.deepEqual(after.reviewFeedback?.history, before.reviewFeedback?.history);
+});
+
+test('migrated bootstrap feedback can fail closed without losing its owner', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const state = await fixture.store.read();
+  await fixture.store.compareAndSwap(state.generation, {
+    schema: state.schema, version: 2,
+    runs: state.runs.map((run) => ({ ...run, reviewFeedback: createReviewFeedbackBootstrap() })),
+  });
+  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
+
+  const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.phase, 'bootstrap-required');
+});
+
+test('review-ready replay remains effect-free without an eligible feedback batch and updates the same PR once for a trusted batch', async () => {
+  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none' });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'review-ready');
+  const initialState = await fixture.store.read();
+  const record = initialState.runs[0]!;
+  const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
+  assert.equal(record.reviewFeedback?.phase, 'idle');
+
+  const batch = createFrozenReviewFeedbackBatch({
+    runId: record.runId,
+    canonicalRepository: record.canonicalRepository,
+    pullRequest: {
+      nodeId: 'PR_1', number: 1, headSha: oldHead, headRefName: record.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
+    },
+    priorPublishedHeadSha: oldHead,
+    sources: [{
+      sourceId: 'pr-thread:T_1', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_r1',
+      path: 'feature.txt', line: 1, body: 'Change the implementation.',
+      bodySha256: hashReviewFeedbackText('Change the implementation.'),
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'T_1' }),
+      threadState: { isResolved: false, isOutdated: false }, commitSha: oldHead,
+      sourceCreatedAt: '2026-07-16T12:00:00.000Z', sourceUpdatedAt: '2026-07-16T12:00:00.000Z',
+      author: { login: 'writer', userId: '42' },
+      permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:00:00.000Z' },
+    }],
+    frozenAt: '2026-07-16T12:00:00.000Z',
+  });
+  let offered = false;
+  let transientPrePush = true;
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => {
+      if (!offered) { offered = true; return { status: 'frozen', batch }; }
+      return { status: 'none', observedHeadSha: await fixture.dependencies.git.getHead(fixture.worktreePath), eligibleSourceIds: [] };
+    },
+    revalidate: async ({ expectedHeadSha }: { expectedHeadSha: string }) => {
+      fixture.events.push('feedback-revalidate');
+      if (transientPrePush && fixture.events.filter((event) => event === 'git:commit').length >= 2) {
+        transientPrePush = false;
+        return { status: 'retryable', reason: 'temporary GitHub timeout' };
+      }
+      return { status: 'valid', observedHeadSha: expectedHeadSha };
+    },
+  } as unknown as ReviewFeedbackCoordinator;
+  const prComments: Array<{ id: string; body: string }> = [];
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: 'https://example.invalid/pull/1',
+    body: `<!-- codex-orchestrator:run:${record.runId}:pr -->\n\nCloses #42`,
+    number: 1,
+    nodeId: 'PR_1',
+    headSha: (await fixture.dependencies.git.getRemoteBranchSha(fixture.worktreePath, record.branchName))!,
+  });
+  fixture.dependencies.pullRequests.listConversationComments = async () => structuredClone(prComments);
+  fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => {
+    const comment = { id: String(prComments.length + 1), body };
+    prComments.push(comment);
+    return comment;
+  };
+  let feedbackImplementationCalls = 0;
+  fixture.dependencies.implementationAgent = {
+    run: async ({ worktreePath, onPrepared, onLaunched }) => {
+      feedbackImplementationCalls += 1;
+      const attemptId = `feedback-implementation-${feedbackImplementationCalls}`;
+      const baseline = await fixture.dependencies.git.snapshot(worktreePath);
+      await onPrepared?.({
+        attemptId, reportPath: `/tmp/${attemptId}-report.json`,
+        preparedAt: '2026-07-16T12:00:00.000Z', baseline,
+      });
+      await onLaunched?.({ attemptId, pid: 5050 + feedbackImplementationCalls, processGroupId: 5050 + feedbackImplementationCalls, launchedAt: '2026-07-16T12:00:00.000Z' });
+      await writeFile(join(worktreePath, 'feature.txt'), `implemented after review ${feedbackImplementationCalls}\n`);
+      return {
+        kind: 'completed', attemptId,
+        report: { version: 1, status: 'completed', summary: 'review fixed', changedFiles: ['feature.txt'], residualRisks: [] },
+      };
+    },
+  };
+
+  const setLabels = fixture.dependencies.issues.setLabels;
+  await setLabels(42, []);
+  const revoked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(revoked.status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.reviewFeedback?.phase, 'idle');
+  await setLabels(42, ['agent:review']);
+  offered = false;
+
+  let rejectActivationLabels = true;
+  fixture.dependencies.issues.setLabels = async (issueNumber, next) => {
+    if (rejectActivationLabels && next.includes('agent:running')) {
+      rejectActivationLabels = false;
+      throw new Error('activation labels interrupted');
+    }
+    return setLabels(issueNumber, next);
+  };
+  const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(interrupted, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const frozen = (await fixture.store.read()).runs[0]!;
+  assert.equal(frozen.reviewFeedback?.phase, 'frozen');
+  assert.equal(frozen.reviewFeedback?.repairRound, 1);
+  assert.equal(frozen.intent?.kind, 'review-activation-labels');
+
+  const continuationStart = fixture.events.length;
+  const transient = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(transient, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const interruptedPublication = (await fixture.store.read()).runs[0]!;
+  assert.equal(interruptedPublication.reviewFeedback?.phase, 'publishing');
+  assert.equal(interruptedPublication.intent?.kind, 'review-update-push');
+  if (interruptedPublication.intent?.kind === 'review-update-push') assert.match(interruptedPublication.intent.treeSha, /^[0-9a-f]{40}$/u);
+
+  const continuationEvents = fixture.events.slice(continuationStart);
+  for (const workerEvent of ['review:code-review', 'proof']) {
+    const index = continuationEvents.indexOf(workerEvent);
+    assert.ok(index > 0, `${workerEvent} was not launched during continuation`);
+    assert.equal(continuationEvents[index - 1], 'feedback-revalidate', `${workerEvent} lacked immediate feedback revalidation`);
+  }
+
+  const updated = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(updated.status, 'review-ready', JSON.stringify(updated));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.cycle, record.cycle);
+  assert.equal(after.reviewFeedback?.phase, 'idle');
+  assert.equal(after.reviewFeedback?.history.length, 1);
+  assert.equal(prComments.length, 1);
+  assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
+
+  const effectsBeforeReplay = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length;
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(replay.status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length, effectsBeforeReplay);
+
+  const secondHead = after.reviewFeedback!.previousPublishedHeadSha!;
+  const secondBatch = createFrozenReviewFeedbackBatch({
+    runId: record.runId, canonicalRepository: record.canonicalRepository,
+    pullRequest: {
+      nodeId: 'PR_1', number: 1, headSha: secondHead, headRefName: record.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
+    },
+    priorPublishedHeadSha: secondHead,
+    sources: [{
+      sourceId: 'pr-thread:T_2', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_r2',
+      path: 'feature.txt', line: 1, body: 'Second review request.',
+      bodySha256: hashReviewFeedbackText('Second review request.'), snapshotSha256: hashReviewFeedbackSnapshot({ id: 'T_2' }),
+      threadState: { isResolved: false, isOutdated: false }, commitSha: secondHead,
+      sourceCreatedAt: '2026-07-16T12:05:00.000Z', sourceUpdatedAt: '2026-07-16T12:05:00.000Z',
+      author: { login: 'writer', userId: '42' },
+      permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:05:00.000Z' },
+    }],
+    frozenAt: '2026-07-16T12:05:00.000Z',
+  });
+  const readIssue = fixture.dependencies.issues.read;
+  let stripClaim = false;
+  fixture.dependencies.issues.read = async (issueNumber) => {
+    const issue = await readIssue(issueNumber);
+    return issue && stripClaim ? { ...issue, comments: [] } : issue;
+  };
+  let postPushValidations = 0;
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch: secondBatch }),
+    revalidate: async ({ epoch, expectedHeadSha }: {
+      epoch: 'pre-update' | 'post-push'; expectedHeadSha: string;
+    }) => {
+      if (epoch === 'post-push') postPushValidations += 1;
+      if (postPushValidations === 3) {
+        stripClaim = true;
+        postPushValidations += 1;
+        await fixture.dependencies.issues.setLabels(42, ['agent:review', 'extra']);
+        return { status: 'blocked', reason: 'permission revoked' };
+      }
+      return { status: 'valid', observedHeadSha: expectedHeadSha };
+    },
+  } as unknown as ReviewFeedbackCoordinator;
+  const drifted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(
+    pick(drifted, ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+    `${JSON.stringify(drifted)}\n${JSON.stringify((await fixture.store.read()).runs[0]?.intent)}\n${fixture.events.join('\n')}`,
+  );
+  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'review-blocked-labels');
+  await fixture.dependencies.issues.setLabels(42, ['agent:review']);
+  const interruptedBlock = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(interruptedBlock, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const interruptedBlockRecord = (await fixture.store.read()).runs[0]!;
+  assert.equal(interruptedBlockRecord.lifecycle, 'publishing');
+  assert.equal(interruptedBlockRecord.intent?.kind, 'review-blocked-labels');
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  const commentsBeforeRecovery = prComments.length;
+
+  const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.equal(prComments.length, commentsBeforeRecovery);
+  const blockedRecord = (await fixture.store.read()).runs[0]!;
+  assert.equal(blockedRecord.reviewFeedback?.history.length, 2);
+  assert.equal(blockedRecord.reviewFeedback?.history[0]?.kind, 'published');
+  assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
 });
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
@@ -528,7 +830,7 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   delete interrupted.outcomeEvidenceId;
   await fixture.store.compareAndSwap(terminal.generation, {
     schema: 'codex-orchestrator.agent-auto-state',
-    version: 1,
+    version: 2,
     runs: [interrupted],
   });
   options.implementationResult = undefined;
@@ -986,7 +1288,8 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     proof: {
-      proveChange: async ({ checkedChange }) => {
+      proveChange: async ({ checkedChange, beforeAgentLaunch }) => {
+        await beforeAgentLaunch?.();
         events.push('proof');
         capabilities.verifyAndRead(checkedChange);
         if (options.proofError) throw options.proofError;
@@ -1068,6 +1371,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
     snapshot: (path) => delegate.snapshot(path),
     fingerprintDeniedPaths: (path, deniedPaths) => delegate.fingerprintDeniedPaths(path, deniedPaths),
     listChangedFiles: (path) => delegate.listChangedFiles(path),
+    listChangedFilesIgnoringUntrackedRoot: (path, ignoredRoot) => delegate.listChangedFilesIgnoringUntrackedRoot(path, ignoredRoot),
     fingerprintChangedFiles: (path, changedFiles) => delegate.fingerprintChangedFiles(path, changedFiles),
     stageAll: async (path) => { events.push('git:stage'); return delegate.stageAll(path); },
     getTreeSha: (path) => delegate.getTreeSha(path),
@@ -1107,7 +1411,7 @@ function configFixture(): AgentAutoConfig {
       },
     },
     runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60, maxCycles: 5 },
-    codex: { command: 'codex', requiredVersion: '0.144.4', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },
+    codex: { command: 'codex', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },
     checks: { typecheck: 'npm run typecheck' },
     proof: { artifactDir: '.codex-orchestrator/proofs' },
     deny: { readPaths: [], commands: [] },
@@ -1154,7 +1458,7 @@ function deferred<T>() {
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let index = 0; index < 200; index += 1) {
+  for (let index = 0; index < 2_000; index += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }

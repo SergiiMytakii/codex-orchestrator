@@ -30,7 +30,6 @@ function validConfig(): AgentAutoConfig {
     },
     codex: {
       command: 'codex',
-      requiredVersion: '0.144.4',
       timeoutMs: 900_000,
       idleTimeoutMs: 300_000,
       toolNetwork: 'deny',
@@ -78,6 +77,7 @@ test('V2 rejects unknown configuration surfaces', () => {
     { ...validConfig(), schema: 'codex-orchestrator.invalid' },
     { ...validConfig(), unknown: {} },
     { ...validConfig(), runner: { ...validConfig().runner, profile: 'deep' } },
+    { ...validConfig(), codex: { ...validConfig().codex, requiredVersion: '0.144.4' } },
   ];
 
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
@@ -93,7 +93,6 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
     { ...validConfig(), deny: { ...validConfig().deny, commands: ['git'] } },
     { ...validConfig(), checks: { '': 'npm test' } },
     { ...validConfig(), checks: { test: '' } },
-    { ...validConfig(), codex: { ...validConfig().codex, requiredVersion: 'latest' } },
     {
       ...validConfig(),
       github: {

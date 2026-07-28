@@ -338,7 +338,7 @@ async function defaultConfig(
       maxCycles: 5,
     },
     codex: {
-      command: 'codex', requiredVersion: '0.144.4', timeoutMs: 900_000, idleTimeoutMs: 300_000, toolNetwork: 'deny',
+      command: 'codex', timeoutMs: 900_000, idleTimeoutMs: 300_000, toolNetwork: 'deny',
     },
     checks,
     proof: { artifactDir: '.codex-orchestrator/v2/proofs' },

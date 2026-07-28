@@ -23,7 +23,7 @@ import {
   projectTerminalDirectReview,
 } from './direct-delivery.js';
 import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
-import { ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
+import { ProofLaunchAuthorizationError, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
@@ -54,9 +54,22 @@ import type {
   RunStateFileV1,
   RunTerminalOutcome,
 } from './run-store.js';
+import type { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
+import {
+  activateReviewFeedback,
+  blockReviewFeedback,
+  bootstrapReviewFeedback,
+  markReviewFeedbackPublishing,
+  markReviewFeedbackRepairing,
+  markReviewFeedbackVerified,
+  projectReviewFeedbackBatch,
+  publishReviewFeedback,
+  reserveNextReviewFeedbackRound,
+  type ReviewFeedbackImplementationInvocationV1,
+} from './review-feedback.js';
 
 export type RunIssueResult =
-  | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string }
+  | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
   | { status: 'route-ready'; route: 'spec-required' | 'awaiting-user'; evidencePath: string }
   | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1; evidencePath: string }
   | { status: 'awaiting-user'; questionId: string; answerPrefix: string; evidencePath: string }
@@ -80,10 +93,12 @@ export interface RunIssueSnapshot {
 export interface RunIssueGit {
   getBaseSha(input: { targetRoot: string; baseBranch: string }): Promise<string>;
   createWorktree(input: { targetRoot: string; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }): Promise<void>;
+  ensureContinuationWorktree?(input: { targetRoot: string; worktreePath: string; branchName: string; baseBranch: string; publishedHeadSha: string }): Promise<void>;
   inspectWorktree(input: { worktreePath: string; branchName: string; baseSha: string }): Promise<'absent' | 'matching' | 'diverged'>;
   snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   fingerprintDeniedPaths(worktreePath: string, deniedPaths: string[]): Promise<string>;
   listChangedFiles(worktreePath: string): Promise<string[]>;
+  listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]>;
   fingerprintChangedFiles(worktreePath: string, changedFiles: string[]): Promise<string>;
   stageAll(worktreePath: string): Promise<void>;
   getTreeSha(worktreePath: string): Promise<string>;
@@ -115,9 +130,12 @@ export interface RunIssueDependencies {
     postComment(issueNumber: number, body: string): Promise<void>;
   };
   pullRequests: {
-    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string; body: string } | undefined>;
+    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string; body: string; number?: number; nodeId?: string; headSha?: string } | undefined>;
     createDraft(input: { title: string; body: string; headBranch: string; baseBranch: string }): Promise<{ url: string }>;
+    listConversationComments?(number: number): Promise<Array<{ id: string; body: string }>>;
+    postConversationComment?(number: number, body: string): Promise<{ id: string; body: string }>;
   };
+  reviewFeedback?: ReviewFeedbackCoordinator;
   git: RunIssueGit;
   implementationAgent: {
     run(input: {
@@ -129,8 +147,17 @@ export interface RunIssueDependencies {
       reworkFindings: string[];
       repairOnly: boolean;
       workflowGeneration: WorkflowGenerationReceipt;
+      reviewFeedbackRound?: number;
+      reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+      onPrepared?: (input: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => Promise<void>;
+      onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
       signal: AbortSignal;
     }): Promise<ImplementationAgentResult>;
+    recover?(input: {
+      runId: string;
+      canonicalRepository: string;
+      invocation: ReviewFeedbackImplementationInvocationV1;
+    }): Promise<Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined>;
   };
   implementationReviewer: {
     run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult>;
@@ -150,6 +177,7 @@ export interface RunIssueDependencies {
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange;
       workflowGeneration: WorkflowGenerationReceipt;
+      beforeAgentLaunch?: () => Promise<void>;
     }): Promise<ProveChangeResult>;
   };
   checkedChangeMint: CheckedChangeMintCapability;
@@ -171,6 +199,7 @@ export class OwnerLockContentionError extends Error {}
 interface ActiveRun {
   state: RunStateFileV1;
   record: RunRecordV1;
+  config: AgentAutoConfig;
 }
 
 type TerminalSeed =
@@ -381,10 +410,21 @@ export class RunIssue {
     }
 
     const evidence = await this.dependencies.writeEvidence({ runId, code: 'review-ready', summary: pullRequest.url });
-    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path };
+    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path, continuationEpoch: commitSha };
     try {
       await this.persist(active, {
         lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome,
+        ...(active.record.routeReceipt?.route === 'direct' ? {
+          reviewFeedback: bootstrapReviewFeedback(
+            active.record.reviewFeedback ?? {
+              version: 1, phase: 'bootstrap-required', consumedSourceIds: [], previousPublishedHeadSha: null,
+              repairRound: 0, activeBatch: null, implementationInvocation: null, history: [],
+              verifiedReceipt: null, terminal: null,
+            },
+            commitSha,
+            [],
+          ),
+        } : {}),
         ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'review-ready' }) } : {}),
       });
     } catch { throw new PostEffectStateError(active); }
@@ -395,9 +435,398 @@ export class RunIssue {
     return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, code);
   }
 
+  private async updateExistingPullRequest(
+    starting: ActiveRun,
+    config: AgentAutoConfig,
+    issueNumber: number,
+  ): Promise<RunIssueResult> {
+    let active = starting;
+    const feedback = active.record.reviewFeedback;
+    const batch = feedback?.activeBatch;
+    const coordinator = this.dependencies.reviewFeedback;
+    if (!feedback || feedback.phase !== 'publishing' || !batch || !coordinator
+      || !this.dependencies.pullRequests.listConversationComments || !this.dependencies.pullRequests.postConversationComment) {
+      return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-contract-missing');
+    }
+    const oldHead = batch.priorPublishedHeadSha;
+    const message = `fix: address review feedback for #${issueNumber}`;
+    let head = await this.dependencies.git.getHead(active.record.worktreePath);
+    let remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+    if (!active.record.intent) {
+      if (head !== oldHead || remote !== oldHead) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-update-baseline-diverged');
+      }
+    }
+
+    if (!active.record.intent || active.record.intent.kind === 'review-update-commit') {
+      if (!active.record.intent) {
+        active = await this.persist(active, { intent: {
+          kind: 'review-update-commit', batchId: batch.batchId, parentSha: oldHead,
+          treeSha: await this.dependencies.git.getTreeSha(active.record.worktreePath), message,
+        } });
+      }
+      const intent = active.record.intent;
+      if (intent?.kind !== 'review-update-commit' || intent.batchId !== batch.batchId
+        || intent.parentSha !== oldHead || intent.message !== message) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-intent-diverged');
+      }
+      head = await this.dependencies.git.getHead(active.record.worktreePath);
+      if (head === intent.parentSha) {
+        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        }
+        const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+        const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
+        if (validationFailure) return validationFailure;
+        if (await this.dependencies.git.getTreeSha(active.record.worktreePath) !== intent.treeSha) {
+          return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-tree-diverged');
+        }
+        try { head = await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: intent.message }); }
+        catch { return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown'); }
+      }
+      const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
+      if (commit.sha !== head || commit.parentSha !== intent.parentSha || commit.treeSha !== intent.treeSha || commit.message !== intent.message) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-observation-diverged');
+      }
+      active = await this.persist(active, { intent: {
+        kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
+        priorRemoteSha: oldHead, sha: commit.sha, treeSha: commit.treeSha,
+      } });
+    }
+    const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
+    const recordedCommit = active.record.intent?.kind === 'review-update-push' ? active.record.intent : undefined;
+    if (commit.parentSha !== oldHead || commit.message !== message
+      || (recordedCommit && (commit.sha !== recordedCommit.sha || commit.treeSha !== recordedCommit.treeSha))) {
+      return this.blockReviewFeedback(active, 'safety', 'review-feedback-update-commit-identity-diverged');
+    }
+    head = commit.sha;
+
+    if (!active.record.intent || active.record.intent.kind === 'review-update-push') {
+      if (!active.record.intent) active = await this.persist(active, { intent: {
+        kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
+        priorRemoteSha: oldHead, sha: head, treeSha: commit.treeSha,
+      } });
+      const intent = active.record.intent;
+      if (intent?.kind !== 'review-update-push' || intent.batchId !== batch.batchId || intent.sha !== head
+        || intent.treeSha !== commit.treeSha || intent.branch !== active.record.branchName || intent.priorRemoteSha !== oldHead) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-intent-diverged');
+      }
+      remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+      if (remote === oldHead) {
+        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        }
+        const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+        const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-prepush-revalidation-failed');
+        if (validationFailure) return validationFailure;
+        try { await this.dependencies.git.push({ worktreePath: active.record.worktreePath, branchName: active.record.branchName }); }
+        catch { return this.invokedFailure(active, 'review-feedback-push-delivery-unknown'); }
+        remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+      }
+      if (remote !== head) return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-observation-diverged');
+    }
+
+    const postPush = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+    const postPushFailure = await this.mapFeedbackRevalidation(active, postPush, 'review-feedback-postpush-revalidation-failed');
+    if (postPushFailure) return postPushFailure;
+    const marker = `<!-- codex-orchestrator:run:${active.record.runId}:review-feedback:${batch.batchId} -->`;
+    const body = [
+      marker,
+      '',
+      `Addressed frozen review feedback batch ${batch.batchId}.`,
+      `Updated head: ${head}`,
+      'Affected Closure, configured checks, and Acceptance Proof passed.',
+      'Review threads remain for human resolution.',
+    ].join('\n');
+    if (active.record.intent?.kind === 'review-update-push') {
+      active = await this.persist(active, { intent: {
+        kind: 'review-summary', batchId: batch.batchId, pullRequestNumber: batch.pullRequest.number,
+        pullRequestNodeId: batch.pullRequest.nodeId, marker, bodySha256: sha256(body), epochHeadSha: head,
+      } });
+    }
+    let summaryId = '';
+    if (!active.record.intent || active.record.intent.kind === 'review-summary') {
+      if (!active.record.intent) active = await this.persist(active, { intent: {
+        kind: 'review-summary', batchId: batch.batchId, pullRequestNumber: batch.pullRequest.number,
+        pullRequestNodeId: batch.pullRequest.nodeId, marker, bodySha256: sha256(body), epochHeadSha: head,
+      } });
+      const intent = active.record.intent;
+      if (intent?.kind !== 'review-summary' || intent.batchId !== batch.batchId
+        || intent.pullRequestNumber !== batch.pullRequest.number || intent.pullRequestNodeId !== batch.pullRequest.nodeId
+        || intent.marker !== marker || intent.bodySha256 !== sha256(body) || intent.epochHeadSha !== head) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-intent-diverged');
+      }
+      const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+      const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-summary-revalidation-failed');
+      if (validationFailure) return validationFailure;
+      let matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
+        .filter((comment) => comment.body.split('\n')[0] === marker);
+      if (matches.some((comment) => comment.body !== body) || matches.length > 1) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-diverged');
+      }
+      if (matches.length === 0) {
+        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        }
+        try { await this.dependencies.pullRequests.postConversationComment(batch.pullRequest.number, body); }
+        catch { return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown'); }
+        matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
+          .filter((comment) => comment.body.split('\n')[0] === marker);
+      }
+      if (matches.length !== 1 || matches[0]!.body !== body) return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-observation-diverged');
+      summaryId = matches[0]!.id;
+      active = await this.persist(active, { intent: {
+        kind: 'review-final-labels', issueNumber, batchId: batch.batchId,
+        pullRequestNumber: batch.pullRequest.number, pullRequestNodeId: batch.pullRequest.nodeId,
+        epochHeadSha: head, expected: [config.github.labels.review.name],
+      } });
+    }
+    if (!summaryId) {
+      const matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
+        .filter((comment) => comment.body.split('\n')[0] === marker && comment.body === body);
+      if (matches.length !== 1) return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-missing');
+      summaryId = matches[0]!.id;
+    }
+
+    const finalLabels = [config.github.labels.review.name];
+    if (!active.record.intent || active.record.intent.kind === 'review-final-labels') {
+      if (!active.record.intent) active = await this.persist(active, { intent: {
+        kind: 'review-final-labels', issueNumber, batchId: batch.batchId,
+        pullRequestNumber: batch.pullRequest.number, pullRequestNodeId: batch.pullRequest.nodeId,
+        epochHeadSha: head, expected: finalLabels,
+      } });
+      const intent = active.record.intent;
+      if (intent?.kind !== 'review-final-labels' || intent.issueNumber !== issueNumber
+        || intent.batchId !== batch.batchId || intent.pullRequestNumber !== batch.pullRequest.number
+        || intent.pullRequestNodeId !== batch.pullRequest.nodeId || intent.epochHeadSha !== head
+        || !sameStrings(intent.expected, finalLabels)) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-intent-diverged');
+      }
+      const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+      const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-final-labels-revalidation-failed');
+      if (validationFailure) return validationFailure;
+      let issue = await this.readIssue(issueNumber);
+      if (!issue || !sameStrings(issue.labels, finalLabels)) {
+        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        }
+        try { await this.dependencies.issues.setLabels(issueNumber, finalLabels); }
+        catch { return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown'); }
+        issue = await this.readIssue(issueNumber);
+      }
+      if (!issue || !sameStrings(issue.labels, finalLabels)) return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-diverged');
+    }
+
+    const receipt = {
+      kind: 'published' as const,
+      batchId: batch.batchId,
+      sourceIds: batch.sources.map((source) => source.sourceId),
+      priorHeadSha: oldHead,
+      publishedHeadSha: head,
+      pullRequestNumber: batch.pullRequest.number,
+      summaryCommentId: summaryId,
+      publishedAt: this.timestamp(),
+    };
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'review-ready', summary: active.record.terminalOutcome?.status === 'review-ready' ? active.record.terminalOutcome.pullRequestUrl : `PR #${batch.pullRequest.number}` });
+    const pullRequestUrl = `https://github.com/${active.record.canonicalRepository}/pull/${batch.pullRequest.number}`;
+    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl, evidencePath: evidence.path, continuationEpoch: head };
+    try {
+      await this.persist(active, {
+        lifecycle: 'review-ready',
+        reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
+        terminalOutcome: outcome,
+        outcomeEvidenceId: evidence.id,
+        intent: undefined,
+      });
+    } catch { throw new PostEffectStateError(active); }
+    return publicOutcome(outcome);
+  }
+
+  private async continueReviewReady(
+    starting: ActiveRun,
+    targetRoot: string,
+    config: AgentAutoConfig,
+  ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    const terminal = starting.record.terminalOutcome;
+    const feedback = starting.record.reviewFeedback;
+    if (!terminal || terminal.status !== 'review-ready' || !feedback || !this.dependencies.reviewFeedback
+      || starting.record.routeReceipt?.route !== 'direct' || starting.record.directReview?.status !== 'clear') {
+      return { result: publicOutcome(terminal!) };
+    }
+    const pullRequest = await this.dependencies.pullRequests.findOpen({
+      headBranch: starting.record.branchName,
+      baseBranch: config.github.baseBranch,
+    });
+    if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
+      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-pr-identity-missing') };
+    }
+    const expectedHeadSha = feedback.phase === 'bootstrap-required'
+      ? pullRequest.headSha
+      : feedback.previousPublishedHeadSha;
+    if (!expectedHeadSha) {
+      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-head-missing') };
+    }
+    const observed = await this.dependencies.reviewFeedback.observeAndFreeze({
+      runId: starting.record.runId,
+      canonicalRepository: starting.record.canonicalRepository,
+      pullRequestNumber: pullRequest.number,
+      expectedHeadSha,
+      expectedHeadRefName: starting.record.branchName,
+      expectedBaseRefName: config.github.baseBranch,
+      marker: `<!-- codex-orchestrator:run:${starting.record.runId}:pr -->`,
+      consumedSourceIds: feedback.consumedSourceIds,
+    });
+    if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
+    if (observed.status === 'blocked') {
+      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-observation-blocked') };
+    }
+    if (feedback.phase === 'bootstrap-required') {
+      const sourceIds = observed.status === 'frozen'
+        ? observed.batch.sources.map((source) => source.sourceId)
+        : observed.eligibleSourceIds;
+      const active = await this.persist(starting, {
+        reviewFeedback: bootstrapReviewFeedback(feedback, expectedHeadSha, sourceIds),
+      });
+      return { result: publicOutcome(active.record.terminalOutcome!) };
+    }
+    if (feedback.phase !== 'idle' || observed.status === 'none') return { result: publicOutcome(terminal) };
+
+    if (!await this.authorizedForExactLabels(
+      starting.record.issueNumber,
+      starting.record.runId,
+      starting.record.branchName,
+      [config.github.labels.review.name],
+    )) {
+      return { result: publicOutcome(terminal) };
+    }
+
+    const projected = projectReviewFeedbackBatch(observed.batch, starting.record.directReview.targetRevision);
+    const repairReview = beginDirectReviewRepair(starting.record.directReview, projected.repairFindings);
+    let active = await this.persist(starting, {
+      lifecycle: 'implementing',
+      reviewFeedback: activateReviewFeedback(feedback, observed.batch),
+      directReview: {
+        ...repairReview,
+        review: { ...repairReview.review, reportRepairs: 0, transportRetries: 0 },
+      },
+      reworkFindings: projected.repairFindings.map((finding) => finding.summary),
+      reportRepairs: 0,
+      transportRetries: 0,
+      checks: [],
+      checkedChangeSha256: undefined,
+      proofId: undefined,
+      proofReceipt: undefined,
+      terminalOutcome: undefined,
+      outcomeEvidenceId: undefined,
+      intent: {
+        kind: 'review-activation-labels',
+        issueNumber: starting.record.issueNumber,
+        batchId: observed.batch.batchId,
+        expected: sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]),
+      },
+    });
+    return this.resumeActivatedReviewFeedback(active, targetRoot, config);
+  }
+
+  private async resumeActivatedReviewFeedback(
+    starting: ActiveRun,
+    targetRoot: string,
+    config: AgentAutoConfig,
+  ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    let active = starting;
+    const feedback = active.record.reviewFeedback;
+    const batch = feedback?.activeBatch;
+    if (!feedback || feedback.phase !== 'frozen' || !batch || !this.dependencies.reviewFeedback) {
+      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-state-invalid') };
+    }
+    const expectedHeadSha = batch.priorPublishedHeadSha;
+    const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
+    const reviewLabels = [config.github.labels.review.name];
+    const intent = active.record.intent;
+    if (intent && (intent.kind !== 'review-activation-labels'
+      || intent.issueNumber !== active.record.issueNumber
+      || intent.batchId !== batch.batchId
+      || !sameStrings(intent.expected, runningLabels))) {
+      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-intent-diverged') };
+    }
+    const issue = await this.readIssue(active.record.issueNumber);
+    const labelsAreRunning = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, runningLabels)
+      && this.hasTrustedClaim(issue, active.record.runId, active.record.issueNumber, active.record.branchName);
+    const labelsAreReview = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, reviewLabels)
+      && this.hasTrustedClaim(issue, active.record.runId, active.record.issueNumber, active.record.branchName);
+    if (!labelsAreRunning && !labelsAreReview) {
+      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-authority-revoked') };
+    }
+    const validation = await this.dependencies.reviewFeedback.revalidate({
+      batch, epoch: 'pre-update', expectedHeadSha,
+    });
+    const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-activation-revalidation-failed');
+    if (validationFailure) return { result: validationFailure };
+    if (labelsAreReview) {
+      try { await this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels); }
+      catch { return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') }; }
+      const observed = await this.readIssue(active.record.issueNumber);
+      if (!observed || !sameStrings(observed.labels, runningLabels)
+        || !this.hasTrustedClaim(observed, active.record.runId, active.record.issueNumber, active.record.branchName)) {
+        return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-labels-diverged') };
+      }
+    }
+    if (intent) active = await this.confirmEffect(active);
+    let worktree = await this.dependencies.git.inspectWorktree({
+      worktreePath: active.record.worktreePath,
+      branchName: active.record.branchName,
+      baseSha: expectedHeadSha,
+    });
+    if (worktree === 'absent' && this.dependencies.git.ensureContinuationWorktree) {
+      try {
+        await this.dependencies.git.ensureContinuationWorktree({
+          targetRoot,
+          worktreePath: active.record.worktreePath,
+          branchName: active.record.branchName,
+          baseBranch: config.github.baseBranch,
+          publishedHeadSha: expectedHeadSha,
+        });
+        worktree = await this.dependencies.git.inspectWorktree({
+          worktreePath: active.record.worktreePath,
+          branchName: active.record.branchName,
+          baseSha: expectedHeadSha,
+        });
+      } catch { worktree = 'diverged'; }
+    }
+    const remoteSha = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+    if (worktree !== 'matching' || remoteSha !== expectedHeadSha
+      || (await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(
+        active.record.worktreePath,
+        config.proof.artifactDir,
+      )).length !== 0) {
+      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-worktree-diverged') };
+    }
+    active = await this.persist(active, { reviewFeedback: markReviewFeedbackRepairing(active.record.reviewFeedback!) });
+    return { active };
+  }
+
+  private async reviewReadyObservationBlocked(active: ActiveRun, code: string): Promise<RunIssueResult> {
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary: 'Review feedback observation failed closed before activation.' });
+    const terminalOutcome: RunTerminalOutcome = {
+      status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path,
+    };
+    await this.persist(active, {
+      lifecycle: 'blocked',
+      reviewFeedback: active.record.reviewFeedback,
+      directReview: active.record.directReview && active.record.directReview.status !== 'terminal'
+        ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind: 'safety' })
+        : active.record.directReview,
+      terminalOutcome,
+      outcomeEvidenceId: evidence.id,
+      intent: undefined,
+    });
+    return publicOutcome(terminalOutcome);
+  }
+
   async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
     let owner: { release(): Promise<void> } | undefined;
     let active: ActiveRun | undefined;
+    let recoveredFeedbackImplementation: Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined;
     try {
       assertPositiveInteger(input.issueNumber, 'issueNumber');
       const targetRoot = resolve(input.targetRoot);
@@ -462,16 +891,37 @@ export class RunIssue {
         if (existing.branchName !== expectedBranch || existing.worktreePath !== expectedWorktree) {
           return await this.preClaimInternal('run-identity-mismatch', input.issueNumber);
         }
-        if (existing.terminalOutcome) return publicOutcome(existing.terminalOutcome);
-        active = { state: persisted, record: existing };
+        active = { state: persisted, record: existing, config };
         issueSnapshot = structuredClone(existing.issueSnapshot);
         frozenCriteria = structuredClone(existing.frozenCriteria);
         runId = existing.runId;
         branchName = existing.branchName;
         worktreePath = existing.worktreePath;
         baseSha = existing.baseSha;
+        if (active.record.intent?.kind === 'review-blocked-labels') {
+          return await this.blockReviewFeedback(
+            active,
+            active.record.intent.blockKind,
+            active.record.intent.evidenceCode,
+          );
+        }
+        if (existing.terminalOutcome) {
+          if (existing.terminalOutcome.status !== 'review-ready') return publicOutcome(existing.terminalOutcome);
+          const continuation = await this.continueReviewReady(active, targetRoot, config);
+          if ('result' in continuation) return continuation.result;
+          active = continuation.active;
+          issueSnapshot = structuredClone(active.record.issueSnapshot);
+          frozenCriteria = structuredClone(active.record.frozenCriteria);
+        }
+        if (active.record.reviewFeedback?.phase === 'frozen') {
+          const activation = await this.resumeActivatedReviewFeedback(active, targetRoot, config);
+          if ('result' in activation) return activation.result;
+          active = activation.active;
+        }
         if (existing.lifecycle === 'publishing') {
-          return await this.publish(active, config, issueSnapshot, input.issueNumber);
+          return active.record.reviewFeedback?.activeBatch
+            ? await this.updateExistingPullRequest(active, config, input.issueNumber)
+            : await this.publish(active, config, issueSnapshot, input.issueNumber);
         }
         if (existing.lifecycle === 'claimed') {
           const claim = await this.reconcileClaim(active, config);
@@ -504,6 +954,32 @@ export class RunIssue {
             if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
             return await this.continueSpecRequired(active);
           }
+          const feedbackInvocation = active.record.reviewFeedback?.implementationInvocation;
+          if (feedbackInvocation?.phase === 'prepared') {
+            return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-launch-ambiguous');
+          }
+          if (feedbackInvocation?.phase === 'launched') {
+            try { await this.dependencies.waitForReviewProcessAbsence(feedbackInvocation.processGroupId!); }
+            catch { return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-process-absence-unconfirmed'); }
+            if (!this.dependencies.implementationAgent.recover) {
+              return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-report-recovery-unavailable');
+            }
+            try {
+              recoveredFeedbackImplementation = await this.dependencies.implementationAgent.recover({
+                runId: active.record.runId,
+                canonicalRepository: active.record.canonicalRepository,
+                invocation: feedbackInvocation,
+              });
+            } catch {
+              return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-report-recovery-failed');
+            }
+            if (!recoveredFeedbackImplementation) {
+              const snapshot = await this.dependencies.git.snapshot(active.record.worktreePath);
+              if (!sameFreshness(snapshot, feedbackInvocation.baseline)) {
+                return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-worktree-ambiguous');
+              }
+            }
+          }
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
           }
@@ -514,8 +990,12 @@ export class RunIssue {
               && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure');
             const checkRecovery = active.record.lifecycle === 'checking'
               && active.record.directReview?.status === 'clear';
-            if (!reviewRecovery && !checkRecovery) {
-              if (active.record.cycle >= config.runner.maxCycles) {
+            const proofRecovery = active.record.lifecycle === 'proving'
+              && active.record.directReview?.status === 'clear';
+            const feedbackRepair = active.record.reviewFeedback?.phase === 'repairing'
+              && active.record.directReview?.stage === 'review-repair';
+            if (!reviewRecovery && !checkRecovery && !proofRecovery && !feedbackRepair) {
+              if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
               }
               active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
@@ -539,7 +1019,7 @@ export class RunIssue {
         const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
         active = await this.createRun({
           runId, issueNumber: input.issueNumber, canonicalRepository, baseSha, branchName, worktreePath,
-          issueSnapshot, frozenCriteria,
+          issueSnapshot, frozenCriteria, config,
           intent: { kind: 'claim-labels', issueNumber: input.issueNumber, expected: runningLabels },
         });
         const claim = await this.reconcileClaim(active, config);
@@ -555,7 +1035,7 @@ export class RunIssue {
         if ('result' in routed) return routed.result;
         active = routed.active;
       }
-      if (active.record.lifecycle !== 'implementing' && active.record.lifecycle !== 'checking') {
+      if (!['implementing', 'checking', 'proving'].includes(active.record.lifecycle)) {
         return await this.terminal(active, { status: 'internal-error', code: 'route-dispatch-not-implementing' });
       }
       if (active.record.lifecycle === 'checking' && !active.record.directReview && active.record.routeReceipt?.route === 'direct') {
@@ -567,7 +1047,7 @@ export class RunIssue {
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
-      let resumeAtChecks = active.record.lifecycle === 'checking'
+      let resumeAtChecks = (active.record.lifecycle === 'checking' || active.record.lifecycle === 'proving')
         && active.record.directReview?.status === 'clear';
       if (active.record.lifecycle === 'implementing'
         && active.record.directReview?.status === 'active'
@@ -581,6 +1061,7 @@ export class RunIssue {
           frozenCriteria,
           `recovered-implementation-cycle-${active.record.cycle}`,
           config.runner.maxCycles,
+          config,
         );
         if ('status' in reviewed) return reviewed;
         active = reviewed;
@@ -589,8 +1070,38 @@ export class RunIssue {
       }
 
       if (!resumeAtChecks) {
+      const feedbackBatch = active.record.reviewFeedback?.activeBatch;
+      const workerBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
+      if (workerBlock) return workerBlock;
+      const feedbackProjection = feedbackBatch
+        ? projectReviewFeedbackBatch(feedbackBatch, active.record.directReview!.targetRevision)
+        : undefined;
+      const feedbackLaunch = feedbackBatch ? {
+        reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
+        reviewFeedback: feedbackProjection!.workerFeedback,
+        onPrepared: async (invocation: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => {
+          const currentActive = active!;
+          active = await this.persist(currentActive, {
+            reviewFeedback: {
+              ...structuredClone(currentActive.record.reviewFeedback!),
+              implementationInvocation: { ...structuredClone(invocation), phase: 'prepared', pid: null, processGroupId: null, launchedAt: null },
+            },
+          });
+        },
+        onLaunched: async (invocation: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => {
+          const currentActive = active!;
+          const current = currentActive.record.reviewFeedback?.implementationInvocation;
+          if (!current || current.phase !== 'prepared' || current.attemptId !== invocation.attemptId) throw new Error('review feedback implementation launch mismatch');
+          active = await this.persist(currentActive, {
+            reviewFeedback: {
+              ...structuredClone(currentActive.record.reviewFeedback!),
+              implementationInvocation: { ...current, phase: 'launched', pid: invocation.pid, processGroupId: invocation.processGroupId, launchedAt: invocation.launchedAt },
+            },
+          });
+        },
+      } : {};
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
-      let implementation = await this.runImplementation({
+      let implementation = recoveredFeedbackImplementation ?? await this.runImplementation({
         runId,
         worktreePath,
         issue: publicIssueSnapshot(issueSnapshot),
@@ -599,7 +1110,9 @@ export class RunIssue {
         reworkFindings: active.record.reworkFindings,
         repairOnly: false,
         workflowGeneration: active.record.workflowGeneration,
+        ...feedbackLaunch,
       });
+      recoveredFeedbackImplementation = undefined;
       if (implementation.kind === 'safe-halt') {
         active = await this.persist(active, {
           lifecycle: 'safe-halt',
@@ -627,6 +1140,10 @@ export class RunIssue {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
       }
       if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
+        const invocation = active.record.reviewFeedback?.implementationInvocation;
+        if (invocation && !sameFreshness(await this.dependencies.git.snapshot(worktreePath), invocation.baseline)) {
+          return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-worktree-ambiguous');
+        }
         active = await this.persist(active, { transportRetries: 1 });
         continue attemptLoop;
       }
@@ -640,6 +1157,8 @@ export class RunIssue {
         }
         const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
         active = await this.persist(active, { reportRepairs: 1 });
+        const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
+        if (repairBlock) return repairBlock;
         implementation = await this.runImplementation({
           runId,
           worktreePath,
@@ -649,6 +1168,7 @@ export class RunIssue {
           reworkFindings: ['The previous implementation report did not match the generated schema.'],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
+          ...feedbackLaunch,
         });
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, {
@@ -677,7 +1197,7 @@ export class RunIssue {
       if (report.status === 'external-block') {
         return await this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
       }
-      if (await this.dependencies.git.getHead(worktreePath) !== baseSha) {
+      if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
       }
       const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
@@ -687,6 +1207,8 @@ export class RunIssue {
         }
         const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
         active = await this.persist(active, { reportRepairs: 1 });
+        const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
+        if (repairBlock) return repairBlock;
         implementation = await this.runImplementation({
           runId,
           worktreePath,
@@ -696,6 +1218,7 @@ export class RunIssue {
           reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
+          ...feedbackLaunch,
         });
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, {
@@ -740,6 +1263,9 @@ export class RunIssue {
         if (active.record.directReview?.stage === 'review-repair') {
           active = await this.persist(active, {
             directReview: prepareDirectReviewClosure(active.record.directReview, targetFingerprint).state,
+            ...(active.record.reviewFeedback ? {
+              reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
+            } : {}),
           });
         } else {
           const reviewerSessionId = this.dependencies.createReviewSessionId();
@@ -749,6 +1275,9 @@ export class RunIssue {
               targetFingerprint,
               codeReviewerSessionId: reviewerSessionId,
             }),
+            ...(active.record.reviewFeedback ? {
+              reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
+            } : {}),
           });
         }
         const reviewed = await this.runDirectReviewFull(
@@ -757,12 +1286,18 @@ export class RunIssue {
           frozenCriteria,
           implementation.attemptId ?? `implementation-cycle-${active.record.cycle}`,
           config.runner.maxCycles,
+          config,
         );
         if ('status' in reviewed) return reviewed;
         active = reviewed;
         if (active.record.lifecycle === 'implementing') continue attemptLoop;
       } else {
-        active = await this.persist(active, { lifecycle: 'checking' });
+        active = await this.persist(active, {
+          lifecycle: 'checking',
+          ...(active.record.reviewFeedback ? {
+            reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
+          } : {}),
+        });
       }
       }
       for (const [id, command] of Object.entries(config.checks)) {
@@ -778,8 +1313,10 @@ export class RunIssue {
         const row = { id, command, status: check.status, outputSha256: sha256(check.output) } as const;
         active = await this.persist(active, { checks: [...active.record.checks, row] });
         if (check.status !== 'passed') {
-          if (active.record.cycle >= config.runner.maxCycles) {
-            return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+          if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+            return active.record.reviewFeedback?.activeBatch
+              ? await this.blockReviewFeedback(active, 'exhausted', 'review-feedback-check-repair-exhausted')
+              : await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
           }
           const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
           active = await this.startNextCycle(active, [summary], [{
@@ -817,7 +1354,7 @@ export class RunIssue {
       } catch {
         return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' });
       }
-      if (await this.dependencies.git.getHead(worktreePath) !== baseSha) {
+      if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
       }
       const proofChangedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
@@ -833,7 +1370,7 @@ export class RunIssue {
         runId,
         issueNumber: input.issueNumber,
         cycle: active.record.cycle,
-        baseSha,
+        baseSha: expectedImplementationHead(active.record),
         headSha: freshness.headSha,
         indexTreeSha: freshness.indexTreeSha,
         trackedContentSha256: freshness.trackedContentSha256,
@@ -859,8 +1396,13 @@ export class RunIssue {
           frozenCriteria,
           checkedChange,
           workflowGeneration: structuredClone(active.record.workflowGeneration),
+          beforeAgentLaunch: async () => {
+            const failure = await this.revalidateFeedbackWorker(active!, config, input.issueNumber);
+            if (failure) throw new ProofLaunchAuthorizationError(failure);
+          },
         });
       } catch (error) {
+        if (error instanceof ProofLaunchAuthorizationError) return error.outcome as RunIssueResult;
         if (error instanceof ProofQuiescenceError) {
           active = await this.persist(active, {
             lifecycle: 'safe-halt',
@@ -894,8 +1436,10 @@ export class RunIssue {
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
       if (proof.status === 'needs-rework') {
-        if (active.record.cycle >= config.runner.maxCycles) {
-          return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
+        if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+          return active.record.reviewFeedback?.activeBatch
+            ? await this.blockReviewFeedback(active, 'exhausted', 'review-feedback-proof-repair-exhausted')
+            : await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
         }
         active = await this.startNextCycle(active, proof.findings, proof.findings.map((summary) => ({
           provenance: 'proof' as const,
@@ -906,11 +1450,24 @@ export class RunIssue {
         continue attemptLoop;
       }
       if (proof.status !== 'passed') return await this.mapProofFailure(active, proof);
-      active = await this.persist(active, { lifecycle: 'publishing', proofReceipt: proof.receipt, reworkFindings: [] });
+      active = await this.persist(active, {
+        lifecycle: 'publishing',
+        proofReceipt: proof.receipt,
+        reworkFindings: [],
+        ...(active.record.reviewFeedback?.activeBatch ? {
+          reviewFeedback: markReviewFeedbackPublishing(markReviewFeedbackVerified(active.record.reviewFeedback, {
+            checkedChangeSha256,
+            proofId,
+            verifiedAt: this.timestamp(),
+          })),
+        } : {}),
+      });
       break;
       }
 
-      return await this.publish(active, config, issueSnapshot, input.issueNumber);
+      return active.record.reviewFeedback?.activeBatch
+        ? await this.updateExistingPullRequest(active, config, input.issueNumber)
+        : await this.publish(active, config, issueSnapshot, input.issueNumber);
     } catch (error) {
       if (!active && error instanceof TransportReadError) {
         return await this.preClaimTransport(input.issueNumber);
@@ -1304,13 +1861,15 @@ export class RunIssue {
     worktreePath: string;
     issueSnapshot: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
+    config: AgentAutoConfig;
     intent: PublicationIntent;
   }): Promise<ActiveRun> {
     const state = await this.dependencies.runRecords.read();
     const now = this.timestamp();
     const workflow = await this.dependencies.createWorkflowGeneration();
+    const { config, ...persistedInput } = input;
     const record: RunRecordV1 = {
-      ...input,
+      ...persistedInput,
       lifecycle: 'claimed', cycle: 1, reportRepairs: 0, transportRetries: 0,
       reworkFindings: [],
       packageVersion: workflow.receipt.packageVersion,
@@ -1319,23 +1878,23 @@ export class RunIssue {
       checks: [], createdAt: now, updatedAt: now,
     };
     const saved = await this.dependencies.runRecords.compareAndSwap(state.generation, {
-      schema: 'codex-orchestrator.agent-auto-state', version: 1, runs: [...state.runs, record],
+      schema: 'codex-orchestrator.agent-auto-state', version: 2, runs: [...state.runs, record],
     });
-    return { state: saved, record: findRun(saved, input.runId) };
+    return { state: saved, record: findRun(saved, input.runId), config };
   }
 
   private async persist(active: ActiveRun, changes: Partial<RunRecordV1> & { intent?: PublicationIntent | undefined }): Promise<ActiveRun> {
     const record = { ...active.record, ...changes, updatedAt: this.timestamp() } as RunRecordV1;
     if (Object.hasOwn(changes, 'intent') && changes.intent === undefined) delete record.intent;
     if (Object.hasOwn(changes, 'process') && changes.process === undefined) delete record.process;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt'] as const) {
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
     const saved = await this.dependencies.runRecords.compareAndSwap(active.state.generation, {
-      schema: 'codex-orchestrator.agent-auto-state', version: 1, runs,
+      schema: 'codex-orchestrator.agent-auto-state', version: 2, runs,
     });
-    return { state: saved, record: findRun(saved, record.runId) };
+    return { state: saved, record: findRun(saved, record.runId), config: active.config };
   }
 
   private clearIntent(active: ActiveRun): Promise<ActiveRun> {
@@ -1355,6 +1914,21 @@ export class RunIssue {
     if (!issue || issue.state !== 'OPEN') return false;
     const labels = new Set(issue.labels);
     if (!labels.has(config.github.labels.auto.name) || !labels.has(config.github.labels.running.name)) return false;
+    return this.hasTrustedClaim(issue, runId, issueNumber, branchName);
+  }
+
+  private async authorizedForExactLabels(
+    issueNumber: number,
+    runId: string,
+    branchName: string,
+    expectedLabels: string[],
+  ): Promise<boolean> {
+    const issue = await this.readIssue(issueNumber);
+    return !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, expectedLabels)
+      && this.hasTrustedClaim(issue, runId, issueNumber, branchName);
+  }
+
+  private hasTrustedClaim(issue: RunIssueSnapshot, runId: string, issueNumber: number, branchName: string): boolean {
     const exactBody = claimComment(runId, issueNumber, branchName);
     const markerPattern = /^<!-- codex-orchestrator:run:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):claim -->$/u;
     const markers = issue.comments.filter((comment) => markerPattern.test(comment.body.split('\n')[0] ?? ''));
@@ -1372,6 +1946,37 @@ export class RunIssue {
     catch { throw new TransportReadError(); }
   }
 
+  private async revalidateFeedbackWorker(
+    active: ActiveRun,
+    config: AgentAutoConfig,
+    issueNumber: number,
+  ): Promise<RunIssueResult | undefined> {
+    const batch = active.record.reviewFeedback?.activeBatch;
+    if (!batch) return undefined;
+    if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+      return this.blockReviewFeedback(active, 'safety', 'review-feedback-worker-authority-revoked');
+    }
+    if (!this.dependencies.reviewFeedback) {
+      return this.blockReviewFeedback(active, 'safety', 'review-feedback-worker-revalidation-unavailable');
+    }
+    const validation = await this.dependencies.reviewFeedback.revalidate({
+      batch,
+      epoch: 'pre-update',
+      expectedHeadSha: batch.priorPublishedHeadSha,
+    });
+    return this.mapFeedbackRevalidation(active, validation, 'review-feedback-worker-revalidation-failed');
+  }
+
+  private async mapFeedbackRevalidation(
+    active: ActiveRun,
+    validation: { status: 'valid'; observedHeadSha: string } | { status: 'retryable' | 'blocked'; reason: string },
+    safetyCode: string,
+  ): Promise<RunIssueResult | undefined> {
+    if (validation.status === 'valid') return undefined;
+    if (validation.status === 'retryable') return this.invokedFailure(active, `${safetyCode}-retryable`);
+    return this.blockReviewFeedback(active, 'safety', safetyCode);
+  }
+
   private async runImplementation(input: {
     runId: string;
     worktreePath: string;
@@ -1381,6 +1986,10 @@ export class RunIssue {
     reworkFindings: string[];
     repairOnly: boolean;
     workflowGeneration: WorkflowGenerationReceipt;
+    reviewFeedbackRound?: number;
+    reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+    onPrepared?: (input: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => Promise<void>;
+    onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
   }): Promise<ImplementationAgentResult> {
     try {
       return await this.dependencies.implementationAgent.run({
@@ -1399,6 +2008,7 @@ export class RunIssue {
     frozenCriteria: FrozenCriterion[],
     implementationAttemptId: string,
     maxCycles: number,
+    config: AgentAutoConfig,
   ): Promise<ActiveRun | RunIssueResult> {
     let active = starting;
     let reportRepair: { originalReportSha256: string; originalReportBytes: Buffer; diagnostic: string } | undefined;
@@ -1415,6 +2025,8 @@ export class RunIssue {
         ? directReviewClosureRequestSha256(directReview)
         : null;
       const mode = directReview.stage === 'review-closure' ? 'closure' as const : 'full' as const;
+      const reviewerAuthorizationFailure = await this.revalidateFeedbackWorker(active, config, active.record.issueNumber);
+      if (reviewerAuthorizationFailure) return reviewerAuthorizationFailure;
       const result = await this.dependencies.implementationReviewer.run({
         runId: active.record.runId,
         worktreePath: active.record.worktreePath,
@@ -1460,8 +2072,10 @@ export class RunIssue {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
         if (result.report.verdict === 'needs-work') {
-          if (active.record.cycle >= maxCycles) {
-            return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
+          if (this.repairBudgetExhausted(active, maxCycles)) {
+            return active.record.reviewFeedback?.activeBatch
+              ? this.blockReviewFeedback(active, 'exhausted', 'direct-review-repair-exhausted')
+              : this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
           }
           const repaired = acceptNeedsWorkDirectReview(current, result.report, result.artifactSha256);
           const findings = [
@@ -1474,7 +2088,12 @@ export class RunIssue {
           ];
           return this.persist(active, {
             lifecycle: 'implementing',
-            cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+            cycle: active.record.reviewFeedback?.activeBatch
+              ? active.record.cycle
+              : (active.record.cycle + 1) as RunRecordV1['cycle'],
+            ...(active.record.reviewFeedback?.activeBatch ? {
+              reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
+            } : {}),
             directReview: repaired,
             reworkFindings: findings,
             checks: [],
@@ -1590,7 +2209,12 @@ export class RunIssue {
       }));
       return this.persist(active, {
         lifecycle: 'implementing',
-        cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+        cycle: active.record.reviewFeedback?.activeBatch
+          ? active.record.cycle
+          : (active.record.cycle + 1) as RunRecordV1['cycle'],
+        ...(active.record.reviewFeedback?.activeBatch ? {
+          reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
+        } : {}),
         reworkFindings: [...findings],
         directReview: beginDirectReviewRepair(active.record.directReview, repairFindings),
         checks: [],
@@ -1602,12 +2226,80 @@ export class RunIssue {
     active = await this.persist(active, { lifecycle: 'reworking', reworkFindings: [...findings] });
     return this.persist(active, {
       lifecycle: 'implementing',
-      cycle: (active.record.cycle + 1) as RunRecordV1['cycle'],
+      cycle: active.record.reviewFeedback?.activeBatch
+        ? active.record.cycle
+        : (active.record.cycle + 1) as RunRecordV1['cycle'],
+      ...(active.record.reviewFeedback?.activeBatch ? {
+        reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
+      } : {}),
       checks: [],
       checkedChangeSha256: undefined,
       proofId: undefined,
       proofReceipt: undefined,
     });
+  }
+
+  private repairBudgetExhausted(active: ActiveRun, maxCycles: number): boolean {
+    return active.record.reviewFeedback?.activeBatch
+      ? active.record.reviewFeedback.repairRound >= 3
+      : active.record.cycle >= maxCycles;
+  }
+
+  private async blockReviewFeedback(
+    active: ActiveRun,
+    kind: 'safety' | 'exhausted',
+    evidenceCode: string,
+  ): Promise<RunIssueResult> {
+    const feedback = active.record.reviewFeedback;
+    if (!feedback?.activeBatch) return this.terminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode);
+    {
+      const config = active.config;
+      const blockedLabels = [config.github.labels.auto.name, config.github.labels.blocked.name].sort();
+      const existingIntent = active.record.intent;
+      if (existingIntent?.kind !== 'review-blocked-labels') {
+        active = await this.persist(active, { intent: {
+          kind: 'review-blocked-labels', issueNumber: active.record.issueNumber,
+          batchId: feedback.activeBatch.batchId, expected: blockedLabels, blockKind: kind, evidenceCode,
+        } });
+      } else if (existingIntent.issueNumber !== active.record.issueNumber
+        || existingIntent.batchId !== feedback.activeBatch.batchId
+        || !sameStrings(existingIntent.expected, blockedLabels)
+        || existingIntent.blockKind !== kind
+        || existingIntent.evidenceCode !== evidenceCode) {
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-intent-diverged');
+      }
+      let issue = await this.readIssue(active.record.issueNumber);
+      const ownedRunningLabels = [config.github.labels.auto.name, config.github.labels.running.name].sort();
+      const ownedReviewLabels = [config.github.labels.review.name];
+      const canReduceAuthority = !!issue && issue.state === 'OPEN'
+        && (sameStrings(issue.labels, ownedRunningLabels) || sameStrings(issue.labels, ownedReviewLabels));
+      if (issue?.state === 'OPEN' && !sameStrings(issue.labels, blockedLabels) && !canReduceAuthority) {
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-source-diverged');
+      }
+      if (canReduceAuthority && !sameStrings(issue!.labels, blockedLabels)) {
+        try { await this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels); }
+        catch { return this.invokedFailure(active, 'review-feedback-blocked-labels-delivery-unknown'); }
+        issue = await this.readIssue(active.record.issueNumber);
+      }
+      if (canReduceAuthority && (!issue || !sameStrings(issue.labels, blockedLabels))) {
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-observation-diverged');
+      }
+    }
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: evidenceCode, summary: `review feedback ${kind}` });
+    const terminalOutcome: RunTerminalOutcome = { status: 'blocked', kind, resumable: false, evidencePath: evidence.path };
+    const directReview = active.record.directReview && active.record.directReview.status !== 'terminal'
+      ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind })
+      : active.record.directReview;
+    await this.persist(active, {
+      lifecycle: 'blocked',
+      reviewFeedback: blockReviewFeedback(feedback, kind, this.timestamp()),
+      ...(directReview ? { directReview } : {}),
+      terminalOutcome,
+      outcomeEvidenceId: evidence.id,
+      process: undefined,
+      intent: undefined,
+    });
+    return publicOutcome(terminalOutcome);
   }
 
   private async mapImplementationFailure(
@@ -1642,6 +2334,13 @@ export class RunIssue {
     evidenceCode: string = outcome.status,
     retainIntent = false,
   ): Promise<RunIssueResult> {
+    if (active.record.reviewFeedback?.activeBatch && outcome.status !== 'review-ready') {
+      return this.blockReviewFeedback(
+        active,
+        outcome.status === 'blocked' && outcome.kind === 'exhausted' ? 'exhausted' : 'safety',
+        evidenceCode,
+      );
+    }
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: evidenceCode, summary: outcome.status });
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
     const changes: Partial<RunRecordV1> & { intent?: PublicationIntent | undefined } = {
@@ -1852,6 +2551,10 @@ function sameFreshness(
     && left.trackedContentSha256 === right.trackedContentSha256
     && left.untrackedContentSha256 === right.untrackedContentSha256
     && left.worktreeIdentity === right.worktreeIdentity;
+}
+
+function expectedImplementationHead(record: RunRecordV1): string {
+  return record.reviewFeedback?.activeBatch?.priorPublishedHeadSha ?? record.baseSha;
 }
 
 function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {

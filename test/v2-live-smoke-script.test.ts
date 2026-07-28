@@ -29,29 +29,29 @@ async function source(): Promise<string> {
 }
 
 const retainedScenarios = [
-  'package-install', 'discovery-matrix', 'real-codex', 'commit-policy',
+  'package-install', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
   'acceptance-proof-positive', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'android-proof', 'ios-proof', 'quality-gates', 'safety-negative',
+  'review-feedback-continuation', 'quality-gates', 'safety-negative',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
   const result = await runLiveSmoke(['--help']);
   assert.equal(result.status, 0); assert.equal(result.stderr, '');
   assert.deepEqual(listedValues(result.stdout, 'Scenarios'), retainedScenarios);
-  assert.deepEqual(listedValues(result.stdout, 'Profiles'), ['core-release', 'v2-regression', 'mobile-proof', 'full']);
+  assert.deepEqual(listedValues(result.stdout, 'Profiles'), ['core-release', 'v2-regression', 'full']);
   assert.match(result.stdout, /Default core-release/);
 });
 
 test('V2 regression profile covers each supplemental non-mobile behavior once', async () => {
   const text = await source();
-  const profile = text.slice(text.indexOf("['v2-regression'"), text.indexOf("['mobile-proof'"));
+  const profile = text.slice(text.indexOf("['v2-regression'"), text.indexOf("['full'"));
   assert.deepEqual(
     [...profile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
       'report-repair', 'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
-      'acceptance-proof-negative', 'quality-gates',
+      'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
     ],
   );
 });
@@ -71,14 +71,14 @@ test('default core release keeps only external integration proofs', async () => 
   const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['v2-regression'"));
   assert.deepEqual(
     [...coreProfile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
-    ['core-release', 'package-install', 'real-codex', 'browser-proof', 'safety-negative'],
+    ['core-release', 'package-install', 'browser-proof', 'safety-negative'],
   );
 });
 
 test('live smoke rejects unknown profile before package or GitHub work', async () => {
   const result = await runLiveSmoke(['--profile', 'missing-profile']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Known profiles: core-release, v2-regression, mobile-proof, full/);
+  assert.match(result.stderr, /Known profiles: core-release, v2-regression, full/);
   assert.doesNotMatch(result.stdout, /npm pack|scenario/u);
 });
 
@@ -94,11 +94,10 @@ test('generated live Codex wrapper pins Luna, records the invocation, and inject
   assert.equal(result.stdout, 'V2 live Codex wrapper self-test passed.\n');
 });
 
-test('mobile-proof is explicit and non-skippable', async () => {
+test('fixture-specific mobile gates are not misrepresented as GitHub live smoke scenarios', async () => {
   const text = await source();
-  assert.match(text, /\['mobile-proof',[\s\S]*'android-proof',[\s\S]*'ios-proof'/u);
-  assert.match(text, /v2-android-real-gate\.js/u);
-  assert.match(text, /v2-ios-real-gate\.js/u);
+  assert.doesNotMatch(text, /mobile-proof|android-proof|ios-proof/u);
+  assert.doesNotMatch(text, /v2-(?:android|ios)-real-gate\.js/u);
 });
 
 test('packed smoke resolves the public V2 CLI', async () => {
@@ -134,10 +133,9 @@ test('live smoke documents scratch repo and strict cleanup defaults', async () =
   assert.match(cleanup, /await verifyCleanup\(context, failures\)/u);
 });
 
-test('real Codex scenario keeps routing markers outside frozen acceptance criteria', async () => {
+test('live smoke omits the redundant free-form real-codex scenario', async () => {
   const text = await source();
-  assert.match(text, /runRealCodexScenario[\s\S]*?\], false\);/u);
-  assert.match(text, /markersAsCriteria \? markers : \[\]/u);
+  assert.doesNotMatch(text, /real-codex|runRealCodexScenario/u);
 });
 
 test('every model-backed live smoke invocation pins GPT-5.6 Luna', async () => {
@@ -148,6 +146,15 @@ test('every model-backed live smoke invocation pins GPT-5.6 Luna', async () => {
   assert.doesNotMatch(text, /context\.fakeCodexPath/u);
 });
 
+test('live smoke certifies its wrapper in an isolated orchestrator home', async () => {
+  const text = await source();
+  assert.match(text, /orchestratorHome: join\(root, 'orchestrator-home'\)/u);
+  assert.match(text, /await certifyLiveCodex\(context\)/u);
+  assert.match(text, /CODEX_ORCHESTRATOR_CONTAINMENT_CODEX: context\.liveCodexPath/u);
+  assert.match(text, /CODEX_ORCHESTRATOR_HOME: context\.orchestratorHome/u);
+  assert.match(text, /args\[0\] === 'login' && args\[1\] === 'status'/u);
+});
+
 test('real Codex smoke budgets cover the complete multi-operation workflow', async () => {
   const text = await source();
   assert.match(text, /const defaultTimeoutMs = 1_800_000;/u);
@@ -156,19 +163,31 @@ test('real Codex smoke budgets cover the complete multi-operation workflow', asy
 
 test('quality-gates deterministically reopens the failed check at the fifth closure', async () => {
   const text = await source();
-  const normalization = text.slice(text.indexOf('function normalizeClosureReview'), text.indexOf('function applyFault'));
-  assert.match(normalization, /report\.coverage = capsule\.mandatoryCoverage/u);
+  const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function applyFault'));
+  assert.match(normalization, /coverage: capsule\.mandatoryCoverage/u);
   assert.match(normalization, /capsule\.fixedRepairFindings/u);
-  assert.match(normalization, /report\.targetRevision === 5/u);
+  assert.match(normalization, /capsule\.targetRevision === 5/u);
   assert.match(normalization, /prompt\.includes\('quality-gates'\)/u);
-  assert.match(normalization, /report\.verdict = 'needs-work'/u);
-  assert.match(normalization, /status: 'reopened'/u);
+  assert.match(normalization, /verdict: reopen \? 'needs-work' : 'approved'/u);
+  assert.match(normalization, /status: reopen \? 'reopened' : 'verified'/u);
+});
+
+test('every live code review is normalized from the runner-owned review capsule', async () => {
+  const text = await source();
+  const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
+  assert.match(normalization, /operation: capsule\.operation/u);
+  assert.match(normalization, /targetFingerprint: capsule\.targetFingerprint/u);
+  assert.match(normalization, /reviewerSessionId: capsule\.reviewerSessionId/u);
+  assert.match(normalization, /writeFileSync\(reportPath, JSON\.stringify\(\{ report \}\)\)/u);
+  assert.doesNotMatch(normalization, /readFileSync\(reportPath/u);
 });
 
 test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {
   const text = await source();
   const fixture = text.slice(text.indexOf('function writeBrowserProof'), text.indexOf('function writeAgentReport'));
   assert.match(fixture, /entrypoint: 'http:\/\/127\.0\.0\.1:/u);
+  const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
+  assert.match(applyFault, /scenario === 'browser-proof'\) \{\s*discardProofArtifacts\(prompt\);/u);
 });
 
 test('incomplete-progress retry uses a deterministic clean transport failure before the retry', async () => {
@@ -197,6 +216,77 @@ test('negative proof fault discards transient evidence before the external block
   const applyFault = text.indexOf('function applyFault');
   const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-negative'", applyFault), text.indexOf("scenario === 'acceptance-proof-rework'", applyFault));
   assert.match(fixture, /discardProofArtifacts\(prompt\)/u);
+});
+
+test('review feedback continuation smoke proves same-PR update and effect-free replay', async () => {
+  const text = await source();
+  const scenario = text.slice(
+    text.indexOf('async function runReviewFeedbackContinuationScenario'),
+    text.indexOf('async function runPackageInstallScenario'),
+  );
+  assert.match(scenario, /review feedback baseline/u);
+  assert.match(scenario, /postTrustedReviewThread/u);
+  assert.match(scenario, /assertReviewFeedbackObservable/u);
+  assert.match(scenario, /runDaemonOnce\(context, issue\.number\)/u);
+  assert.match(scenario, /continuationEpoch/u);
+  assert.match(scenario, /history\.length !== 1/u);
+  assert.match(scenario, /checkedChangeSha256/u);
+  assert.match(scenario, /proofId/u);
+  assert.match(scenario, /summary marker/u);
+  assert.match(scenario, /model calls during effect-free replay/u);
+  assert.match(scenario, /rev-list/u);
+  const normalization = text.slice(
+    text.indexOf('function normalizeReviewFeedbackImplementation'),
+    text.indexOf('function applyFault'),
+  );
+  assert.match(normalization, /Pull-request feedback repair round/u);
+  assert.match(normalization, /review-feedback-continuation-addressed\.txt/u);
+  assert.match(normalization, /changedFiles/u);
+  const proofNormalization = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
+  assert.match(proofNormalization, /scenario === 'review-feedback-continuation'/u);
+  assert.match(proofNormalization, /discardProofArtifacts\(prompt\)/u);
+  assert.match(proofNormalization, /writePassingNonVisualProof\(criteria, reportPath\)/u);
+});
+
+test('daemon continuation reads the target issue result from authoritative run state', async () => {
+  const text = await source();
+  const runner = text.slice(text.indexOf('async function runDaemonOnce'), text.indexOf('async function readRunRecord'));
+  assert.match(runner, /readRunRecord\(context, issueNumber\)/u);
+  assert.match(runner, /record\.terminalOutcome/u);
+  assert.doesNotMatch(runner, /parseExactEnvelope/u);
+});
+
+test('daemon continuation requires exclusive scratch-repository candidate ownership', async () => {
+  const text = await source();
+  const daemon = text.slice(text.indexOf('async function runDaemonOnce'), text.indexOf('async function readRunRecord'));
+  assert.match(daemon, /await assertExclusiveDaemonCandidate\(context, issueNumber\)/u);
+  assert.match(daemon, /'--once', '--issue', String\(issueNumber\)/u);
+  assert.match(daemon, /'agent:auto', 'agent:review'/u);
+  assert.match(daemon, /candidates\.size !== 1 \|\| !candidates\.has\(issueNumber\)/u);
+});
+
+test('scenario assertions bind live smoke outcomes to their current owner behavior', async () => {
+  const text = await source();
+  assert.match(text, /context\.cliPath = installedCliPath/u);
+  assert.match(text, /expected one durable transport retry/u);
+  assert.match(text, /expected one durable report repair/u);
+  assert.match(text, /expected two publishable responsive screenshots/u);
+  assert.match(text, /read-only diagnostics mutated the target/u);
+  assert.match(text, /did not exhaust on the fifth configured-check failure/u);
+  assert.match(text, /directReview\.terminalOutcome\.kind !== 'exhausted'/u);
+  assert.match(text, /reworkFindings\[0\]\.startsWith\('Check smoke failed:'\)/u);
+  assert.match(text, /denied-path-modified/u);
+  assert.match(text, /negative scenario published a branch or PR/u);
+});
+
+test('fixture happy paths normalize proof semantics after real model invocation', async () => {
+  const text = await source();
+  const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
+  for (const scenario of [
+    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
+    'acceptance-proof-positive', 'acceptance-proof-rework',
+  ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
+  assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
 });
 
 test('implementation operation defines changedFiles as the cumulative run change set', async () => {

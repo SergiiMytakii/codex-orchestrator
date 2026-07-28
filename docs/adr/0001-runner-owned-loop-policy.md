@@ -6,7 +6,7 @@ Status: accepted and implemented by the V2 runtime.
 
 One trusted Runner owns issue selection, authorization, worktree state, bounded retries, checks, proof validation, GitHub mutations, and publication. A contained Codex Agent implements one selected issue and returns a structured report; it never owns external publication.
 
-Direct `run` and serial `daemon` discovery call the same `runIssue` lifecycle. The loop allows at most five implementation cycles, one report-only repair, and one separate clean transport retry. Durable intent and postcondition reconciliation own recovery after interruption.
+Direct `run` and serial `daemon` discovery call the same `runIssue` lifecycle. The initial loop allows at most five implementation cycles, one report-only repair, and one separate clean transport retry. A successful direct run may later resume from a frozen trusted PR-feedback batch for at most three separate repair rounds without changing the initial cycle count. Durable intent and postcondition reconciliation own recovery after interruption.
 
 ## Why
 
@@ -20,3 +20,6 @@ Giving an Agent dynamic authority over priority, stopping, credentials, or publi
 - Checks, device leases, issue mutations, Git, and GitHub publication remain finite Runner actions.
 - Ambiguous ownership or effect outcome fails closed.
 - There is no alternate parent-planning or scoped public loop.
+- Review-feedback continuation updates only the existing same-repository branch
+  and marker-bound draft PR by fast-forward; it never force-pushes or resolves a
+  human review thread.

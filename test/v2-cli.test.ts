@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import {
   isDirectCliExecution,
+  executeDaemonCandidates,
   parseDaemonArgs,
   parseRunArgs,
   parseTargetConfigForExecution,
@@ -56,8 +57,13 @@ test('CLI daemon accepts one absolute target and delegates the serial loop', asy
   assert.deepEqual(parseDaemonArgs(['daemon', '--target', '/tmp/target', '--once']), {
     targetRoot: '/tmp/target', once: true,
   });
+  assert.deepEqual(parseDaemonArgs(['daemon', '--target', '/tmp/target', '--once', '--issue', '42']), {
+    targetRoot: '/tmp/target', once: true, issueNumber: 42,
+  });
   for (const argv of [
     ['daemon'], ['daemon', '--target', 'relative'], ['daemon', '--target', '/tmp/target', '--once', '--again'],
+    ['daemon', '--target', '/tmp/target', '--issue', '42'],
+    ['daemon', '--target', '/tmp/target', '--once', '--issue', '0'],
   ]) assert.throws(() => parseDaemonArgs(argv));
 
   const seen: unknown[] = [];
@@ -66,6 +72,38 @@ test('CLI daemon accepts one absolute target and delegates the serial loop', asy
   });
   assert.equal(exit, 0);
   assert.deepEqual(seen, [{ targetRoot: '/tmp/target', once: true }]);
+
+  await runCli(['daemon', '--target', '/tmp/target', '--once', '--issue', '42'], {
+    executeDaemon: async (intent) => { seen.push(intent); return 0; },
+  });
+  assert.deepEqual(seen.at(-1), { targetRoot: '/tmp/target', once: true, issueNumber: 42 });
+});
+
+test('daemon deduplicates auto and review candidates and suppresses unchanged review-ready output in one process', async () => {
+  const issue = {
+    number: 17, title: 'Issue', body: '', url: 'https://example.invalid/17', state: 'OPEN' as const,
+    labels: [{ name: 'agent:auto' }, { name: 'agent:review' }], comments: [], closedByPullRequestsReferences: [],
+  };
+  const output: string[] = [];
+  const calls: number[] = [];
+  const lastResults = new Map<number, string>();
+  let epoch = 'a'.repeat(40);
+  const executeRun = async ({ issueNumber }: { targetRoot: string; issueNumber: number }) => {
+    calls.push(issueNumber);
+    return { status: 'review-ready' as const, pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence.json', continuationEpoch: epoch };
+  };
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue, structuredClone(issue)], executeRun, write: (text) => output.push(text), lastResults });
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue], executeRun, write: (text) => output.push(text), lastResults });
+  assert.deepEqual(calls, [17, 17]);
+  assert.equal(output.length, 1);
+
+  epoch = 'b'.repeat(40);
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue], executeRun, write: (text) => output.push(text), lastResults });
+  assert.equal(output.length, 2);
+
+  const changed = async () => ({ status: 'blocked' as const, kind: 'safety' as const, resumable: false, evidencePath: 'blocked.json' });
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue], executeRun: changed, write: (text) => output.push(text), lastResults });
+  assert.equal(output.length, 3);
 });
 
 test('CLI delegates setup, doctor, and status policy to Setup and renders its typed result', async () => {

@@ -73,6 +73,12 @@ export class ProofQuiescenceError extends Error {
   }
 }
 
+export class ProofLaunchAuthorizationError extends Error {
+  constructor(readonly outcome: unknown) {
+    super('proof launch authorization failed');
+  }
+}
+
 export type ProveChangeResult =
   | { status: 'passed'; receipt: ProofReceipt }
   | { status: 'needs-rework'; findings: string[]; receipt: ProofReceipt }
@@ -105,6 +111,7 @@ export class AcceptanceProof {
     frozenCriteria: FrozenCriterion[];
     checkedChange: CheckedChange;
     workflowGeneration?: WorkflowGenerationReceipt;
+    beforeAgentLaunch?: () => Promise<void>;
   }): Promise<ProveChangeResult> {
     let bindingSha256 = sha256(canonicalJson({ proofId: input.proofId, invalid: true }));
     try {
@@ -124,7 +131,7 @@ export class AcceptanceProof {
       await this.releaseMobileLeasesIfSettled(input.proofId, bindingSha256);
       return result;
     } catch (error) {
-      if (error instanceof ProofQuiescenceError) throw error;
+      if (error instanceof ProofQuiescenceError || error instanceof ProofLaunchAuthorizationError) throw error;
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
     }
   }
@@ -138,6 +145,7 @@ export class AcceptanceProof {
     checkedChangeSha256: string;
     bindingSha256: string;
     workflowGeneration?: WorkflowGenerationReceipt;
+    beforeAgentLaunch?: () => Promise<void>;
   }): Promise<ProveChangeResult> {
     let state = await this.dependencies.proofRecords.read(input.proofId);
     if (state && state.bindingSha256 !== input.bindingSha256) {
@@ -198,6 +206,7 @@ export class AcceptanceProof {
       const purpose = state.attempts.at(-1)!.purpose;
       let agentResult: ProofAgentResult;
       try {
+        await input.beforeAgentLaunch?.();
         agentResult = await this.dependencies.proofAgent.run({
           proofId: input.proofId,
           runId: input.payload.runId,
@@ -212,7 +221,7 @@ export class AcceptanceProof {
           signal: this.dependencies.signal ?? new AbortController().signal,
         });
       } catch (error) {
-        if (error instanceof ProofQuiescenceError) throw error;
+        if (error instanceof ProofQuiescenceError || error instanceof ProofLaunchAuthorizationError) throw error;
         return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
       }
 

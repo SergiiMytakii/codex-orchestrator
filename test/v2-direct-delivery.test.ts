@@ -161,3 +161,29 @@ test('needs-work defects become fixed only after implementation and enter correl
     repairFindingOutcomes: [],
   }, 'd'.repeat(64)), /unresolved defects/u);
 });
+
+test('maps PR findings through repair and affected Closure', () => {
+  const initial = createInitialDirectReview({ targetFingerprint: fingerprint, codeReviewerSessionId: 'review-session-1' });
+  const launched = launchDirectReviewInvocation(prepareDirectReviewInvocation(initial, {
+    attemptId: 'review-attempt-1', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
+    targetRevision: 1, targetFingerprint: fingerprint, closureRequestSha256: null,
+  }), { attemptId: 'review-attempt-1', pid: 42, processGroupId: 42 });
+  const clear = acceptApprovedDirectReview(launched, {
+    version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
+    verdict: 'approved', mode: 'full', coverage: ['correctness'], defects: [], residualRisks: [],
+    reviewerSessionId: 'review-session-1', closureRequestSha256: null, repairFindingOutcomes: [],
+  }, 'a'.repeat(64));
+  const repair = beginDirectReviewRepair(clear, [{
+    id: 'pr-thread:T_1', provenance: 'pr-review', sourceId: 'pr-thread:T_1', targetRevision: 1,
+    summary: 'Trusted review feedback.', affectedContracts: ['pr-review'], status: 'open',
+  }]);
+  assert.deepEqual(validateDirectReview(repair, {
+    lifecycle: 'safe-halt',
+    process: { purpose: 'implementation', resumeLifecycle: 'implementing', resumeReviewStage: null },
+  }), repair);
+  const closure = prepareDirectReviewClosure(repair, 'b'.repeat(64));
+  assert.equal(closure.state.repairFindings[0]?.provenance, 'pr-review');
+  assert.equal(closure.state.repairFindings[0]?.status, 'fixed');
+  assert.deepEqual(closure.state.review.affectedDefectIds, ['pr-thread:T_1']);
+  assert.deepEqual(validateDirectReview(closure.state, { lifecycle: 'implementing' }), closure.state);
+});

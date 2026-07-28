@@ -15,9 +15,10 @@ import { parseSetupArgs, renderSetupResultJson, setupOutcomeExitCode } from './s
 import { createProductionSetup } from './setup-runtime.js';
 import type { SetupIntent, SetupOutcome } from './setup.js';
 import type { RunIssueResult } from './run-issue.js';
+import type { GitHubIssue } from './adapters/issues.js';
 
 export interface RunIntent { targetRoot: string; issueNumber: number }
-export interface DaemonIntent { targetRoot: string; once: boolean }
+export interface DaemonIntent { targetRoot: string; once: boolean; issueNumber?: number }
 
 export function parseRunArgs(argv: string[]): RunIntent {
   if (argv.length !== 5 || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
@@ -30,15 +31,19 @@ export function parseRunArgs(argv: string[]): RunIntent {
 }
 
 export function parseDaemonArgs(argv: string[]): DaemonIntent {
-  if ((argv.length !== 3 && argv.length !== 4)
+  const targetedOnce = argv.length === 6 && argv[3] === '--once' && argv[4] === '--issue';
+  if ((argv.length !== 3 && argv.length !== 4 && !targetedOnce)
     || argv[0] !== 'daemon'
     || argv[1] !== '--target'
     || (argv.length === 4 && argv[3] !== '--once')) {
-    throw new Error('usage: cli daemon --target <absolute-path> [--once]');
+    throw new Error('usage: cli daemon --target <absolute-path> [--once [--issue <positive-integer>]]');
   }
   const targetRoot = argv[2]!;
-  if (!isAbsolute(targetRoot)) throw new Error('CLI daemon target is invalid');
-  return { targetRoot: resolve(targetRoot), once: argv[3] === '--once' };
+  const issueNumber = targetedOnce ? Number(argv[5]) : undefined;
+  if (!isAbsolute(targetRoot) || (targetedOnce && (!Number.isSafeInteger(issueNumber) || issueNumber! <= 0))) {
+    throw new Error('CLI daemon target is invalid');
+  }
+  return { targetRoot: resolve(targetRoot), once: argv[3] === '--once', ...(issueNumber ? { issueNumber } : {}) };
 }
 
 export async function runCli(argv: string[], dependencies: {
@@ -80,16 +85,46 @@ async function executeProductionDaemon(
   const config = await readTargetConfig(intent.targetRoot);
   const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
   let exitCode = 0;
+  const lastResults = new Map<number, string>();
   do {
-    const candidates = await issues.listOpenIssuesWithAnyLabel([config.github.labels.auto.name]);
-    for (const issue of candidates) {
-      const result = await executeProductionRun({ targetRoot: intent.targetRoot, issueNumber: issue.number });
-      write(renderRunResultJson(result));
-      exitCode = Math.max(exitCode, runIssueExitCode(result));
-    }
+    const discovered = await issues.listOpenIssuesWithAnyLabel([
+      config.github.labels.auto.name,
+      config.github.labels.review.name,
+    ]);
+    const candidates = intent.issueNumber === undefined
+      ? discovered
+      : discovered.filter((issue) => issue.number === intent.issueNumber);
+    exitCode = Math.max(exitCode, await executeDaemonCandidates({
+      targetRoot: intent.targetRoot,
+      candidates,
+      executeRun: executeProductionRun,
+      write,
+      lastResults,
+    }));
     if (intent.once) return exitCode;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, config.runner.pollIntervalSeconds * 1_000));
   } while (true);
+}
+
+export async function executeDaemonCandidates(input: {
+  targetRoot: string;
+  candidates: GitHubIssue[];
+  executeRun(input: RunIntent): Promise<RunIssueResult>;
+  write(text: string): void;
+  lastResults: Map<number, string>;
+}): Promise<number> {
+  let exitCode = 0;
+  const candidates = [...new Map(input.candidates.map((issue) => [issue.number, issue])).values()]
+    .sort((left, right) => left.number - right.number);
+  for (const issue of candidates) {
+    const result = await input.executeRun({ targetRoot: input.targetRoot, issueNumber: issue.number });
+    const rendered = renderRunResultJson(result);
+    const previous = input.lastResults.get(issue.number);
+    if (previous !== rendered) input.write(rendered);
+    input.lastResults.set(issue.number, rendered);
+    exitCode = Math.max(exitCode, runIssueExitCode(result));
+  }
+  return exitCode;
 }
 
 async function executeProductionRun(intent: RunIntent): Promise<RunIssueResult> {
@@ -147,7 +182,7 @@ function cliHelp(): string {
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
     '  run --target <absolute-path> --issue <positive-integer>',
-    '  daemon --target <absolute-path> [--once]',
+    '  daemon --target <absolute-path> [--once [--issue <positive-integer>]]',
     '',
   ].join('\n');
 }

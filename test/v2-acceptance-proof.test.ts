@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   AcceptanceProof,
+  ProofLaunchAuthorizationError,
   type FrozenCriterion,
   type IssueSnapshot,
   type ProofAgentResult,
@@ -151,9 +152,28 @@ test('one malformed-report repair and one transport retry stay proof-internal un
       { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
     ],
   });
-  assert.equal((await transport.proof.proveChange(transport.input())).status, 'passed');
+  let launchAuthorizations = 0;
+  assert.equal((await transport.proof.proveChange(transport.input({
+    beforeAgentLaunch: async () => { launchAuthorizations += 1; },
+  }))).status, 'passed');
   assert.equal(transport.agentCalls.length, 2);
+  assert.equal(launchAuthorizations, 2);
   assert.deepEqual((await transport.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'transport-retry']);
+
+  const revoked = proofFixture({
+    agentResults: [
+      { kind: 'transport-failed', resumable: true },
+      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
+    ],
+  });
+  let authorizationAttempt = 0;
+  await assert.rejects(revoked.proof.proveChange(revoked.input({
+    beforeAgentLaunch: async () => {
+      authorizationAttempt += 1;
+      if (authorizationAttempt === 2) throw new ProofLaunchAuthorizationError({ status: 'blocked' });
+    },
+  })), ProofLaunchAuthorizationError);
+  assert.equal(revoked.agentCalls.length, 1);
 });
 
 test('passed proof returns a sanitized receipt and persists no run lifecycle capability', async () => {
@@ -271,6 +291,7 @@ function proofFixture(options: {
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange;
+      beforeAgentLaunch: () => Promise<void>;
     }> = {}) => ({ proofId: 'proof-1', issue, frozenCriteria: criteria, checkedChange, ...overrides }),
   };
 }

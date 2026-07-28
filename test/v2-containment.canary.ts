@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -22,12 +23,12 @@ import {
   containmentCertificatePath,
   createContainmentCertificate,
   removeMatchingContainmentCertificate,
+  sha256,
   type ContainmentProbeResultV2,
   writeContainmentCertificate,
 } from '../src/v2/containment.js';
 
 const execFileAsync = promisify(execFile);
-const CODEX_VERSION = '0.144.4';
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 
 interface CanaryAgentReport {
@@ -63,11 +64,18 @@ async function main(): Promise<void> {
   const packageVersion = await readPackageVersion();
   const argvPolicySha256 = containmentArgvPolicySha256();
   const certificatePath = containmentCertificatePath();
+  let actualVersion: string | undefined;
+  let actualExecutablePath: string | undefined;
+  let actualExecutableSha256: string | undefined;
   try {
     assert.equal(platform(), 'darwin', 'containment canary requires macOS sandbox support');
-    const codexPath = await resolveCommand('codex');
-    const actualVersion = await readCodexVersion(codexPath);
-    assert.equal(actualVersion, `codex-cli ${CODEX_VERSION}`);
+    const configuredCommand = process.env.CODEX_ORCHESTRATOR_CONTAINMENT_CODEX ?? 'codex';
+    const codexPath = await realpath(configuredCommand.includes('/')
+      ? configuredCommand
+      : await resolveCommand(configuredCommand));
+    actualExecutablePath = codexPath;
+    actualExecutableSha256 = sha256(await readFile(codexPath));
+    actualVersion = await readCodexVersion(codexPath);
 
     const parentCodexHome = resolve(process.env.CODEX_HOME ?? join(homedir(), '.codex'));
     const parentAuthPath = join(parentCodexHome, 'auth.json');
@@ -165,6 +173,9 @@ async function main(): Promise<void> {
         assertProbeContract(report.nativeChild, childDiagnostics, 'native child');
 
         const certificate = createContainmentCertificate({
+          codexVersion: actualVersion,
+          codexExecutablePath: actualExecutablePath,
+          codexExecutableSha256: actualExecutableSha256,
           packageVersion,
           argvPolicySha256,
           root: stripAttempted(report.root),
@@ -180,11 +191,15 @@ async function main(): Promise<void> {
       await rm(canaryRoot, { recursive: true, force: true });
     }
   } catch (error) {
-    await removeMatchingContainmentCertificate(certificatePath, {
-      codexVersion: CODEX_VERSION,
-      packageVersion,
-      argvPolicySha256,
-    });
+    if (actualVersion && actualExecutablePath && actualExecutableSha256) {
+      await removeMatchingContainmentCertificate(certificatePath, {
+        codexVersion: actualVersion,
+        codexExecutablePath: actualExecutablePath,
+        codexExecutableSha256: actualExecutableSha256,
+        packageVersion,
+        argvPolicySha256,
+      });
+    }
     throw error;
   }
 }

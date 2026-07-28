@@ -19,7 +19,7 @@ Ordinary technical choices do not stop the run. A human question is reserved for
 - Node.js 18 or newer
 - `git`
 - an authenticated [GitHub CLI](https://cli.github.com/) (`gh auth status`)
-- the configured Codex CLI version and an authenticated parent Codex installation
+- an installed Codex CLI and an authenticated parent Codex installation
 - a GitHub repository with a usable `origin` remote
 
 The target path passed to every command must be absolute.
@@ -120,7 +120,33 @@ Run exactly one polling pass—for example from cron or another scheduler—with
 npx codex-orchestrator daemon --target "$PWD" --once
 ```
 
+For a bounded one-shot daemon check of one discovered candidate, add
+`--issue <number>` after `--once`. Continuous daemon mode intentionally has no
+issue filter.
+
 The daemon uses the same lifecycle as `run`; it does not have a less strict execution path.
+
+### Continue from pull-request review feedback
+
+After a direct-delivery run reaches `review-ready`, the daemon also polls issues
+with `agent:review`. A quiet PR remains effect-free. When the same marker-bound,
+same-repository draft PR receives a new unresolved inline thread root or a
+non-empty `CHANGES_REQUESTED` review from a current repository writer or admin,
+the Runner freezes that exact feedback batch and resumes the existing run.
+
+The repair uses the existing implementation and affected Closure flow, then
+reruns configured checks and Acceptance Proof against the repaired content. It
+has a separate maximum of three feedback rounds and does not consume the
+original five implementation cycles. Publication appends one fast-forward
+commit to the existing branch and PR; divergence blocks without reset, rebase,
+amend, or force-push recovery.
+
+Feedback is re-read with fresh permission before workers and publication
+effects. Edited, deleted, revoked, wrong-head, cross-repository, bot, resolved,
+outdated, ordinary conversation, and read-only feedback cannot authorize work.
+The Runner posts one marker-bound PR summary after success, but it never resolves
+review threads or claims human approval. Thread resolution remains a reviewer
+action.
 
 ## Labels and visible outcomes
 
@@ -138,7 +164,7 @@ Important command results:
 
 | Result | What to do |
 | --- | --- |
-| `review-ready` | Open the returned draft PR URL and review the change. |
+| `review-ready` | Open the returned draft PR URL and review the change; later trusted unresolved feedback may resume the same run and PR. |
 | `spec-frozen` | Use the returned frozen specification receipt as the authority for a later implementation workflow. |
 | `awaiting-user` | Reply to the issue using the returned answer prefix. Re-run the command or let the daemon pick it up. |
 | `not-eligible` | Check that the issue is open, has only the appropriate authorization label, and has no existing open PR for its branch. |
@@ -159,7 +185,7 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `deny.readPaths`: paths the worker must not read or modify.
 - `deny.commands`: absolute command paths that must not be exposed to the worker.
 
-`runner.maxCycles`, the branch template, required Codex version, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs.
+`runner.maxCycles`, the branch template, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs. There is no configured Codex version pin: the Runner uses the installed `codex` command, and the containment canary binds its actual version, canonical executable path and digest, plus the orchestrator package version in the certificate.
 
 ## Safety model in plain language
 

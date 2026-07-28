@@ -142,6 +142,12 @@ export class GitWorktreeManager {
     return parsePorcelainChangedFiles(result.stdout);
   }
 
+  public async listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]> {
+    const root = normalizePath(ignoredRoot);
+    const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
+    return parsePorcelainChangedFiles(result.stdout, root);
+  }
+
   public async collectSessionChangeSet(input: CollectSessionChangeSetInput): Promise<SessionChangeSet> {
     const committedPaths = parseNulPaths(
       (await this.git(['-C', input.worktreePath, 'diff', '--name-only', '-z', `${input.baseHead}..HEAD`])).stdout,
@@ -371,7 +377,7 @@ export function renderBranchTemplate(template: string, values: BranchTemplateVal
     .replaceAll('${parentIssueNumber}', values.parentIssueNumber === undefined ? '' : String(values.parentIssueNumber));
 }
 
-function parsePorcelainChangedFiles(output: string): string[] {
+function parsePorcelainChangedFiles(output: string, ignoredUntrackedRoot?: string): string[] {
   const entries = output.split('\0').filter(Boolean);
   const files: string[] = [];
 
@@ -379,6 +385,10 @@ function parsePorcelainChangedFiles(output: string): string[] {
     const entry = entries[index] ?? '';
     const status = entry.slice(0, 2);
     const path = entry.slice(3);
+    if (status === '??' && ignoredUntrackedRoot
+      && (path === ignoredUntrackedRoot || path.startsWith(`${ignoredUntrackedRoot}/`))) {
+      continue;
+    }
     if (status.startsWith('R') || status.startsWith('C')) {
       const nextPath = entries[index + 1];
       if (path) {

@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
+import { access, lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
@@ -9,6 +9,8 @@ import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { GitWorktreeManager } from './adapters/worktree.js';
 import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
+import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
+import type { ReviewFeedbackImplementationInvocationV1 } from './review-feedback.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
@@ -71,6 +73,36 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
       baseBranch: input.baseBranch,
       requiredBaseSha: input.baseSha,
     });
+  }
+
+  async ensureContinuationWorktree(input: {
+    targetRoot: string;
+    worktreePath: string;
+    branchName: string;
+    baseBranch: string;
+    publishedHeadSha: string;
+  }): Promise<void> {
+    const localHead = (await this.git([
+      '-C', input.targetRoot, 'rev-parse', '--verify', `refs/heads/${input.branchName}`,
+    ])).trim();
+    const remoteHead = await this.getRemoteBranchSha(input.targetRoot, input.branchName);
+    if (localHead !== input.publishedHeadSha || remoteHead !== input.publishedHeadSha) {
+      throw new Error('continuation branch refs do not exactly match the published head');
+    }
+    await this.worktrees.ensureIssueWorktree({
+      targetRoot: input.targetRoot,
+      workspacePath: input.worktreePath,
+      branchName: input.branchName,
+      baseBranch: input.baseBranch,
+      requiredBaseSha: input.publishedHeadSha,
+      allowResume: true,
+    });
+    const observed = await this.inspectWorktree({
+      worktreePath: input.worktreePath,
+      branchName: input.branchName,
+      baseSha: input.publishedHeadSha,
+    });
+    if (observed !== 'matching') throw new Error('continuation worktree does not match the published head');
   }
 
   async inspectWorktree(input: { worktreePath: string; branchName: string; baseSha: string }): Promise<'absent' | 'matching' | 'diverged'> {
@@ -142,6 +174,10 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
 
   listChangedFiles(worktreePath: string): Promise<string[]> {
     return this.worktrees.listChangedFiles(worktreePath);
+  }
+
+  listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]> {
+    return this.worktrees.listChangedFilesIgnoringUntrackedRoot(worktreePath, ignoredRoot);
   }
 
   async fingerprintChangedFiles(worktreePath: string, changedFiles: string[]): Promise<string> {
@@ -234,6 +270,13 @@ export class ContainedImplementationAgent {
     reworkFindings: string[];
     repairOnly: boolean;
     workflowGeneration: WorkflowGenerationReceipt;
+    reviewFeedbackRound?: number;
+    reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+    onPrepared?: (input: {
+      attemptId: string; reportPath: string; preparedAt: string;
+      baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'>;
+    }) => Promise<void>;
+    onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
     signal: AbortSignal;
   }): Promise<ImplementationAgentResult> {
     const config = this.dependencies.config();
@@ -249,6 +292,12 @@ export class ContainedImplementationAgent {
       bootId: this.dependencies.bootId,
     });
     const baseline = await this.dependencies.git.snapshot(input.worktreePath);
+    await input.onPrepared?.({
+      attemptId,
+      reportPath: attempt.reportPath,
+      preparedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
+      baseline,
+    });
     try {
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
@@ -266,6 +315,8 @@ export class ContainedImplementationAgent {
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Implement issue #${input.issue.number}: ${input.issue.title}`,
           `Implementation cycle: ${input.cycle}.`,
+          ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
+          ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
@@ -275,6 +326,9 @@ export class ContainedImplementationAgent {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
+        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
+          attemptId, pid, processGroupId, launchedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
+        }) } : {}),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -299,6 +353,38 @@ export class ContainedImplementationAgent {
         waitForAbsence: () => waitForProcessGroupAbsent(error.processGroupId),
       };
     }
+  }
+
+  async recover(input: {
+    runId: string;
+    canonicalRepository: string;
+    invocation: ReviewFeedbackImplementationInvocationV1;
+  }): Promise<Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined> {
+    const expected = join(
+      resolve(this.dependencies.orchestratorHome),
+      'v2',
+      sha256(input.canonicalRepository),
+      'runs',
+      input.runId,
+      'attempts',
+      input.invocation.attemptId,
+      'report.json',
+    );
+    if (resolve(input.invocation.reportPath) !== expected) {
+      throw new Error('review feedback implementation report path is not attempt-owned');
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await readRegularFile(expected);
+    } catch (error) {
+      if (isErrorCode(error, 'ENOENT')) return undefined;
+      throw error;
+    }
+    return {
+      kind: 'completed',
+      attemptId: input.invocation.attemptId,
+      report: decodeAgentReportForValidation(bytes),
+    };
   }
 }
 
@@ -423,6 +509,26 @@ export interface V2Runtime {
   dispose(): void;
 }
 
+export async function resolveCodexExecutable(command: string, safePath: string): Promise<string> {
+  if (command.length === 0 || safePath.length === 0) throw new Error('Codex command and safe path must be non-empty');
+  if (!isAbsolute(command) && command.includes('/')) throw new Error('relative Codex command paths are not supported');
+  const candidates = isAbsolute(command)
+    ? [command]
+    : safePath.split(':').filter((entry) => entry.length > 0).map((entry) => join(entry, command));
+  for (const candidate of candidates) {
+    try {
+      const canonical = await realpath(candidate);
+      const stat = await lstat(canonical);
+      if (!stat.isFile()) continue;
+      await access(canonical, constants.X_OK);
+      return canonical;
+    } catch {
+      // Try the next safe-path entry.
+    }
+  }
+  throw new Error('Codex executable is unavailable in the configured safe path');
+}
+
 export function createV2Runtime(input: {
   targetRoot: string;
   orchestratorHome: string;
@@ -452,6 +558,14 @@ export function createV2Runtime(input: {
   const orchestratorHome = resolve(input.orchestratorHome);
   const now = input.now ?? (() => new Date().toISOString());
   const commandExecutor = input.processExecutor ?? defaultProcessExecutor;
+  const runtimeSafePath = requireRuntimeString(input.safePath, 'safePath');
+  let codexExecutable: { command: string; path: string } | undefined;
+  const resolveRuntimeCodex = async (command: string) => {
+    if (codexExecutable?.command === command) return codexExecutable.path;
+    const path = await resolveCodexExecutable(command, runtimeSafePath);
+    codexExecutable = { command, path };
+    return path;
+  };
   const git = input.git ?? new LocalGitRunIssueAdapter(commandExecutor);
   const proofFreshnessGit = git as RunIssueGit & {
     snapshotIgnoringUntrackedRoot?: (
@@ -474,7 +588,7 @@ export function createV2Runtime(input: {
     config: () => requireConfig(currentConfig),
     orchestratorHome,
     parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-    safePath: requireRuntimeString(input.safePath, 'safePath'),
+    safePath: runtimeSafePath,
     bootId: input.bootId,
     process: containedProcess,
     createAttemptId: input.createAttemptId,
@@ -737,7 +851,11 @@ export function createV2Runtime(input: {
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
     const bytes = await readRegularFile(join(targetRoot, '.codex-orchestrator', 'config.json'));
-    const config = parseAgentAutoConfig(parseJsonWithoutDuplicateKeys(bytes.toString('utf8')));
+    const parsed = parseAgentAutoConfig(parseJsonWithoutDuplicateKeys(bytes.toString('utf8')));
+    const config: AgentAutoConfig = {
+      ...parsed,
+      codex: { ...parsed.codex, command: await resolveRuntimeCodex(parsed.codex.command) },
+    };
     const path = join(targetRoot, config.runner.stateDir, 'v2', 'run-state.json');
     if (!runRecords) runRecords = new FileRunRecordWriter(path);
     currentConfig = config;
@@ -802,10 +920,14 @@ export function createV2Runtime(input: {
     readConfig,
     validateContainment: async (config) => {
       const certificate = await readContainmentCertificate(containmentCertificatePath(orchestratorHome));
-      const version = await commandExecutor(config.codex.command, ['--version']);
+      const executablePath = await resolveRuntimeCodex(config.codex.command);
+      const version = await commandExecutor(executablePath, ['--version']);
       if (version.exitCode !== 0) throw new Error('Codex version is unavailable');
       assertContainmentCertificateMatchesRuntime(certificate, {
         codexVersion: version.stdout.trim(),
+        codexExecutablePath: executablePath,
+        codexExecutableSha256: sha256(await readFile(executablePath)),
+        packageVersion: input.packageVersion,
         argvPolicySha256: containmentArgvPolicySha256(),
       });
     },
@@ -851,10 +973,25 @@ export function createV2Runtime(input: {
           .filter((pullRequest) => pullRequest.state === 'OPEN' && pullRequest.baseRefName === baseBranch);
         if (matches.length > 1) throw new Error('multiple open pull requests match publication intent');
         const match = matches[0];
-        return match ? { url: match.url, body: match.body } : undefined;
+        if (!match) return undefined;
+        const reviewTarget = await input.pullRequests.getReviewTarget(match.number);
+        return {
+          url: match.url,
+          body: match.body,
+          number: match.number,
+          nodeId: match.nodeId,
+          ...(reviewTarget ? { headSha: reviewTarget.headRefOid } : {}),
+        };
       },
       createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
+      listConversationComments: async (number) => (await input.pullRequests.listConversationComments(number))
+        .map((comment) => ({ id: comment.id, body: comment.body })),
+      postConversationComment: async (number, body) => {
+        const comment = await input.pullRequests.postConversationComment(number, body);
+        return { id: comment.id, body: comment.body };
+      },
     },
+    reviewFeedback: new ReviewFeedbackCoordinator({ pullRequests: input.pullRequests, issues: input.issues, now }),
     git,
     routeCoordinator: {
       run: ({ state, ...routeInput }) => new RouteCoordinator({

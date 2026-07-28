@@ -37,7 +37,7 @@ Codex processes are operation-scoped workers. The current internal workflow defi
 
 Workers do not receive GitHub, SSH, npm, or cloud publication credentials. They cannot turn a proposed shell command into Runner authority and cannot directly push, create a pull request, alter issue labels, or publish comments.
 
-This is an authority-containment boundary, not an OS sandbox. Ordinary Codex execution and native Codex subagents use the same local OS account and may use the user's existing Codex authentication or read files available to that user. The containment certificate records that accepted local-read risk. Environment scrubbing, denied paths, isolated read views, and report/artifact validation prevent those local capabilities from becoming an external publication grant.
+This is an authority-containment boundary, not an OS sandbox. Ordinary Codex execution and native Codex subagents use the same local OS account and may use the user's existing Codex authentication or read files available to that user. The containment certificate records that accepted local-read risk and binds the installed `codex` command's reported version, canonical executable path and digest, plus the orchestrator package version; configuration does not pin a Codex release. Environment scrubbing, denied paths, isolated read views, and report/artifact validation prevent those local capabilities from becoming an external publication grant.
 
 ## 3. Strict repository configuration
 
@@ -47,7 +47,7 @@ The config contains:
 
 - `github`: canonical owner/repository, base branch, and five distinct label definitions;
 - `runner`: worktree root, durable state directory, fixed branch template, daemon polling interval, and the five-cycle limit;
-- `codex`: command, exact supported version, total and idle timeouts, and denied worker tool network;
+- `codex`: command, total and idle timeouts, and denied worker tool network;
 - `checks`: a finite map of check IDs to Runner-owned commands;
 - `proof.artifactDir`: proof-owned artifact root inside the issue worktree;
 - `deny.readPaths`: repository-relative or canonical absolute paths protected from workers;
@@ -247,9 +247,65 @@ Workers never publish. After proof passes, the Runner performs publication in th
 
 Every step checks its postcondition before proceeding. A conflicting remote branch, duplicate marker, unexpected PR, changed tree, revoked authorization, or ambiguous effect becomes a safety or transport result; it is never treated as implicit success.
 
+### Post-PR review continuation
+
+A successful direct run persists review-feedback state inside the same atomic
+run record. Version 1 state remains readable; the next compare-and-swap emits
+version 2. The first observation of a migrated `review-ready` run baselines
+already-present eligible source IDs without launching a worker or changing
+GitHub, so an upgrade cannot retrospectively execute old feedback.
+
+The daemon discovers both `agent:auto` and `agent:review`, deduplicates issue
+numbers, and sends every candidate through `RunIssue.runIssue`. Unchanged
+`review-ready` output is suppressed only in daemon memory; durable run state
+remains authoritative. One-shot diagnostics and live smoke may additionally
+constrain daemon execution to one discovered issue with `--once --issue`; the
+ordinary long-running daemon always processes the complete discovered set. A V2 idle run observes one coherent PR snapshot bounded
+by equal identity/head reads around all GraphQL thread and REST review pages.
+Eligible inputs are:
+
+- the non-empty root of an unresolved, non-outdated inline thread bound to the
+  observed head; or
+- a non-empty submitted `CHANGES_REQUESTED` review bound to that head.
+
+Each exposed body requires a fresh repository `write` or `admin` permission
+receipt tied to the immutable author ID. Replies can contribute IDs and hashes
+to drift detection, but their bodies are never persisted or sent to a worker.
+Bots, ordinary PR conversation comments, approvals, blank or dismissed reviews,
+read-only identities, and consumed source IDs are excluded.
+
+Activation is one atomic transition from outer `review-ready` to
+`implementing`: it freezes and consumes the batch, reserves feedback round one,
+opens the existing direct-review repair ledger with `pr-review` provenance,
+clears terminal/check/CheckedChange/proof receipts, and persists the exact
+`agent:auto` + `agent:running` label intent. Feedback rounds are independently
+bounded to 1–3; completed needs-work results alone reserve the next round. The
+original five-cycle counter is unchanged.
+
+Every worker launch and publication effect revalidates PR identity, refs,
+marker, source content, immutable author, and current permission. `pre-update`
+requires the old published head and exact thread state. After the fast-forward
+push, `post-push` requires the new head and unchanged trusted source, while
+allowing only GitHub-derived resolved/outdated changes. Safety or exhaustion
+blocks are non-resumable.
+
+Terminal feedback safety/exhaustion cleanup performs only a monotonic authority
+reduction from the exact run-owned running or review label set to
+`agent:auto` + `agent:blocked`. This cleanup remains allowed when the claim was
+just removed, because it cannot launch work or publish product state.
+
+Update publication has separate durable commit, push, PR-summary, and final-label
+intents. Local HEAD and the remote branch must begin at the persisted published
+head; the new commit must be its single parent-child successor. Unknown delivery
+is adopted only when the exact parent, tree, message, branch, and resulting SHA
+match. No reset, rebase, amend, or force push exists. Success posts one
+`review-feedback:<batch>` PR summary, returns the same issue and PR to
+`agent:review`/`review-ready`, and records the new published head. GitHub review
+threads are never auto-resolved.
+
 ## 11. Durable state and crash recovery
 
-The durable run file is stored beneath the configured state directory. Each run record contains identity, lifecycle, cycle budgets, frozen issue data, workflow pin, route state, waiting-human history, spec/review state, process records, checks, proof bindings, publication intent, and terminal outcome.
+The durable run file is stored beneath the configured state directory. Each run record contains identity, lifecycle, cycle budgets, frozen issue data, workflow pin, route state, waiting-human history, spec/review and review-feedback state, process records, checks, proof bindings, publication intent, and terminal outcome.
 
 State updates use generation-based compare-and-swap. Atomic files use write, flush, rename, and directory synchronization where supported. Locks and leases include fencing plus process and boot identity.
 
@@ -263,7 +319,7 @@ If the process exits after the effect but before confirmation, the next invocati
 
 Prepared worker invocations can be abandoned without launch. Launched invocations require positive process-group absence before replacement. If quiescence cannot be proven, the run enters `safe-halt` or a non-resumable transport/safety outcome. Unknown process state is never permission to relaunch against the same worktree.
 
-An existing nonterminal issue run is resumed only when its canonical repository, branch, worktree path, base SHA, workflow generation, authorization, and lifecycle invariants still match. Terminal outcomes are replayed without re-executing the workflow.
+An existing nonterminal issue run is resumed only when its canonical repository, branch, worktree path, base SHA, workflow generation, authorization, and lifecycle invariants still match. Terminal outcomes are replayed without re-executing the workflow, except that a direct `review-ready` checkpoint may perform the bounded trusted-feedback observation described above.
 
 ## 12. Result and failure model
 
@@ -304,6 +360,6 @@ npm pack --dry-run --json
 
 The build deletes `dist` before TypeScript compilation so removed modules cannot survive in tests or the tarball. `prepack` verifies the committed workflow and rebuilds from a clean output directory.
 
-`npm run smoke:live` packs and installs the exact package bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation, a real Codex path, browser evidence, and a safety-negative path. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
+`npm run smoke:live` packs and installs the exact package bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation through real model-backed operations, browser evidence, and a safety-negative path. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
 
 Live smoke is not a normal local test and must run only with explicit authorization. Release publication is owned by the GitHub release workflow after the release commit reaches `main`.

@@ -1,15 +1,14 @@
 import { createHash } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
-export const CONTAINMENT_CODEX_VERSION = '0.144.4' as const;
 export const CONTAINMENT_PLATFORM = 'darwin' as const;
 export const CONTAINMENT_SCHEMA = 'codex-orchestrator.containment' as const;
-const CERTIFICATE_FILE = `containment-codex-${CONTAINMENT_CODEX_VERSION}.json`;
+const CERTIFICATE_FILE = 'containment.json';
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_CERTIFICATE_BYTES = 1024 * 1024;
 const DENIED_TOOL_ENV_KEYS = [
@@ -43,7 +42,9 @@ export interface ContainmentProbeResultV2 {
 export interface ContainmentCertificateV2 {
   schema: typeof CONTAINMENT_SCHEMA;
   version: 2;
-  codexVersion: typeof CONTAINMENT_CODEX_VERSION;
+  codexVersion: string;
+  codexExecutablePath: string;
+  codexExecutableSha256: string;
   platform: typeof CONTAINMENT_PLATFORM;
   packageVersion: string;
   argvPolicySha256: string;
@@ -172,12 +173,18 @@ export function containmentArgvPolicySha256(): string {
 }
 
 export function createContainmentCertificate(input: {
+  codexVersion: string;
+  codexExecutablePath: string;
+  codexExecutableSha256: string;
   packageVersion: string;
   argvPolicySha256: string;
   root: ContainmentProbeResultV2;
   nativeChild: ContainmentProbeResultV2;
   completedAt: string;
 }): ContainmentCertificateV2 {
+  assertCodexVersion(input.codexVersion);
+  assertAbsolutePath(input.codexExecutablePath, 'codexExecutablePath');
+  assertSha256(input.codexExecutableSha256, 'codexExecutableSha256');
   assertNonEmptyString(input.packageVersion, 'packageVersion');
   assertSha256(input.argvPolicySha256, 'argvPolicySha256');
   validateProbeResult(input.root, 'root');
@@ -187,7 +194,9 @@ export function createContainmentCertificate(input: {
   const unsigned = {
     schema: CONTAINMENT_SCHEMA,
     version: 2 as const,
-    codexVersion: CONTAINMENT_CODEX_VERSION,
+    codexVersion: input.codexVersion,
+    codexExecutablePath: input.codexExecutablePath,
+    codexExecutableSha256: input.codexExecutableSha256,
     platform: CONTAINMENT_PLATFORM,
     packageVersion: input.packageVersion,
     argvPolicySha256: input.argvPolicySha256,
@@ -203,6 +212,8 @@ export function validateContainmentCertificate(value: unknown): ContainmentCerti
     'schema',
     'version',
     'codexVersion',
+    'codexExecutablePath',
+    'codexExecutableSha256',
     'platform',
     'packageVersion',
     'argvPolicySha256',
@@ -213,7 +224,9 @@ export function validateContainmentCertificate(value: unknown): ContainmentCerti
   ], 'containment certificate');
   if (value.schema !== CONTAINMENT_SCHEMA) throw new Error('invalid containment schema');
   if (value.version !== 2) throw new Error('invalid containment version');
-  if (value.codexVersion !== CONTAINMENT_CODEX_VERSION) throw new Error('invalid containment Codex version');
+  assertCodexVersion(value.codexVersion);
+  assertAbsolutePath(value.codexExecutablePath, 'codexExecutablePath');
+  assertSha256(value.codexExecutableSha256, 'codexExecutableSha256');
   if (value.platform !== CONTAINMENT_PLATFORM) throw new Error('invalid containment platform');
   assertNonEmptyString(value.packageVersion, 'packageVersion');
   assertSha256(value.argvPolicySha256, 'argvPolicySha256');
@@ -225,6 +238,8 @@ export function validateContainmentCertificate(value: unknown): ContainmentCerti
     schema: value.schema,
     version: value.version,
     codexVersion: value.codexVersion,
+    codexExecutablePath: value.codexExecutablePath,
+    codexExecutableSha256: value.codexExecutableSha256,
     platform: value.platform,
     packageVersion: value.packageVersion,
     argvPolicySha256: value.argvPolicySha256,
@@ -240,13 +255,26 @@ export function validateContainmentCertificate(value: unknown): ContainmentCerti
 
 export function assertContainmentCertificateMatchesRuntime(
   certificate: ContainmentCertificateV2,
-  runtime: { codexVersion: string; argvPolicySha256: string },
+  runtime: {
+    codexVersion: string;
+    codexExecutablePath: string;
+    codexExecutableSha256: string;
+    packageVersion: string;
+    argvPolicySha256: string;
+  },
 ): void {
   if (certificate.argvPolicySha256 !== runtime.argvPolicySha256) {
     throw new Error('containment argv policy mismatch');
   }
-  if (runtime.codexVersion !== `codex-cli ${certificate.codexVersion}`) {
+  if (runtime.codexVersion !== certificate.codexVersion) {
     throw new Error('Codex version does not match the containment certificate');
+  }
+  if (runtime.codexExecutablePath !== certificate.codexExecutablePath
+    || runtime.codexExecutableSha256 !== certificate.codexExecutableSha256) {
+    throw new Error('Codex executable does not match the containment certificate');
+  }
+  if (runtime.packageVersion !== certificate.packageVersion) {
+    throw new Error('orchestrator package version does not match the containment certificate');
   }
 }
 
@@ -266,7 +294,13 @@ export async function readContainmentCertificate(path: string): Promise<Containm
 
 export async function removeMatchingContainmentCertificate(
   path: string,
-  expected: { codexVersion: string; packageVersion: string; argvPolicySha256: string },
+  expected: {
+    codexVersion: string;
+    codexExecutablePath: string;
+    codexExecutableSha256: string;
+    packageVersion: string;
+    argvPolicySha256: string;
+  },
 ): Promise<void> {
   let certificate: ContainmentCertificateV2;
   try {
@@ -277,6 +311,8 @@ export async function removeMatchingContainmentCertificate(
   }
   if (
     certificate.codexVersion === expected.codexVersion
+    && certificate.codexExecutablePath === expected.codexExecutablePath
+    && certificate.codexExecutableSha256 === expected.codexExecutableSha256
     && certificate.packageVersion === expected.packageVersion
     && certificate.argvPolicySha256 === expected.argvPolicySha256
   ) {
@@ -343,6 +379,17 @@ function assertExactObject(value: unknown, expectedKeys: string[], field: string
 
 function assertNonEmptyString(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${field} must be a non-empty string`);
+}
+
+function assertAbsolutePath(value: unknown, field: string): asserts value is string {
+  assertNonEmptyString(value, field);
+  if (!isAbsolute(value) || resolve(value) !== value) throw new Error(`${field} must be a canonical absolute path`);
+}
+
+function assertCodexVersion(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !/^codex-cli \S+$/u.test(value)) {
+    throw new Error('codexVersion must be the exact installed Codex version');
+  }
 }
 
 function assertSha256(value: unknown, field: string): asserts value is string {
