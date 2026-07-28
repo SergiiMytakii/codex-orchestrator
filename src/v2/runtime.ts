@@ -994,6 +994,18 @@ export function createV2Runtime(input: {
           removeLabels: current.filter((label) => !labels.includes(label)),
         });
       },
+      transitionToBlocked: async (issueNumber, labels) => {
+        const current = await input.issues.getLabels(issueNumber);
+        if (current.includes(labels.review) || current.includes(labels.waitingHuman)) return;
+        const hasRunnerStatus = current.some((label) => (
+          label === labels.auto || label === labels.running || label === labels.blocked
+        ));
+        if (!hasRunnerStatus) return;
+        await input.issues.updateIssue(issueNumber, {
+          addLabels: current.includes(labels.blocked) ? [] : [labels.blocked],
+          removeLabels: current.includes(labels.running) ? [labels.running] : [],
+        });
+      },
       postComment: async (issueNumber, body) => { await input.issues.postComment(issueNumber, body); },
     },
     pullRequests: {

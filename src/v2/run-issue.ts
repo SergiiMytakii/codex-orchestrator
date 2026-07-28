@@ -135,6 +135,13 @@ export interface RunIssueDependencies {
   issues: {
     read(issueNumber: number): Promise<RunIssueSnapshot | undefined>;
     setLabels(issueNumber: number, labels: string[]): Promise<void>;
+    transitionToBlocked?(issueNumber: number, labels: {
+      auto: string;
+      running: string;
+      blocked: string;
+      review: string;
+      waitingHuman: string;
+    }): Promise<void>;
     postComment(issueNumber: number, body: string): Promise<void>;
   };
   pullRequests: {
@@ -931,6 +938,22 @@ export class RunIssue {
             active.record.intent.blockKind,
             active.record.intent.evidenceCode,
           );
+        }
+        if (active.record.intent?.kind === 'blocked-labels') {
+          return await this.publishBlockedTerminal(
+            active,
+            {
+              status: 'blocked',
+              kind: active.record.intent.blockKind,
+              resumable: active.record.intent.resumable,
+            },
+            active.record.intent.evidenceCode,
+          );
+        }
+        if (existing.terminalOutcome?.status === 'blocked'
+          && issue?.state === 'OPEN'
+          && blockedLabelProjection(issue.labels, config).status !== 'settled') {
+          return await this.reconcilePersistedBlockedTerminal(active, issue, existing.terminalOutcome);
         }
         if (existing.terminalOutcome) {
           if (existing.terminalOutcome.status !== 'review-ready') {
@@ -2562,6 +2585,113 @@ export class RunIssue {
         evidenceCode,
       );
     }
+    if (outcome.status === 'blocked') {
+      return this.publishBlockedTerminal(active, outcome, evidenceCode);
+    }
+    return this.persistTerminal(active, outcome, evidenceCode, retainIntent);
+  }
+
+  private async publishBlockedTerminal(
+    starting: ActiveRun,
+    outcome: Extract<TerminalSeed, { status: 'blocked' }>,
+    evidenceCode: string,
+  ): Promise<RunIssueResult> {
+    let active = starting;
+    const autoBlocked = [active.config.github.labels.auto.name, active.config.github.labels.blocked.name].sort();
+    const blockedOnly = [active.config.github.labels.blocked.name];
+    let expected = autoBlocked;
+    const existing = active.record.intent;
+    if (!existing) {
+      active = await this.persist(active, { intent: {
+        kind: 'blocked-labels',
+        issueNumber: active.record.issueNumber,
+        expected,
+        blockKind: outcome.kind,
+        resumable: outcome.resumable,
+        evidenceCode,
+      } });
+    } else if (existing.kind !== 'blocked-labels'
+      || existing.issueNumber !== active.record.issueNumber
+      || existing.blockKind !== outcome.kind
+      || existing.resumable !== outcome.resumable
+      || existing.evidenceCode !== evidenceCode) {
+      return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+    } else {
+      expected = existing.expected;
+      if (!sameStrings(expected, autoBlocked) && !sameStrings(expected, blockedOnly) && expected.length !== 0) {
+        return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+      }
+    }
+
+    let issue = await this.readIssue(active.record.issueNumber);
+    if (!issue) return this.invokedFailure(active, 'blocked-labels-issue-missing');
+    let projection = blockedLabelProjection(issue.labels, active.config);
+    if (issue.state === 'OPEN' && projection.status === 'transition') {
+      if (!this.dependencies.issues.transitionToBlocked) {
+        return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
+      }
+      try {
+        await this.dependencies.issues.transitionToBlocked(
+          active.record.issueNumber,
+          blockedLabelPolicy(active.config),
+        );
+      }
+      catch { return this.invokedFailure(active, 'blocked-labels-delivery-unknown'); }
+      issue = await this.readIssue(active.record.issueNumber);
+      projection = issue ? blockedLabelProjection(issue.labels, active.config) : { status: 'diverged' };
+    }
+    if (!issue) return this.invokedFailure(active, 'blocked-labels-observation-missing');
+    if (issue.state === 'OPEN') {
+      if (projection.status !== 'settled') {
+        return this.invokedFailure(active, 'blocked-labels-observation-diverged');
+      }
+      if (!sameStrings(expected, projection.expected)) {
+        expected = projection.expected;
+        const intent = active.record.intent;
+        if (intent?.kind !== 'blocked-labels') return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+        try {
+          active = await this.persist(active, { intent: { ...intent, expected } });
+        } catch {
+          throw new PostEffectStateError(active);
+        }
+      }
+    }
+    try {
+      return await this.persistTerminal(active, outcome, evidenceCode, false);
+    } catch {
+      throw new PostEffectStateError(active);
+    }
+  }
+
+  private async reconcilePersistedBlockedTerminal(
+    active: ActiveRun,
+    issue: RunIssueSnapshot,
+    outcome: Extract<RunTerminalOutcome, { status: 'blocked' }>,
+  ): Promise<RunIssueResult> {
+    if (!this.dependencies.issues.transitionToBlocked) {
+      return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
+    }
+    try {
+      await this.dependencies.issues.transitionToBlocked(
+        active.record.issueNumber,
+        blockedLabelPolicy(active.config),
+      );
+    }
+    catch { return this.invokedFailure(active, 'blocked-labels-delivery-unknown'); }
+    const observation = await this.readIssue(active.record.issueNumber);
+    if (!observation || observation.state !== 'OPEN'
+      || blockedLabelProjection(observation.labels, active.config).status !== 'settled') {
+      return this.invokedFailure(active, 'blocked-labels-observation-diverged');
+    }
+    return publicOutcome(outcome);
+  }
+
+  private async persistTerminal(
+    active: ActiveRun,
+    outcome: TerminalSeed,
+    evidenceCode: string,
+    retainIntent: boolean,
+  ): Promise<RunIssueResult> {
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: evidenceCode, summary: outcome.status });
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
     const changes: Partial<RunRecordV1> & { intent?: PublicationIntent | undefined } = {
@@ -2835,6 +2965,37 @@ function sameStrings(left: string[], right: string[]): boolean {
   const a = [...left].sort();
   const b = [...right].sort();
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function blockedLabelPolicy(config: AgentAutoConfig): {
+  auto: string;
+  running: string;
+  blocked: string;
+  review: string;
+  waitingHuman: string;
+} {
+  return {
+    auto: config.github.labels.auto.name,
+    running: config.github.labels.running.name,
+    blocked: config.github.labels.blocked.name,
+    review: config.github.labels.review.name,
+    waitingHuman: config.github.labels.waitingHuman.name,
+  };
+}
+
+function blockedLabelProjection(
+  labels: string[],
+  config: AgentAutoConfig,
+): { status: 'settled'; expected: string[] } | { status: 'transition' | 'diverged' } {
+  const policy = blockedLabelPolicy(config);
+  const present = new Set(labels);
+  if (present.has(policy.review) || present.has(policy.waitingHuman)) return { status: 'diverged' };
+  const auto = present.has(policy.auto);
+  const running = present.has(policy.running);
+  const blocked = present.has(policy.blocked);
+  if (running || (auto && !blocked)) return { status: 'transition' };
+  if (blocked) return { status: 'settled', expected: auto ? [policy.auto, policy.blocked].sort() : [policy.blocked] };
+  return { status: 'settled', expected: [] };
 }
 
 function sameCheckPolicy(checks: RunRecordV1['checks'], policy: Record<string, string>): boolean {

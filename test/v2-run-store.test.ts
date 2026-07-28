@@ -109,6 +109,30 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
   }
 });
 
+test('run state round-trips the durable blocked-label publication intent exactly', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const active = {
+    ...record(),
+    intent: {
+      kind: 'blocked-labels' as const,
+      issueNumber: 42,
+      expected: ['agent:auto', 'agent:blocked'],
+      blockKind: 'external' as const,
+      resumable: true,
+      evidenceCode: 'proof-external-block',
+    },
+  };
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  await writer.compareAndSwap(0, body([active]));
+  assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0]?.intent, active.intent);
+
+  const invalid = structuredClone(active) as RunRecordV1;
+  (invalid.intent as { blockKind: string }).blockKind = 'unknown';
+  const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+  await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /blockKind/u);
+});
+
 
 test('run store persists exact triaging and routed state', async () => {
   const generationHash = record().workflowGeneration.generationHash;

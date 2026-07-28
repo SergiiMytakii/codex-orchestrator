@@ -958,6 +958,117 @@ test('the fifth failed implementation cycle exhausts without publication', async
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 5);
 });
 
+test('ordinary external safety and exhausted terminals publish the blocked issue status', async () => {
+  const cases: Array<{ name: string; options: FixtureOptions; kind: 'external' | 'safety' | 'exhausted' }> = [
+    {
+      name: 'external proof blocker',
+      options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }) },
+      kind: 'external',
+    },
+    { name: 'safety blocker', options: { agentCommit: true }, kind: 'safety' },
+    { name: 'exhausted checks', options: { check: async () => ({ status: 'failed', output: Buffer.from('still failing') }) }, kind: 'exhausted' },
+  ];
+  for (const entry of cases) {
+    const fixture = await runFixture(entry.options);
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: entry.kind }, entry.name);
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked'], entry.name);
+  }
+});
+
+test('blocked label delivery resumes from its durable intent without rerunning work', async () => {
+  const fixture = await runFixture({
+    rejectEffect: 'labels',
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+});
+
+test('blocked label delivery survives a crash after the remote effect without duplicating work or labels', async () => {
+  const fixture = await runFixture({
+    rejectStoreEvent: 'state:blocked:none',
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+  const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
+});
+
+test('blocked terminal replay repairs a stale running label without rerunning work', async () => {
+  const fixture = await runFixture({
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+  const cases = [
+    { before: ['agent:auto', 'agent:running'], after: ['agent:auto', 'agent:blocked'] },
+    { before: ['manual:keep', 'agent:auto', 'agent:running', 'agent:blocked'], after: ['agent:auto', 'agent:blocked', 'manual:keep'] },
+    { before: ['manual:keep', 'agent:running', 'agent:blocked'], after: ['agent:blocked', 'manual:keep'] },
+  ];
+  for (const entry of cases) {
+    await fixture.dependencies.issues.setLabels(42, entry.before);
+    const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(
+      pick(replayed, ['status', 'kind']),
+      { status: 'blocked', kind: 'external' },
+      `${JSON.stringify(await fixture.store.read())}\n${fixture.events.join('\n')}`,
+    );
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, entry.after);
+    assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  }
+});
+
+test('blocked transition preserves concurrent labels and never restores revoked authorization', async () => {
+  for (const entry of [
+    { concurrent: ['manual:keep', 'agent:running'], expected: ['agent:blocked', 'manual:keep'] },
+    { concurrent: ['manual:keep'], expected: ['manual:keep'] },
+  ]) {
+    const fixture = await runFixture({
+      blockedTransitionLabels: entry.concurrent,
+      proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+    });
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, entry.expected);
+  }
+});
+
+test('blocked transition resumes when the post-effect projection write fails', async () => {
+  const fixture = await runFixture({
+    blockedTransitionLabels: ['agent:running'],
+    rejectStoreEvent: 'state:proving:blocked-labels',
+    rejectStoreOccurrence: 2,
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked']);
+  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+  const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
+});
+
 test('malformed report repair and clean transport retry use separate budgets without consuming a cycle', async () => {
   const malformed = await runFixture({
     implementationResults: [
@@ -1255,6 +1366,7 @@ interface FixtureOptions {
   routeSequence?: Array<'direct' | 'awaiting-user' | 'spec-required'>;
   trustedAnswerOnReplay?: boolean;
   initialLabels?: string[];
+  blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
   agentCommit?: boolean;
   baselineCheck?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
@@ -1331,6 +1443,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const localGit = new LocalGitRunIssueAdapter();
   const git = traceGit(localGit, events, options);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
+  let blockedTransitionMutated = false;
   let nextCommentId = 1;
   let comments: Array<{
     id?: string;
@@ -1385,6 +1498,18 @@ async function runFixture(options: FixtureOptions = {}) {
         if (claim && shouldReject('claim-labels')) throw new Error('claim labels rejected');
         if (!claim && shouldReject('labels')) throw new Error('labels rejected');
         labels = [...next];
+      },
+      transitionToBlocked: async (_issueNumber, policy) => {
+        events.push('effect:terminal-labels');
+        if (shouldReject('labels')) throw new Error('labels rejected');
+        if (!blockedTransitionMutated && options.blockedTransitionLabels) {
+          blockedTransitionMutated = true;
+          labels = [...options.blockedTransitionLabels];
+        }
+        if (labels.includes(policy.review) || labels.includes(policy.waitingHuman)) return;
+        if (!labels.some((label) => label === policy.auto || label === policy.running || label === policy.blocked)) return;
+        labels = labels.filter((label) => label !== policy.running);
+        if (!labels.includes(policy.blocked)) labels.push(policy.blocked);
       },
       postComment: async (_issueNumber, body) => {
         const claim = body.split('\n')[0]?.endsWith(':claim -->') ?? false;

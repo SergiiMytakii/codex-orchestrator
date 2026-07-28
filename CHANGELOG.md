@@ -7,6 +7,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Changed
+- Blocked terminal outcomes now durably reconcile GitHub issue status before
+  completion. Recovery removes stale `agent:running`, preserves unrelated
+  labels, never restores revoked `agent:auto` authorization, and resumes safely
+  after remote-effect or state-write interruption without rerunning work.
 - Code-review coverage is now descriptive instead of byte-correlated. Closure
   normalizes outcome order, preserves stable defect identity across paraphrased
   prose, gives each target revision four report-only repairs, and can safely

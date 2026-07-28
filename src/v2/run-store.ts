@@ -47,6 +47,14 @@ export type PublicationIntent =
   | { kind: 'pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
   | { kind: 'comment'; issueNumber: number; marker: string; bodySha256: string }
   | { kind: 'labels'; issueNumber: number; expected: string[] }
+  | {
+    kind: 'blocked-labels';
+    issueNumber: number;
+    expected: string[];
+    blockKind: 'external' | 'safety' | 'exhausted';
+    resumable: boolean;
+    evidenceCode: string;
+  }
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
   | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string }
   | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
@@ -544,6 +552,13 @@ function validateIntent(value: unknown, field: string): void {
     assertSha256(value.batchId, `${field}.batchId`);
     validateStringArray(value.expected, `${field}.expected`);
     if (value.blockKind !== 'safety' && value.blockKind !== 'exhausted') throw new Error(`${field}.blockKind is invalid`);
+    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
+  } else if (kind === 'blocked-labels') {
+    assertExactObject(value, ['kind', 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    validateStringArray(value.expected, `${field}.expected`);
+    if (!['external', 'safety', 'exhausted'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
+    if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else {
     throw new Error(`${field}.kind is invalid`);
