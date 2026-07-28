@@ -18,9 +18,15 @@ Use the spec's `review_profile`; if absent, infer it from current evidence:
 
 - `simple`: narrow change with direct proof;
 - `medium`: default for ordinary implementation;
-- `high`: material failure consequence plus an uncertainty amplifier.
+- `high`: material failure consequence (financial side effect,
+  unauthorized/cross-owner behavior, durable corruption, or materially false
+  production result) plus an uncertainty amplifier (concurrency or event
+  ordering, delayed/background callbacks, retry/idempotency/recovery,
+  ownership transitions, or shared state across consumers).
 
 Implementation evidence may raise but never lower the approved profile.
+Recheck the settled diff immediately before the first reviewer launch and
+persist any required raise before launching reviewers.
 
 ## Default Review Shape
 

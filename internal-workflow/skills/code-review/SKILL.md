@@ -7,6 +7,13 @@ description: "Evidence-first review of code, PRs, commits, regressions, or revie
 
 This skill performs evidence-based code review. It is not a style pass and not a summary. Treat the change as potentially wrong until independent review tracks fail to break it.
 
+Passing tests, test names, checklists, and implementation reports are inputs,
+not proof. For each material behavior, trace the production path before reading
+its tests, attempt one concrete violating sequence, then verify that the exact
+setup, actions, and assertions reject it. If a fake bypasses the claimed
+boundary or the test stays green, report a finding or verification gap; do not
+approve nominal coverage.
+
 The review always covers two lenses:
 
 - **Correctness reviewer**: bugs, regressions, runtime behavior, security, contracts, caches, concurrency, framework rules, and failure paths.
@@ -50,7 +57,9 @@ When this skill is called from `$spec-implementer`:
 
 - read `../spec-implementer/references/review-loop.md` and the persisted
   `## Implementation Review State`
-- accept the scheduled mode, session, revision, and lenses from that state
+- recheck the scheduled profile against the settled diff; return an
+  underclassified profile to the executor before launching reviewers
+- accept the scheduled mode, session, revision, and lenses after that check
 - pin the target and give reviewers the owner-defined capsule
 - return the usable result and stable defect updates to the executor
 - keep cleanup findings in the spec/standards lineage and canonical Defect Ledger
@@ -189,8 +198,11 @@ The coordinator must not blindly relay reviewer output.
 4. Reclassify severity/confidence using `../../docs/agents/confidence-rubric.md` if evidence does not support the label.
 5. For real contract defects that pass the ledger gate, identify the missing or inadequate invariant when TDD/spec evidence is available.
 6. Confirm every mandatory `Review Focus` item and mandatory delta lens was reviewed; if not, report the unverified item as a verification gap.
-7. Decide whether auto-fix is allowed.
-8. Run the narrowest meaningful verification after any fix.
+7. Confirm that mandatory behavior evidence rejects the concrete violating
+   sequence attempted by the reviewer. Evidence that bypasses its claimed
+   production boundary invalidates that Full coverage.
+8. Decide whether auto-fix is allowed.
+9. Run the narrowest meaningful verification after any fix.
 
 Keep the two axes visible in your own notes, but present the final report by severity unless the user explicitly asked for side-by-side Standards/Spec output.
 
