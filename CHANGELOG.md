@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.6] - 2026-07-28
+
 ### Changed
 - Bound GitHub issue comments to the 16,384-code-unit persisted run-state
   contract on both read and write, with an explicit truncation marker and
