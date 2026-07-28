@@ -15,6 +15,21 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   target configuration is corrected, and bounded local evidence retains the
   underlying Git diagnostic instead of collapsing it into a terminal
   `local-git-effect-failed`.
+- Preserve valid claim markers that predate a new run as ID-bound audit history
+  while continuing to block malformed, duplicate-current, replaced-history, and
+  newly competing claim authority before triage, implementation, or publication
+  effects; safely retain pre-upgrade snapshots through GitHub timestamps and
+  refresh ordinary issue comments immediately before triage.
+- Move Android Acceptance Proof device authority into the trusted Runner. A
+  configured run now starts its own selected AVD with clean ephemeral data,
+  owns the durable lease outside the contained worktree sandbox, builds and
+  launches the app, waits for configured accessibility-label navigation,
+  captures PID-bound visual evidence (including blocked navigation), and stops
+  only its own emulator and removes its own data after terminal settlement.
+  Preparation is durably fenced before emulator startup, the installed APK is
+  an exact Runner-owned snapshot, process identity and artifact digests are
+  revalidated across the workflow, and Android infrastructure failure is
+  retained as a non-blocking unfinished-UI-proof warning.
 
 ## [2.0.5] - 2026-07-28
 

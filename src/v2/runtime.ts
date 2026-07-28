@@ -12,6 +12,7 @@ import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
 import type { ReviewFeedbackImplementationInvocationV1 } from './review-feedback.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
+import { RunnerAndroidProofController } from './android-proof-runner.js';
 import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
@@ -419,13 +420,6 @@ export class ContainedProofAgent implements ProofAgent {
     });
     const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
     const snapshotRoot = dirname(attempt.sourceSkillPath ?? attempt.operationPath);
-    const androidLeaseRoot = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(canonicalRepository),
-      'leases',
-    );
-    const androidLeaseArtifact = join(artifactRoot, input.proofId, 'android-lease.json');
     const iosLeaseRoot = join(
       resolve(this.dependencies.orchestratorHome),
       'v2',
@@ -458,12 +452,14 @@ export class ContainedProofAgent implements ProofAgent {
           `Write evidence only below ${config.proof.artifactDir}.`,
           'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
           'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
-          `Android lease helper: ${join(snapshotRoot, 'tools', 'android-lease.mjs')}.`,
-          `Android lease root: ${androidLeaseRoot}.`,
-          `Android lease artifact: ${androidLeaseArtifact}.`,
-          `Android lease proof ID: ${input.proofId}.`,
-          `Android lease owner PID: ${process.pid}.`,
-          `Android adb path: ${this.dependencies.androidAdbPath}.`,
+          ...(config.proof.android ? [
+            `Runner-owned Android artifact paths: ${canonicalJson(input.runnerPreparedArtifactPaths)}.`,
+            `Runner-owned Android preparation warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
+            'The trusted Runner owns emulator, build, adb, lease, capture, and cleanup actions. Do not invoke adb, emulator, Flutter run, or an Android lease helper.',
+            'Inspect Runner artifacts when present. If preparation warnings are present, continue with all available non-visual evidence and preserve the warning as a residual risk; Android infrastructure failure alone must not block delivery.',
+          ] : [
+            'Runner-owned Android proof is not configured for this repository. Do not invoke adb, emulator, Flutter run, or an Android lease helper; return a typed tool blocker for Android criteria.',
+          ]),
           'When a frozen criterion has an iOS surface, follow references/ios.md from the exact acceptance-proof skill snapshot.',
           `iOS lease helper: ${join(snapshotRoot, 'tools', 'ios-lease.mjs')}.`,
           `iOS lease root: ${iosLeaseRoot}.`,
@@ -583,6 +579,7 @@ export function createV2Runtime(input: {
     ?? (process.env.ANDROID_SDK_ROOT ? join(process.env.ANDROID_SDK_ROOT, 'platform-tools', 'adb') : undefined)
     ?? join(homedir(), 'Library', 'Android', 'sdk', 'platform-tools', 'adb');
   const androidAdbPath = resolve(configuredAndroidAdbPath);
+  const androidEmulatorPath = join(dirname(dirname(androidAdbPath)), 'emulator', 'emulator');
   const iosXcrunPath = resolve(input.iosXcrunPath ?? '/usr/bin/xcrun');
   const containedDependencies = () => ({
     config: () => requireConfig(currentConfig),
@@ -604,6 +601,12 @@ export function createV2Runtime(input: {
     androidAdbPath,
     iosXcrunPath,
     processExecutor: commandExecutor,
+  });
+  const androidProofController = new RunnerAndroidProofController({
+    adbPath: androidAdbPath,
+    emulatorPath: androidEmulatorPath,
+    execute: commandExecutor,
+    now: () => new Date(now()),
   });
   const reportOperation = new InjectedContainedReportOperation({
     prepare: async ({ operation, attemptId, runId, workflowGeneration }) => ({
@@ -884,6 +887,7 @@ export function createV2Runtime(input: {
         worktreeRoot: worktreePath,
         now: () => new Date(now()),
         artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/android-lease.json`,
+        targetController: androidProofController,
       });
       const iosLease = new FileIosLeaseVerifier({
         leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
@@ -913,7 +917,43 @@ export function createV2Runtime(input: {
         now,
         signal: controller.signal,
       });
-      return acceptanceProof.proveChange(proofInput);
+      const androidRelevant = !!config.proof.android && isAndroidProofRelevant(
+        proofInput.issue,
+        proofInput.frozenCriteria,
+        checked.payload.changedFiles,
+      );
+      const runnerPreparedArtifactPaths: string[] = [];
+      const runnerPreparedArtifactSha256: Record<string, string> = {};
+      const runnerPreparationWarnings: string[] = [];
+      let preparationAttempted = false;
+      return acceptanceProof.proveChange({
+        ...proofInput,
+        runnerPreparedArtifactPaths,
+        runnerPreparedArtifactSha256,
+        runnerPreparationWarnings,
+        beforeAgentLaunch: async () => {
+          await proofInput.beforeAgentLaunch?.();
+          if (!androidRelevant || preparationAttempted) return;
+          preparationAttempted = true;
+          const prepared = await androidProofController.prepare({
+            proofId: proofInput.proofId,
+            worktreePath,
+            artifactDir: config.proof.artifactDir,
+            leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
+            config: config.proof.android!,
+            checks: checked.payload.checks,
+            checkedChangeSha256: checked.checkedChangeSha256,
+            proofAgentBudgetMs: config.codex.timeoutMs * 3,
+            signal: controller.signal,
+          });
+          if (prepared.status === 'prepared') {
+            runnerPreparedArtifactPaths.splice(0, runnerPreparedArtifactPaths.length, ...prepared.runnerPreparedArtifactPaths);
+            Object.assign(runnerPreparedArtifactSha256, prepared.runnerPreparedArtifactSha256);
+          } else {
+            runnerPreparationWarnings.push(`Android UI proof unfinished: ${prepared.summary}`);
+          }
+        },
+      });
     },
   };
   const runner = new RunIssue({
@@ -955,7 +995,13 @@ export function createV2Runtime(input: {
           url: issue.url,
           state: 'OPEN',
           labels: issue.labels.map((label) => label.name).sort(),
-          comments: comments.map((comment) => ({ body: comment.body, authorAssociation: comment.authorAssociation })),
+          comments: comments.map((comment) => ({
+            id: comment.id,
+            body: comment.body,
+            authorAssociation: comment.authorAssociation,
+            createdAt: comment.createdAt,
+            updatedAt: comment.updatedAt,
+          })),
         };
       },
       setLabels: async (issueNumber, labels) => {
@@ -1529,6 +1575,11 @@ async function scrubReportReadView(directory: string): Promise<void> {
       await rm(path, { recursive: true, force: true });
     }
   }
+}
+
+function isAndroidProofRelevant(issue: IssueSnapshot, criteria: FrozenCriterion[], changedFiles: string[]): boolean {
+  return /\bandroid\b/iu.test([issue.title, issue.body, ...criteria.map((criterion) => criterion.text)].join('\n'))
+    || changedFiles.some((path) => /^(?:android\/|lib\/|assets\/|fonts\/|pubspec\.(?:yaml|lock)$)/u.test(path));
 }
 
 function isErrorCode(error: unknown, code: string): boolean {

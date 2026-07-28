@@ -145,15 +145,23 @@ async function resultFromReady<TOwner extends ImmutableWorkflowOwner, TReady ext
 async function leafOwner<TOwner extends ImmutableWorkflowOwner, TReady extends ReadyRecord, TContent, TResult>(
   input: Parameters<typeof publishImmutableWorkflow<TOwner, TReady, TContent, TResult>>[0],
 ): Promise<TOwner> {
+  return (await ownerChain(input)).at(-1)!;
+}
+
+async function ownerChain<TOwner extends ImmutableWorkflowOwner, TReady extends ReadyRecord, TContent, TResult>(
+  input: Parameters<typeof publishImmutableWorkflow<TOwner, TReady, TContent, TResult>>[0],
+): Promise<TOwner[]> {
   let owner = input.parseOwner(JSON.parse((await input.readControl(join(input.parent, `${input.identity}.claim`))).toString('utf8')));
+  const owners = [owner];
   const seen = new Set([owner.token]);
   while (await exists(join(input.parent, `${input.identity}.recovery.${owner.token}`))) {
     const next = input.parseOwner(JSON.parse((await input.readControl(join(input.parent, `${input.identity}.recovery.${owner.token}`))).toString('utf8')));
     if (next.parentToken !== owner.token || seen.has(next.token)) throw new Error(input.recoveryChainError);
     owner = next;
+    owners.push(owner);
     seen.add(owner.token);
   }
-  return owner;
+  return owners;
 }
 
 async function tryLinkRecord<TOwner extends ImmutableWorkflowOwner, TReady extends ReadyRecord, TContent, TResult>(

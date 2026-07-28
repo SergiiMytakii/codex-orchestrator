@@ -43,15 +43,27 @@ A standalone reviewer performs one bounded Full over all applicable lenses and
 returns only `Approved | Needs Work | Rejected`; it does not invent owner state
 or claim Closure.
 
+## Minimum Solution First
+
+Begin every Full review with the evidence-backed scope delta, before checking whether the proposed implementation is detailed enough:
+
+1. Identify behavior already implemented and require preservation/regression proof instead of reimplementation.
+2. Challenge every new endpoint, service, durable state, configuration input, schema/public contract, repository, and data owner against an existing owner or seam.
+3. Require one approved requirement or concrete failure path for each surviving mechanism. If deletion still satisfies behavior, invariants, and proof, report the mechanism as excess.
+4. Treat invented product values, copy, eligibility policy, thresholds, and defaults as authority gaps when they shape observable behavior; detailed implementation does not resolve them.
+
+Prefer the smallest repair in this order: delete excess, reuse an existing owner/seam, narrowly extend an existing contract, then add a new mechanism only when the earlier options cannot satisfy a named invariant.
+
 ## Review Lenses
 
 Scale depth to the profile and inspect only applicable lenses:
 
 - **Determinism and evidence:** execution-critical paths, symbols, commands,
   contracts, fixtures, and claims are confirmed rather than invented.
-- **Scope and minimum solution:** the spec preserves approved scope, uses
-  existing owners/seams, and ties every added mechanism to a requirement or
-  concrete failure path.
+- **Scope and minimum solution:** the spec preserves approved scope,
+  distinguishes `preserve + regression proof` from new work, uses existing
+  owners/seams, and ties every added mechanism to a requirement or concrete
+  failure path.
 - **Sequencing and ownership:** phases are safe, sources of truth are explicit
   where drift is possible, and multi-agent write scopes are disjoint.
 - **Validation:** each behavior has an observable proof; contract-risk work maps
@@ -80,6 +92,8 @@ ceremony is not.
 Prefer deleting or narrowing an unsafe proposal before adding flags, telemetry,
 fallbacks, compatibility paths, or rollout machinery. Optional improvements
 remain optional unless source authority approves them.
+
+Do not approve a duplicate public seam merely because it is internally consistent. Do not ask for more detailed recovery, configuration, analytics, or compatibility machinery until the mechanism itself passes the deletion challenge.
 
 ## Defects And Decision
 

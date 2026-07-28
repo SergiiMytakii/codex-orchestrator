@@ -105,6 +105,43 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
 });
 
+test('V2 accepts a strict optional Runner-owned Android proof recipe and rejects unsafe recipes', () => {
+  const android = {
+    applicationId: 'ai.levantem.sirbro',
+    avdName: 'Pixel_9_API_Baklava',
+    flutterCommand: '/Users/example/fvm/flutter',
+    buildArgs: ['build', 'apk', '--debug', '--flavor', 'sirbro'],
+    apkPath: 'build/app/outputs/flutter-apk/app-sirbro-debug.apk',
+    tapText: ['Live'],
+    bootTimeoutMs: 180_000,
+    navigationTimeoutMs: 60_000,
+    settleMs: 5_000,
+  };
+  assert.deepEqual(parseAgentAutoConfig({
+    ...validConfig(), proof: { ...validConfig().proof, android },
+  }).proof.android, android);
+  for (const invalid of [
+    { ...android, applicationId: 'not-an-app-id' },
+    { ...android, avdName: '../foreign' },
+    { ...android, flutterCommand: 'flutter' },
+    { ...android, buildArgs: [] },
+    { ...android, buildArgs: ['doctor'] },
+    { ...android, buildArgs: ['build', 'appbundle'] },
+    { ...android, buildArgs: [...android.buildArgs, '--dart-define=TOKEN=secret'] },
+    { ...android, apkPath: '../app.apk' },
+    { ...android, launchUri: 'https://user:password@example.com/trades' },
+    { ...android, launchUri: 'sirbro://trades?code=magic-link-secret' },
+    { ...android, tapText: [] },
+    { ...android, tapText: [''] },
+    { ...android, navigationTimeoutMs: 120_001 },
+    { ...android, unknown: true },
+  ]) {
+    assert.throws(() => parseAgentAutoConfig({
+      ...validConfig(), proof: { ...validConfig().proof, android: invalid },
+    }));
+  }
+});
+
 test('CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },

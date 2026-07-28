@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../src/v2/acceptance-proof.js';
-import { createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
+import { checkedChangePayloadSha256, createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
 import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
@@ -44,6 +44,43 @@ test('AcceptanceProof verifies and releases Android ownership while returning on
   for (const forbidden of ['emulator-5580', 'dev.codex.proof', 'lease-token', '4242', 'lease.json', 'proofs/proof-android']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test('AcceptanceProof accepts current Runner-prepared Android artifacts without requiring the contained worker to rewrite them', async () => {
+  const lease: AndroidLeaseVerifier = { verify: async () => {}, release: async () => {} };
+  const prepared = [
+    'proofs/proof-android/final.png',
+    'proofs/proof-android/final.xml',
+    'proofs/proof-android/logcat.txt',
+    'proofs/proof-android/lease.json',
+    'proofs/proof-android/android-runner-receipt.json',
+  ];
+  assert.equal((await runAcceptanceFixture({ lease, runnerPreparedArtifactPaths: prepared })).status, 'passed');
+  assert.equal((await runAcceptanceFixture({
+    lease,
+    runnerPreparedArtifactPaths: prepared,
+    mutateBytesAfterDigest: (bytes) => bytes.set('proofs/proof-android/final.xml', Buffer.from('<hierarchy tampered="true" />\n')),
+  })).status, 'internal-error');
+  assert.equal((await runAcceptanceFixture({
+    lease,
+    runnerPreparedArtifactPaths: prepared,
+    omitRunnerReceiptFromReport: true,
+  })).status, 'internal-error');
+  assert.equal((await runAcceptanceFixture({
+    lease,
+    runnerPreparedArtifactPaths: [...prepared, '../foreign.png'],
+  })).status, 'internal-error');
+});
+
+test('AcceptanceProof persists an unfinished Android UI warning even when the worker omits it', async () => {
+  const warning = 'Android UI proof unfinished: emulator boot timed out.';
+  const result = await runAcceptanceFixture({ runnerPreparationWarnings: [warning] });
+  assert.equal(result.status, 'passed');
+  assert.match(result.receipt.summary, /passed with warning/iu);
+  assert.match(result.receipt.summary, /emulator boot timed out/iu);
+  const saturated = await runAcceptanceFixture({ runnerPreparationWarnings: [warning], residualRiskCount: 256 });
+  assert.equal(saturated.status, 'passed');
+  assert.match(saturated.receipt.summary, /emulator boot timed out/iu);
 });
 
 test('AcceptanceProof fails closed when Android lease verification is absent or rejects ownership', async () => {
@@ -106,6 +143,7 @@ function androidReport(): unknown {
       artifact('android-tree', 'ui-hierarchy', 'proofs/proof-android/final.xml', false),
       artifact('android-log', 'device-log', 'proofs/proof-android/logcat.txt', false),
       artifact('android-lease', 'lease-record', 'proofs/proof-android/lease.json', false),
+      artifact('android-runner-receipt', 'generated-file', 'proofs/proof-android/android-runner-receipt.json', false),
     ],
     visualEvidence: {
       workflow: {
@@ -140,12 +178,30 @@ function artifact(id: string, kind: string, relativePath: string, publishable: b
 async function runAcceptanceFixture(input: {
   lease?: AndroidLeaseVerifier;
   mutateBytes?: (bytes: Map<string, Buffer>) => void;
+  mutateBytesAfterDigest?: (bytes: Map<string, Buffer>) => void;
   mutateMetadata?: (metadata: Map<string, string>) => void;
   malformedFirstReport?: boolean;
+  runnerPreparedArtifactPaths?: string[];
+  omitRunnerReceiptFromReport?: boolean;
+  runnerPreparationWarnings?: string[];
+  residualRiskCount?: number;
 }) {
   const capabilities = createCheckedChangeCapabilities();
   const payload = checkedPayload();
   const report = androidReport() as ProofReportV1;
+  if (input.runnerPreparationWarnings?.length && !input.runnerPreparedArtifactPaths) {
+    report.decision = { mode: 'non-visual', targets: [] };
+    report.checks = payload.checks.map((check) => ({ ...check, summary: 'Configured check passed.' }));
+    report.criteria = report.criteria.map((criterion) => ({
+      ...criterion, surfaces: ['non-visual'], evidenceRefs: [payload.checks[0]!.id],
+    }));
+    report.artifacts = [];
+    delete report.visualEvidence;
+  }
+  if (input.residualRiskCount) report.residualRisks = Array.from({ length: input.residualRiskCount }, (_, index) => `risk-${index}`);
+  if (input.omitRunnerReceiptFromReport) {
+    report.artifacts = report.artifacts.filter((item) => !item.relativePath.endsWith('/android-runner-receipt.json'));
+  }
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   const leaseRecord = {
     schema: 'codex-orchestrator.android-lease', version: 1, status: 'active', proofId: 'proof-android',
@@ -157,8 +213,23 @@ async function runAcceptanceFixture(input: {
     ['proofs/proof-android/final.xml', Buffer.from('<hierarchy><node text="Android proof ready" /></hierarchy>\n')],
     ['proofs/proof-android/logcat.txt', Buffer.from('I/flutter: Android proof ready\n')],
     ['proofs/proof-android/lease.json', Buffer.from(`${canonicalJson(leaseRecord)}\n`)],
+    ['proofs/proof-android/android-runner-receipt.json', Buffer.from(`${canonicalJson({
+      schema: 'codex-orchestrator.runner-android-proof', version: 1, status: 'prepared', proofId: 'proof-android',
+      configuredCheckIds: payload.checks.map((check) => check.id), buildOutputSha256: '7'.repeat(64),
+      checkedChangeSha256: checkedChangePayloadSha256(payload), apkSha256: '8'.repeat(64),
+      artifactRefs: [
+        'proofs/proof-android/final.png', 'proofs/proof-android/final.xml',
+        'proofs/proof-android/logcat.txt', 'proofs/proof-android/lease.json',
+      ],
+      navigation: { launchUriConfigured: false, tapText: ['Live'] },
+      capturedAt: '2026-07-16T12:00:01.000Z',
+    })}\n`)],
   ]);
   input.mutateBytes?.(bytes);
+  const runnerPreparedArtifactSha256 = input.runnerPreparedArtifactPaths
+    ? Object.fromEntries(input.runnerPreparedArtifactPaths.map((path) => [path, sha256(bytes.get(path) ?? Buffer.alloc(0))]))
+    : undefined;
+  input.mutateBytesAfterDigest?.(bytes);
   const metadata = new Map(report.artifacts.map((artifact) => [artifact.relativePath, '2026-07-16T12:00:01.000Z']));
   input.mutateMetadata?.(metadata);
   for (const reportArtifact of report.artifacts) reportArtifact.sha256 = sha256(bytes.get(reportArtifact.relativePath)!);
@@ -177,7 +248,9 @@ async function runAcceptanceFixture(input: {
         return {
           kind: 'report' as const,
           report,
-          proofPhaseChangedFiles: input.malformedFirstReport ? [] : report.artifacts.map((item) => item.relativePath),
+          proofPhaseChangedFiles: input.runnerPreparedArtifactPaths
+            ? []
+            : input.malformedFirstReport ? [] : report.artifacts.map((item) => item.relativePath),
         };
       },
     },
@@ -201,7 +274,12 @@ async function runAcceptanceFixture(input: {
     url: 'https://example.invalid/issues/88', state: 'OPEN', labels: ['agent:auto'],
   };
   const criteria: FrozenCriterion[] = [{ id: 'ac-android', order: 1, source: 'explicit', text: 'Android ready state is visible.' }];
-  return proof.proveChange({ proofId: 'proof-android', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+  return proof.proveChange({
+    proofId: 'proof-android', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload),
+    runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths,
+    runnerPreparedArtifactSha256,
+    runnerPreparationWarnings: input.runnerPreparationWarnings,
+  });
 }
 
 function checkedPayload(): CheckedChangePayloadV1 {

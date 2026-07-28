@@ -31,6 +31,8 @@ spec revision, and mandatory external evidence. Save a useful blocked spec when
 a product or contract decision is missing; do not launch review to discover a
 known authority gap.
 
+Require an evidence-backed scope delta before review: approved behavior, current capability/owner/seam, and the smallest remaining implementation delta for each material requirement. Already implemented behavior is preservation/regression scope. Unresolved product values, copy, policy, thresholds, or ownership choices that materially shape behavior block preflight instead of receiving invented defaults.
+
 `medium` is the default. Use:
 
 - `simple` for one narrow owner with direct proof and no material uncertainty;
@@ -50,9 +52,12 @@ authorize flags, telemetry, compatibility paths, generic fallbacks, or rollout
 machinery unless the source or a concrete failure requires them.
 
 Give each reviewer a bounded capsule containing the current spec, authority,
-approved scope, evidence, review question, assigned lenses, and current defect
-records. For Closure also include the repaired sections and affected contracts.
-Do not pass raw parent history or unrelated inventories.
+approved scope, scope delta, current owners/seams, evidence, review question,
+assigned lenses, and current defect records. Name behavior that already exists
+and the justification for every proposed new endpoint, service, durable state,
+configuration input, schema/public contract, repository, or data owner. For
+Closure also include the repaired sections, affected contracts, and repair
+complexity delta. Do not pass raw parent history or unrelated inventories.
 
 ## Topology
 
@@ -63,13 +68,32 @@ Do not pass raw parent history or unrelated inventories.
 
 Root launches and aggregates reviewers. A reviewer child runs the
 `implementation-spec-review` Adapter inline and never spawns another reviewer.
-Reuse valid coverage for the same revision and question.
+Reuse valid coverage for the same revision and question. Parallel high-profile
+reviewers are one Full review round, not sequential rounds.
 
 After one consolidated repair, coordinator verification is enough for ordinary
 medium/low findings. Use shared-protocol Closure only for critical/high defects,
 protected trust/data/concurrency/shared-contract impact, or invalidated
-mandatory coverage. A substantive rewrite gets a new Full only when it
-invalidates existing mandatory lenses.
+mandatory coverage.
+
+The default budget is one Full round, one consolidated repair, and at most one
+Closure round. Closure verifies its supplied defects and runs a bounded
+complexity guard over the repair delta:
+
+1. Did the repair add a new integration boundary or durable mechanism?
+2. Can it be removed or replaced by an existing owner/seam?
+3. Did it change approved scope?
+
+This guard is part of Closure, not a separate simplification review. A further
+targeted Closure is exceptional and requires a newly introduced critical/high
+defect plus materially changed target or evidence; otherwise coordinator
+verification or the shared no-progress/blocked outcome applies.
+
+Start a fresh Full only when existing mandatory coverage is invalidated by a
+changed source decision or approved scope, replacement of the primary solution
+or owner, addition of a repository/data owner, or a new public API or durable
+workflow that changes the reviewed architecture. A large diff or accumulated
+clarifications alone do not trigger Full.
 
 ## Approval
 

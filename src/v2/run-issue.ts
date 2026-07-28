@@ -87,7 +87,13 @@ export interface RunIssueSnapshot {
   url: string;
   state: 'OPEN' | 'CLOSED';
   labels: string[];
-  comments: Array<{ body: string; authorAssociation: string }>;
+  comments: Array<{
+    id?: string;
+    body: string;
+    authorAssociation: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
 }
 
 export interface RunIssueGit {
@@ -299,7 +305,7 @@ export class RunIssue {
         if (commitSha === intent.parentSha) {
           if (await this.dependencies.git.getTreeSha(worktreePath) !== intent.treeSha) return await this.publicationDiverged(active, 'commit-tree-diverged');
           if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-          if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+          if (!await this.authorized(active, config)) return await this.revoked(active);
           try { commitSha = await this.dependencies.git.commit({ worktreePath, message: intent.message }); }
           catch { return await this.invokedFailure(active, 'commit-delivery-unknown'); }
         }
@@ -323,7 +329,7 @@ export class RunIssue {
       if (remoteSha && remoteSha !== commitSha) return await this.publicationDiverged(active, 'remote-branch-diverged');
       if (!remoteSha) {
         if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        if (!await this.authorized(active, config)) return await this.revoked(active);
         try { await this.dependencies.git.push({ worktreePath, branchName }); }
         catch { return await this.invokedFailure(active, 'push-delivery-unknown'); }
         remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
@@ -349,7 +355,7 @@ export class RunIssue {
       if (observed && observed.body !== prBody) return await this.publicationDiverged(active, 'pr-marker-diverged');
       if (!observed) {
         if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        if (!await this.authorized(active, config)) return await this.revoked(active);
         try {
           await this.dependencies.pullRequests.createDraft({
             title: `Implement #${issueNumber}: ${issue.title}`,
@@ -382,7 +388,7 @@ export class RunIssue {
       }
       if (matching.length === 0) {
         if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        if (!await this.authorized(active, config)) return await this.revoked(active);
         try { await this.dependencies.issues.postComment(issueNumber, handoffBody); }
         catch { return await this.invokedFailure(active, 'handoff-comment-delivery-unknown'); }
         observation = await this.readIssue(issueNumber);
@@ -401,7 +407,7 @@ export class RunIssue {
       if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-labels');
       if (!sameStrings(observation.labels, terminalLabels)) {
         if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
-        if (!await this.authorized(issueNumber, runId, branchName, config)) return await this.revoked(active);
+        if (!await this.authorized(active, config)) return await this.revoked(active);
         try { await this.dependencies.issues.setLabels(issueNumber, terminalLabels); }
         catch { return await this.invokedFailure(active, 'terminal-labels-delivery-unknown'); }
         observation = await this.readIssue(issueNumber);
@@ -472,7 +478,7 @@ export class RunIssue {
       }
       head = await this.dependencies.git.getHead(active.record.worktreePath);
       if (head === intent.parentSha) {
-        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+        if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
         const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
@@ -513,7 +519,7 @@ export class RunIssue {
       }
       remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
       if (remote === oldHead) {
-        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+        if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
         const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
@@ -565,7 +571,7 @@ export class RunIssue {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-diverged');
       }
       if (matches.length === 0) {
-        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+        if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
         try { await this.dependencies.pullRequests.postConversationComment(batch.pullRequest.number, body); }
@@ -607,7 +613,7 @@ export class RunIssue {
       if (validationFailure) return validationFailure;
       let issue = await this.readIssue(issueNumber);
       if (!issue || !sameStrings(issue.labels, finalLabels)) {
-        if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+        if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
         try { await this.dependencies.issues.setLabels(issueNumber, finalLabels); }
@@ -691,12 +697,7 @@ export class RunIssue {
     }
     if (feedback.phase !== 'idle' || observed.status === 'none') return { result: publicOutcome(terminal) };
 
-    if (!await this.authorizedForExactLabels(
-      starting.record.issueNumber,
-      starting.record.runId,
-      starting.record.branchName,
-      [config.github.labels.review.name],
-    )) {
+    if (!await this.authorizedForExactLabels(starting, [config.github.labels.review.name])) {
       return { result: publicOutcome(terminal) };
     }
 
@@ -751,9 +752,9 @@ export class RunIssue {
     }
     const issue = await this.readIssue(active.record.issueNumber);
     const labelsAreRunning = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, runningLabels)
-      && this.hasTrustedClaim(issue, active.record.runId, active.record.issueNumber, active.record.branchName);
+      && this.hasTrustedClaim(issue, active.record);
     const labelsAreReview = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, reviewLabels)
-      && this.hasTrustedClaim(issue, active.record.runId, active.record.issueNumber, active.record.branchName);
+      && this.hasTrustedClaim(issue, active.record);
     if (!labelsAreRunning && !labelsAreReview) {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-authority-revoked') };
     }
@@ -767,7 +768,7 @@ export class RunIssue {
       catch { return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') }; }
       const observed = await this.readIssue(active.record.issueNumber);
       if (!observed || !sameStrings(observed.labels, runningLabels)
-        || !this.hasTrustedClaim(observed, active.record.runId, active.record.issueNumber, active.record.branchName)) {
+        || !this.hasTrustedClaim(observed, active.record)) {
         return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-labels-diverged') };
       }
     }
@@ -972,7 +973,7 @@ export class RunIssue {
             frozenCriteria = structuredClone(active.record.frozenCriteria);
           }
           if (existing.lifecycle === 'spec-authoring') {
-            if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
+            if (!await this.authorized(active, config)) return await this.revoked(active);
             return await this.continueSpecRequired(active);
           }
           const feedbackInvocation = active.record.reviewFeedback?.implementationInvocation;
@@ -1004,7 +1005,7 @@ export class RunIssue {
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
           }
-          if (!await this.authorized(input.issueNumber, runId, branchName, config)) return await this.revoked(active);
+          if (!await this.authorized(active, config)) return await this.revoked(active);
           if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
             if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteInitializationUnrecoverableError();
             const reviewRecovery = active.record.lifecycle === 'implementing' && active.record.directReview?.status === 'active'
@@ -1069,7 +1070,7 @@ export class RunIssue {
         return await this.terminal(active, { status: 'internal-error', code: 'direct-review-state-missing' });
       }
       attemptLoop: while (true) {
-      if (!await this.authorized(input.issueNumber, runId, branchName, config)) {
+      if (!await this.authorized(active, config)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
       }
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
@@ -1561,13 +1562,15 @@ export class RunIssue {
     } catch {
       throw new RouteInitializationUnrecoverableError();
     }
-    const issueSnapshot = issue?.state === 'OPEN' ? snapshotIssue(issue) : active.record.issueSnapshot;
+    const issueSnapshot = issue?.state === 'OPEN'
+      ? refreshClaimedIssueSnapshot(active.record.issueSnapshot, issue)
+      : active.record.issueSnapshot;
     return this.persist(active, { lifecycle: 'triaging', routeExecution: initialRouteExecution(), issueSnapshot });
   }
 
   private async routeRun(
     starting: ActiveRun,
-    issue: IssueSnapshot,
+    issue: RunRecordV1['issueSnapshot'],
     frozenCriteria: FrozenCriterion[],
     worktreePath: string,
     config: AgentAutoConfig,
@@ -1576,6 +1579,22 @@ export class RunIssue {
   ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
     let active = starting;
     while (active.record.lifecycle === 'triaging') {
+      let currentIssue: RunIssueSnapshot | undefined;
+      try {
+        currentIssue = await this.readIssue(active.record.issueNumber);
+      } catch (error) {
+        if (error instanceof TransportReadError) {
+          return { result: await this.invokedFailure(active, 'authorization-read-failed') };
+        }
+        throw error;
+      }
+      if (!currentIssue || !this.isAuthorizedIssue(currentIssue, active.record, config)) {
+        return { result: await this.revoked(active) };
+      }
+      active = await this.persist(active, {
+        issueSnapshot: refreshClaimedIssueSnapshot(active.record.issueSnapshot, currentIssue),
+      });
+      issue = structuredClone(active.record.issueSnapshot);
       const state: RouteCoordinatorState = {
         read: async () => requireRouteExecution(active.record.routeExecution),
         compareAndSwap: async (expected, next) => {
@@ -1672,7 +1691,7 @@ export class RunIssue {
       return { result: await this.terminal(active, { status: 'internal-error', code: 'route-state-not-dispatchable' }) };
     }
     try {
-      if (!await this.authorized(issueNumber, active.record.runId, branchName, config)) {
+      if (!await this.authorized(active, config)) {
         return { result: await this.revoked(active) };
       }
     } catch (error) {
@@ -1694,7 +1713,7 @@ export class RunIssue {
     });
     if (receipt.route !== 'awaiting-user') active = await this.persist(active, { lifecycle });
     try {
-      if (!await this.authorized(issueNumber, active.record.runId, branchName, config)) {
+      if (!await this.authorized(active, config)) {
         return { result: await this.revoked(active) };
       }
     } catch (error) {
@@ -1936,36 +1955,51 @@ export class RunIssue {
     }
   }
 
-  private async authorized(issueNumber: number, runId: string, branchName: string, config: AgentAutoConfig): Promise<boolean> {
-    const issue = await this.readIssue(issueNumber);
-    if (!issue || issue.state !== 'OPEN') return false;
+  private async authorized(active: ActiveRun, config: AgentAutoConfig): Promise<boolean> {
+    const issue = await this.readIssue(active.record.issueNumber);
+    return !!issue && this.isAuthorizedIssue(issue, active.record, config);
+  }
+
+  private isAuthorizedIssue(
+    issue: RunIssueSnapshot,
+    record: RunRecordV1,
+    config: AgentAutoConfig,
+  ): boolean {
+    if (issue.state !== 'OPEN') return false;
     const labels = new Set(issue.labels);
     if (!labels.has(config.github.labels.auto.name) || !labels.has(config.github.labels.running.name)) return false;
-    return this.hasTrustedClaim(issue, runId, issueNumber, branchName);
+    return this.hasTrustedClaim(issue, record);
   }
 
   private async authorizedForExactLabels(
-    issueNumber: number,
-    runId: string,
-    branchName: string,
+    active: ActiveRun,
     expectedLabels: string[],
   ): Promise<boolean> {
-    const issue = await this.readIssue(issueNumber);
+    const issue = await this.readIssue(active.record.issueNumber);
     return !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, expectedLabels)
-      && this.hasTrustedClaim(issue, runId, issueNumber, branchName);
+      && this.hasTrustedClaim(issue, active.record);
   }
 
-  private hasTrustedClaim(issue: RunIssueSnapshot, runId: string, issueNumber: number, branchName: string): boolean {
-    const exactBody = claimComment(runId, issueNumber, branchName);
-    const markerPattern = /^<!-- codex-orchestrator:run:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):claim -->$/u;
-    const markers = issue.comments.filter((comment) => markerPattern.test(comment.body.split('\n')[0] ?? ''));
+  private hasTrustedClaim(issue: RunIssueSnapshot, record: RunRecordV1): boolean {
+    const exactBody = claimComment(record.runId, record.issueNumber, record.branchName);
+    const markers = issue.comments.filter(isClaimMarkerComment);
     if (issue.comments.some((comment) => {
       const firstLine = comment.body.split('\n')[0] ?? '';
-      return firstLine.startsWith(`<!-- codex-orchestrator:run:${runId}:claim`) && !markerPattern.test(firstLine);
+      return firstLine.startsWith(`<!-- codex-orchestrator:run:${record.runId}:claim`) && !claimMarkerPattern.test(firstLine);
     })) return false;
-    if (markers.some((comment) => (comment.body.split('\n')[0] ?? '').match(markerPattern)?.[1] !== runId)) return false;
-    const current = markers.filter((comment) => comment.body === exactBody);
-    return current.length === 1 && ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(current[0]!.authorAssociation);
+    const currentMarkers = markers.filter((comment) => claimRunId(comment) === record.runId);
+    if (currentMarkers.some((comment) => comment.body !== exactBody
+      || !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.authorAssociation))) return false;
+    const historicalClaims = historicalClaimCounts(record);
+    for (const comment of markers) {
+      const markerRunId = claimRunId(comment);
+      if (markerRunId === record.runId) continue;
+      const key = observedHistoricalClaimKeys(comment, record)
+        .find((candidate) => (historicalClaims.get(candidate) ?? 0) > 0);
+      if (!key) return false;
+      historicalClaims.set(key, historicalClaims.get(key)! - 1);
+    }
+    return currentMarkers.length === 1;
   }
 
   private async readIssue(issueNumber: number): Promise<RunIssueSnapshot | undefined> {
@@ -1980,7 +2014,7 @@ export class RunIssue {
   ): Promise<RunIssueResult | undefined> {
     const batch = active.record.reviewFeedback?.activeBatch;
     if (!batch) return undefined;
-    if (!await this.authorized(issueNumber, active.record.runId, active.record.branchName, config)) {
+    if (!await this.authorized(active, config)) {
       return this.blockReviewFeedback(active, 'safety', 'review-feedback-worker-authority-revoked');
     }
     if (!this.dependencies.reviewFeedback) {
@@ -2444,6 +2478,80 @@ class PostEffectStateError extends Error {
   constructor(readonly active: ActiveRun) {
     super('post-effect state write failed');
   }
+}
+
+const claimMarkerPattern = /^<!-- codex-orchestrator:run:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):claim -->$/u;
+
+function isClaimMarkerComment(comment: { body: string }): boolean {
+  return claimMarkerPattern.test(comment.body.split('\n')[0] ?? '');
+}
+
+function claimRunId(comment: { body: string }): string | undefined {
+  return (comment.body.split('\n')[0] ?? '').match(claimMarkerPattern)?.[1];
+}
+
+function trustedHistoricalClaimBodyKey(
+  comment: { body: string; authorAssociation: string },
+  issueNumber: number,
+  branchName: string,
+): string | undefined {
+  const runId = claimRunId(comment);
+  if (!runId || !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.authorAssociation)) return undefined;
+  if (comment.body !== claimComment(runId, issueNumber, branchName)) return undefined;
+  return `${comment.authorAssociation}\u0000${comment.body}`;
+}
+
+function frozenHistoricalClaimKey(
+  comment: { id?: string; body: string; authorAssociation: string },
+  issueNumber: number,
+  branchName: string,
+): string | undefined {
+  const bodyKey = trustedHistoricalClaimBodyKey(comment, issueNumber, branchName);
+  if (!bodyKey) return undefined;
+  return comment.id ? `id\u0000${comment.id}\u0000${bodyKey}` : `legacy\u0000${bodyKey}`;
+}
+
+function observedHistoricalClaimKeys(
+  comment: RunIssueSnapshot['comments'][number],
+  record: RunRecordV1,
+): string[] {
+  const bodyKey = trustedHistoricalClaimBodyKey(comment, record.issueNumber, record.branchName);
+  if (!bodyKey) return [];
+  const keys = comment.id ? [`id\u0000${comment.id}\u0000${bodyKey}`] : [];
+  if (timestampAtOrBefore(comment.createdAt, record.createdAt)
+    && timestampAtOrBefore(comment.updatedAt, record.createdAt)) {
+    keys.push(`legacy\u0000${bodyKey}`);
+  }
+  return keys;
+}
+
+function timestampAtOrBefore(value: string | undefined, cutoff: string): boolean {
+  if (!value) return false;
+  const timestamp = Date.parse(value);
+  return !Number.isNaN(timestamp) && timestamp <= Date.parse(cutoff);
+}
+
+function historicalClaimCounts(record: RunRecordV1): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const comment of record.issueSnapshot.comments ?? []) {
+    const key = frozenHistoricalClaimKey(comment, record.issueNumber, record.branchName);
+    if (!key || claimRunId(comment) === record.runId) continue;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function refreshClaimedIssueSnapshot(
+  baseline: RunRecordV1['issueSnapshot'],
+  issue: RunIssueSnapshot,
+): RunRecordV1['issueSnapshot'] {
+  return {
+    ...structuredClone(baseline),
+    comments: [
+      ...(baseline.comments ?? []).filter(isClaimMarkerComment),
+      ...issue.comments.filter((comment) => !isClaimMarkerComment(comment)),
+    ],
+  };
 }
 
 function snapshotIssue(issue: RunIssueSnapshot): IssueSnapshot & Pick<RunIssueSnapshot, 'comments'> {

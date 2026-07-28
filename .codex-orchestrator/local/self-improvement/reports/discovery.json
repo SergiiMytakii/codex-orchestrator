@@ -1,0 +1,31 @@
+{
+  "status": "completed",
+  "candidates": [
+    {
+      "title": "Preserve V2 outcome exit codes in the standalone implement command",
+      "files": [
+        ".codex-orchestrator/local/self-improvement/runner.mjs",
+        ".codex-orchestrator/local/self-improvement/self-improvement-runner.test.mjs"
+      ],
+      "problem": "implement() correctly preserves typed V2 exit codes such as blocked=20, not-eligible=21, and cancelled=130, but the standalone CLI converts every non-failed result to exit 0. Shell automation can therefore interpret blocked, cancelled, or malformed missing-issue execution as success.",
+      "solution": "Validate --issue at the CLI boundary and return the implement result's semantic exitCode instead of reducing outcomes to failed versus non-failed.",
+      "benefits": [
+        "Makes process status agree with the printed and typed execution outcome.",
+        "Prevents schedulers from treating blocked or cancelled implementation as successful.",
+        "Makes invalid standalone invocations fail clearly."
+      ],
+      "verification": [
+        "Add subprocess-level tests covering review-ready, blocked, not-eligible, cancelled, and missing --issue outcomes.",
+        "Run node --test .codex-orchestrator/local/self-improvement/self-improvement-runner.test.mjs."
+      ],
+      "proofStrategy": "non-visual-smoke",
+      "risk": "Low; the change affects only standalone CLI exit semantics, although callers currently relying on incorrect zero exits will begin detecting failures.",
+      "adrConflict": "none"
+    }
+  ],
+  "residualRisks": [
+    "The local runner files are currently untracked, so this candidate assumes they are intended repository content."
+  ]
+}
+
+Evidence: [runner.mjs](/Users/serhiimytakii/Projects/codex-orchestrator/.codex-orchestrator/local/self-improvement/runner.mjs:670) preserves semantic codes internally but collapses standalone outcomes at line 866. The focused suite currently passes all 31 tests, but only exercises the internal function—not process exit behavior.

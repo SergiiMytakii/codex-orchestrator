@@ -18,9 +18,11 @@ Create or revise an execution-ready specification for a downstream coding agent.
 ## Preflight
 
 1. Read the source authority, applicable repository instructions, and only the evidence needed to confirm targets, commands, contracts, consumers, fixtures, and validation.
-2. Reuse valid Evidence Maps and `$research` artifacts. Refresh only claims invalidated by changed files, versions, dates, contracts, or conflicts.
-3. Read the relevant section of [source modes](references/source-modes.md). Stop or mark the spec blocked when its source-specific requirements are not satisfied.
-4. Classify and record these independent facts:
+2. Build a transient evidence-backed scope delta with three facts per material requirement: approved behavior, current capability/owner/seam, and the smallest remaining implementation delta. Pass it in the reviewer capsule; persist it in the spec only when an executor needs it.
+3. Treat behavior already present as `preserve + regression proof`, not new implementation. Stop with a blocked spec when an unresolved product value, copy decision, policy, or ownership choice changes the implementation; never manufacture a working default to keep drafting.
+4. Reuse valid Evidence Maps and `$research` artifacts. Refresh only claims invalidated by changed files, versions, dates, contracts, or conflicts.
+5. Read the relevant section of [source modes](references/source-modes.md). Stop or mark the spec blocked when its source-specific requirements are not satisfied.
+6. Classify and record these independent facts:
    - `spec_mode`: `compact | full` — document and coordination density.
    - `implementation_size`: `small | medium | large` — expected delivery shape.
    - `review_profile`: `simple | medium | high` — consequence and uncertainty,
@@ -50,6 +52,7 @@ Before drafting slices:
 3. Set `Added Complexity: None` unless the minimum solution cannot satisfy a named requirement or evidenced failure path.
 4. For every added mechanism, including a new service, helper, adapter, layer, schema object, transaction, retry policy, job, cache, flag, compatibility path, or coordination boundary, record the exact invariant or failure that requires it and what breaks without it.
 5. Run the deletion challenge: if removing a proposed mechanism still satisfies all approved behavior, invariants, and proof, remove it from the spec.
+6. Do not use technical detail to conceal a missing product decision. Unknown durations, thresholds, localized copy, policy defaults, and eligibility rules remain blockers when they materially shape behavior.
 
 Judge simplicity by the fewest necessary concepts, owners, states, and integration points, not by line or file count. Do not require complexity scores or alternative-solution essays.
 
@@ -74,11 +77,10 @@ Read [the spec template](references/spec-template.md) before drafting, then remo
    `$implementation-spec-review` as its Adapter. Supply the saved spec, source
    authority, approved decisions, and evidence; do not restate its topology or
    defect lifecycle.
-3. Apply one consolidated, scope-preserving repair batch, then follow the owner
-   loop until it returns `Approved`, `Blocked`, or an eligible user-authorized
-   `Waived` outcome.
-4. A preflight-blocked spec may be saved with zero reviews and `review_verdict: "Not run"`. Never fabricate approval or use `Not required`.
-5. Replace temporary lifecycle metadata with outcome, last Adapter verdict,
+3. Apply one consolidated, scope-preserving repair batch. Before requesting any Closure, record a transient repair complexity delta containing every newly introduced endpoint, service, durable state, configuration input, schema/public contract, repository, or data owner and its existing-seam justification. Pass only that delta, repaired sections, and affected defects/contracts to Closure; do not add a separate simplification review.
+4. Follow the owner loop until it returns `Approved`, `Blocked`, or an eligible user-authorized `Waived` outcome. Respect its default review budget and rare fresh-Full triggers; do not create review rounds for ordinary coordinator-verifiable repairs.
+5. A preflight-blocked spec may be saved with zero reviews and `review_verdict: "Not run"`. Never fabricate approval or use `Not required`.
+6. Replace temporary lifecycle metadata with outcome, last Adapter verdict,
    mandatory coverage, accepted risks, and open stable IDs. Keep pass/session
    counts only for high, Closure, or interrupted review. Any substantive
    post-approval edit invalidates approval until reviewed again.

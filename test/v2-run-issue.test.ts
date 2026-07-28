@@ -635,6 +635,130 @@ test('triage receives persisted issue comments and authorization is rechecked af
   assert.equal(revoked.events.includes('agent'), false);
 });
 
+test('historical claim markers do not revoke a newly claimed run', async () => {
+  const historicalClaim = [
+    '<!-- codex-orchestrator:run:11111111-1111-4111-8111-111111111111:claim -->',
+    'codex-orchestrator claimed #42 for branch codex/issue-42',
+  ].join('\n');
+  const fixture = await runFixture({
+    initialComments: [{ id: 'historical-claim', body: historicalClaim, authorAssociation: 'COLLABORATOR' }],
+  });
+
+  assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
+    'review-ready',
+  );
+});
+
+test('a pre-upgrade snapshot without comment ids accepts only a live claim that predates the run', async () => {
+  const historicalClaim = [
+    '<!-- codex-orchestrator:run:11111111-1111-4111-8111-111111111111:claim -->',
+    'codex-orchestrator claimed #42 for branch codex/issue-42',
+  ].join('\n');
+  const fixture = await runFixture({
+    rejectEffect: 'claim-comment',
+    initialComments: [{
+      id: 'historical-claim',
+      body: historicalClaim,
+      authorAssociation: 'COLLABORATOR',
+      createdAt: '2026-07-16T11:00:00.000Z',
+      updatedAt: '2026-07-16T11:00:00.000Z',
+    }],
+  });
+  assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
+    'transport-failed',
+  );
+  const persisted = await fixture.store.read();
+  const legacy = structuredClone(persisted);
+  for (const comment of legacy.runs[0]!.issueSnapshot.comments ?? []) {
+    delete comment.id;
+    delete comment.createdAt;
+    delete comment.updatedAt;
+  }
+  await fixture.store.compareAndSwap(persisted.generation, {
+    schema: legacy.schema,
+    version: legacy.version,
+    runs: legacy.runs,
+  });
+
+  assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
+    'review-ready',
+  );
+});
+
+test('a competing claim marker added during routing revokes the current run', async () => {
+  const fixture = await runFixture({ competingClaimDuringRoute: true });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.equal(fixture.events.includes('agent'), false);
+});
+
+test('a competing claim observed after claiming blocks before triage launches', async () => {
+  const fixture = await runFixture({ competingClaimAfterClaim: true });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.equal(fixture.events.includes('route:triage'), false);
+});
+
+test('triage receives an ordinary comment posted after the initial issue read', async () => {
+  const lateComment = 'Clarification posted while the claim was being established.';
+  const fixture = await runFixture({
+    ordinaryCommentAfterClaim: lateComment,
+    expectedTriageComment: lateComment,
+  });
+
+  assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
+    'review-ready',
+  );
+});
+
+test('pre-triage comment refresh preserves the frozen issue body', async () => {
+  const frozenBody = '## Acceptance Criteria\n- The behavior works.';
+  const mutatedBody = '## Acceptance Criteria\n- Replace the frozen contract.';
+  const fixture = await runFixture({
+    issueBodyAfterClaim: mutatedBody,
+    expectedTriageIssueBody: frozenBody,
+  });
+
+  assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
+    'review-ready',
+  );
+  assert.equal(fixture.events.includes('route:triage'), true);
+});
+
+test('a malformed duplicate of the current claim marker revokes the run', async () => {
+  const fixture = await runFixture({ malformedCurrentClaimDuringRoute: true });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.equal(fixture.events.includes('agent'), false);
+});
+
+test('reposting a deleted historical claim under a new comment id revokes the run', async () => {
+  const historicalClaim = [
+    '<!-- codex-orchestrator:run:11111111-1111-4111-8111-111111111111:claim -->',
+    'codex-orchestrator claimed #42 for branch codex/issue-42',
+  ].join('\n');
+  const fixture = await runFixture({
+    initialComments: [{ id: 'historical-claim', body: historicalClaim, authorAssociation: 'COLLABORATOR' }],
+    replaceHistoricalClaimDuringRoute: true,
+  });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.equal(fixture.events.includes('agent'), false);
+});
+
 test('claimed initialization refreshes comments that arrived before restart', async () => {
   const options: FixtureOptions = { rejectEffect: 'claim-comment' };
   const fixture = await runFixture(options);
@@ -1019,7 +1143,13 @@ interface FixtureOptions {
   storeReadReject?: boolean;
   storeReadError?: Error;
   rejectEffect?: 'claim-labels' | 'claim-comment' | 'commit' | 'push' | 'pr' | 'comment' | 'labels';
-  initialComments?: Array<{ body: string; authorAssociation: string }>;
+  initialComments?: Array<{
+    id?: string;
+    body: string;
+    authorAssociation: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
   expectedTriageComment?: string;
   revokeDuringRoute?: boolean;
   workflowVerificationReject?: boolean;
@@ -1027,6 +1157,13 @@ interface FixtureOptions {
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
+  competingClaimDuringRoute?: boolean;
+  malformedCurrentClaimDuringRoute?: boolean;
+  replaceHistoricalClaimDuringRoute?: boolean;
+  competingClaimAfterClaim?: boolean;
+  ordinaryCommentAfterClaim?: string;
+  issueBodyAfterClaim?: string;
+  expectedTriageIssueBody?: string;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -1056,7 +1193,14 @@ async function runFixture(options: FixtureOptions = {}) {
   const localGit = new LocalGitRunIssueAdapter();
   const git = traceGit(localGit, events, options);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
-  let comments: Array<{ body: string; authorAssociation: string }> = structuredClone(options.initialComments ?? []);
+  let nextCommentId = 1;
+  let comments: Array<{
+    id?: string;
+    body: string;
+    authorAssociation: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
   let authReads = 0;
@@ -1110,7 +1254,25 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push(claim ? 'effect:claim-comment' : 'effect:handoff-comment');
         if (claim && shouldReject('claim-comment')) throw new Error('claim comment rejected');
         if (!claim && shouldReject('comment')) throw new Error('comment rejected');
-        comments.push({ body, authorAssociation: 'OWNER' });
+        comments.push({ id: `comment-${nextCommentId++}`, body, authorAssociation: 'OWNER' });
+        if (claim && options.competingClaimAfterClaim) {
+          comments.push({
+            id: `comment-${nextCommentId++}`,
+            body: [
+              '<!-- codex-orchestrator:run:33333333-3333-4333-8333-333333333333:claim -->',
+              'codex-orchestrator claimed #42 for branch codex/issue-42',
+            ].join('\n'),
+            authorAssociation: 'COLLABORATOR',
+          });
+        }
+        if (claim && options.ordinaryCommentAfterClaim) {
+          comments.push({
+            id: `comment-${nextCommentId++}`,
+            body: options.ordinaryCommentAfterClaim,
+            authorAssociation: 'OWNER',
+          });
+        }
+        if (claim && options.issueBodyAfterClaim) issue.body = options.issueBodyAfterClaim;
       },
     },
     pullRequests: {
@@ -1128,6 +1290,13 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push('route:triage');
         if (options.expectedTriageComment) {
           assert.equal(promptFacts.some((fact) => fact.includes(options.expectedTriageComment!)), true);
+        }
+        if (options.expectedTriageIssueBody) {
+          const issueFact = promptFacts.find((fact) => fact.startsWith('issue='));
+          assert.ok(issueFact);
+          const routedIssue = JSON.parse(issueFact.slice('issue='.length)) as { body?: unknown };
+          assert.equal(routedIssue.body, options.expectedTriageIssueBody);
+          assert.notEqual(routedIssue.body, options.issueBodyAfterClaim);
         }
         const expected = await state.read();
         const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
@@ -1189,6 +1358,31 @@ async function runFixture(options: FixtureOptions = {}) {
         };
         assert.equal(await state.complete(expected, completed, receipt), true);
         if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
+        if (options.competingClaimDuringRoute) {
+          comments.push({
+            id: `comment-${nextCommentId++}`,
+            body: [
+              '<!-- codex-orchestrator:run:22222222-2222-4222-8222-222222222222:claim -->',
+              'codex-orchestrator claimed #42 for branch codex/issue-42',
+            ].join('\n'),
+            authorAssociation: 'COLLABORATOR',
+          });
+        }
+        if (options.malformedCurrentClaimDuringRoute) {
+          const currentClaim = comments.find((comment) => comment.body.includes(':claim -->'));
+          assert.ok(currentClaim);
+          comments.push({
+            id: `comment-${nextCommentId++}`,
+            body: `${currentClaim.body.split('\n')[0]}\nmalformed claim body`,
+            authorAssociation: 'OWNER',
+          });
+        }
+        if (options.replaceHistoricalClaimDuringRoute) {
+          const historicalIndex = comments.findIndex((comment) => comment.id === 'historical-claim');
+          assert.notEqual(historicalIndex, -1);
+          const [historical] = comments.splice(historicalIndex, 1);
+          comments.push({ ...historical!, id: `comment-${nextCommentId++}` });
+        }
         return { status: 'succeeded' as const, receipt };
       },
     },

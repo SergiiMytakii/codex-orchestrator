@@ -56,6 +56,9 @@ export interface ProofAgent {
     checkedChangeSha256: string;
     changedFiles: string[];
     checks: CheckedChangePayloadV1['checks'];
+    runnerPreparedArtifactPaths: string[];
+    runnerPreparedArtifactSha256: Record<string, string>;
+    runnerPreparationWarnings: string[];
     repairOnly: boolean;
     repairFindings: string[];
     workflowGeneration?: WorkflowGenerationReceipt;
@@ -112,6 +115,9 @@ export class AcceptanceProof {
     checkedChange: CheckedChange;
     workflowGeneration?: WorkflowGenerationReceipt;
     beforeAgentLaunch?: () => Promise<void>;
+    runnerPreparedArtifactPaths?: string[];
+    runnerPreparedArtifactSha256?: Record<string, string>;
+    runnerPreparationWarnings?: string[];
   }): Promise<ProveChangeResult> {
     let bindingSha256 = sha256(canonicalJson({ proofId: input.proofId, invalid: true }));
     try {
@@ -126,12 +132,22 @@ export class AcceptanceProof {
         frozenCriteria: input.frozenCriteria,
         payload: checked.payload,
         checkedChangeSha256: checked.checkedChangeSha256,
+        runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths ?? [],
       });
       const result = await this.execute({ ...input, ...checked, bindingSha256 });
       await this.releaseMobileLeasesIfSettled(input.proofId, bindingSha256);
       return result;
     } catch (error) {
-      if (error instanceof ProofQuiescenceError || error instanceof ProofLaunchAuthorizationError) throw error;
+      if (error instanceof ProofQuiescenceError) {
+        throw new ProofQuiescenceError(error.pid, error.processGroupId, async () => {
+          await error.waitForAbsence();
+          await this.releaseMobileLeases(input.proofId);
+        });
+      }
+      if (error instanceof ProofLaunchAuthorizationError) {
+        await this.releaseMobileLeases(input.proofId);
+        throw error;
+      }
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
     }
   }
@@ -146,6 +162,9 @@ export class AcceptanceProof {
     bindingSha256: string;
     workflowGeneration?: WorkflowGenerationReceipt;
     beforeAgentLaunch?: () => Promise<void>;
+    runnerPreparedArtifactPaths?: string[];
+    runnerPreparedArtifactSha256?: Record<string, string>;
+    runnerPreparationWarnings?: string[];
   }): Promise<ProveChangeResult> {
     let state = await this.dependencies.proofRecords.read(input.proofId);
     if (state && state.bindingSha256 !== input.bindingSha256) {
@@ -215,6 +234,9 @@ export class AcceptanceProof {
           checkedChangeSha256: input.checkedChangeSha256,
           changedFiles: [...input.payload.changedFiles],
           checks: structuredClone(input.payload.checks),
+          runnerPreparedArtifactPaths: [...(input.runnerPreparedArtifactPaths ?? [])],
+          runnerPreparedArtifactSha256: { ...(input.runnerPreparedArtifactSha256 ?? {}) },
+          runnerPreparationWarnings: [...(input.runnerPreparationWarnings ?? [])],
           repairOnly: purpose === 'report-repair',
           repairFindings: purpose === 'report-repair' ? [...reportRepairFindings] : [],
           workflowGeneration: input.workflowGeneration ? structuredClone(input.workflowGeneration) : undefined,
@@ -249,6 +271,9 @@ export class AcceptanceProof {
       try {
         report = validateProofReport(agentResult.report);
         validateReportAgainstFrozenCriteria(report, input.frozenCriteria);
+        for (const warning of input.runnerPreparationWarnings ?? []) {
+          if (!report.residualRisks.includes(warning) && report.residualRisks.length < 256) report.residualRisks.push(warning);
+        }
       } catch (error) {
         const alreadyRepaired = state.attempts.some((attempt) => attempt.purpose === 'report-repair');
         if (!alreadyRepaired && await this.isFresh(input.payload)) {
@@ -265,6 +290,10 @@ export class AcceptanceProof {
           agentResult.proofPhaseChangedFiles,
           state.startedAt,
           purpose !== 'report-repair',
+          input.runnerPreparedArtifactPaths ?? [],
+          input.runnerPreparedArtifactSha256 ?? {},
+          input.checkedChangeSha256,
+          input.payload.checks.map((check) => check.id),
         );
       } catch {
         return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof artifacts are invalid.');
@@ -279,7 +308,9 @@ export class AcceptanceProof {
       proofId: input.proofId,
       bindingSha256: input.bindingSha256,
       summary: report.status === 'passed'
-        ? 'Acceptance proof passed.'
+        ? input.runnerPreparationWarnings?.length
+          ? `Acceptance proof passed with warning: ${input.runnerPreparationWarnings.join(' ')}`
+          : 'Acceptance proof passed.'
         : report.status === 'needs-rework'
           ? 'Acceptance proof needs rework.'
           : 'Acceptance proof is externally blocked.',
@@ -298,8 +329,25 @@ export class AcceptanceProof {
     changedFiles: string[],
     proofStartedAt: string,
     requireCurrentVisualWrites: boolean,
+    runnerPreparedArtifactPaths: string[],
+    runnerPreparedArtifactSha256: Record<string, string>,
+    checkedChangeSha256: string,
+    configuredCheckIds: string[],
   ): Promise<void> {
     if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
+    if (!Array.isArray(runnerPreparedArtifactPaths) || runnerPreparedArtifactPaths.length > 256) {
+      throw new Error('Runner-prepared proof artifact set is invalid');
+    }
+    for (const path of runnerPreparedArtifactPaths) {
+      assertRelativePath(path, 'Runner-prepared proof artifact');
+      if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, path)) {
+        throw new Error('Runner-prepared proof artifact escapes proof-owned directory');
+      }
+    }
+    if (Object.keys(runnerPreparedArtifactSha256).length !== runnerPreparedArtifactPaths.length
+      || runnerPreparedArtifactPaths.some((path) => !/^[0-9a-f]{64}$/u.test(runnerPreparedArtifactSha256[path] ?? ''))) {
+      throw new Error('Runner-prepared proof artifact digest set is invalid');
+    }
     const artifactPaths = new Set<string>();
     const mobileTarget = report.decision.mode === 'visual' && ['android', 'ios'].includes(report.decision.targets[0] ?? '')
       ? report.decision.targets[0] as 'android' | 'ios'
@@ -310,11 +358,19 @@ export class AcceptanceProof {
       ? report.visualEvidence.lease.leaseRef
       : undefined;
     let mobileLeaseArtifact: { relativePath: string; bytes: Buffer } | undefined;
+    let androidRunnerReceiptArtifact: { relativePath: string; bytes: Buffer } | undefined;
+    const androidReceiptPaths = runnerPreparedArtifactPaths.filter((path) => path.endsWith(`/${proofId}/android-runner-receipt.json`));
+    if (androidReceiptPaths.length > 1) throw new Error('Android Runner receipt set is ambiguous');
+    const expectedAndroidReceiptPath = androidReceiptPaths[0];
     for (const artifact of report.artifacts) {
       if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, artifact.relativePath)) {
         throw new Error('proof artifact escapes proof-owned directory');
       }
       const bytes = await this.dependencies.readArtifact(artifact.relativePath);
+      if (runnerPreparedArtifactPaths.includes(artifact.relativePath)
+        && sha256(bytes) !== runnerPreparedArtifactSha256[artifact.relativePath]) {
+        throw new Error('Runner-prepared proof artifact changed after capture');
+      }
       if (sha256(bytes) !== artifact.sha256) throw new Error('proof artifact hash mismatch');
       validateArtifactBytes(artifact, bytes);
       if (report.decision.mode === 'visual') {
@@ -327,18 +383,37 @@ export class AcceptanceProof {
       }
       artifactPaths.add(artifact.relativePath);
       if (artifact.id === mobileLeaseRef) mobileLeaseArtifact = { relativePath: artifact.relativePath, bytes };
+      if (artifact.relativePath === expectedAndroidReceiptPath) {
+        if (artifact.kind !== 'generated-file' || artifact.publishable) throw new Error('Android Runner receipt classification is invalid');
+        androidRunnerReceiptArtifact = { relativePath: artifact.relativePath, bytes };
+      }
     }
     for (const path of changedFiles) {
       assertRelativePath(path, 'proof phase changed file');
       if (!artifactPaths.has(path)) throw new Error('proof phase changed a non-artifact path');
     }
     if (report.decision.mode === 'visual' && requireCurrentVisualWrites) {
-      const changed = new Set(changedFiles);
+      const changed = new Set([...changedFiles, ...runnerPreparedArtifactPaths]);
       if (report.artifacts.some((artifact) => !changed.has(artifact.relativePath))) {
         throw new Error('visual proof reused an unchanged artifact');
       }
     }
+    if (androidReceiptPaths.length === 1
+      && (report.decision.mode !== 'visual' || report.decision.targets[0] !== 'android' || !mobileLeaseRef)) {
+      throw new Error('Runner-prepared Android proof requires Android visual evidence and lease custody');
+    }
     if (mobileLeaseRef && mobileTarget) {
+      if (mobileTarget === 'android' && expectedAndroidReceiptPath) {
+        if (!androidRunnerReceiptArtifact) throw new Error('Android Runner receipt artifact is required');
+        validateAndroidRunnerReceipt({
+          bytes: androidRunnerReceiptArtifact.bytes,
+          proofId,
+          checkedChangeSha256,
+          configuredCheckIds,
+          runnerPreparedArtifactPaths,
+          reportArtifactPaths: artifactPaths,
+        });
+      }
       const verifier = mobileTarget === 'android' ? this.dependencies.androidLease : this.dependencies.iosLease;
       if (!verifier || !mobileLeaseArtifact) throw new Error(`${mobileTarget} lease verification is unavailable`);
       await verifier.verify({
@@ -353,6 +428,10 @@ export class AcceptanceProof {
     if (!this.dependencies.androidLease && !this.dependencies.iosLease) return;
     const state = await this.dependencies.proofRecords.read(proofId);
     if (!state || state.bindingSha256 !== bindingSha256 || !isTerminalStatus(state.status)) return;
+    await this.releaseMobileLeases(proofId);
+  }
+
+  private async releaseMobileLeases(proofId: string): Promise<void> {
     await this.dependencies.androidLease?.release(proofId);
     await this.dependencies.iosLease?.release(proofId);
   }
@@ -431,6 +510,7 @@ function createBindingSha256(input: {
   frozenCriteria: FrozenCriterion[];
   payload: CheckedChangePayloadV1;
   checkedChangeSha256: string;
+  runnerPreparedArtifactPaths: string[];
 }): string {
   return sha256(canonicalJson({
     proofId: input.proofId,
@@ -444,6 +524,7 @@ function createBindingSha256(input: {
     packageVersion: input.payload.packageVersion,
     proofSchemaVersion: input.payload.proofSchemaVersion,
     checkPolicySha256: input.payload.checkPolicySha256,
+    runnerPreparedArtifactPathsSha256: sha256(canonicalJson(input.runnerPreparedArtifactPaths)),
   }));
 }
 
@@ -481,6 +562,52 @@ function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], byt
 
 function containsHostIdentityEvidence(value: string): boolean {
   return /(?:^|[\s"'])(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|[A-Za-z]:\\Users\\[^\\\s"']+)/mu.test(value);
+}
+
+function validateAndroidRunnerReceipt(input: {
+  bytes: Buffer;
+  proofId: string;
+  checkedChangeSha256: string;
+  configuredCheckIds: string[];
+  runnerPreparedArtifactPaths: string[];
+  reportArtifactPaths: Set<string>;
+}): void {
+  if (input.bytes.length === 0 || input.bytes.length > 64 * 1024) throw new Error('Android Runner receipt bytes are invalid');
+  const value = JSON.parse(input.bytes.toString('utf8')) as unknown;
+  assertExactObject(value, [
+    'schema', 'version', 'status', 'proofId', 'configuredCheckIds', 'buildOutputSha256',
+    'checkedChangeSha256', 'apkSha256', 'artifactRefs', 'navigation', 'capturedAt',
+  ], 'Android Runner receipt');
+  if (value.schema !== 'codex-orchestrator.runner-android-proof' || value.version !== 1
+    || value.status !== 'prepared' || value.proofId !== input.proofId) {
+    throw new Error('Android Runner receipt identity is invalid');
+  }
+  const shaPattern = /^[0-9a-f]{64}$/u;
+  for (const field of ['buildOutputSha256', 'checkedChangeSha256', 'apkSha256'] as const) {
+    if (typeof value[field] !== 'string' || !shaPattern.test(value[field])) throw new Error(`Android Runner receipt ${field} is invalid`);
+  }
+  if (value.checkedChangeSha256 !== input.checkedChangeSha256) throw new Error('Android Runner receipt checked change is stale');
+  if (!Array.isArray(value.configuredCheckIds)
+    || value.configuredCheckIds.length !== input.configuredCheckIds.length
+    || value.configuredCheckIds.some((id, index) => id !== input.configuredCheckIds[index])) {
+    throw new Error('Android Runner receipt check policy is invalid');
+  }
+  if (!Array.isArray(value.artifactRefs) || value.artifactRefs.length !== 4
+    || new Set(value.artifactRefs).size !== value.artifactRefs.length
+    || value.artifactRefs.some((path) => typeof path !== 'string'
+      || !input.runnerPreparedArtifactPaths.includes(path)
+      || !input.reportArtifactPaths.has(path))) {
+    throw new Error('Android Runner receipt artifact binding is invalid');
+  }
+  assertExactObject(value.navigation, ['launchUriConfigured', 'tapText'], 'Android Runner receipt navigation');
+  if (typeof value.navigation.launchUriConfigured !== 'boolean' || !Array.isArray(value.navigation.tapText)
+    || value.navigation.tapText.some((text) => typeof text !== 'string' || text.length === 0)) {
+    throw new Error('Android Runner receipt navigation is invalid');
+  }
+  if (typeof value.capturedAt !== 'string' || Number.isNaN(Date.parse(value.capturedAt))
+    || new Date(value.capturedAt).toISOString() !== value.capturedAt) {
+    throw new Error('Android Runner receipt timestamp is invalid');
+  }
 }
 
 function validateIssue(value: unknown): asserts value is IssueSnapshot {

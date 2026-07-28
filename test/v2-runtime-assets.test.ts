@@ -7,7 +7,8 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
-import { materializeReportReadView } from '../src/v2/runtime.js';
+import { ContainedProofAgent, materializeReportReadView } from '../src/v2/runtime.js';
+import type { AgentAutoConfig } from '../src/v2/config.js';
 import { materializeWorkflowGeneration, parseWorkflowExecutionProfile } from '../src/v2/workflow-assets.js';
 
 const packageRoot = join(import.meta.dirname, '..', '..');
@@ -94,12 +95,69 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   assert.equal(left.policy.runnerPostcondition, 'proof-only');
   assert.match(left.operationPath, /operations\/acceptance-proof\/SKILL\.md$/u);
   assert.match(left.schemaPath, /schemas\/proof-report-v1\.json$/u);
-  assert.ok(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')));
+  assert.equal(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')), false);
   const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
   assert.equal(profile.name, 'proof_agent');
   assert.equal(profile.model, 'gpt-5.6-sol');
   assert.equal(profile.reasoningEffort, 'high');
   await verifyRuntimeAssetSnapshot(left);
+});
+
+test('contained Android proof receives only Runner-prepared evidence and no host mutation authority', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-android-proof-prompt-'));
+  const orchestratorHome = join(root, 'orchestrator');
+  const targetRoot = join(root, 'target');
+  const worktree = join(targetRoot, '.codex-orchestrator/worktrees/issue-177');
+  await mkdir(worktree, { recursive: true });
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: orchestratorHome,
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  let prompt = '';
+  const process = {
+    run: async (invocation: { prompt: string }) => {
+      prompt = invocation.prompt;
+      return { kind: 'cancelled' as const };
+    },
+  };
+  const agent = new ContainedProofAgent({
+    config: androidConfigFixture,
+    orchestratorHome,
+    parentCodexHome: join(root, 'codex-home'),
+    safePath: '/usr/bin:/bin',
+    targetRoot,
+    bootId: 'boot-a',
+    androidAdbPath: '/android-sdk/platform-tools/adb',
+    iosXcrunPath: '/usr/bin/xcrun',
+    processExecutor: async () => ({ stdout: '', stderr: '', exitCode: 1 }),
+    process: process as never,
+    createAttemptId: () => 'attempt-android-proof',
+  });
+  const result = await agent.run({
+    proofId: 'proof-177',
+    runId: 'run-177',
+    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
+    checkedChangeSha256: 'a'.repeat(64),
+    changedFiles: ['test/widget_test.dart'],
+    checks: [],
+    runnerPreparedArtifactPaths: ['.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json'],
+    runnerPreparedArtifactSha256: { '.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json': 'b'.repeat(64) },
+    runnerPreparationWarnings: ['Android UI proof unfinished: emulator boot timed out.'],
+    repairOnly: false,
+    repairFindings: [],
+    workflowGeneration,
+    signal: new AbortController().signal,
+  });
+  assert.equal(result.kind, 'cancelled');
+  assert.match(prompt, /Runner-owned Android artifact paths/u);
+  assert.match(prompt, /Do not invoke adb, emulator, Flutter run, or an Android lease helper/u);
+  assert.match(prompt, /Android UI proof unfinished: emulator boot timed out/u);
+  assert.match(prompt, /Android infrastructure failure alone must not block delivery/u);
+  assert.doesNotMatch(prompt, /Android lease root:/u);
+  assert.doesNotMatch(prompt, /Android adb path:/u);
 });
 
 test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {
@@ -185,4 +243,35 @@ async function spawnResult(file: string, args: string[]): Promise<{ code: number
     child.once('error', rejectExit);
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
+}
+
+function androidConfigFixture(): AgentAutoConfig {
+  return {
+    schema: 'codex-orchestrator.agent-auto', version: 2,
+    github: {
+      owner: 'M-Ivonin', repo: 'tipsterBro', baseBranch: 'sirbro-dev',
+      labels: {
+        auto: { name: 'agent:auto', color: '000000', description: 'auto' },
+        running: { name: 'agent:running', color: '000001', description: 'running' },
+        blocked: { name: 'agent:blocked', color: '000002', description: 'blocked' },
+        review: { name: 'agent:review', color: '000003', description: 'review' },
+        waitingHuman: { name: 'agent:waiting-human', color: '000004', description: 'waiting' },
+      },
+    },
+    runner: {
+      workspaceRoot: '.codex-orchestrator/worktrees', stateDir: '.codex-orchestrator/state',
+      branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 30, maxCycles: 5,
+    },
+    codex: { command: '/usr/bin/false', timeoutMs: 60_000, idleTimeoutMs: 30_000, toolNetwork: 'deny' },
+    checks: {},
+    proof: {
+      artifactDir: '.codex-orchestrator/v2/proofs',
+      android: {
+        applicationId: 'ai.levantem.sirbro', avdName: 'Pixel_9_API_Baklava',
+        flutterCommand: '/opt/flutter/bin/flutter', buildArgs: ['build', 'apk'], apkPath: 'build/app.apk',
+        tapText: ['Live'], bootTimeoutMs: 180_000, navigationTimeoutMs: 60_000, settleMs: 5_000,
+      },
+    },
+    deny: { readPaths: ['.env'], commands: ['/usr/bin/env'] },
+  };
 }

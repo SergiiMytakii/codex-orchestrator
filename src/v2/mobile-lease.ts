@@ -15,6 +15,10 @@ export interface AndroidLeaseRecordV1 {
   appId: string;
   ownerPid: number;
   appPid: number | null;
+  runnerCreated?: true;
+  emulatorPid?: number;
+  emulatorProcessIdentity?: string;
+  dataDir?: string;
   acquiredAt: string;
   expiresAt: string;
   updatedAt: string;
@@ -23,6 +27,10 @@ export interface AndroidLeaseRecordV1 {
 export interface AndroidLeaseVerifier {
   verify(input: { proofId: string; artifactRelativePath: string; artifactBytes: Buffer }): Promise<void>;
   release(proofId: string): Promise<void>;
+}
+
+export interface AndroidLeaseTargetController {
+  release(record: AndroidLeaseRecordV1): Promise<void>;
 }
 
 export interface IosLeaseRecordV1 {
@@ -58,6 +66,7 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
   private readonly worktreeRoot: string;
   private readonly now: () => Date;
   private readonly artifactRelativePathForProof?: (proofId: string) => string;
+  private readonly targetController?: AndroidLeaseTargetController;
   private readonly verified = new Map<string, { lease: AndroidLeaseRecordV1; artifactPath: string }>();
 
   constructor(input: {
@@ -65,11 +74,13 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     worktreeRoot: string;
     now?: () => Date;
     artifactRelativePathForProof?: (proofId: string) => string;
+    targetController?: AndroidLeaseTargetController;
   }) {
     this.leasePath = join(resolve(input.leaseRoot), 'android.json');
     this.worktreeRoot = resolve(input.worktreeRoot);
     this.now = input.now ?? (() => new Date());
     this.artifactRelativePathForProof = input.artifactRelativePathForProof;
+    this.targetController = input.targetController;
   }
 
   async verify(input: { proofId: string; artifactRelativePath: string; artifactBytes: Buffer }): Promise<void> {
@@ -78,7 +89,7 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     if (external.status !== 'active' || artifact.status !== 'active' || external.proofId !== input.proofId || artifact.proofId !== input.proofId) {
       throw new Error('Android lease proof identity is invalid');
     }
-    for (const field of ['token', 'serial', 'appId', 'ownerPid', 'appPid', 'acquiredAt', 'expiresAt'] as const) {
+    for (const field of ['token', 'serial', 'appId', 'ownerPid', 'appPid', 'runnerCreated', 'emulatorPid', 'emulatorProcessIdentity', 'dataDir', 'acquiredAt', 'expiresAt'] as const) {
       if (external[field] !== artifact[field]) throw new Error('Android lease artifact does not match active ownership');
     }
     if (!Number.isSafeInteger(external.appPid) || (external.appPid as number) < 1 || Date.parse(external.expiresAt) < this.now().getTime()) {
@@ -100,6 +111,10 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     if (external.proofId !== proofId) throw new Error('Android lease release identity is invalid');
     const verified = this.verified.get(proofId) ?? await this.resolveReleaseArtifact(proofId, external);
     if (verified.lease.token !== external.token) throw new Error('Android lease release token changed');
+    if (external.runnerCreated === true) {
+      if (!this.targetController) throw new Error('Runner-created Android lease target controller is unavailable');
+      await this.targetController.release(external);
+    }
     const released: AndroidLeaseRecordV1 = { ...external, status: 'released', updatedAt: this.now().toISOString() };
     await writeDurableAtomicFile(verified.artifactPath, `${canonicalJson(released)}\n`, 0o600);
     const reread = parseAndroidLease(await readBoundedRegularFile(this.leasePath));
@@ -123,7 +138,7 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     if (!['active', 'released'].includes(artifact.status) || artifact.proofId !== proofId || artifact.token !== external.token) {
       throw new Error('Android lease release artifact does not match active ownership');
     }
-    for (const field of ['serial', 'appId', 'ownerPid', 'appPid', 'acquiredAt', 'expiresAt'] as const) {
+    for (const field of ['serial', 'appId', 'ownerPid', 'appPid', 'runnerCreated', 'emulatorPid', 'emulatorProcessIdentity', 'dataDir', 'acquiredAt', 'expiresAt'] as const) {
       if (artifact[field] !== external[field]) throw new Error('Android lease release artifact identity changed');
     }
     return { lease: artifact, artifactPath };
@@ -217,7 +232,13 @@ export function parseAndroidLease(bytes: Buffer): AndroidLeaseRecordV1 {
   const value = JSON.parse(bytes.toString('utf8')) as unknown;
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Android lease must be an object');
   const record = value as Record<string, unknown>;
-  const expected = ['schema', 'version', 'status', 'proofId', 'token', 'serial', 'appId', 'ownerPid', 'appPid', 'acquiredAt', 'expiresAt', 'updatedAt'].sort();
+  const expectedBase = ['schema', 'version', 'status', 'proofId', 'token', 'serial', 'appId', 'ownerPid', 'appPid', 'acquiredAt', 'expiresAt', 'updatedAt'];
+  const expected = [
+    ...expectedBase,
+    ...('runnerCreated' in record || 'emulatorPid' in record || 'emulatorProcessIdentity' in record || 'dataDir' in record
+      ? ['runnerCreated', 'emulatorPid', 'emulatorProcessIdentity'] : []),
+    ...('dataDir' in record ? ['dataDir'] : []),
+  ].sort();
   const actual = Object.keys(record).sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error('Android lease fields are invalid');
   if (record.schema !== 'codex-orchestrator.android-lease' || record.version !== 1
@@ -229,6 +250,17 @@ export function parseAndroidLease(bytes: Buffer): AndroidLeaseRecordV1 {
   if (!Number.isSafeInteger(record.ownerPid) || (record.ownerPid as number) < 1
     || (record.appPid !== null && (!Number.isSafeInteger(record.appPid) || (record.appPid as number) < 1))) {
     throw new Error('Android lease process identity is invalid');
+  }
+  if ('runnerCreated' in record || 'emulatorPid' in record) {
+    if (record.runnerCreated !== true || !Number.isSafeInteger(record.emulatorPid) || (record.emulatorPid as number) < 1) {
+      throw new Error('Android Runner lease process identity is invalid');
+    }
+    if (!isBoundedString(record.emulatorProcessIdentity)) {
+      throw new Error('Android Runner lease process-start identity is invalid');
+    }
+  }
+  if ('dataDir' in record && (typeof record.dataDir !== 'string' || !record.dataDir.startsWith('/'))) {
+    throw new Error('Android Runner lease data directory is invalid');
   }
   for (const field of ['acquiredAt', 'expiresAt', 'updatedAt'] as const) {
     const timestamp = record[field];

@@ -75,7 +75,13 @@ export interface PersistedIssueSnapshotV1 {
   url: string;
   state: 'OPEN';
   labels: string[];
-  comments?: Array<{ body: string; authorAssociation: string }>;
+  comments?: Array<{
+    id?: string;
+    body: string;
+    authorAssociation: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }>;
 }
 
 export interface PersistedFrozenCriterionV1 {
@@ -434,7 +440,15 @@ function validateIssueSnapshot(value: unknown, field: string): asserts value is 
   if (hasOwn(value, 'comments')) {
     if (!Array.isArray(value.comments) || value.comments.length > 256) throw new Error(`${field}.comments is invalid`);
     for (const [index, comment] of value.comments.entries()) {
-      assertExactObject(comment, ['body', 'authorAssociation'], `${field}.comments[${index}]`);
+      const optionalCommentFields = [
+        ...(hasOwn(comment, 'id') ? ['id'] : []),
+        ...(hasOwn(comment, 'createdAt') ? ['createdAt'] : []),
+        ...(hasOwn(comment, 'updatedAt') ? ['updatedAt'] : []),
+      ];
+      assertExactObject(comment, [...optionalCommentFields, 'body', 'authorAssociation'], `${field}.comments[${index}]`);
+      if (hasOwn(comment, 'id')) assertNonEmptyString(comment.id, `${field}.comments[${index}].id`);
+      if (hasOwn(comment, 'createdAt')) assertTimestamp(comment.createdAt, `${field}.comments[${index}].createdAt`);
+      if (hasOwn(comment, 'updatedAt')) assertTimestamp(comment.updatedAt, `${field}.comments[${index}].updatedAt`);
       if (typeof comment.body !== 'string' || comment.body.length > 16 * 1024) throw new Error(`${field}.comments[${index}].body is invalid`);
       assertNonEmptyString(comment.authorAssociation, `${field}.comments[${index}].authorAssociation`);
     }

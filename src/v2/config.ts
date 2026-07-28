@@ -10,6 +10,19 @@ interface LabelPolicy {
   description: string;
 }
 
+export interface AndroidProofConfig {
+  applicationId: string;
+  avdName: string;
+  flutterCommand: string;
+  buildArgs: string[];
+  apkPath: string;
+  launchUri?: string;
+  tapText?: string[];
+  bootTimeoutMs: number;
+  navigationTimeoutMs: number;
+  settleMs: number;
+}
+
 export interface AgentAutoConfig {
   schema: 'codex-orchestrator.agent-auto';
   version: 2;
@@ -39,7 +52,7 @@ export interface AgentAutoConfig {
     toolNetwork: 'deny';
   };
   checks: Record<string, string>;
-  proof: { artifactDir: string };
+  proof: { artifactDir: string; android?: AndroidProofConfig };
   deny: { readPaths: string[]; commands: string[] };
 }
 
@@ -93,8 +106,11 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
     assertNonEmptyString(command, `config.checks.${name}`);
   }
 
-  assertExactObject(value.proof, ['artifactDir'], 'config.proof');
+  assertExactObject(value.proof, value.proof && typeof value.proof === 'object' && 'android' in value.proof
+    ? ['artifactDir', 'android']
+    : ['artifactDir'], 'config.proof');
   assertRepositoryRelativePath(value.proof.artifactDir, 'config.proof.artifactDir');
+  if ('android' in value.proof) validateAndroidProof(value.proof.android, 'config.proof.android');
 
   assertExactObject(value.deny, ['readPaths', 'commands'], 'config.deny');
   assertStringArray(value.deny.readPaths, 'config.deny.readPaths');
@@ -103,6 +119,52 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
   for (const command of value.deny.commands) assertCanonicalAbsolutePath(command, 'config.deny.commands');
 
   return value as unknown as AgentAutoConfig;
+}
+
+function validateAndroidProof(value: unknown, field: string): void {
+  const optionalKeys = value && typeof value === 'object'
+    ? [...('launchUri' in value ? ['launchUri'] : []), ...('tapText' in value ? ['tapText'] : [])]
+    : [];
+  assertExactObject(value, [
+    'applicationId', 'avdName', 'flutterCommand', 'buildArgs', 'apkPath',
+    'bootTimeoutMs', 'navigationTimeoutMs', 'settleMs', ...optionalKeys,
+  ], field);
+  if (typeof value.applicationId !== 'string'
+    || !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$/u.test(value.applicationId)) {
+    throw new Error(`${field}.applicationId is invalid`);
+  }
+  if (typeof value.avdName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.avdName)) {
+    throw new Error(`${field}.avdName is invalid`);
+  }
+  assertCanonicalAbsolutePath(value.flutterCommand, `${field}.flutterCommand`);
+  assertStringArray(value.buildArgs, `${field}.buildArgs`);
+  if (value.buildArgs.length === 0 || value.buildArgs.some((argument) => argument.length === 0 || argument.includes('\0')
+    || /(?:^|[^A-Za-z0-9])(token|password|secret|api[_-]?key)=/iu.test(argument))) {
+    throw new Error(`${field}.buildArgs is invalid`);
+  }
+  if (value.buildArgs[0] !== 'build' || value.buildArgs[1] !== 'apk') {
+    throw new Error(`${field}.buildArgs must invoke flutter build apk`);
+  }
+  assertRepositoryRelativePath(value.apkPath, `${field}.apkPath`);
+  if (!('launchUri' in value) && !('tapText' in value)) throw new Error(`${field} must configure launchUri or tapText`);
+  if ('launchUri' in value) {
+    assertNonEmptyString(value.launchUri, `${field}.launchUri`);
+    let uri: URL;
+    try { uri = new URL(value.launchUri); } catch { throw new Error(`${field}.launchUri is invalid`); }
+    if (!uri.protocol || uri.username || uri.password || uri.search || uri.hash) throw new Error(`${field}.launchUri is invalid`);
+  }
+  if ('tapText' in value) {
+    assertStringArray(value.tapText, `${field}.tapText`);
+    if (value.tapText.length === 0 || value.tapText.some((text) => text.length === 0)) {
+      throw new Error(`${field}.tapText is invalid`);
+    }
+  }
+  assertPositiveSafeInteger(value.bootTimeoutMs, `${field}.bootTimeoutMs`);
+  assertPositiveSafeInteger(value.navigationTimeoutMs, `${field}.navigationTimeoutMs`);
+  assertPositiveSafeInteger(value.settleMs, `${field}.settleMs`);
+  if (value.bootTimeoutMs > 10 * 60 * 1000 || value.navigationTimeoutMs > 2 * 60 * 1000 || value.settleMs > 60 * 1000) {
+    throw new Error(`${field} timeouts exceed policy`);
+  }
 }
 
 function validateLabel(value: unknown, field: string): void {

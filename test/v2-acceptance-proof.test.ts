@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   AcceptanceProof,
   ProofLaunchAuthorizationError,
+  ProofQuiescenceError,
   type FrozenCriterion,
   type IssueSnapshot,
   type ProofAgentResult,
@@ -17,6 +18,7 @@ import {
 import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { ProofReportV1 } from '../src/v2/proof-report.js';
+import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
 
 const artifactBytes = Buffer.from('proof evidence\n');
 
@@ -160,11 +162,16 @@ test('one malformed-report repair and one transport retry stay proof-internal un
   assert.equal(launchAuthorizations, 2);
   assert.deepEqual((await transport.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'transport-retry']);
 
+  let revokedReleaseCalls = 0;
   const revoked = proofFixture({
     agentResults: [
       { kind: 'transport-failed', resumable: true },
       { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
     ],
+    androidLease: {
+      verify: async () => {},
+      release: async () => { revokedReleaseCalls += 1; },
+    },
   });
   let authorizationAttempt = 0;
   await assert.rejects(revoked.proof.proveChange(revoked.input({
@@ -174,6 +181,7 @@ test('one malformed-report repair and one transport retry stay proof-internal un
     },
   })), ProofLaunchAuthorizationError);
   assert.equal(revoked.agentCalls.length, 1);
+  assert.equal(revokedReleaseCalls, 1);
 });
 
 test('passed proof returns a sanitized receipt and persists no run lifecycle capability', async () => {
@@ -195,6 +203,20 @@ test('passed proof returns a sanitized receipt and persists no run lifecycle cap
   assert.equal('lifecycle' in (state ?? {}), false);
   assert.equal('cycle' in (state ?? {}), false);
   assert.equal('intent' in (state ?? {}), false);
+});
+
+test('proof quiescence is rethrown before waiting and releases Android ownership only after absence', async () => {
+  const events: string[] = [];
+  const fixture = proofFixture({
+    agentError: new ProofQuiescenceError(71, 71, async () => { events.push('absent'); }),
+    androidLease: { verify: async () => {}, release: async () => { events.push('release'); } },
+  });
+  let captured: unknown;
+  try { await fixture.proof.proveChange(fixture.input()); } catch (error) { captured = error; }
+  assert.ok(captured instanceof ProofQuiescenceError);
+  assert.deepEqual(events, []);
+  await captured.waitForAbsence();
+  assert.deepEqual(events, ['absent', 'release']);
 });
 
 test('needs-rework, external-block, transport, cancellation, and internal agent outcomes remain typed', async () => {
@@ -242,6 +264,8 @@ function proofFixture(options: {
   agentResults?: ProofAgentResult[];
   artifactContent?: Buffer;
   inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
+  androidLease?: AndroidLeaseVerifier;
+  agentError?: Error;
 } = {}) {
   const capabilities = createCheckedChangeCapabilities();
   const payload = checkedPayload();
@@ -265,6 +289,7 @@ function proofFixture(options: {
     proofAgent: {
       run: async (input) => {
         agentCalls.push(input);
+        if (options.agentError) throw options.agentError;
         return options.agentResults?.shift() ?? options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
       },
     },
@@ -279,6 +304,7 @@ function proofFixture(options: {
     proofArtifactDir: 'proofs/proof-1',
     createAttemptId: (() => { let attempt = 0; return () => `attempt-${++attempt}`; })(),
     now: () => '2026-07-16T12:00:00.000Z',
+    androidLease: options.androidLease,
   });
   return {
     proof,

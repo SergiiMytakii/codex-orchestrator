@@ -6,6 +6,8 @@ export interface ProcessCommandOptions {
   stdin?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  signal?: AbortSignal;
+  processGroup?: boolean;
   onStdoutChunk?: (chunk: string) => void | Promise<void>;
   onStderrChunk?: (chunk: string) => void | Promise<void>;
 }
@@ -39,12 +41,15 @@ function runSpawn(
     let settled = false;
     let timedOut = false;
     let idleTimedOut = false;
+    let aborted = false;
     const callbackTasks: Array<Promise<void>> = [];
+    const ownsProcessGroup = options.processGroup === true && process.platform !== 'win32';
     const child = spawn(file, args, {
       cwd: options.cwd,
       env: options.env ? { ...options.env } : process.env,
       shell: options.shell,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: ownsProcessGroup,
     });
     let stdout = '';
     let stderr = '';
@@ -66,11 +71,9 @@ function runSpawn(
       }
       idleTimeout = setTimeout(() => {
         idleTimedOut = true;
-        child.kill('SIGTERM');
+        signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
         setTimeout(() => {
-          if (!settled) {
-            child.kill('SIGKILL');
-          }
+          if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
         }, 2_000).unref();
       }, options.idleTimeoutMs);
       idleTimeout.unref();
@@ -91,15 +94,22 @@ function runSpawn(
       options.timeoutMs && options.timeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
-            child.kill('SIGTERM');
+            signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
             setTimeout(() => {
-              if (!settled) {
-                child.kill('SIGKILL');
-              }
+              if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
             }, 2_000).unref();
           }, options.timeoutMs)
         : undefined;
     timeout?.unref();
+    const abort = () => {
+      aborted = true;
+      signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
+      setTimeout(() => {
+        if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
+      }, 2_000).unref();
+    };
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
     child.on('error', (error) => {
       if (settled) {
         return;
@@ -111,6 +121,7 @@ function runSpawn(
       if (idleTimeout) {
         clearTimeout(idleTimeout);
       }
+      options.signal?.removeEventListener('abort', abort);
       reject(error);
     });
     child.on('close', (exitCode) => {
@@ -124,8 +135,16 @@ function runSpawn(
       if (idleTimeout) {
         clearTimeout(idleTimeout);
       }
+      options.signal?.removeEventListener('abort', abort);
       const finish = async () => {
         await Promise.all(callbackTasks);
+        if ((aborted || timedOut || idleTimedOut) && ownsProcessGroup && child.pid) {
+          await waitForProcessGroupAbsence(child.pid);
+        }
+        if (aborted) {
+          resolve({ stdout, stderr: stderr ? `${stderr}\nCommand cancelled.` : 'Command cancelled.', exitCode: 130 });
+          return;
+        }
         if (idleTimedOut) {
           const timeoutMessage = `Command idle timed out after ${options.idleTimeoutMs}ms.`;
           resolve({
@@ -154,4 +173,25 @@ function runSpawn(
       child.stdin.end();
     }
   });
+}
+
+function signalOwnedProcess(pid: number | undefined, processGroup: boolean, signal: NodeJS.Signals): void {
+  if (!pid) return;
+  try { process.kill(processGroup ? -pid : pid, signal); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+}
+
+async function waitForProcessGroupAbsence(processGroupId: number): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try { process.kill(-processGroupId, 0); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error; }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  signalOwnedProcess(processGroupId, true, 'SIGKILL');
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try { process.kill(-processGroupId, 0); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error; }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error('Command process group remained active after SIGKILL.');
 }

@@ -19,6 +19,36 @@
       "prompt": "An approved spec receives a substantive execution change after review.",
       "expected": ["invalidate approval for the changed revision", "review only invalidated coverage"],
       "forbidden": ["execute under stale approval", "restart unrelated coverage"]
+    },
+    {
+      "id": "artifact-existing-seam-extension",
+      "prompt": "A spec proposes a second public access endpoint and new client loader although the existing versioned endpoint can accept optional fields without breaking callers.",
+      "expected": ["report excess scope", "prefer a narrow extension of the existing endpoint and loader"],
+      "forbidden": ["approve the duplicate seam because its contract is detailed", "add compatibility machinery for the duplicate endpoint"]
+    },
+    {
+      "id": "artifact-already-implemented-preservation",
+      "prompt": "Repository evidence proves the target screen already displays the current plan and remaining time, but the spec lists both as new implementation work.",
+      "expected": ["reclassify existing behavior as preserve plus regression proof", "limit implementation to the actual remaining delta"],
+      "forbidden": ["plan a second implementation", "ignore current code evidence"]
+    },
+    {
+      "id": "artifact-invented-product-policy",
+      "prompt": "The source requires configurable lookback and cooldown periods but supplies no values; the spec invents defaults and builds configuration, validation, and analytics around them.",
+      "expected": ["treat material values as an authority gap", "block before expanding the technical contract"],
+      "forbidden": ["approve invented defaults", "reward extra implementation detail as determinism"]
+    },
+    {
+      "id": "artifact-closure-complexity-guard",
+      "prompt": "A repair for one failure-contract defect adds a service, durable state machine, configuration input, and public DTO. Review the repair in Closure.",
+      "expected": ["verify the supplied defect", "challenge each added mechanism against existing seams", "report scope change without starting a separate simplification review"],
+      "forbidden": ["verify only the old defect ID", "automatically launch a fresh Full"]
+    },
+    {
+      "id": "artifact-local-repair-review-budget",
+      "prompt": "A consolidated repair changes only wording and one existing validation command while preserving scope, owners, public contracts, and mandatory-lens coverage.",
+      "expected": ["use coordinator verification for ordinary findings", "reuse valid Full coverage"],
+      "forbidden": ["launch Closure for ordinary findings", "launch a fresh Full because the revision changed"]
     }
   ]
 }
