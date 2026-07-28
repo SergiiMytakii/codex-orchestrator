@@ -102,6 +102,14 @@ For an eligible issue, the Runner freezes the issue snapshot and acceptance crit
 
 Every later externally meaningful phase revalidates authorization. The open issue must still carry `agent:auto` and `agent:running`, and exactly one trusted claim comment must bind the run ID, issue, and branch. Revoked or conflicting authority fails closed.
 
+Issue-worktree creation is an idempotent local effect. If it fails before the
+worktree exists, the Runner keeps the run in `claimed`, writes a bounded local
+Git diagnostic, and returns a resumable transport result. A later invocation
+reconciles the same claim and retries creation after the operator corrects the
+configured base branch, stale ref, or worktree collision. Git failures after
+implementation or staging remain fail-closed because their partial effects are
+not equivalent to an absent worktree.
+
 ## 6. Routing before implementation
 
 After claim and worktree creation, the Runner invokes `triage` against the frozen issue facts, acceptance criteria, repository, base SHA, and pinned workflow generation. Triage must return a schema-valid, evidence-backed route:

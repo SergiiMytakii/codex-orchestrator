@@ -927,11 +927,32 @@ export class RunIssue {
           const claim = await this.reconcileClaim(active, config);
           if ('result' in claim) return claim.result;
           active = claim.active;
-          const worktree = await this.dependencies.git.inspectWorktree({ worktreePath, branchName, baseSha });
-          if (worktree === 'diverged') return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'claim-worktree-diverged');
+          let worktree: 'absent' | 'matching' | 'diverged';
+          try {
+            worktree = await this.dependencies.git.inspectWorktree({ worktreePath, branchName, baseSha });
+          } catch (error) {
+            return await this.invokedFailure(
+              active,
+              'local-git-worktree-inspection-failed',
+              claimedWorktreeInspectionFailureSummary(error),
+            );
+          }
+          if (worktree === 'diverged') {
+            return await this.invokedFailure(
+              active,
+              'local-git-worktree-diverged',
+              'The claimed worktree path is present but does not match the expected branch and base. Correct or preserve the local artifact, then retry the same run.',
+            );
+          }
           if (worktree === 'absent') {
             try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
-            catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
+            catch (error) {
+              return await this.invokedFailure(
+                active,
+                'local-git-worktree-creation-failed',
+                worktreeCreationFailureSummary(error),
+              );
+            }
           }
           active = await this.initializeClaimedRun(active, issue);
           issueSnapshot = structuredClone(active.record.issueSnapshot);
@@ -1026,7 +1047,13 @@ export class RunIssue {
         if ('result' in claim) return claim.result;
         active = claim.active;
         try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
-        catch { return await this.terminal(active, { status: 'internal-error', code: 'local-git-effect-failed' }); }
+        catch (error) {
+          return await this.invokedFailure(
+            active,
+            'local-git-worktree-creation-failed',
+            worktreeCreationFailureSummary(error),
+          );
+        }
         active = await this.initializeClaimedRun(active, issue);
         issueSnapshot = structuredClone(active.record.issueSnapshot);
       }
@@ -2323,8 +2350,12 @@ export class RunIssue {
     return this.terminal(await this.clearIntent(active), { status: 'blocked', kind: 'safety', resumable: true });
   }
 
-  private async invokedFailure(active: ActiveRun, code: string): Promise<RunIssueResult> {
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary: 'Publication delivery requires reconciliation.' });
+  private async invokedFailure(
+    active: ActiveRun,
+    code: string,
+    summary = 'Publication delivery requires reconciliation.',
+  ): Promise<RunIssueResult> {
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary });
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
 
@@ -2563,6 +2594,29 @@ function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ bo
 
 function sortedUnique(values: string[]): string[] {
   return [...new Set(values)].sort();
+}
+
+function worktreeCreationFailureSummary(error: unknown): string {
+  return boundedLocalGitFailureSummary(
+    'Local Git worktree creation failed; correct the local Git state and retry the same run.',
+    error,
+  );
+}
+
+function claimedWorktreeInspectionFailureSummary(error: unknown): string {
+  return boundedLocalGitFailureSummary(
+    'The claimed worktree could not be inspected; correct or preserve the local artifact and retry the same run.',
+    error,
+  );
+}
+
+function boundedLocalGitFailureSummary(prefix: string, error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const diagnostic = raw
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, ' ')
+    .trim();
+  if (diagnostic.length === 0) return prefix;
+  return `${prefix}\n${diagnostic.slice(0, 4 * 1024 - prefix.length - 1)}`;
 }
 
 function assertUuid(value: unknown): asserts value is string {

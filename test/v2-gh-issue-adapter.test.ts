@@ -35,6 +35,18 @@ test('GhCliIssueAdapter preserves decimal REST comment and author IDs above MAX_
   ]);
 });
 
+test('GhCliIssueAdapter bounds historical comments to the persisted run-state contract', async () => {
+  const oversizedBody = 'x'.repeat(60_000);
+  const executor: CommandExecutor = async () => ({
+    stdout: `${JSON.stringify({ ...restComment, body: oversizedBody })}\n`, stderr: '',
+  });
+
+  const [comment] = await new GhCliIssueAdapter('owner', 'repo', executor).listAllComments(12);
+
+  assert.equal(comment!.body.length, 16_384);
+  assert.match(comment!.body, /\[truncated by codex-orchestrator: original comment was 60000 UTF-16 code units\]$/u);
+});
+
 test('GhCliIssueAdapter checks permission against the immutable author ID and types 404 as none', async () => {
   const success: CommandExecutor = async () => ({
     stdout: JSON.stringify({ permission: 'write', user: { id: restComment.user.id } }), stderr: '',
@@ -68,4 +80,30 @@ test('GhCliIssueAdapter returns the posted comment only after REST reread observ
   assert.equal(observed.id, restComment.id);
   assert.equal(calls.length, 2);
   assert.equal(calls[1]![0], 'api');
+});
+
+test('GhCliIssueAdapter preserves oversized Unicode comments across the GitHub argv round trip', async () => {
+  const suffix = '\n\n[truncated by codex-orchestrator: original comment was 60000 UTF-16 code units]';
+  const cutoff = 16_384 - suffix.length;
+  const body = `${'x'.repeat(cutoff - 1)}😀${'x'.repeat(60_000 - cutoff - 1)}`;
+  let outboundBody = '';
+  let postedBody = '';
+  const executor: CommandExecutor = async (_file, args) => {
+    if (args[0] === 'issue') {
+      outboundBody = args.at(-1)!;
+      postedBody = Buffer.from(outboundBody).toString('utf8');
+      return { stdout: '', stderr: '' };
+    }
+    return { stdout: `${JSON.stringify({ ...restComment, body: postedBody })}\n`, stderr: '' };
+  };
+
+  const observed = await new GhCliIssueAdapter('owner', 'repo', executor).postComment(12, body);
+
+  assert.equal(observed.body, postedBody);
+  assert.equal(outboundBody.length, 16_383);
+  assert.notEqual(outboundBody, body);
+  assert.equal(outboundBody.endsWith(suffix), true);
+  assert.doesNotMatch(outboundBody, /😀/u);
+  assert.equal(observed.body.length, outboundBody.length);
+  assert.doesNotMatch(observed.body, /\uFFFD/u);
 });

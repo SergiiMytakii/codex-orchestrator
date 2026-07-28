@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -572,6 +572,58 @@ test('claimed initialization verifies the pinned workflow generation before tria
   assert.equal(fixture.events.includes('route:triage'), false);
 });
 
+test('worktree creation failure is diagnostic and resumes the claimed run', async () => {
+  const diagnostic = `Existing branch codex/issue-42 is not merged into main; refusing to remove it automatically.\u0000${'x'.repeat(5_000)}`;
+  const fixture = await runFixture({ createWorktreeRejectOnce: diagnostic });
+
+  const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(interrupted, ['status', 'resumable']), {
+    status: 'transport-failed', resumable: true,
+  });
+  const claimed = (await fixture.store.read()).runs[0]!;
+  assert.equal(claimed.lifecycle, 'claimed');
+  assert.equal(claimed.terminalOutcome, undefined);
+  const summary = fixture.evidence.at(-1)?.summary ?? '';
+  assert.match(summary, /Existing branch codex\/issue-42 is not merged into main/u);
+  assert.equal(summary.length <= 4 * 1024, true);
+  assert.doesNotMatch(summary, /\u0000/u);
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
+});
+
+test('partial worktree creation artifacts remain correctable in the same claimed run', async () => {
+  const fixture = await runFixture({ createIncompleteWorktreeThenRejectOnce: true });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const claimed = (await fixture.store.read()).runs[0]!;
+  const stillInterrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(stillInterrupted, ['status', 'resumable']), {
+    status: 'transport-failed', resumable: true,
+  });
+  assert.equal((await fixture.store.read()).runs[0]!.lifecycle, 'claimed');
+
+  await rm(fixture.worktreePath, { recursive: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
+});
+
+test('diverged claimed worktree remains correctable instead of becoming terminal', async () => {
+  const fixture = await runFixture({ createWorktreeRejectOnce: 'partial creation failed', inspectWorktreeDivergedOnce: true });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const claimed = (await fixture.store.read()).runs[0]!;
+  const diverged = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(diverged, ['status', 'resumable']), {
+    status: 'transport-failed', resumable: true,
+  });
+  assert.equal((await fixture.store.read()).runs[0]!.lifecycle, 'claimed');
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
+});
+
 test('triage receives persisted issue comments and authorization is rechecked after routing', async () => {
   const comments = [{ body: 'Product owner clarification.', authorAssociation: 'OWNER' }];
   const visible = await runFixture({ initialComments: comments, expectedTriageComment: comments[0]!.body });
@@ -972,6 +1024,9 @@ interface FixtureOptions {
   revokeDuringRoute?: boolean;
   workflowVerificationReject?: boolean;
   reviewMalformedOnce?: boolean;
+  createWorktreeRejectOnce?: string;
+  createIncompleteWorktreeThenRejectOnce?: boolean;
+  inspectWorktreeDivergedOnce?: boolean;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -988,6 +1043,7 @@ async function runFixture(options: FixtureOptions = {}) {
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteRoot]);
   const baseSha = (await execFileAsync('git', ['-C', targetRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   const events: string[] = [];
+  const evidence: Array<{ runId: string; code: string; summary: string }> = [];
   const config = configFixture();
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
   const configBytes = Buffer.from(`${canonicalJson(config)}\n`);
@@ -1299,7 +1355,10 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     checkedChangeMint: capabilities,
     runRecords: store,
-    writeEvidence: async ({ runId, code }) => ({ id: `evidence:${runId}:${code}`, path: `.codex-orchestrator/evidence/${runId}.json` }),
+    writeEvidence: async (entry) => {
+      evidence.push(structuredClone(entry));
+      return { id: `evidence:${entry.runId}:${entry.code}`, path: `.codex-orchestrator/evidence/${entry.runId}.json` };
+    },
     packageVersion: '0.1.51',
     createWorkflowGeneration: async () => ({
       receipt: workflowGeneration('0.1.51', '1'),
@@ -1314,7 +1373,7 @@ async function runFixture(options: FixtureOptions = {}) {
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), dependencies, targetRoot, remoteRoot, worktreePath, baseSha, events, store: rawStore };
+  return { runner: new RunIssue(dependencies), dependencies, targetRoot, remoteRoot, worktreePath, baseSha, events, evidence, store: rawStore };
 }
 
 function workflowGeneration(packageVersion: string, seed: string) {
@@ -1359,6 +1418,8 @@ function traceStore(
 
 function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: FixtureOptions): RunIssueGit {
   const rejected = new Set<string>();
+  let createWorktreeRejected = false;
+  let inspectWorktreeDiverged = false;
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejected.has(effect)) return false;
     rejected.add(effect);
@@ -1366,8 +1427,25 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   };
   return {
     getBaseSha: (input) => delegate.getBaseSha(input),
-    createWorktree: (input) => delegate.createWorktree(input),
-    inspectWorktree: (input) => delegate.inspectWorktree(input),
+    createWorktree: async (input) => {
+      if (options.createIncompleteWorktreeThenRejectOnce && !createWorktreeRejected) {
+        createWorktreeRejected = true;
+        await mkdir(input.worktreePath, { recursive: true });
+        throw new Error('git left an incomplete worktree directory');
+      }
+      if (options.createWorktreeRejectOnce && !createWorktreeRejected) {
+        createWorktreeRejected = true;
+        throw new Error(options.createWorktreeRejectOnce);
+      }
+      return delegate.createWorktree(input);
+    },
+    inspectWorktree: async (input) => {
+      if (options.inspectWorktreeDivergedOnce && !inspectWorktreeDiverged) {
+        inspectWorktreeDiverged = true;
+        return 'diverged';
+      }
+      return delegate.inspectWorktree(input);
+    },
     snapshot: (path) => delegate.snapshot(path),
     fingerprintDeniedPaths: (path, deniedPaths) => delegate.fingerprintDeniedPaths(path, deniedPaths),
     listChangedFiles: (path) => delegate.listChangedFiles(path),

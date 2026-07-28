@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Bound GitHub issue comments to the 16,384-code-unit persisted run-state
+  contract on both read and write, with an explicit truncation marker and
+  surrogate-safe Unicode handling.
+- Treat issue-worktree creation failures as resumable local transport failures.
+  The claimed run is preserved for an idempotent retry after local Git state or
+  target configuration is corrected, and bounded local evidence retains the
+  underlying Git diagnostic instead of collapsing it into a terminal
+  `local-git-effect-failed`.
+
 ## [2.0.5] - 2026-07-28
 
 ### Added

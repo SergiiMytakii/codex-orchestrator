@@ -200,15 +200,27 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 }
 
-const maxGitHubCommentBodyLength = 60_000;
+const maxGitHubCommentBodyLength = 16_384;
 
 function truncateCommentBody(body: string): string {
   if (body.length <= maxGitHubCommentBodyLength) {
     return body;
   }
 
-  const suffix = `\n\n[truncated by codex-orchestrator: original comment was ${body.length} characters]`;
-  return `${body.slice(0, maxGitHubCommentBodyLength - suffix.length)}${suffix}`;
+  const suffix = `\n\n[truncated by codex-orchestrator: original comment was ${body.length} UTF-16 code units]`;
+  let prefixLength = maxGitHubCommentBodyLength - suffix.length;
+  const splitsSurrogatePair = isHighSurrogate(body.charCodeAt(prefixLength - 1))
+    && isLowSurrogate(body.charCodeAt(prefixLength));
+  if (splitsSurrogatePair) prefixLength -= 1;
+  return `${body.slice(0, prefixLength)}${suffix}`;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 }
 
 function isIssueNotFound(error: unknown): boolean {
@@ -257,7 +269,7 @@ function normalizeComment(input: unknown): GitHubIssueComment[] {
   const record = input as Record<string, unknown>;
   const id = typeof record.id === 'string' ? record.id : '';
   const url = typeof record.url === 'string' ? record.url : '';
-  const body = typeof record.body === 'string' ? record.body : '';
+  const body = typeof record.body === 'string' ? truncateCommentBody(record.body) : '';
   const createdAt = typeof record.createdAt === 'string' ? record.createdAt : '';
   const author = typeof record.author === 'object' && record.author !== null ? record.author as Record<string, unknown> : {};
   const login = typeof author.login === 'string' ? author.login : '';
@@ -276,7 +288,7 @@ function normalizeRestComment(input: unknown): GitHubIssueComment {
   return {
     id: readDecimalString(record, 'id'),
     url: readString(record, 'html_url'),
-    body: readString(record, 'body'),
+    body: truncateCommentBody(readString(record, 'body')),
     createdAt: readString(record, 'created_at'),
     updatedAt: readString(record, 'updated_at'),
     author: { login: readString(user, 'login'), id: readDecimalString(user, 'id') },
