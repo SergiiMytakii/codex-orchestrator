@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.8] - 2026-07-29
+
 ### Changed
 - Direct runs now resolve bounded verification commands from the frozen issue's
   command-only `Verification` section instead of forcing repository-wide checks.
