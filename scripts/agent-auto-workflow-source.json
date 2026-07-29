@@ -127,6 +127,26 @@
         "externalWrite": false
       }
     },
+    "qualification-repair": {
+      "entry": "operations/qualification-repair/SKILL.md",
+      "sourceSkill": null,
+      "dependencySkills": ["code-debugger", "diagnosing-bugs", "tdd"],
+      "resources": [],
+      "outputSchema": "schemas/implementation-report-v1.json",
+      "profile": "implementer_standard",
+      "policy": {
+        "sandboxMode": "workspace-write",
+        "cwdClass": "worktree",
+        "worktreeAccess": "write",
+        "writableRootClasses": ["worktree"],
+        "runnerPostcondition": "change-set",
+        "network": "deny",
+        "networkHosts": [],
+        "mcpTools": [],
+        "approvalCeiling": "never",
+        "externalWrite": false
+      }
+    },
     "spec-author": {
       "entry": "operations/spec-author/SKILL.md",
       "sourceSkill": "implementation-spec-maker",

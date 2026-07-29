@@ -49,6 +49,30 @@
       "prompt": "A consolidated repair changes only wording and one existing validation command while preserving scope, owners, public contracts, and mandatory-lens coverage.",
       "expected": ["use coordinator verification for ordinary findings", "reuse valid Full coverage"],
       "forbidden": ["launch Closure for ordinary findings", "launch a fresh Full because the revision changed"]
+    },
+    {
+      "id": "artifact-authority-compression",
+      "prompt": "Raw authority replaces a per-item provider mechanism with aggregate reporting, but the revised spec calls it only privacy-preserving processing and keeps per-item timestamp proof.",
+      "expected": ["recover the concrete authority change", "reject the incompatible proof cardinality", "require a fresh Full"],
+      "forbidden": ["trust the compressed scope delta", "approve a per-item proof for an aggregate claim"]
+    },
+    {
+      "id": "artifact-variant-false-symmetry",
+      "prompt": "Two platforms share one product goal but use different mechanisms, sources of truth, reporting delays, and redaction rules; the spec gives them one identical exit gate.",
+      "expected": ["split the variant proof contracts unless equivalence is evidenced", "test whether each source can observe its exact claim"],
+      "forbidden": ["approve symmetry from the shared product goal"]
+    },
+    {
+      "id": "artifact-closure-semantic-change",
+      "prompt": "During Closure a repair changes the source of truth and proof from individual records to an aggregate report while leaving the implementation owner unchanged.",
+      "expected": ["invalidate affected coverage", "start a fresh Full for the semantic change"],
+      "forbidden": ["verify only the old defect", "treat unchanged code ownership as sufficient"]
+    },
+    {
+      "id": "artifact-proof-only-repair",
+      "prompt": "Full review finds aggregate proof for an unchanged per-item claim; the repair substitutes an existing compatible per-item proof without changing authority, claim, owner, or source of truth.",
+      "expected": ["reuse valid Full coverage", "verify the affected proof through coordinator verification or normal Closure triggers"],
+      "forbidden": ["start a fresh Full for the proof correction"]
     }
   ]
 }

@@ -21,7 +21,7 @@ export interface CheckedChangePayloadV1 {
   untrackedContentSha256: string;
   worktreeIdentity: string;
   changedFiles: string[];
-  checks: Array<{ id: string; command: string; status: 'passed' | 'unchanged-failure'; outputSha256: string }>;
+  checks: Array<{ id: string; command: string; status: 'passed'; outputSha256: string }>;
   checkPolicySha256: string;
   packageVersion: string;
   proofSchemaVersion: 1;
@@ -129,9 +129,7 @@ function validatePayload(value: unknown): asserts value is CheckedChangePayloadV
     assertExactObject(check, ['id', 'command', 'status', 'outputSha256'], field);
     assertNonEmptyString(check.id, `${field}.id`);
     assertNonEmptyString(check.command, `${field}.command`);
-    if (check.status !== 'passed' && check.status !== 'unchanged-failure') {
-      throw new Error(`${field}.status must be passed or unchanged from a failing base`);
-    }
+    if (check.status !== 'passed') throw new Error(`${field}.status must be passed`);
     assertSha256(check.outputSha256, `${field}.outputSha256`);
     checkIds.push(check.id);
   }

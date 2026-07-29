@@ -260,6 +260,7 @@ export class ContainedImplementationAgent {
   }) {}
 
   async run(input: {
+    operation: 'qualification-repair' | 'implementation';
     runId: string;
     worktreePath: string;
     issue: IssueSnapshot;
@@ -285,7 +286,7 @@ export class ContainedImplementationAgent {
       canonicalRepository,
       runId: input.runId,
       attemptId,
-      operationId: 'implementation',
+      operationId: input.operation,
       workflowGeneration: input.workflowGeneration,
       bootId: this.dependencies.bootId,
     });
@@ -311,11 +312,19 @@ export class ContainedImplementationAgent {
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Implement issue #${input.issue.number}: ${input.issue.title}`,
+          ...(input.operation === 'qualification-repair'
+            ? [
+              `Pre-implementation qualification repair for issue #${input.issue.number}: ${input.issue.title}`,
+              'Do not implement the issue acceptance criteria yet. Repair only the reported scoped-check failures so the existing worktree qualifies for implementation.',
+              'You may modify the product files required by those failures. Return changedFiles as the complete cumulative worktree change set.',
+            ]
+            : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
           `Implementation cycle: ${input.cycle}.`,
           ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
           ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
-          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
+          ...(input.operation === 'implementation'
+            ? [`Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`]
+            : []),
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
           'Do not commit, push, publish, or print credentials or local auth paths.',
@@ -1371,7 +1380,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
+  operationId: 'implementation' | 'qualification-repair' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{

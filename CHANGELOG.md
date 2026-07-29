@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Direct runs now require their scoped issue checks to pass before issue
+  implementation. Red qualification checks receive a separate sealed, bounded
+  repair operation and full-policy retry without consuming the issue
+  implementation-cycle budget; launched repairs are restart-recoverable and
+  resumed dirty worktrees qualify again before implementation.
+- Final changed-worktree checks must all pass. New runs no longer compare
+  failure output hashes or mint `unchanged-failure` success evidence, while
+  historical run state and proof capabilities remain readable.
+
 ## [2.0.8] - 2026-07-29
 
 ### Changed

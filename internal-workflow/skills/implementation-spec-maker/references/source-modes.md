@@ -25,6 +25,7 @@ Read the section matching the active source. Apply the common source-authority a
 ## Revision
 
 - Reconcile the entire existing spec against new authority and current repository evidence.
+- Treat a changed claim, mechanism/owner, source of truth, evidence unit/cardinality, or blocked/failure meaning as a semantic change; invalidate the affected approval coverage instead of translating it into broader wording.
 - Preserve still-valid completed `[x]` items exactly.
 - Reopen invalid completed items to `[ ]` and add a short `Revision Note:` with evidence.
 - Never silently delete progress or defect history.

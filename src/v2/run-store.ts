@@ -14,7 +14,9 @@ import { posix } from 'node:path';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
 import {
   createReviewFeedbackBootstrap,
+  validateImplementationInvocation,
   validateReviewFeedbackExecution,
+  type ReviewFeedbackImplementationInvocationV1,
   type ReviewFeedbackExecutionV1,
 } from './review-feedback.js';
 
@@ -121,6 +123,15 @@ export interface RunRecordV1 {
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
   reviewFeedback?: ReviewFeedbackExecutionV1;
+  checkQualification?: {
+    version: 1;
+    checkPolicySha256: string;
+    repairAttempts: 0 | 1 | 2 | 3 | 4 | 5;
+    checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
+    implementationStarted?: boolean;
+    repairInvocation?: ReviewFeedbackImplementationInvocationV1 | null;
+    deniedPathsBaseline?: string;
+  };
   skillHashes: Record<string, string>;
   process?: {
     pid: number;
@@ -137,7 +148,9 @@ export interface RunRecordV1 {
     resumeLifecycle: Lifecycle;
     resumeReviewStage: DirectReviewStage | null;
   };
+  /** Legacy read compatibility for runs created before check qualification. New runs never write this field. */
   baselineChecks?: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
+  /** `unchanged-failure` is accepted only so historical terminal runs remain readable. */
   checks: Array<{ id: string; command: string; status: 'passed' | 'failed' | 'unchanged-failure'; outputSha256: string }>;
   checkedChangeSha256?: string;
   proofId?: string;
@@ -261,6 +274,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'directReview',
     'specDelivery',
     'reviewFeedback',
+    'checkQualification',
     'baselineChecks',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
@@ -352,6 +366,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     validateReviewFeedbackExecution(value.reviewFeedback);
     validateReviewFeedbackRunInvariant(value as unknown as RunRecordV1, field);
   }
+  if (hasOwn(value, 'checkQualification')) validateCheckQualification(value.checkQualification, `${field}.checkQualification`);
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
@@ -438,6 +453,40 @@ function validateChecks(value: unknown, field: string, allowUnchangedFailure = t
     assertSha256(check.outputSha256, `${field}[${index}].outputSha256`);
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);
+  }
+}
+
+function validateCheckQualification(value: unknown, field: string): asserts value is NonNullable<RunRecordV1['checkQualification']> {
+  const optional = [
+    ...(hasOwn(value, 'implementationStarted') ? ['implementationStarted'] : []),
+    ...(hasOwn(value, 'repairInvocation') ? ['repairInvocation'] : []),
+    ...(hasOwn(value, 'deniedPathsBaseline') ? ['deniedPathsBaseline'] : []),
+  ];
+  assertExactObject(value, ['version', 'checkPolicySha256', 'repairAttempts', 'checks', ...optional], field);
+  if (value.version !== 1) throw new Error(`${field}.version is invalid`);
+  assertSha256(value.checkPolicySha256, `${field}.checkPolicySha256`);
+  if (!Number.isSafeInteger(value.repairAttempts) || (value.repairAttempts as number) < 0 || (value.repairAttempts as number) > 5) {
+    throw new Error(`${field}.repairAttempts is invalid`);
+  }
+  validateChecks(value.checks, `${field}.checks`, false);
+  if (hasOwn(value, 'implementationStarted') && typeof value.implementationStarted !== 'boolean') {
+    throw new Error(`${field}.implementationStarted is invalid`);
+  }
+  if (hasOwn(value, 'repairInvocation') && value.repairInvocation !== null) {
+    validateImplementationInvocation(value.repairInvocation);
+  }
+  if (hasOwn(value, 'deniedPathsBaseline')) assertSha256(value.deniedPathsBaseline, `${field}.deniedPathsBaseline`);
+  if (hasOwn(value, 'deniedPathsBaseline') !== (hasOwn(value, 'repairInvocation') && value.repairInvocation !== null)) {
+    throw new Error(`${field}.deniedPathsBaseline requires a repair invocation`);
+  }
+  const repairInvocation = hasOwn(value, 'repairInvocation')
+    ? value.repairInvocation as ReviewFeedbackImplementationInvocationV1 | null
+    : undefined;
+  if (value.implementationStarted === true && repairInvocation !== null && repairInvocation !== undefined) {
+    throw new Error(`${field} cannot own qualification repair and implementation launches together`);
+  }
+  if (repairInvocation?.phase === 'launched' && value.repairAttempts === 0) {
+    throw new Error(`${field}.repairAttempts must reserve a launched repair`);
   }
 }
 

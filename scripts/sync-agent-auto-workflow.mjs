@@ -12,6 +12,7 @@ const PRODUCTION_OPERATION_BINDINGS = {
   'ambiguity-review': [null, [], 'schemas/ambiguity-review-v1.json', 'reviewer_deep'],
   'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'reviewer_standard'],
   implementation: ['agent-auto', ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],
+  'qualification-repair': [null, ['code-debugger', 'diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],
   'spec-author': ['implementation-spec-maker', [], 'schemas/spec-author-v1.json', 'implementer_standard'],
   'spec-review': ['implementation-spec-review', [], 'schemas/spec-review-v1.json', 'reviewer_deep'],
   triage: ['triage', [], 'schemas/triage-route-v1.json', 'analyst_deep'],

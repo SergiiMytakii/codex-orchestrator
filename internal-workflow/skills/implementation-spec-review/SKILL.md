@@ -77,6 +77,8 @@ Scale depth to the profile and inspect only applicable lenses:
 - **Completion:** another agent can tell what to do, what proves success, when
   to stop, and what remains blocked.
 
+Before accepting the supplied scope delta, independently recover each material claim from the raw authority and compare its mechanism/owner, source of truth, evidence unit/cardinality, and blocked/failure meaning. Report compressed or missing decisions. Challenge each material proof with: can this source observe the exact claim, and can the gate pass while the claim is false? Shared proofs across platforms, providers, tenants, regions, or modes require evidenced equivalence in mechanism, truth source, granularity, timing/redaction, and failure semantics.
+
 ## Proportional Expectations
 
 Approve a compact spec when targets, ordered work, observable proof, and stop

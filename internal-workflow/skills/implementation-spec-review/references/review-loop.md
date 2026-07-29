@@ -89,11 +89,15 @@ targeted Closure is exceptional and requires a newly introduced critical/high
 defect plus materially changed target or evidence; otherwise coordinator
 verification or the shared no-progress/blocked outcome applies.
 
-Start a fresh Full only when existing mandatory coverage is invalidated by a
-changed source decision or approved scope, replacement of the primary solution
-or owner, addition of a repository/data owner, or a new public API or durable
-workflow that changes the reviewed architecture. A large diff or accumulated
-clarifications alone do not trigger Full.
+Start a fresh Full only when an authority or approved-contract change
+invalidates existing mandatory coverage by changing the observable claim,
+primary mechanism/owner, source of truth, required evidence unit/cardinality,
+variant-equivalence assumption, blocked/failure meaning, approved scope,
+repository/data owner, public API, or durable workflow. Closure cannot absorb
+such a semantic change. A repair that only replaces incompatible proof with
+proof matching an unchanged reviewed claim uses coordinator verification or
+Closure under the normal triggers; wording, command, and other local repairs
+also reuse valid coverage.
 
 ## Approval
 

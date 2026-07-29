@@ -43,13 +43,15 @@ test('workflow V2 exposes current operation dependencies and keeps evals out of 
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
   assert.deepEqual(Object.keys(loaded.manifest.operations).sort(), [
-    'acceptance-proof', 'ambiguity-review', 'code-review', 'implementation', 'spec-author', 'spec-review', 'triage',
+    'acceptance-proof', 'ambiguity-review', 'code-review', 'implementation', 'qualification-repair', 'spec-author', 'spec-review', 'triage',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
     'code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd',
   ]);
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
+  assert.equal(loaded.manifest.operations['qualification-repair'].sourceSkill, null);
+  assert.equal(loaded.manifest.operations['qualification-repair'].entry, 'operations/qualification-repair/SKILL.md');
   assert.equal(Object.keys(loaded.manifest.evals).length >= 2, true);
 });
 

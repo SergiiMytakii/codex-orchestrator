@@ -31,6 +31,11 @@ test('CheckedChange is nominal at compile time and rejects forged runtime object
   const checked = capabilities.mint(checkedPayload());
   assert.equal(capabilities.verifyAndRead(checked).payload.headSha, 'b'.repeat(40));
   assert.throws(() => capabilities.verifyAndRead(checkedPayload() as unknown as CheckedChange), /not minted/u);
+  const legacyFailure = {
+    ...checkedPayload(),
+    checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'unchanged-failure', outputSha256: 'a'.repeat(64) }],
+  };
+  assert.throws(() => capabilities.mint(legacyFailure as unknown as CheckedChangePayloadV1), /status must be passed/u);
 });
 
 test('identical proof binding reuses one passed attempt while mismatch fails before process launch', async () => {

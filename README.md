@@ -181,10 +181,12 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
 - `checks`: finite fallback commands for issues without a command-only
-  `Verification:` section. The Runner snapshots the resolved policy on the clean
-  base and reruns them after implementation; only a new or changed failure is
-  task-owned rework, while a byte-identical base failure is retained as an
-  explicit `unchanged-failure` warning.
+  `Verification:` section. Before the issue implementation starts, the Runner
+  requires the resolved scoped policy to pass. A red qualification check starts
+  a separate sealed, bounded repair operation, reruns the policy, and does not
+  consume the issue's implementation-cycle budget. Its launched process is
+  durably recoverable across daemon restarts. Final checks must all pass;
+  failures are never accepted by comparing output hashes.
 - `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
 - `proof.android`: optional Runner-owned Android recipe. It selects `avdName`, creates an ephemeral clean data directory, requires fixed `build apk` arguments, removes any old `apkPath`, snapshots a fresh no-symlink APK outside the worker-writable tree, and binds its digest to the checked change. It installs and launches that exact snapshot, repeatedly verifies emulator process identity, waits up to `navigationTimeoutMs` for each exact `tapText` accessibility label, and captures proof-bound screenshot, hierarchy, PID log, and lease artifacts. Commands are bounded, cancellable, and process-group quiescent; URI query/fragment credentials are rejected. The contained proof worker never receives `adb`, emulator, Flutter, or durable lease authority. Emulator or Android-tool startup failure is retained as an explicit unfinished-UI-proof warning and does not by itself block delivery.
 - `deny.readPaths`: paths the worker must not read or modify.

@@ -155,6 +155,7 @@ export interface RunIssueDependencies {
   git: RunIssueGit;
   implementationAgent: {
     run(input: {
+      operation: 'qualification-repair' | 'implementation';
       runId: string;
       worktreePath: string;
       issue: IssueSnapshot;
@@ -184,7 +185,7 @@ export interface RunIssueDependencies {
   };
   routeContinuations: RoutedContinuationRegistry;
   checks: {
-    run(input: { id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'baseline' | 'changed'; signal: AbortSignal }): Promise<{
+    run(input: { id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'qualification' | 'changed'; signal: AbortSignal }): Promise<{
       status: 'passed' | 'failed'; output: Buffer; outputSha256: string;
     }>;
   };
@@ -1071,7 +1072,10 @@ export class RunIssue {
               && active.record.directReview?.status === 'clear';
             const feedbackRepair = active.record.reviewFeedback?.phase === 'repairing'
               && active.record.directReview?.stage === 'review-repair';
-            if (!reviewRecovery && !checkRecovery && !proofRecovery && !feedbackRepair) {
+            const qualificationRecovery = active.record.lifecycle === 'implementing'
+              && !active.record.directReview
+              && !this.hasRecordedImplementationStart(active.record, config);
+            if (!reviewRecovery && !checkRecovery && !proofRecovery && !feedbackRepair && !qualificationRecovery) {
               if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
               }
@@ -1128,9 +1132,9 @@ export class RunIssue {
       }
       if (active.record.lifecycle === 'implementing' && active.record.routeReceipt?.route === 'direct'
         && !active.record.directReview) {
-        const baseline = await this.captureBaselineChecks(active, config);
-        if ('status' in baseline) return baseline;
-        active = baseline.active;
+        const qualification = await this.qualifyChecks(active, config, issueSnapshot, frozenCriteria);
+        if ('status' in qualification) return qualification;
+        active = qualification.active;
       }
       attemptLoop: while (true) {
       if (!await this.authorized(active, config)) {
@@ -1167,7 +1171,7 @@ export class RunIssue {
       const feedbackProjection = feedbackBatch
         ? projectReviewFeedbackBatch(feedbackBatch, active.record.directReview!.targetRevision)
         : undefined;
-      const feedbackLaunch = feedbackBatch ? {
+      const implementationLaunch = feedbackBatch ? {
         reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
         reviewFeedback: feedbackProjection!.workerFeedback,
         onPrepared: async (invocation: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => {
@@ -1190,9 +1194,19 @@ export class RunIssue {
             },
           });
         },
-      } : {};
+      } : {
+        onLaunched: async () => {
+          const currentActive = active!;
+          const qualification = currentActive.record.checkQualification;
+          if (!qualification) throw new Error('implementation launch requires check qualification');
+          active = await this.persist(currentActive, {
+            checkQualification: { ...qualification, implementationStarted: true },
+          });
+        },
+      };
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
       let implementation = recoveredFeedbackImplementation ?? await this.runImplementation({
+        operation: 'implementation',
         runId,
         worktreePath,
         issue: publicIssueSnapshot(issueSnapshot),
@@ -1201,7 +1215,7 @@ export class RunIssue {
         reworkFindings: active.record.reworkFindings,
         repairOnly: false,
         workflowGeneration: active.record.workflowGeneration,
-        ...feedbackLaunch,
+        ...implementationLaunch,
       });
       recoveredFeedbackImplementation = undefined;
       if (implementation.kind === 'safe-halt') {
@@ -1251,6 +1265,7 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         implementation = await this.runImplementation({
+          operation: 'implementation',
           runId,
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
@@ -1259,7 +1274,7 @@ export class RunIssue {
           reworkFindings: ['The previous implementation report did not match the generated schema.'],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
-          ...feedbackLaunch,
+          ...implementationLaunch,
         });
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, {
@@ -1301,6 +1316,7 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         implementation = await this.runImplementation({
+          operation: 'implementation',
           runId,
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
@@ -1309,7 +1325,7 @@ export class RunIssue {
           reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
-          ...feedbackLaunch,
+          ...implementationLaunch,
         });
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, {
@@ -1398,7 +1414,8 @@ export class RunIssue {
       }
       const configuredChecks = Object.entries(checkPolicy.checks);
       const reusableChecks = active.record.checks.filter((check) =>
-        configuredChecks.some(([id, command]) => check.id === id && check.command === command));
+        check.status === 'passed'
+        && configuredChecks.some(([id, command]) => check.id === id && check.command === command));
       if (reusableChecks.length !== active.record.checks.length) {
         active = await this.persist(active, {
           checks: reusableChecks,
@@ -1410,7 +1427,7 @@ export class RunIssue {
       for (const [id, command] of configuredChecks) {
         if (active.record.checks.some((check) => check.id === id
           && check.command === command
-          && (check.status === 'passed' || check.status === 'unchanged-failure'))) continue;
+          && check.status === 'passed')) continue;
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
         let check;
         try {
@@ -1426,14 +1443,9 @@ export class RunIssue {
           );
         }
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
-        const outputSha256 = check.outputSha256;
-        const baseline = active.record.baselineChecks?.find((candidate) => candidate.id === id && candidate.command === command);
-        const status = check.status === 'failed' && baseline?.status === 'failed' && baseline.outputSha256 === outputSha256
-          ? 'unchanged-failure' as const
-          : check.status;
-        const row = { id, command, status, outputSha256 } as const;
+        const row = { id, command, status: check.status, outputSha256: check.outputSha256 } as const;
         active = await this.persist(active, { checks: [...active.record.checks, row] });
-        if (status === 'failed') {
+        if (check.status === 'failed') {
           if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
             return active.record.reviewFeedback?.activeBatch
               ? await this.blockReviewFeedback(active, 'exhausted', 'review-feedback-check-repair-exhausted')
@@ -1503,7 +1515,7 @@ export class RunIssue {
         changedFiles: proofChangedFiles,
         checks: active.record.checks.map((check) => ({
           ...check,
-          status: check.status === 'unchanged-failure' ? 'unchanged-failure' as const : 'passed' as const,
+          status: 'passed' as const,
         })),
         checkPolicySha256: sha256(canonicalJson(checkPolicy.checks)),
         packageVersion: active.record.packageVersion,
@@ -2020,7 +2032,7 @@ export class RunIssue {
       packageVersion: workflow.receipt.packageVersion,
       workflowGeneration: structuredClone(workflow.receipt),
       skillHashes: structuredClone(workflow.skillHashes),
-      baselineChecks: [], checks: [], createdAt: now, updatedAt: now,
+      checks: [], createdAt: now, updatedAt: now,
     };
     const saved = await this.dependencies.runRecords.compareAndSwap(state.generation, {
       schema: 'codex-orchestrator.agent-auto-state', version: 2, runs: [...state.runs, record],
@@ -2032,7 +2044,7 @@ export class RunIssue {
     const record = { ...active.record, ...changes, updatedAt: this.timestamp() } as RunRecordV1;
     if (Object.hasOwn(changes, 'intent') && changes.intent === undefined) delete record.intent;
     if (Object.hasOwn(changes, 'process') && changes.process === undefined) delete record.process;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback'] as const) {
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback', 'checkQualification', 'baselineChecks'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
@@ -2141,6 +2153,7 @@ export class RunIssue {
   }
 
   private async runImplementation(input: {
+    operation: 'qualification-repair' | 'implementation';
     runId: string;
     worktreePath: string;
     issue: IssueSnapshot;
@@ -2353,12 +2366,13 @@ export class RunIssue {
     return this.persist(starting, { directReview: withoutInvocation });
   }
 
-  private async captureBaselineChecks(
+  private async qualifyChecks(
     starting: ActiveRun,
     config: AgentAutoConfig,
+    issue: IssueSnapshot,
+    frozenCriteria: FrozenCriterion[],
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
     let active = starting;
-    if ((await this.dependencies.git.listChangedFiles(active.record.worktreePath)).length !== 0) return { active };
     let checkPolicy;
     try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
     catch (error) {
@@ -2366,44 +2380,219 @@ export class RunIssue {
       return this.invokedFailure(active, 'issue-verification-invalid', error instanceof Error ? error.message : undefined);
     }
     const configuredChecks = Object.entries(checkPolicy.checks);
-    const reusableBaselineChecks = (active.record.baselineChecks ?? []).filter((check) =>
-      configuredChecks.some(([id, command]) => check.id === id && check.command === command));
-    if (reusableBaselineChecks.length !== (active.record.baselineChecks ?? []).length) {
-      active = await this.persist(active, { baselineChecks: reusableBaselineChecks });
-    }
-    for (const [id, command] of configuredChecks) {
-      if (active.record.baselineChecks?.some((check) => check.id === id && check.command === command)) continue;
-      if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
-      let check: { status: 'passed' | 'failed'; output: Buffer; outputSha256: string };
+    const checkPolicySha256 = sha256(canonicalJson(checkPolicy.checks));
+    const existingQualification = active.record.checkQualification;
+    const prior = existingQualification?.checkPolicySha256 === checkPolicySha256
+      ? existingQualification
+      : undefined;
+    let repairAttempts = prior?.repairAttempts ?? 0;
+    const pendingInvocation = existingQualification?.repairInvocation ?? null;
+    if (pendingInvocation) {
+      if (pendingInvocation.phase === 'launched') {
+        try { await this.dependencies.waitForReviewProcessAbsence(pendingInvocation.processGroupId!); }
+        catch { return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-process-absence-unconfirmed'); }
+      }
+      if (!this.dependencies.implementationAgent.recover) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-report-recovery-unavailable');
+      }
+      let recovered;
       try {
-        check = await this.dependencies.checks.run({
-          id, command, source: checkPolicy.source,
-          cwd: active.record.worktreePath,
-          phase: 'baseline',
-          signal: this.signal,
+        recovered = await this.dependencies.implementationAgent.recover({
+          runId: active.record.runId,
+          canonicalRepository: active.record.canonicalRepository,
+          invocation: pendingInvocation,
         });
-      } catch (error) {
-        if (error instanceof CheckProcessQuiescenceError) {
-          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+      } catch {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-report-recovery-failed');
+      }
+      if (recovered) {
+        const settled = await this.settleQualificationRepair(active, config, recovered);
+        if ('status' in settled) return settled;
+        active = settled.active;
+      } else {
+        const deniedPathsBaseline = active.record.checkQualification?.deniedPathsBaseline;
+        if (!deniedPathsBaseline
+          || await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
         }
-        active = await this.persist(active, { lifecycle: 'routed' });
-        return this.invokedFailure(
-          active,
-          'configured-check-execution-failed',
-          error instanceof Error ? error.message : 'The baseline check process did not start or settle. Retry the same run.',
-        );
+        if (!sameFreshness(await this.dependencies.git.snapshot(active.record.worktreePath), pendingInvocation.baseline)) {
+          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-worktree-ambiguous');
+        }
+        active = await this.clearQualificationRepairInvocation(active);
       }
-      if ((await this.dependencies.git.listChangedFiles(active.record.worktreePath)).length !== 0) {
-        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'baseline-check-mutated-worktree');
-      }
+    }
+    if (!prior) {
       active = await this.persist(active, {
-        baselineChecks: [
-          ...(active.record.baselineChecks ?? []),
-          { id, command, status: check.status, outputSha256: check.outputSha256 },
-        ],
+        checkQualification: {
+          version: 1, checkPolicySha256, repairAttempts, checks: [],
+          implementationStarted: false, repairInvocation: null,
+        },
+        baselineChecks: undefined,
       });
     }
+
+    while (true) {
+      const checks: NonNullable<RunRecordV1['checkQualification']>['checks'] = [];
+      const failures: string[] = [];
+      for (const [id, command] of configuredChecks) {
+        if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
+        let check: { status: 'passed' | 'failed'; output: Buffer; outputSha256: string };
+        try {
+          check = await this.dependencies.checks.run({
+            id, command, source: checkPolicy.source,
+            cwd: active.record.worktreePath,
+            phase: 'qualification',
+            signal: this.signal,
+          });
+        } catch (error) {
+          if (error instanceof CheckProcessQuiescenceError) {
+            return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+          }
+          return this.invokedFailure(
+            active,
+            'qualification-check-execution-failed',
+            error instanceof Error ? error.message : 'The qualification check process did not start or settle. Retry the same run.',
+          );
+        }
+        if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
+        checks.push({ id, command, status: check.status, outputSha256: check.outputSha256 });
+        if (check.status === 'failed') {
+          failures.push(`Pre-implementation scoped check ${id} failed (${command}):\n${check.output.toString('utf8').slice(0, 8 * 1024)}`);
+        }
+      }
+
+      active = await this.persist(active, {
+        checkQualification: {
+          version: 1, checkPolicySha256, repairAttempts, checks,
+          implementationStarted: false, repairInvocation: null,
+        },
+        baselineChecks: undefined,
+      });
+      if (failures.length === 0) return { active };
+      if (repairAttempts >= config.runner.maxCycles) {
+        return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'qualification-repair-exhausted');
+      }
+      if (!await this.authorized(active, config)) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
+      }
+
+      const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths);
+      const repair = await this.runImplementation({
+        operation: 'qualification-repair',
+        runId: active.record.runId,
+        worktreePath: active.record.worktreePath,
+        issue,
+        frozenCriteria,
+        cycle: repairAttempts + 1,
+        reworkFindings: failures,
+        repairOnly: false,
+        workflowGeneration: active.record.workflowGeneration,
+        onPrepared: async (invocation) => {
+          active = await this.persist(active, {
+            checkQualification: {
+              ...active.record.checkQualification!,
+              implementationStarted: false,
+              deniedPathsBaseline,
+              repairInvocation: {
+                ...structuredClone(invocation), phase: 'prepared',
+                pid: null, processGroupId: null, launchedAt: null,
+              },
+            },
+          });
+        },
+        onLaunched: async (invocation) => {
+          const current = active.record.checkQualification?.repairInvocation;
+          if (!current || current.phase !== 'prepared' || current.attemptId !== invocation.attemptId) {
+            throw new Error('qualification repair launch mismatch');
+          }
+          repairAttempts = (repairAttempts + 1) as NonNullable<RunRecordV1['checkQualification']>['repairAttempts'];
+          active = await this.persist(active, {
+            checkQualification: {
+              ...active.record.checkQualification!, repairAttempts,
+              repairInvocation: {
+                ...current, phase: 'launched', pid: invocation.pid,
+                processGroupId: invocation.processGroupId, launchedAt: invocation.launchedAt,
+              },
+            },
+          });
+        },
+      });
+      if (repair.kind === 'safe-halt') {
+        active = await this.persist(active, {
+          lifecycle: 'safe-halt',
+          process: {
+            ...repair.process,
+            purpose: 'implementation',
+            resumeLifecycle: 'implementing',
+            resumeReviewStage: null,
+          },
+        });
+        while (true) {
+          try { await repair.waitForAbsence(); break; }
+          catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
+        }
+        if (await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
+        }
+        return this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+      }
+      if (repair.kind !== 'completed'
+        && await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
+      }
+      if (repair.kind === 'cancelled') return this.terminal(active, { status: 'cancelled' });
+      if (repair.kind !== 'completed') {
+        return this.invokedFailure(active, 'qualification-repair-agent-failed', 'Qualification repair did not complete. Retry the same run.');
+      }
+      const settled = await this.settleQualificationRepair(active, config, repair);
+      if ('status' in settled) return settled;
+      active = settled.active;
+    }
+  }
+
+  private async settleQualificationRepair(
+    active: ActiveRun,
+    config: AgentAutoConfig,
+    repair: Extract<ImplementationAgentResult, { kind: 'completed' }>,
+  ): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const deniedPathsBaseline = active.record.checkQualification?.deniedPathsBaseline;
+    if (!deniedPathsBaseline
+      || await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
+    }
+    active = await this.clearQualificationRepairInvocation(active);
+    let report;
+    try { report = validateImplementationReport(repair.report); }
+    catch { return this.invokedFailure(active, 'qualification-repair-report-invalid', 'Qualification repair report was invalid. Retry the same run.'); }
+    if (report.status === 'external-block') {
+      return this.terminal(active, { status: 'blocked', kind: 'external', resumable: true }, 'qualification-repair-external-block');
+    }
+    if (await this.dependencies.git.getHead(active.record.worktreePath) !== expectedImplementationHead(active.record)) {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'qualification-repair-head-changed');
+    }
+    const changedFiles = await this.dependencies.git.listChangedFiles(active.record.worktreePath);
+    if (changedFiles.length === 0 || !sameStrings(changedFiles, report.changedFiles)) {
+      return this.invokedFailure(active, 'qualification-repair-change-set-invalid', 'Qualification repair must report the complete cumulative worktree change set.');
+    }
     return { active };
+  }
+
+  private async clearQualificationRepairInvocation(active: ActiveRun): Promise<ActiveRun> {
+    const qualification = { ...active.record.checkQualification!, implementationStarted: false, repairInvocation: null };
+    delete qualification.deniedPathsBaseline;
+    return this.persist(active, { checkQualification: qualification });
+  }
+
+  private hasRecordedImplementationStart(record: RunRecordV1, config: AgentAutoConfig): boolean {
+    const qualification = record.checkQualification;
+    if (!qualification) return false;
+    let policy;
+    try { policy = resolveIssueCheckPolicy(record.issueSnapshot.body, config.checks); }
+    catch { return false; }
+    return qualification.implementationStarted === true
+      && qualification.checkPolicySha256 === sha256(canonicalJson(policy.checks))
+      && sameCheckPolicy(qualification.checks, policy.checks)
+      && qualification.checks.every((check) => check.status === 'passed');
   }
 
   private async recoverTerminalReviewReport(

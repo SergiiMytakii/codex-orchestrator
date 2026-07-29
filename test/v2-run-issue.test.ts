@@ -275,11 +275,11 @@ test('direct run executes issue-scoped verification checks instead of repository
   const scopedCommand = 'npm --prefix src/service test -- --runInBand scoped.spec.ts';
   const fixture = await runFixture({ issueBody: `Verification:\n- ${scopedCommand}\n\nRisk:\nLow.` });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.includes('check:baseline:issue-verification-001'), true);
+  assert.equal(fixture.events.includes('check:qualification:issue-verification-001'), true);
   assert.equal(fixture.events.includes('check:changed:issue-verification-001'), true);
   assert.equal(fixture.events.some((event) => event.endsWith(':typecheck')), false);
   const record = (await fixture.store.read()).runs[0]!;
-  assert.deepEqual(record.baselineChecks?.map(({ id, command }) => ({ id, command })), [
+  assert.deepEqual(record.checkQualification?.checks.map(({ id, command }) => ({ id, command })), [
     { id: 'issue-verification-001', command: scopedCommand },
   ]);
   assert.deepEqual(record.checks.map(({ id, command }) => ({ id, command })), [
@@ -311,8 +311,30 @@ test('a check launch failure is resumable without consuming an implementation cy
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
 });
 
-test('a baseline check launch failure resumes before implementation without consuming a cycle', async () => {
-  const options: FixtureOptions = { baselineCheckReject: true };
+test('a legacy unchanged-failure check is discarded and rerun on resume', async () => {
+  const options: FixtureOptions = { checkReject: true };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'checking';
+  interrupted.checks = [{
+    id: 'typecheck', command: 'npm run typecheck', status: 'unchanged-failure', outputSha256: sha256('legacy failure'),
+  }];
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+
+  options.checkReject = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.deepEqual((await fixture.store.read()).runs[0]?.checks.map((check) => check.status), ['passed']);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+});
+
+test('a qualification check launch failure resumes before implementation without consuming a cycle', async () => {
+  const options: FixtureOptions = { qualificationCheckReject: true };
   const fixture = await runFixture(options);
   assert.deepEqual(
     pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
@@ -322,10 +344,56 @@ test('a baseline check launch failure resumes before implementation without cons
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
   assert.equal((await fixture.store.read()).runs[0]?.terminalOutcome, undefined);
 
-  options.baselineCheckReject = false;
+  options.qualificationCheckReject = false;
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+});
+
+test('a dirty resumed worktree reruns a previously green qualification before implementation', async () => {
+  const options: FixtureOptions = {
+    implementationResult: { kind: 'transport-failed', resumable: false },
+  };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+  await writeFile(join(fixture.worktreePath, 'feature.txt'), 'partial interrupted implementation\n');
+
+  options.implementationResult = undefined;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 2);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 2);
+});
+
+test('a crash after green qualification but before implementation launch does not consume a cycle', async () => {
+  const options: FixtureOptions = {
+    implementationResult: { kind: 'transport-failed', resumable: false },
+    skipImplementationLaunchPersistence: true,
+  };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+
+  options.implementationResult = undefined;
+  options.skipImplementationLaunchPersistence = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
 });
 
 test('malformed code review consumes one durable report-repair bit and retries before checks', async () => {
@@ -944,32 +1012,153 @@ test('failed checks and proof findings rework the same worktree until review-rea
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
 });
 
-test('an unchanged check failure already present on the base is recorded without reworking the task', async () => {
-  const output = Buffer.from('pre-existing test failure');
+test('a red scoped qualification check is repaired before the issue implementation starts', async () => {
+  let qualificationCalls = 0;
   const fixture = await runFixture({
-    baselineCheck: async () => ({ status: 'failed', output }),
-    check: async () => ({ status: 'failed', output }),
+    qualificationCheck: async () => (++qualificationCalls === 1
+      ? { status: 'failed', output: Buffer.from('base build is red') }
+      : { status: 'passed', output: Buffer.from('base build repaired') }),
   });
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
-  assert.equal((await fixture.store.read()).runs[0]?.checks[0]?.status, 'unchanged-failure');
-});
 
-test('a changed full-output digest is reworked even when the retained diagnostics are identical', async () => {
-  const output = Buffer.from('same retained prefix');
-  let changedCalls = 0;
-  const fixture = await runFixture({
-    baselineCheck: async () => ({ status: 'failed', output, outputSha256: 'a'.repeat(64) }),
-    check: async () => (++changedCalls === 1
-      ? { status: 'failed', output, outputSha256: 'b'.repeat(64) }
-      : { status: 'passed', output: Buffer.from('ok'), outputSha256: 'c'.repeat(64) }),
-  });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  assertSubsequence(fixture.events, [
+    'check:qualification:typecheck',
+    'agent:qualification-repair',
+    'check:qualification:typecheck',
+    'agent:implementation',
+    'check:typecheck',
+  ]);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
 });
 
-test('a changed baseline command replaces the stale same-ID result on restart', async () => {
+test('qualification repair has its own bounded budget and never starts the issue implementation while checks stay red', async () => {
+  const fixture = await runFixture({
+    qualificationCheck: async () => ({ status: 'failed', output: Buffer.from('base remains red') }),
+  });
+
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'exhausted', resumable: true },
+  );
+  assert.equal(fixture.events.filter((event) => event === 'agent:qualification-repair').length, 5);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 0);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.cycle, 1);
+  assert.equal(record.checkQualification?.repairAttempts, 5);
+});
+
+test('a launched qualification repair transport failure is recovered without spending a main cycle', async () => {
+  let qualificationCalls = 0;
+  const options: FixtureOptions = {
+    qualificationCheck: async () => (++qualificationCalls < 3
+      ? { status: 'failed', output: Buffer.from('base remains red') }
+      : { status: 'passed', output: Buffer.from('base repaired') }),
+    implementationResults: [{ kind: 'transport-failed', resumable: true }],
+  };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.cycle, 1);
+  assert.equal(record.checkQualification?.repairAttempts, 2);
+  assert.equal(fixture.events.filter((event) => event === 'agent:qualification-repair').length, 2);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+});
+
+test('a malformed recovered qualification report is settled once and does not wedge restart', async () => {
+  let qualificationCalls = 0;
+  const options: FixtureOptions = {
+    qualificationCheck: async () => (++qualificationCalls === 1
+      ? { status: 'failed', output: Buffer.from('base is red') }
+      : { status: 'passed', output: Buffer.from('base is green') }),
+    implementationResults: [{ kind: 'transport-failed', resumable: true }],
+  };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+  let recoverCalls = 0;
+  fixture.dependencies.implementationAgent.recover = async () => {
+    recoverCalls += 1;
+    return { kind: 'completed', report: { status: 'completed' } };
+  };
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairInvocation, null);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(recoverCalls, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+});
+
+test('recovered qualification repair rejects ignored denied-path mutation', async () => {
+  const options: FixtureOptions = {
+    qualificationCheck: async () => ({ status: 'failed', output: Buffer.from('base is red') }),
+    implementationResults: [{ kind: 'transport-failed', resumable: true }],
+    agentWritesDeniedIgnoredPath: true,
+  };
+  const fixture = await runFixture(options);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const terminal = await fixture.store.read();
+  const interrupted = structuredClone(terminal.runs[0]!);
+  interrupted.lifecycle = 'implementing';
+  delete interrupted.terminalOutcome;
+  delete interrupted.outcomeEvidenceId;
+  await fixture.store.compareAndSwap(terminal.generation, {
+    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  });
+  await writeFile(join(fixture.worktreePath, '.env'), 'recovered repair touched denied path\n');
+  fixture.dependencies.implementationAgent.recover = async () => ({
+    kind: 'completed', attemptId: 'qualification-repair-attempt-1',
+    report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] },
+  });
+
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: false },
+  );
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 0);
+});
+
+test('qualification repair preserves an explicit external blocker without starting the issue implementation', async () => {
+  const fixture = await runFixture({
+    qualificationCheck: async () => ({ status: 'failed', output: Buffer.from('base is red') }),
+    implementationResult: {
+      kind: 'completed',
+      report: {
+        version: 1,
+        status: 'external-block',
+        summary: 'tool is unavailable',
+        changedFiles: [],
+        residualRisks: [],
+        blocker: { kind: 'tool', summary: 'tool is unavailable', attempted: ['ran scoped check'] },
+      },
+    },
+  });
+
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'external', resumable: true },
+  );
+  assert.equal(fixture.events.filter((event) => event === 'agent:qualification-repair').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 0);
+});
+
+test('a changed qualification command replaces the stale same-ID receipt on restart', async () => {
   const options: FixtureOptions = {
     implementationResult: { kind: 'transport-failed', resumable: false },
   };
@@ -995,8 +1184,8 @@ test('a changed baseline command replaces the stale same-ID result on restart', 
 
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   const resumed = (await fixture.store.read()).runs[0]!;
-  assert.equal(fixture.events.filter((event) => event === 'check:baseline:typecheck').length, 2);
-  assert.deepEqual(resumed.baselineChecks?.map(({ id, command }) => ({ id, command })), [
+  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
+  assert.deepEqual(resumed.checkQualification?.checks.map(({ id, command }) => ({ id, command })), [
     { id: 'typecheck', command: 'npm test' },
   ]);
   assert.deepEqual(resumed.checks.map(({ id, command }) => ({ id, command })), [
@@ -1426,16 +1615,17 @@ interface FixtureOptions {
   blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
   agentCommit?: boolean;
-  baselineCheck?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
+  qualificationCheck?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
   check?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
   proof?: (checkedChange: CheckedChange) => Promise<ProveChangeResult>;
   implementationResult?: ImplementationAgentResult;
   implementationResults?: ImplementationAgentResult[];
+  skipImplementationLaunchPersistence?: boolean;
   transportWrites?: boolean;
   agentWrites?: boolean;
   agentWritesDeniedIgnoredPath?: boolean;
   checkReject?: boolean;
-  baselineCheckReject?: boolean;
+  qualificationCheckReject?: boolean;
   proofReject?: boolean;
   proofError?: Error;
   issueReadRejectAt?: number;
@@ -1515,6 +1705,7 @@ async function runFixture(options: FixtureOptions = {}) {
   let reads = 0;
   let authReads = 0;
   let reviewCalls = 0;
+  let qualificationRepairApplied = false;
   const rejectedEffects = new Set<string>();
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejectedEffects.has(effect)) return false;
@@ -1803,23 +1994,48 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     implementationAgent: {
-      run: async ({ worktreePath: path }) => {
+      run: async ({ operation, worktreePath: path, reworkFindings, onPrepared, onLaunched }) => {
+        const qualificationRepair = operation === 'qualification-repair';
+        assert.equal(
+          reworkFindings.some((finding) => finding.startsWith('Pre-implementation scoped check ')),
+          qualificationRepair,
+        );
         events.push('agent');
+        events.push(qualificationRepair ? 'agent:qualification-repair' : 'agent:implementation');
+        const attemptId = qualificationRepair ? 'qualification-repair-attempt-1' : 'implementation-attempt-1';
+        await onPrepared?.({
+          attemptId,
+          reportPath: `/tmp/${attemptId}-report.json`,
+          preparedAt: '2026-07-16T12:00:00.000Z',
+          baseline: await dependencies.git.snapshot(path),
+        });
+        if (qualificationRepair || !options.skipImplementationLaunchPersistence) {
+          await onLaunched?.({
+            attemptId, pid: 6060, processGroupId: 6060, launchedAt: '2026-07-16T12:00:01.000Z',
+          });
+        }
         const sequenced = options.implementationResults?.shift();
         const selected = sequenced ?? options.implementationResult;
         if (options.transportWrites && selected?.kind === 'transport-failed') {
           await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
         }
         if (selected?.kind !== 'completed' && selected) return selected;
-        if (options.agentWrites !== false) await writeFile(join(path, 'feature.txt'), 'implemented\n');
+        if (options.agentWrites !== false) {
+          await writeFile(join(path, qualificationRepair ? 'qualification-repair.txt' : 'feature.txt'), 'implemented\n');
+        }
+        if (qualificationRepair) qualificationRepairApplied = true;
         if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
         if (options.agentCommit) {
           await execFileAsync('git', ['-C', path, 'add', '--all']);
           await execFileAsync('git', ['-C', path, '-c', 'user.name=agent', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent commit']);
         }
-        const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
-        return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? 'implementation-attempt-1' } : completed;
+        const changedFiles = qualificationRepair
+          ? ['qualification-repair.txt']
+          : [...(qualificationRepairApplied ? ['feature.txt', 'qualification-repair.txt'] : ['feature.txt'])].sort();
+        const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles, residualRisks: [] } };
+        return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? attemptId } : completed;
       },
+      recover: async () => undefined,
     },
     implementationReviewer: {
       run: async (input) => {
@@ -1856,16 +2072,16 @@ async function runFixture(options: FixtureOptions = {}) {
     waitForReviewProcessAbsence: async () => {},
     checks: {
       run: async ({ id, phase }) => {
-        events.push(phase === 'baseline'
-          ? `check:baseline:${id}`
+        events.push(phase === 'qualification'
+          ? `check:qualification:${id}`
           : id === 'typecheck' ? 'check:typecheck' : `check:changed:${id}`);
-        if (options.baselineCheckReject && phase === 'baseline') throw new Error('baseline check rejected');
+        if (options.qualificationCheckReject && phase === 'qualification') throw new Error('qualification check rejected');
         if (options.checkReject && phase === 'changed') throw new Error('check rejected');
         const fallback: { status: 'passed'; output: Buffer; outputSha256?: string } = {
           status: 'passed', output: Buffer.from('ok'),
         };
-        const result = await (phase === 'baseline'
-          ? options.baselineCheck?.() ?? fallback
+        const result = await (phase === 'qualification'
+          ? options.qualificationCheck?.() ?? fallback
           : options.check?.() ?? fallback);
         return { ...result, outputSha256: result.outputSha256 ?? sha256(result.output) };
       },

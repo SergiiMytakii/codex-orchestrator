@@ -433,7 +433,7 @@ function validateFrozenSource(value: unknown): asserts value is FrozenReviewFeed
   assertTimestamp(value.permission.checkedAt, 'review feedback permission checkedAt');
 }
 
-function validateImplementationInvocation(value: unknown): void {
+export function validateImplementationInvocation(value: unknown): asserts value is ReviewFeedbackImplementationInvocationV1 {
   exactObject(value, ['phase', 'attemptId', 'reportPath', 'preparedAt', 'baseline', 'pid', 'processGroupId', 'launchedAt'], 'review feedback implementation invocation');
   if (value.phase !== 'prepared' && value.phase !== 'launched') throw new Error('review feedback invocation phase is invalid');
   assertString(value.attemptId, 'review feedback invocation attempt ID');

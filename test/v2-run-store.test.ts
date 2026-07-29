@@ -96,6 +96,12 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     },
     frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
     reworkFindings: ['typecheck failed'],
+    checkQualification: {
+      version: 1,
+      checkPolicySha256: 'a'.repeat(64),
+      repairAttempts: 5,
+      checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'failed', outputSha256: 'b'.repeat(64) }],
+    },
   } as unknown as RunRecordV1;
   assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 5);
 
@@ -103,11 +109,43 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     { ...recoverable, cycle: 6 },
     { ...recoverable, reportRepairs: 2 },
     { ...recoverable, transportRetries: 2 },
+    { ...recoverable, checkQualification: { ...recoverable.checkQualification, repairAttempts: 6 } },
+    { ...recoverable, checkQualification: { ...recoverable.checkQualification!, checks: [{ ...recoverable.checkQualification!.checks[0], status: 'unchanged-failure' }] } },
+    {
+      ...recoverable,
+      checkQualification: {
+        ...recoverable.checkQualification!, implementationStarted: true, deniedPathsBaseline: 'c'.repeat(64),
+        repairInvocation: qualificationInvocation('launched'),
+      },
+    },
+    {
+      ...recoverable,
+      checkQualification: {
+        ...recoverable.checkQualification!, repairAttempts: 0, deniedPathsBaseline: 'c'.repeat(64),
+        repairInvocation: qualificationInvocation('launched'),
+      },
+    },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
   }
 });
+
+function qualificationInvocation(phase: 'prepared' | 'launched') {
+  return {
+    phase,
+    attemptId: 'qualification-attempt-1',
+    reportPath: '/tmp/qualification-attempt-1/report.json',
+    preparedAt: '2026-07-16T12:00:00.000Z',
+    baseline: {
+      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
+      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
+    },
+    pid: phase === 'launched' ? 123 : null,
+    processGroupId: phase === 'launched' ? 123 : null,
+    launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,
+  } as const;
+}
 
 test('run state round-trips the durable blocked-label publication intent exactly', async () => {
   const root = await temporaryRoot();
