@@ -40,7 +40,7 @@ npx codex-orchestrator setup --target "$PWD" --prepare-labels
 npx codex-orchestrator doctor --target "$PWD"
 ```
 
-`setup` infers the GitHub repository and base branch from the target checkout. If that is not possible, provide both repository fields:
+`setup` derives the base branch only from `origin/HEAD`. When an agent performs setup, it must show that detected branch and obtain explicit user confirmation before running the mutating setup command. If repository inference is not possible, provide both repository fields:
 
 ```sh
 npx codex-orchestrator setup \
@@ -105,6 +105,8 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
+
+Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
 ### `daemon`
 

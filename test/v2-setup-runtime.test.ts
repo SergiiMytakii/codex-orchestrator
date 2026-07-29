@@ -11,7 +11,7 @@ import { acquireOwnerControlLock } from '../src/v2/owner-control-lock.js';
 
 const execFileAsync = promisify(execFile);
 
-test('production Setup composition derives canonical GitHub origin and owns durable configure', async () => {
+test('production Setup composition always derives the base branch from origin/HEAD', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-setup-runtime-'));
   const targetRoot = join(root, 'target');
   try {
@@ -22,6 +22,9 @@ test('production Setup composition derives canonical GitHub origin and owns dura
     await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', 'git@github.com:ExampleOwner/example-repo.git']);
     await execFileAsync('git', ['-C', targetRoot, 'update-ref', 'refs/remotes/origin/main', 'HEAD']);
     await execFileAsync('git', ['-C', targetRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main']);
+    await execFileAsync('git', ['-C', targetRoot, 'update-ref', 'refs/remotes/origin/dev', 'HEAD']);
+    await execFileAsync('git', ['-C', targetRoot, 'switch', '-c', 'dev']);
+    await execFileAsync('git', ['-C', targetRoot, 'branch', '--set-upstream-to', 'origin/dev', 'dev']);
 
     const setup = createProductionSetup({ orchestratorHome: join(root, 'home'), bootId: 'boot-fixture' });
     assert.deepEqual(await setup.execute({ targetRoot, operation: 'configure', dryRun: false }), { status: 'created' });

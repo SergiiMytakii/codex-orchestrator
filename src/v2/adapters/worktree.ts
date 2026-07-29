@@ -317,7 +317,7 @@ export class GitWorktreeManager {
       '-b',
       input.branchName,
       input.workspacePath,
-      input.baseBranch,
+      input.requiredBaseSha ?? input.baseBranch,
     ];
   }
 
@@ -328,11 +328,11 @@ export class GitWorktreeManager {
       'merge-base',
       '--is-ancestor',
       input.branchName,
-      input.baseBranch,
+      input.requiredBaseSha ?? input.baseBranch,
     ]);
     if (ancestor.exitCode !== 0) {
       throw new Error(
-        `Existing branch ${input.branchName} is not merged into ${input.baseBranch}; refusing to remove it automatically.`,
+        `Existing branch ${input.branchName} is not merged into the required base; refusing to remove it automatically.`,
       );
     }
 

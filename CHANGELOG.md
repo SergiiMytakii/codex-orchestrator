@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- New issue worktrees now use a freshly fetched configured remote base and are
+  created from its immutable pinned SHA. Base fetch failures remain unclaimed
+  and safely retryable.
+
 ## [2.0.10] - 2026-07-29
 
 ### Fixed

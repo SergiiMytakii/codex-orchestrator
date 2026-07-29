@@ -1095,7 +1095,15 @@ export class RunIssue {
         assertUuid(runId);
         branchName = `codex/issue-${input.issueNumber}`;
         worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${input.issueNumber}`);
-        baseSha = await this.dependencies.git.getBaseSha({ targetRoot, baseBranch: config.github.baseBranch });
+        try {
+          baseSha = await this.dependencies.git.getBaseSha({ targetRoot, baseBranch: config.github.baseBranch });
+        } catch {
+          return await this.preClaimTransport(
+            input.issueNumber,
+            'base-refresh-failed',
+            'The configured remote base branch could not be refreshed before claim.',
+          );
+        }
         assertGitSha(baseSha, 'baseSha');
         const claimBody = claimComment(runId, input.issueNumber, branchName);
         active = await this.createRun({
@@ -2961,8 +2969,12 @@ export class RunIssue {
     return { status: 'cancelled', evidencePath: evidence.path };
   }
 
-  private async preClaimTransport(issueNumber: number): Promise<RunIssueResult> {
-    const evidence = await this.dependencies.writeEvidence({ runId: `issue-${issueNumber}`, code: 'issue-read-failed', summary: 'Issue read failed.' });
+  private async preClaimTransport(
+    issueNumber: number,
+    code = 'issue-read-failed',
+    summary = 'Issue read failed.',
+  ): Promise<RunIssueResult> {
+    const evidence = await this.dependencies.writeEvidence({ runId: `issue-${issueNumber}`, code, summary });
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
 

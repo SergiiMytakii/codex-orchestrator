@@ -54,7 +54,10 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   }
 
   async getBaseSha(input: { targetRoot: string; baseBranch: string }): Promise<string> {
-    return (await this.git(['-C', input.targetRoot, 'rev-parse', input.baseBranch])).trim();
+    await this.git([
+      '-C', input.targetRoot, 'fetch', '--quiet', '--no-tags', 'origin', `refs/heads/${input.baseBranch}`,
+    ]);
+    return (await this.git(['-C', input.targetRoot, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}'])).trim();
   }
 
   async createWorktree(input: {
@@ -71,6 +74,9 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
       baseBranch: input.baseBranch,
       requiredBaseSha: input.baseSha,
     });
+    if (await this.getHead(input.worktreePath) !== input.baseSha) {
+      throw new Error('created issue worktree does not match the pinned base SHA');
+    }
   }
 
   async ensureContinuationWorktree(input: {

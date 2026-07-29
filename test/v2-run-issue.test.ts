@@ -781,6 +781,16 @@ test('worktree creation failure is diagnostic and resumes the claimed run', asyn
   assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
 });
 
+test('base refresh failure is resumable and creates no claim or run state', async () => {
+  const fixture = await runFixture({ getBaseShaRejectOnce: true });
+  const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(interrupted, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs.length, 0);
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:claim')), false);
+  assert.equal(fixture.evidence.at(-1)?.code, 'base-refresh-failed');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+});
+
 test('partial worktree creation artifacts remain correctable in the same claimed run', async () => {
   const fixture = await runFixture({ createIncompleteWorktreeThenRejectOnce: true });
 
@@ -1655,6 +1665,7 @@ interface FixtureOptions {
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
+  getBaseShaRejectOnce?: boolean;
   competingClaimDuringRoute?: boolean;
   malformedCurrentClaimDuringRoute?: boolean;
   replaceHistoricalClaimDuringRoute?: boolean;
@@ -1677,6 +1688,7 @@ async function runFixture(options: FixtureOptions = {}) {
   await execFileAsync('git', ['-C', targetRoot, 'add', 'README.md', ...(options.agentWritesDeniedIgnoredPath ? ['.gitignore'] : [])]);
   await execFileAsync('git', ['-C', targetRoot, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteRoot]);
+  await execFileAsync('git', ['-C', targetRoot, 'push', '-u', 'origin', 'main']);
   const baseSha = (await execFileAsync('git', ['-C', targetRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   const events: string[] = [];
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
@@ -2163,13 +2175,20 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   const rejected = new Set<string>();
   let createWorktreeRejected = false;
   let inspectWorktreeDiverged = false;
+  let getBaseShaRejected = false;
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejected.has(effect)) return false;
     rejected.add(effect);
     return true;
   };
   return {
-    getBaseSha: (input) => delegate.getBaseSha(input),
+    getBaseSha: async (input) => {
+      if (options.getBaseShaRejectOnce && !getBaseShaRejected) {
+        getBaseShaRejected = true;
+        throw new Error('remote unavailable');
+      }
+      return delegate.getBaseSha(input);
+    },
     createWorktree: async (input) => {
       if (options.createIncompleteWorktreeThenRejectOnce && !createWorktreeRejected) {
         createWorktreeRejected = true;
