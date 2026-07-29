@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { lstat, mkdir } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { lstat, mkdir, readFile } from 'node:fs/promises';
+import { platform } from 'node:os';
 import { join } from 'node:path';
 
 import { canonicalJson, sha256 } from './containment.js';
@@ -13,6 +14,7 @@ interface OwnerControlRecordV1 {
   host: string;
   bootId: string;
   pid: number;
+  processStartIdentity: string;
   acquiredAt: string;
 }
 
@@ -22,7 +24,8 @@ export async function inspectOwnerControlLock(input: {
   bootId: string;
   host: string;
   processAlive(pid: number): boolean;
-}): Promise<{ status: 'absent' | 'active' | 'ambiguous'; reason?: string }> {
+  inspectProcessIdentity?(pid: number): Promise<ProcessIdentityInspection>;
+}): Promise<{ status: 'absent' | 'inactive' | 'active' | 'ambiguous'; reason?: string }> {
   validateRepository(input.canonicalRepository);
   const controlGitDir = join(input.orchestratorHome, 'v2', 'owner-control.git');
   try {
@@ -42,9 +45,13 @@ export async function inspectOwnerControlLock(input: {
   if (owner.canonicalRepository !== input.canonicalRepository || owner.host !== input.host || owner.bootId !== input.bootId) {
     return { status: 'ambiguous', reason: 'Owner control identity is foreign or stale.' };
   }
-  return input.processAlive(owner.pid)
+  let observation: ProcessIdentityInspection;
+  try { observation = await (input.inspectProcessIdentity ?? inspectProcessIdentity)(owner.pid); }
+  catch { return { status: 'ambiguous', reason: 'Owner control process identity is unavailable.' }; }
+  if (observation.status === 'unknown') return { status: 'ambiguous', reason: 'Owner control process identity is unavailable.' };
+  return observation.status === 'present' && observation.processStartIdentity === owner.processStartIdentity
     ? { status: 'active' }
-    : { status: 'ambiguous', reason: 'Owner control record has ambiguous liveness.' };
+    : { status: 'inactive' };
 }
 
 export class OwnerControlLockBlockedError extends Error {
@@ -63,6 +70,8 @@ export interface OwnerControlLockInput {
   now(): string;
   createToken(): string;
   processAlive(pid: number): boolean;
+  processStartIdentity?: string;
+  inspectProcessIdentity?: (pid: number) => Promise<ProcessIdentityInspection>;
   waitMs?: number;
   pollMs?: number;
   afterObservedOwner?(owner: Readonly<OwnerControlRecordV1>): Promise<void>;
@@ -76,6 +85,8 @@ export async function acquireOwnerControlLock(input: OwnerControlLockInput): Pro
   const initialized = await runGit(['init', '--bare', '--quiet', '--object-format=sha1', controlGitDir]);
   if (initialized.code !== 0) throw new OwnerControlLockBlockedError('owner control store initialization failed');
   const ref = `refs/codex-orchestrator/owners/${sha256(input.canonicalRepository)}`;
+  const processStartIdentity = input.processStartIdentity ?? await readProcessStartIdentity(input.pid);
+  if (!processStartIdentity) throw new OwnerControlLockBlockedError('owner process identity is unavailable');
   const owner: OwnerControlRecordV1 = {
     version: 1,
     token: input.createToken(),
@@ -83,6 +94,7 @@ export async function acquireOwnerControlLock(input: OwnerControlLockInput): Pro
     host: input.host,
     bootId: input.bootId,
     pid: input.pid,
+    processStartIdentity,
     acquiredAt: input.now(),
   };
   const blob = await writeBlob(controlGitDir, owner);
@@ -100,7 +112,11 @@ export async function acquireOwnerControlLock(input: OwnerControlLockInput): Pro
       || observed.bootId !== input.bootId) {
       throw new OwnerControlLockBlockedError();
     }
-    if (input.processAlive(observed.pid)) {
+    let observation: ProcessIdentityInspection;
+    try { observation = await (input.inspectProcessIdentity ?? inspectProcessIdentity)(observed.pid); }
+    catch { throw new OwnerControlLockBlockedError('owner process identity is unavailable'); }
+    if (observation.status === 'unknown') throw new OwnerControlLockBlockedError('owner process identity is unavailable');
+    if (observation.status === 'present' && observation.processStartIdentity === observed.processStartIdentity) {
       if (Date.now() - startedAt >= (input.waitMs ?? 5_000)) throw new OwnerControlLockBlockedError('owner control lock wait timed out', 'live-contention');
       await delay(input.pollMs ?? 25);
       continue;
@@ -153,16 +169,50 @@ async function updateRef(controlGitDir: string, ref: string, next: string, previ
 function parseOwner(value: unknown): OwnerControlRecordV1 {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('owner control record is invalid');
   const keys = Object.keys(value).sort();
-  const expected = ['version', 'token', 'canonicalRepository', 'host', 'bootId', 'pid', 'acquiredAt'].sort();
+  const expected = ['version', 'token', 'canonicalRepository', 'host', 'bootId', 'pid', 'processStartIdentity', 'acquiredAt'].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error('owner control record keys are invalid');
   const owner = value as unknown as OwnerControlRecordV1;
   validateRepository(owner.canonicalRepository);
   if (owner.version !== 1 || !owner.token || !owner.host || !owner.bootId
-    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !owner.processStartIdentity
     || Number.isNaN(Date.parse(owner.acquiredAt)) || new Date(owner.acquiredAt).toISOString() !== owner.acquiredAt) {
     throw new Error('owner control record fields are invalid');
   }
   return owner;
+}
+
+type ProcessIdentityInspection =
+  | { status: 'present'; processStartIdentity: string }
+  | { status: 'absent' }
+  | { status: 'unknown' };
+
+async function inspectProcessIdentity(pid: number): Promise<ProcessIdentityInspection> {
+  const identity = await readProcessStartIdentity(pid);
+  if (identity) return { status: 'present', processStartIdentity: identity };
+  try { process.kill(pid, 0); return { status: 'unknown' }; }
+  catch (error) { return isErrorCode(error, 'ESRCH') ? { status: 'absent' } : { status: 'unknown' }; }
+}
+
+async function readProcessStartIdentity(pid: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (platform() === 'linux') {
+    try {
+      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = text.lastIndexOf(') ');
+      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
+      return fields[19] ? `linux:${fields[19]}` : undefined;
+    } catch { return undefined; }
+  }
+  return await new Promise((resolveIdentity) => {
+    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
+      const value = error ? '' : stdout.trim().replace(/\s+/gu, ' ');
+      resolveIdentity(value ? `${platform()}:${value}` : undefined);
+    });
+  });
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === code;
 }
 
 function validateRepository(value: string): void {

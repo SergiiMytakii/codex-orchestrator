@@ -1,293 +1,285 @@
-import { canonicalJson, containsCredentialEvidence, sha256 } from './containment.js';
-import { decodeAgentReportForValidation } from './report-envelope.js';
-import {
-  hashCodeReviewReport,
-  validateCodeReviewReport,
-  type CodeReviewValidationContext,
-} from './code-review-report.js';
-import {
-  hashAmbiguityReviewArtifact,
-  hashTriageArtifact,
-  validateAmbiguityReviewArtifact,
-} from './route-decision.js';
-import { validateTriageRoute } from './triage-route.js';
-import type {
-  WorkflowExecutionProfile,
-  WorkflowGenerationReceipt,
-  WorkflowOperationPolicy,
-} from './workflow-assets.js';
-import type { RunRecordV1 } from './run-store.js';
+import { canonicalJson, sha256 } from './containment.js';
+import type { WorkflowExecutionProfile, WorkflowGenerationReceipt, WorkflowOperationPolicy } from './workflow-assets.js';
 
-const MAX_STRING_LENGTH = 16 * 1024;
 const POLICY_KEYS = [
   'sandboxMode', 'cwdClass', 'worktreeAccess', 'writableRootClasses', 'runnerPostcondition',
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review';
+export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review' | 'spec-review';
+
+export interface ReportOnlyWorktreeSnapshot {
+  headSha: string; indexTreeSha: string; trackedContentSha256: string;
+  untrackedContentSha256: string; worktreeIdentity: string;
+}
+
+export interface DurableReportInvocationV1 {
+  version: 1;
+  operation: ContainedReportOperationId; attemptId: string;
+  generationHash: string; promptFactsSha256: string; reportPath: string;
+  phase: 'prepared' | 'launched';
+  host: string; bootId: string; preparedAt: string; launchedAt: string | null;
+  pid: number | null; processStartIdentity: string | null; processGroupId: number | null;
+  baseline: ReportOnlyWorktreeSnapshot;
+}
+
+export interface DurableReportInvocationState {
+  read(): Promise<DurableReportInvocationV1 | undefined>;
+  compareAndSwap(expected: DurableReportInvocationV1 | undefined,
+    next: DurableReportInvocationV1 | undefined): Promise<boolean>;
+}
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
-  attemptId: string;
   runId: string;
   worktreePath: string;
   workflowGeneration: WorkflowGenerationReceipt;
   promptFacts: string[];
   signal: AbortSignal;
-  reviewContext?: CodeReviewValidationContext;
-  onPrepared?: () => Promise<void>;
-  onLaunched?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
+  invocationState: DurableReportInvocationState;
+  forbiddenAttemptIds?: string[];
 }
 
 export type ContainedReportOperationResult =
-  | { status: 'completed'; attemptId: string; validatedPayload: unknown; artifactSha256: string }
-  | { status: 'invalid'; attemptId: string; findings: string[]; repairInput?: { originalReportSha256: string; originalReportBytes: Buffer } }
+  | { status: 'completed'; attemptId: string; reportBytes: Buffer; reportSha256: string }
   | { status: 'retryable'; code: string }
-  | {
-    status: 'safe-halt';
-    process: Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
-    waitForAbsence(): Promise<void>;
-  }
+  | { status: 'safe-halt'; code: string }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety'; code: string };
 
-export interface ContainedReportOperation {
-  run(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult>;
-}
-
-export type ReportOnlyWorktreeSnapshot = NonNullable<RunRecordV1['process']>['baseline'];
+export interface ContainedReportOperation { run(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult> }
 
 export interface PreparedContainedReportAttempt {
   operation: ContainedReportOperationId;
   generationHash: string;
   policy: WorkflowOperationPolicy;
-  workflowRoot?: string;
-  operationPath?: string;
-  schemaPath?: string;
-  reportPath?: string;
-  toolHome?: string;
-  tmpDir?: string;
-  profile?: WorkflowExecutionProfile;
+  reportPath: string;
+  workflowRoot?: string; operationPath?: string; schemaPath?: string;
+  toolHome?: string; tmpDir?: string; profile?: WorkflowExecutionProfile;
 }
 
 export type ContainedReportLaunchResult =
   | { status: 'completed'; reportBytes: Buffer }
   | { status: 'retryable'; code: string }
-  | { status: 'safe-halt'; pid: number; processGroupId: number; startedAt: string; waitForAbsence(): Promise<void> }
+  | { status: 'safe-halt' }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety'; code: string };
 
+export type ProcessIdentityObservation =
+  | { status: 'present'; processStartIdentity: string; processGroupAlive: boolean | 'unknown' }
+  | { status: 'absent'; processGroupAlive: false }
+  | { status: 'unknown' };
+
+export type ReportObservation =
+  | { status: 'available'; bytes: Buffer }
+  | { status: 'absent' }
+  | { status: 'unknown' };
+
 export interface ContainedReportOperationDependencies {
-  prepare(input: {
-    operation: ContainedReportOperationId;
-    attemptId: string;
-    runId: string;
-    workflowGeneration: WorkflowGenerationReceipt;
-  }): Promise<PreparedContainedReportAttempt>;
+  host: string;
+  bootId: string;
+  now(): string;
+  createAttemptId(): string;
+  prepare(input: { operation: ContainedReportOperationId; attemptId: string; runId: string; workflowGeneration: WorkflowGenerationReceipt }): Promise<PreparedContainedReportAttempt>;
   snapshot(worktreePath: string): Promise<unknown>;
-  launch(input: ContainedReportOperationInput & {
-    attempt: PreparedContainedReportAttempt;
-  }): Promise<ContainedReportLaunchResult>;
+  readReport(path: string): Promise<ReportObservation>;
+  settleAttempt(attempt: PreparedContainedReportAttempt): Promise<void>;
+  processStartIdentity(pid: number): Promise<string | undefined>;
+  inspectProcess(invocation: DurableReportInvocationV1): Promise<ProcessIdentityObservation>;
+  launch(input: ContainedReportOperationInput & { attempt: PreparedContainedReportAttempt;
+    onSpawned(identity: { pid: number; processGroupId: number }): Promise<void> }): Promise<ContainedReportLaunchResult>;
 }
 
 export class InjectedContainedReportOperation implements ContainedReportOperation {
   constructor(private readonly dependencies: ContainedReportOperationDependencies) {}
 
   async run(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult> {
-    let before: ReportOnlyWorktreeSnapshot;
-    try {
-      before = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath));
-    } catch {
-      return { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' };
-    }
+    const existing = await input.invocationState.read();
+    if (existing) return this.recover(input, validateDurableReportInvocation(existing));
+    return this.launch(input);
+  }
 
+  private async launch(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult> {
+    let baseline: ReportOnlyWorktreeSnapshot;
+    try { baseline = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath)); }
+    catch { return blocked('safety', 'report-operation-snapshot-failed'); }
+    const attemptId = this.dependencies.createAttemptId();
+    if (!attemptId || input.forbiddenAttemptIds?.includes(attemptId)) return blocked('safety', 'report-operation-attempt-identity-invalid');
     let attempt: PreparedContainedReportAttempt;
+    try { attempt = await this.prepare(input, attemptId); }
+    catch (error) {
+      return error instanceof ReportAuthorityError
+        ? blocked('safety', 'report-operation-authority-drift')
+        : blocked('external', 'report-operation-prepare-failed');
+    }
+    const prepared: DurableReportInvocationV1 = {
+      version: 1, operation: input.operation, attemptId, generationHash: input.workflowGeneration.generationHash,
+      promptFactsSha256: promptFactsSha256(input.promptFacts),
+      reportPath: attempt.reportPath, phase: 'prepared', host: this.dependencies.host, bootId: this.dependencies.bootId,
+      preparedAt: this.dependencies.now(), launchedAt: null, pid: null, processStartIdentity: null,
+      processGroupId: null, baseline,
+    };
+    if (!await input.invocationState.compareAndSwap(undefined, prepared)) return blocked('safety', 'report-operation-state-conflict');
+    let current = prepared;
+    let result: ContainedReportLaunchResult;
     try {
-      attempt = await this.dependencies.prepare({
-        operation: input.operation,
-        attemptId: input.attemptId,
-        runId: input.runId,
-        workflowGeneration: input.workflowGeneration,
-      });
-    } catch {
-      return this.finishWithSnapshot(input.worktreePath, before, {
-        status: 'blocked', kind: 'external', code: 'report-operation-prepare-failed',
-      });
-    }
-
-    let launchResult: ContainedReportLaunchResult;
-    if (!hasExactReadOnlyAuthority(attempt, input)) {
-      launchResult = { status: 'blocked', kind: 'safety', code: 'report-operation-authority-drift' };
-    } else {
-      if (isImplementationReview(input.operation)) {
-        if (!input.reviewContext || !input.onPrepared || !input.onLaunched) {
-          return this.finishWithSnapshot(input.worktreePath, before, {
-            status: 'blocked', kind: 'safety', code: 'review-operation-launch-gate-missing',
-          });
-        }
-        try {
-          await input.onPrepared();
-        } catch {
-          return this.finishWithSnapshot(input.worktreePath, before, {
-            status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed',
-          });
-        }
-      }
-      try {
-        launchResult = await this.dependencies.launch({ ...input, attempt });
-      } catch {
-        launchResult = { status: 'blocked', kind: 'external', code: 'report-operation-launch-failed' };
-      }
-    }
-
-    if (launchResult.status === 'safe-halt') {
-      return {
-        status: 'safe-halt',
-        process: {
-          pid: launchResult.pid,
-          processGroupId: launchResult.processGroupId,
-          startedAt: launchResult.startedAt,
-          baseline: structuredClone(before),
+      result = await this.dependencies.launch({
+        ...input,
+        attempt,
+        onSpawned: async ({ pid, processGroupId }) => {
+          const processStartIdentity = await this.dependencies.processStartIdentity(pid);
+          if (!processStartIdentity) throw new Error('report process identity unavailable');
+          const launched: DurableReportInvocationV1 = {
+            ...prepared, phase: 'launched', launchedAt: this.dependencies.now(), pid, processStartIdentity, processGroupId,
+          };
+          if (!await input.invocationState.compareAndSwap(prepared, launched)) throw new Error('report launch state conflict');
+          current = launched;
         },
-        waitForAbsence: launchResult.waitForAbsence,
-      };
+      });
+    } catch { result = { status: 'retryable', code: 'report-operation-launch-failed' }; }
+    if (result.status === 'completed') return this.finish(input, current, attempt, result.reportBytes);
+    if (result.status === 'safe-halt') return { status: 'safe-halt', code: 'report-operation-process-unresolved' };
+    if (result.status === 'cancelled' || result.status === 'blocked') {
+      const abandoned = await this.abandon(input, current, attempt);
+      if (abandoned) return abandoned;
+      return result;
     }
-    return this.finishWithSnapshot(input.worktreePath, before, launchResult, input);
+    const recovered = await this.observeReport(current.reportPath);
+    if (recovered.status === 'unknown') return { status: 'safe-halt', code: 'report-operation-report-observation-unknown' };
+    if (recovered.status === 'available') return this.finish(input, current, attempt, recovered.bytes);
+    const abandoned = await this.abandon(input, current, attempt);
+    if (abandoned) return abandoned;
+    return result;
   }
 
-  private async finishWithSnapshot(
-    worktreePath: string,
-    before: ReportOnlyWorktreeSnapshot,
-    launchResult: Exclude<ContainedReportLaunchResult, { status: 'safe-halt' }>,
-    input?: ContainedReportOperationInput,
-  ): Promise<ContainedReportOperationResult> {
+  private async recover(input: ContainedReportOperationInput, invocation: DurableReportInvocationV1): Promise<ContainedReportOperationResult> {
+    if (invocation.operation !== input.operation || invocation.generationHash !== input.workflowGeneration.generationHash
+      || invocation.host !== this.dependencies.host || invocation.bootId !== this.dependencies.bootId) {
+      return { status: 'safe-halt', code: 'report-operation-owner-identity-unresolved' };
+    }
+    if (invocation.promptFactsSha256 !== promptFactsSha256(input.promptFacts)) {
+      return { status: 'safe-halt', code: 'report-operation-prompt-facts-drift' };
+    }
+    let attempt: PreparedContainedReportAttempt;
+    try { attempt = await this.prepare(input, invocation.attemptId); }
+    catch (error) {
+      return error instanceof ReportAuthorityError
+        ? blocked('safety', 'report-operation-authority-drift')
+        : blocked('external', 'report-operation-prepare-failed');
+    }
+    if (attempt.reportPath !== invocation.reportPath) return blocked('safety', 'report-operation-report-path-drift');
+    const report = await this.observeReport(invocation.reportPath);
+    if (report.status === 'unknown') return { status: 'safe-halt', code: 'report-operation-report-observation-unknown' };
+    if (invocation.phase === 'prepared') {
+      if (report.status === 'available') return this.finish(input, invocation, attempt, report.bytes);
+      if (!await this.settleAttempt(attempt)) return { status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed' };
+      if (!await input.invocationState.compareAndSwap(invocation, undefined)) return blocked('safety', 'report-operation-state-conflict');
+      return { status: 'retryable', code: 'report-operation-prepared-attempt-abandoned' };
+    }
+    const unresolved = await this.unresolvedProcess(invocation);
+    if (unresolved) return unresolved;
+    if (report.status === 'available') return this.finish(input, invocation, attempt, report.bytes);
+    if (!await this.settleAttempt(attempt)) return { status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed' };
+    if (!await input.invocationState.compareAndSwap(invocation, undefined)) return blocked('safety', 'report-operation-state-conflict');
+    return { status: 'retryable', code: 'report-operation-output-unavailable' };
+  }
+
+  private async abandon(input: ContainedReportOperationInput, invocation: DurableReportInvocationV1,
+    attempt: PreparedContainedReportAttempt): Promise<ContainedReportOperationResult | undefined> {
+    if (invocation.phase === 'launched') {
+      const unresolved = await this.unresolvedProcess(invocation);
+      if (unresolved) return unresolved;
+    }
+    if (!await this.settleAttempt(attempt)) return { status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed' };
+    if (!await input.invocationState.compareAndSwap(invocation, undefined)) return blocked('safety', 'report-operation-state-conflict');
+    return undefined;
+  }
+
+  private async observeReport(path: string): Promise<ReportObservation> {
+    try { return await this.dependencies.readReport(path); }
+    catch { return { status: 'unknown' }; }
+  }
+
+  private async unresolvedProcess(invocation: DurableReportInvocationV1): Promise<ContainedReportOperationResult | undefined> {
+    const observed = await this.dependencies.inspectProcess(invocation).catch(() => ({ status: 'unknown' as const }));
+    if (observed.status === 'unknown') return { status: 'safe-halt', code: 'report-operation-process-observation-unknown' };
+    if (observed.status === 'present' && (observed.processStartIdentity === invocation.processStartIdentity || observed.processGroupAlive !== false)) {
+      return { status: 'safe-halt', code: 'report-operation-process-active-or-uncertain' };
+    }
+    return observed.status === 'absent' && observed.processGroupAlive !== false
+      ? { status: 'safe-halt', code: 'report-operation-process-group-unresolved' } : undefined;
+  }
+
+  private async settleAttempt(attempt: PreparedContainedReportAttempt): Promise<boolean> {
+    try { await this.dependencies.settleAttempt(attempt); return true; }
+    catch { return false; }
+  }
+
+  private async prepare(input: ContainedReportOperationInput, attemptId: string): Promise<PreparedContainedReportAttempt> {
+    const attempt = await this.dependencies.prepare({
+      operation: input.operation, attemptId, runId: input.runId, workflowGeneration: input.workflowGeneration,
+    });
+    if (!hasExactReadOnlyAuthority(attempt, input) || !attempt.reportPath) throw new ReportAuthorityError();
+    return attempt;
+  }
+
+  private async finish(input: ContainedReportOperationInput, invocation: DurableReportInvocationV1,
+    attempt: PreparedContainedReportAttempt, reportBytes: Buffer): Promise<ContainedReportOperationResult> {
     let after: ReportOnlyWorktreeSnapshot;
-    try {
-      after = requireReportSnapshot(await this.dependencies.snapshot(worktreePath));
-    } catch {
-      return { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' };
-    }
-    if (!sameSnapshot(before, after)) {
-      return { status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated' };
-    }
-
-    if (launchResult.status !== 'completed') return launchResult;
-    if (!input) return { status: 'blocked', kind: 'external', code: 'report-operation-prepare-failed' };
-    return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes, input.reviewContext);
+    try { after = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath)); }
+    catch { return blocked('safety', 'report-operation-snapshot-failed'); }
+    if (canonicalJson(invocation.baseline) !== canonicalJson(after)) return blocked('safety', 'report-operation-worktree-mutated');
+    if (!await this.settleAttempt(attempt)) return { status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed' };
+    return { status: 'completed', attemptId: invocation.attemptId, reportBytes: Buffer.from(reportBytes), reportSha256: sha256(reportBytes) };
   }
 }
 
-function hasExactReadOnlyAuthority(
-  attempt: PreparedContainedReportAttempt,
-  input: ContainedReportOperationInput,
-): boolean {
+export function validateDurableReportInvocation(value: unknown): DurableReportInvocationV1 {
+  const keys = [
+    'version', 'operation', 'attemptId', 'generationHash', 'promptFactsSha256', 'reportPath', 'phase', 'host', 'bootId', 'preparedAt',
+    'launchedAt', 'pid', 'processStartIdentity', 'processGroupId', 'baseline',
+  ];
+  if (!hasExactKeys(value, keys)) throw new Error('durable report invocation is invalid');
+  const record = value as Record<string, unknown>;
+  if (record.version !== 1 || !['triage', 'ambiguity-review', 'code-review', 'spec-review'].includes(record.operation as string)
+    || !nonEmpty(record.attemptId) || !/^[0-9a-f]{64}$/u.test(record.generationHash as string)
+    || !nonEmpty(record.reportPath) || !nonEmpty(record.host) || !nonEmpty(record.bootId)
+    || !/^[0-9a-f]{64}$/u.test(record.promptFactsSha256 as string)
+    || !timestamp(record.preparedAt) || !['prepared', 'launched'].includes(record.phase as string)) throw new Error('durable report invocation fields are invalid');
+  const launched = record.phase === 'launched';
+  if (launched !== (positive(record.pid) && positive(record.processGroupId) && nonEmpty(record.processStartIdentity)
+    && timestamp(record.launchedAt))) throw new Error('durable report invocation process identity is invalid');
+  if (!launched && (record.pid !== null || record.processGroupId !== null || record.processStartIdentity !== null || record.launchedAt !== null)) {
+    throw new Error('prepared report invocation has process identity');
+  }
+  requireReportSnapshot(record.baseline);
+  return structuredClone(value as unknown as DurableReportInvocationV1);
+}
+
+function hasExactReadOnlyAuthority(attempt: PreparedContainedReportAttempt, input: ContainedReportOperationInput): boolean {
   const policy = attempt.policy;
-  return attempt.operation === input.operation
-    && attempt.generationHash === input.workflowGeneration.generationHash
-    && hasExactKeys(policy, POLICY_KEYS)
-    && policy.sandboxMode === 'read-only'
-    && policy.cwdClass === 'worktree'
-    && policy.worktreeAccess === 'read-only'
-    && Array.isArray(policy.writableRootClasses)
-    && policy.writableRootClasses.length === 0
-    && policy.runnerPostcondition === 'report-only'
-    && policy.network === 'deny'
-    && Array.isArray(policy.networkHosts)
-    && policy.networkHosts.length === 0
-    && Array.isArray(policy.mcpTools)
-    && policy.mcpTools.length === 0
-    && policy.approvalCeiling === 'never'
-    && policy.externalWrite === false;
-}
-
-function validateCompletedReport(
-  operation: ContainedReportOperationId,
-  attemptId: string,
-  reportBytes: Buffer,
-  reviewContext?: CodeReviewValidationContext,
-): ContainedReportOperationResult {
-  const rawText = reportBytes.toString('utf8');
-  const repairable = Buffer.from(rawText, 'utf8').equals(reportBytes)
-    && !containsCredentialEvidence(rawText)
-    && reportBytes.length <= 1024 * 1024;
-  try {
-    if (!Buffer.from(rawText, 'utf8').equals(reportBytes) || containsCredentialEvidence(rawText)) {
-      throw new Error('report payload contains forbidden credential material');
-    }
-    const decoded = decodeAgentReportForValidation(reportBytes);
-    let validatedPayload: unknown;
-    let artifactSha256: string;
-    if (operation === 'triage') {
-      validatedPayload = validateTriageRoute(decoded);
-      artifactSha256 = hashTriageArtifact(validatedPayload);
-    } else if (operation === 'ambiguity-review') {
-      validatedPayload = validateAmbiguityReviewArtifact(decoded);
-      artifactSha256 = hashAmbiguityReviewArtifact(validatedPayload);
-    } else {
-      const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
-      validatedPayload = reviewReport;
-      artifactSha256 = hashCodeReviewReport(reviewReport);
-    }
-    return {
-      status: 'completed',
-      attemptId,
-      validatedPayload,
-      artifactSha256,
-    };
-  } catch (error) {
-    return {
-      status: 'invalid',
-      attemptId,
-      findings: [safeFinding(error)],
-      ...(repairable ? { repairInput: { originalReportSha256: sha256(reportBytes), originalReportBytes: Buffer.from(reportBytes) } } : {}),
-    };
-  }
-}
-
-function isImplementationReview(operation: ContainedReportOperationId): operation is 'code-review' {
-  return operation === 'code-review';
-}
-
-function inputReviewContext(context: CodeReviewValidationContext | undefined): CodeReviewValidationContext {
-  if (!context) throw new Error('implementation review validation context is missing');
-  return context;
-}
-
-function inputReview(
-  operation: 'code-review',
-  context: CodeReviewValidationContext,
-  decoded: unknown,
-) {
-  if (context.operation !== operation) throw new Error('implementation review operation context mismatch');
-  return validateCodeReviewReport(decoded, context);
-}
-
-function safeFinding(error: unknown): string {
-  return error instanceof Error && error.message.length > 0
-    ? error.message.slice(0, MAX_STRING_LENGTH)
-    : 'report payload validation failed';
-}
-
-function sameSnapshot(left: ReportOnlyWorktreeSnapshot, right: ReportOnlyWorktreeSnapshot): boolean {
-  try {
-    return canonicalJson(left) === canonicalJson(right);
-  } catch {
-    return false;
-  }
-}
-
-function hasExactKeys(value: unknown, keys: readonly string[]): boolean {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+  return attempt.operation === input.operation && attempt.generationHash === input.workflowGeneration.generationHash
+    && hasExactKeys(policy, POLICY_KEYS) && policy.sandboxMode === 'read-only' && policy.cwdClass === 'worktree'
+    && policy.worktreeAccess === 'read-only' && Array.isArray(policy.writableRootClasses) && policy.writableRootClasses.length === 0
+    && policy.runnerPostcondition === 'report-only' && policy.network === 'deny' && policy.networkHosts.length === 0
+    && policy.mcpTools.length === 0 && policy.approvalCeiling === 'never' && policy.externalWrite === false;
 }
 
 function requireReportSnapshot(value: unknown): ReportOnlyWorktreeSnapshot {
-  const keys = ['headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity'] as const;
-  if (!hasExactKeys(value, keys)) throw new Error('report-operation snapshot is invalid');
-  for (const key of keys) {
-    if (typeof (value as Record<string, unknown>)[key] !== 'string') throw new Error('report-operation snapshot is invalid');
-  }
-  return value as ReportOnlyWorktreeSnapshot;
+  const keys = ['headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity'];
+  if (!hasExactKeys(value, keys) || !keys.every((key) => nonEmpty((value as Record<string, unknown>)[key]))) throw new Error('report snapshot is invalid');
+  return structuredClone(value as unknown as ReportOnlyWorktreeSnapshot);
 }
+
+function blocked(kind: 'external' | 'safety', code: string): ContainedReportOperationResult { return { status: 'blocked', kind, code }; }
+function hasExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort(); const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+function nonEmpty(value: unknown): value is string { return typeof value === 'string' && value.length > 0; }
+function positive(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) > 0; }
+function timestamp(value: unknown): value is string { return typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
+function promptFactsSha256(promptFacts: string[]): string { return sha256(canonicalJson(promptFacts)); }
+
+class ReportAuthorityError extends Error {}

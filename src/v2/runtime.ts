@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
@@ -1166,6 +1166,10 @@ export function createV2Runtime(input: {
     now: () => new Date(now()),
   });
   const reportOperation = new InjectedContainedReportOperation({
+    host: hostname(),
+    bootId: input.bootId,
+    now,
+    createAttemptId: input.createAttemptId ?? randomUUID,
     prepare: async ({ operation, attemptId, runId, workflowGeneration }) => ({
       operation,
       generationHash: workflowGeneration.generationHash,
@@ -1180,7 +1184,14 @@ export function createV2Runtime(input: {
       }),
     }),
     snapshot: (worktreePath) => git.snapshot(worktreePath),
-    launch: async ({ attempt, worktreePath, promptFacts, signal, onLaunched }) => {
+    readReport: async (path) => readRegularFile(path).then((bytes) => ({ status: 'available' as const, bytes }))
+      .catch((error) => isErrorCode(error, 'ENOENT') ? { status: 'absent' as const } : { status: 'unknown' as const }),
+    settleAttempt: async (attempt) => attempt.tmpDir
+      ? rm(join(dirname(attempt.tmpDir), 'read-view'), { recursive: true, force: true })
+      : Promise.reject(new Error('report operation attempt temporary directory is missing')),
+    processStartIdentity: readProcessStartIdentity,
+    inspectProcess: inspectReportProcess,
+    launch: async ({ attempt, worktreePath, promptFacts, signal, onSpawned }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
@@ -1221,21 +1232,12 @@ export function createV2Runtime(input: {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
-        ...(onLaunched ? { onSpawned: onLaunched } : {}),
+        onSpawned,
         }, signal);
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
           cleanupAfterSafeHalt = true;
-          return {
-            status: 'safe-halt' as const,
-            pid: error.pid,
-            processGroupId: error.processGroupId,
-            startedAt: now(),
-            waitForAbsence: async () => {
-              await waitForProcessGroupAbsent(error.processGroupId);
-              await rm(readView, { recursive: true, force: true });
-            },
-          };
+          return { status: 'safe-halt' as const };
         }
         throw error;
       } finally {
@@ -1256,7 +1258,6 @@ export function createV2Runtime(input: {
   });
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
-    createAttemptId: input.createAttemptId ?? randomUUID,
   });
   const createAttemptId = input.createAttemptId ?? randomUUID;
   const specOperation: SpecDeliveryOperation = {
@@ -1311,58 +1312,44 @@ export function createV2Runtime(input: {
         return { status: 'retryable', code: 'spec-author-report-invalid' };
       }
     },
-    review: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.review.reviewer?.sessionId ?? randomUUID();
+    review: async ({ context, state, mode, reviewerSessionId: sessionId, signal, invocationState }) => {
+      let completedAttemptId: string | undefined;
       try {
-        const attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-review', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
-        const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
-          codexPath: config.codex.command, cwd: context.worktreePath, schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
+        const result = await reportOperation.run({
+          operation: 'spec-review', runId: context.runId, worktreePath: context.worktreePath,
+          workflowGeneration: context.workflowGeneration, signal, invocationState,
+          forbiddenAttemptIds: state.revisions.map((revision) => revision.author.attemptId),
+          promptFacts: [
             `Reviewer session ID: ${sessionId}. Review mode: ${mode}.`,
             `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
             `Immutable spec delivery state: ${canonicalJson(state)}.`,
-            'Return only the package spec-review report. Do not edit files or external state.',
-          ].join('\n'),
-        }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
-        const raw = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
+          ],
+        });
+        if (result.status === 'cancelled') return { status: 'cancelled' };
+        if (result.status === 'retryable' || result.status === 'safe-halt') return { status: 'retryable', code: result.code };
+        if (result.status === 'blocked') return { status: 'blocked', kind: result.kind, code: result.code };
+        completedAttemptId = result.attemptId;
+        const raw = decodeAgentReportForValidation(result.reportBytes) as Record<string, unknown>;
         if (raw.mode !== mode || raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
           || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts) || !Array.isArray(raw.acceptedRisks)
           || typeof raw.coverageInvalidated !== 'boolean'
-          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'retryable', code: 'spec-review-report-invalid' };
+          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'invalid', code: 'spec-review-report-invalid', attemptId: result.attemptId };
         const target = state.revisions.at(-1)!;
         const defects = validateCodeReviewDefects(raw.defects, target.revision);
         const report: SpecReviewReportV1 = {
           version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256, mode,
-          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId, sessionId },
+          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId: result.attemptId, sessionId },
           coverage: raw.coverage as string[], defects,
           affectedDefectIds: raw.affectedDefectIds as string[],
           affectedContracts: raw.affectedContracts as string[],
           closureRequestSha256: mode === 'closure' ? state.review.closureRequestSha256 : null,
           acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
         };
-        return { status: 'completed', value: report, reportSha256: sha256(result.report.bytes) };
-      } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-review-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-review-process-absence-unconfirmed' }; }
-        }
-        return { status: 'retryable', code: 'spec-review-report-invalid' };
+        return { status: 'completed', value: report, reportSha256: result.reportSha256 };
+      } catch {
+        return completedAttemptId
+          ? { status: 'invalid', code: 'spec-review-report-invalid', attemptId: completedAttemptId }
+          : { status: 'retryable', code: 'spec-review-report-invalid' };
       }
     },
     recover: async ({ context, state, signal }) => {
@@ -1372,39 +1359,21 @@ export function createV2Runtime(input: {
         try { await waitForProcessGroupAbsent(invocation.processGroupId!); }
         catch { return { status: 'blocked', kind: 'safety', code: 'spec-process-absence-unconfirmed' }; }
       }
-      if (!invocation.reportPath) return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` };
+      if (!invocation.reportPath) return { status: 'retryable', code: 'spec-author-transport-recovery' };
       let reportBytes: Buffer;
       try { reportBytes = await readRegularFile(invocation.reportPath); }
-      catch { return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` }; }
-      if (invocation.purpose === 'author') {
-        if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        try {
-          const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-          const content = await readRegularFile(invocation.revisionPath);
-          if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
-          return { status: 'completed', value: createSpecRevision({
-            revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
-            evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-            author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
-          }) };
-        } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
-      }
+      catch { return { status: 'retryable', code: 'spec-author-transport-recovery' }; }
+      if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
       try {
         const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-        if (raw.mode !== invocation.mode || raw.reviewerSessionId !== invocation.sessionId || !Array.isArray(raw.coverage)
-          || !Array.isArray(raw.defects) || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts)
-          || typeof raw.coverageInvalidated !== 'boolean' || !['approved','needs-work','rejected'].includes(raw.verdict as string)) {
-          return { status: 'retryable', code: 'spec-review-report-invalid' };
-        }
-        const defects = validateCodeReviewDefects(raw.defects, invocation.targetRevision);
-        return { status: 'completed', reportSha256: sha256(reportBytes), value: {
-          version: 1, targetRevision: invocation.targetRevision, targetSha256: invocation.targetSha256!,
-          mode: invocation.mode as 'full'|'closure', verdict: raw.verdict as SpecReviewReportV1['verdict'],
-          reviewer: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, coverage: raw.coverage as string[], defects,
-          affectedDefectIds: raw.affectedDefectIds as string[], affectedContracts: raw.affectedContracts as string[],
-          closureRequestSha256: invocation.closureRequestSha256, acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
-        } };
-      } catch { return { status: 'retryable', code: 'spec-review-report-invalid' }; }
+        const content = await readRegularFile(invocation.revisionPath);
+        if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        return { status: 'completed', value: createSpecRevision({
+          revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
+          evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
+          author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
+        }) };
+      } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
     },
   };
 
@@ -1417,7 +1386,20 @@ export function createV2Runtime(input: {
       codex: { ...parsed.codex, command: await resolveRuntimeCodex(parsed.codex.command) },
     };
     const path = join(targetRoot, config.runner.stateDir, 'v2', 'run-state.json');
-    if (!runRecords) runRecords = new FileRunRecordWriter(path);
+    if (!runRecords) {
+      const processStartIdentity = await readProcessStartIdentity(process.pid);
+      if (!processStartIdentity) throw new Error('run-store owner process identity is unavailable');
+      runRecords = new FileRunRecordWriter(path, {
+        host: hostname(), bootId: input.bootId, pid: process.pid, processStartIdentity,
+        inspectProcessIdentity: async (pid) => {
+          const identity = await readProcessStartIdentity(pid);
+          if (identity) return { processStartIdentity: identity };
+          try { process.kill(pid, 0); return 'unknown'; }
+          catch (error) { return isErrorCode(error, 'ESRCH') ? 'absent' : 'unknown'; }
+        },
+        exclusiveRepositoryOwnership: true,
+      });
+    }
     currentConfig = config;
     return { bytes, config };
   };
@@ -1441,7 +1423,18 @@ export function createV2Runtime(input: {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
       const repoKey = sha256(checked.payload.canonicalRepository);
-      const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'));
+      const ownerProcessIdentity = await readProcessStartIdentity(process.pid);
+      if (!ownerProcessIdentity) throw new Error('proof-store owner process identity is unavailable');
+      const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'), {
+        host: hostname(), bootId: input.bootId, pid: process.pid, processStartIdentity: ownerProcessIdentity,
+        inspectProcessIdentity: async (pid) => {
+          const identity = await readProcessStartIdentity(pid);
+          if (identity) return { processStartIdentity: identity };
+          try { process.kill(pid, 0); return 'unknown'; }
+          catch (error) { return isErrorCode(error, 'ESRCH') ? 'absent' : 'unknown'; }
+        },
+        exclusiveRepositoryOwnership: true,
+      });
       const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
       const worktreePath = proofInput.executionLease?.path ?? issueWorktreePath;
       const androidLease = new FileAndroidLeaseVerifier({
@@ -1629,7 +1622,6 @@ export function createV2Runtime(input: {
       run: ({ state, ...routeInput }) => new RouteCoordinator({
         state,
         operation: reportOperation,
-        createAttemptId: input.createAttemptId ?? randomUUID,
         now,
         createReceipt: ({ artifact, triage, review, decidedAt }) => {
           if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
@@ -1650,7 +1642,9 @@ export function createV2Runtime(input: {
     },
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
-      specRequired: (context, state, signal) => new SpecCoordinator({ state, operation: specOperation }).run(context, signal),
+      specRequired: (context, state, signal) => new SpecCoordinator({
+        state, operation: specOperation, createReviewerSessionId: randomUUID,
+      }).run(context, signal),
       awaitingUser: async (context, state, signal) => {
         const config = requireConfig(currentConfig);
         return new WaitingHumanCoordinator({
@@ -2111,6 +2105,41 @@ async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> 
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
   }
+}
+
+async function readProcessStartIdentity(pid: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (platform() === 'linux') {
+    try {
+      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = text.lastIndexOf(') ');
+      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
+      return fields[19] ? `linux:${fields[19]}` : undefined;
+    } catch { return undefined; }
+  }
+  return await new Promise((resolveIdentity) => {
+    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
+      const value = error ? '' : stdout.trim().replace(/\s+/gu, ' ');
+      resolveIdentity(value ? `${platform()}:${value}` : undefined);
+    });
+  });
+}
+
+async function inspectReportProcess(invocation: import('./contained-report-operation.js').DurableReportInvocationV1) {
+  const processStartIdentity = await readProcessStartIdentity(invocation.pid!);
+  let processGroupAlive: boolean | 'unknown';
+  try { process.kill(-invocation.processGroupId!, 0); processGroupAlive = true; }
+  catch (error) {
+    if (isErrorCode(error, 'ESRCH')) processGroupAlive = false;
+    else if (isErrorCode(error, 'EPERM')) processGroupAlive = true;
+    else processGroupAlive = 'unknown';
+  }
+  if (!processStartIdentity) {
+    return processGroupAlive === false
+      ? { status: 'absent' as const, processGroupAlive: false as const }
+      : { status: 'unknown' as const };
+  }
+  return { status: 'present' as const, processStartIdentity, processGroupAlive };
 }
 
 export async function materializeReportReadView(input: {

@@ -637,6 +637,36 @@ test('malformed code review consumes one durable report-repair bit and retries b
   assert.equal(record.directReview?.status, 'clear');
 });
 
+test('code-review restart lets canonical invocation observe process state before candidate cleanup', async () => {
+  const fixture = await runFixture({ reviewSafeHaltOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const interrupted = (await fixture.store.read()).runs[0]!;
+  assert.equal(interrupted.reportInvocation?.operation, 'code-review');
+  assert.equal(interrupted.reportInvocation?.phase, 'launched');
+  assert.equal(interrupted.executionLease?.operation, 'direct-review');
+  assert.equal(interrupted.executionLease?.phase, 'launched');
+  assert.equal(fixture.events.includes('candidate-process-absence'), false);
+
+  const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(recovered.status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review-launched').length, 1);
+  assert.equal(fixture.events.includes('candidate-process-absence'), false);
+});
+
+test('launched direct-review lease without canonical invocation fails closed instead of using a legacy process reader', async () => {
+  const fixture = await runFixture({ reviewSafeHaltOnce: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const state = await fixture.store.read();
+  const interrupted = structuredClone(state.runs[0]!);
+  delete interrupted.reportInvocation;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, version: state.version, runs: [interrupted] });
+
+  const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.equal(fixture.events.includes('candidate-process-absence'), false);
+});
+
 test('code review gets four report-only repairs per target revision', async () => {
   const fixture = await runFixture({ reviewMalformedCount: 4 });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -669,7 +699,7 @@ test('an exhausted malformed Closure report remains terminal on replay', async (
   assert.equal(fixture.events.filter((event) => event === 'agent').length, implementationCalls);
 });
 
-test('a legacy malformed Closure terminal resumes review without rerunning implementation', async () => {
+test('a legacy malformed Closure terminal is no longer a parallel recovery owner', async () => {
   let checkCalls = 0;
   const fixture = await runFixture({
     reviewMalformedCount: 5,
@@ -685,14 +715,17 @@ test('a legacy malformed Closure terminal resumes review without rerunning imple
   legacy.directReview!.review.reportRepairs = 1;
   delete legacy.directReview!.terminalCode;
   legacy.outcomeEvidenceId = `evidence:${legacy.runId}:direct-review-report-malformed`;
-  await fixture.store.compareAndSwap(terminal.generation, {
+  const migrated = await fixture.store.compareAndSwap(terminal.generation, {
     schema: terminal.schema, version: terminal.version, runs: [legacy],
   });
+  const reviewCalls = fixture.events.filter((event) => event === 'review:code-review').length;
   const implementationCalls = fixture.events.filter((event) => event === 'agent').length;
   fixture.options.reviewMalformedCount = 0;
 
-  const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(recovered.status, 'review-ready');
+  const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(replayed.status, 'internal-error');
+  assert.equal((await fixture.store.read()).generation, migrated.generation);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, reviewCalls);
   assert.equal(fixture.events.filter((event) => event === 'agent').length, implementationCalls);
 });
 
@@ -2034,6 +2067,7 @@ interface FixtureOptions {
   reviewMalformedOnce?: boolean;
   reviewMalformedCount?: number;
   reviewMalformedMode?: 'full' | 'closure';
+  reviewSafeHaltOnce?: boolean;
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
@@ -2245,14 +2279,30 @@ async function runFixture(options: FixtureOptions = {}) {
         const completed = {
           version: expected.version,
           triageRepairs: expected.triageRepairs,
-          triageTransportRetries: expected.triageTransportRetries,
-          ambiguityTransportRetries: expected.ambiguityTransportRetries,
           candidateReviews: awaiting ? 1 as const : expected.candidateReviews,
           phase: 'route-complete' as const,
           triage,
           review,
         };
-        assert.equal(await state.complete(expected, completed, receipt), true);
+        const triageInFlight = { ...expected, phase: 'triage-in-flight' as const };
+        assert.equal(await state.compareAndSwap(expected, triageInFlight), true);
+        const preparedTriage = reportInvocation(triage.attemptId, 'triage');
+        const launchedTriage = reportInvocation(triage.attemptId, 'triage', 'launched');
+        assert.equal(await state.invocation.compareAndSwap(undefined, preparedTriage), true);
+        assert.equal(await state.invocation.compareAndSwap(preparedTriage, launchedTriage), true);
+        if (awaiting) {
+          const candidateReady = { ...expected, phase: 'candidate-ready' as const, candidate: artifact, triage };
+          assert.equal(await state.settle(triageInFlight, candidateReady, triage.attemptId), true);
+          const reviewInFlight = { ...candidateReady, phase: 'review-in-flight' as const };
+          assert.equal(await state.compareAndSwap(candidateReady, reviewInFlight), true);
+          const preparedReview = reportInvocation(review!.attemptId, 'ambiguity-review');
+          const launchedReview = reportInvocation(review!.attemptId, 'ambiguity-review', 'launched');
+          assert.equal(await state.invocation.compareAndSwap(undefined, preparedReview), true);
+          assert.equal(await state.invocation.compareAndSwap(preparedReview, launchedReview), true);
+          assert.equal(await state.complete(reviewInFlight, completed, receipt, review!.attemptId), true);
+        } else {
+          assert.equal(await state.complete(triageInFlight, completed, receipt, triage.attemptId), true);
+        }
         if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
         if (options.dropRunningDuringRoute) labels = labels.filter((label) => label !== 'agent:running');
         if (options.competingClaimDuringRoute) {
@@ -2287,6 +2337,7 @@ async function runFixture(options: FixtureOptions = {}) {
       direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
       specRequired: (context, state, signal) => new SpecCoordinator({
         state,
+        createReviewerSessionId: () => 'reviewer-session',
         operation: {
           author: async ({ state: delivery, onPrepared, onLaunched }) => {
             events.push('spec-author');
@@ -2300,12 +2351,14 @@ async function runFixture(options: FixtureOptions = {}) {
               author: { attemptId, sessionId }, previousRevision: delivery.revisions.at(-1) ?? null,
             }) };
           },
-          review: async ({ state: delivery, mode, onPrepared, onLaunched }) => {
+          review: async ({ state: delivery, mode, reviewerSessionId, invocationState }) => {
             events.push(`spec-review:${mode}`);
             const attemptId = `review-${mode}`;
-            const sessionId = delivery.review.reviewer?.sessionId ?? 'review-session';
-            await onPrepared({ attemptId, sessionId });
-            await onLaunched({ attemptId, sessionId, pid: 702, processGroupId: 702 });
+            const sessionId = reviewerSessionId;
+            const preparedInvocation = reportInvocation(attemptId, 'spec-review');
+            const launchedInvocation = reportInvocation(attemptId, 'spec-review', 'launched');
+            assert.equal(await invocationState.compareAndSwap(undefined, preparedInvocation), true);
+            assert.equal(await invocationState.compareAndSwap(preparedInvocation, launchedInvocation), true);
             const target = delivery.revisions.at(-1)!;
             return { status: 'completed', reportSha256: 'd'.repeat(64), value: {
               version: 1 as const, targetRevision: target.revision, targetSha256: target.revisionSha256,
@@ -2425,14 +2478,18 @@ async function runFixture(options: FixtureOptions = {}) {
       run: async (input) => {
         reviewCalls += 1;
         events.push('review:code-review');
-        const invocation = {
-          attemptId: 'code-review-attempt-1', operation: input.operation, mode: input.mode,
-          reviewerSessionId: input.reviewerSessionId, targetRevision: input.targetRevision,
-          targetFingerprint: input.targetFingerprint, closureRequestSha256: input.closureRequestSha256,
-        };
-        await input.onPrepared(invocation);
-        await input.onLaunched({ ...invocation, pid: 4242, processGroupId: 4242 });
-        events.push('review:code-review-launched');
+        const existingInvocation = await input.invocationState.read();
+        if (!existingInvocation) {
+          const preparedInvocation = reportInvocation('code-review-attempt-1', 'code-review');
+          const launchedInvocation = reportInvocation('code-review-attempt-1', 'code-review', 'launched');
+          assert.equal(await input.invocationState.compareAndSwap(undefined, preparedInvocation), true);
+          assert.equal(await input.invocationState.compareAndSwap(preparedInvocation, launchedInvocation), true);
+          events.push('review:code-review-launched');
+        }
+        if (options.reviewSafeHaltOnce) {
+          options.reviewSafeHaltOnce = false;
+          return { kind: 'safe-halt', code: 'report-operation-process-active-or-uncertain' };
+        }
         if ((options.reviewMalformedOnce && reviewCalls === 1)
           || ((options.reviewMalformedCount ?? 0) > 0 && (!options.reviewMalformedMode || options.reviewMalformedMode === input.mode))) {
           if ((options.reviewMalformedCount ?? 0) > 0) options.reviewMalformedCount!--;
@@ -2443,7 +2500,7 @@ async function runFixture(options: FixtureOptions = {}) {
           };
         }
         return {
-          kind: 'completed', attemptId: invocation.attemptId, artifactSha256: '8'.repeat(64),
+          kind: 'completed', attemptId: 'code-review-attempt-1', artifactSha256: '8'.repeat(64),
           report: {
             version: 1, operation: input.operation, targetRevision: input.targetRevision,
             targetFingerprint: input.targetFingerprint, verdict: 'approved', mode: input.mode,
@@ -2699,6 +2756,26 @@ function effectCounts(events: string[]): Record<string, number> {
     counts[event] = (counts[event] ?? 0) + 1;
   }
   return counts;
+}
+
+function reportInvocation(
+  attemptId: string,
+  operation: 'triage' | 'ambiguity-review' | 'code-review' | 'spec-review',
+  phase: 'prepared' | 'launched' = 'prepared',
+) {
+  return {
+    version: 1 as const, operation, attemptId, generationHash: '1'.repeat(64), promptFactsSha256: 'a'.repeat(64),
+    reportPath: `/attempts/${attemptId}/report.json`, phase,
+    host: 'host-a', bootId: 'boot-a', preparedAt: '2026-07-16T12:00:00.000Z',
+    launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,
+    pid: phase === 'launched' ? 4242 : null,
+    processStartIdentity: phase === 'launched' ? 'process-start-4242' : null,
+    processGroupId: phase === 'launched' ? 4242 : null,
+    baseline: {
+      headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+      untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'worktree-1',
+    },
+  };
 }
 
 function assertSubsequence(actual: string[], expected: string[]): void {

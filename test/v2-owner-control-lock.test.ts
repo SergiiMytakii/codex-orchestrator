@@ -60,8 +60,53 @@ function input(
     now: () => '2026-07-17T00:00:00.000Z',
     createToken: () => `token-${pid}`,
     processAlive: (candidate: number) => alive.has(candidate),
+    processStartIdentity: `start-${pid}`,
+    inspectProcessIdentity: async (candidate: number) => alive.has(candidate)
+      ? { status: 'present' as const, processStartIdentity: `start-${candidate}` }
+      : { status: 'absent' as const },
     waitMs: overrides.waitMs ?? 100,
     pollMs: 1,
     afterObservedOwner: overrides.afterObservedOwner,
   };
 }
+
+test('dead-owner reclaim is PID-reuse resistant and live or unknown identity stays fail closed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-identity-'));
+  const alive = new Set([101]);
+  const first = await acquireOwnerControlLock(input(root, 101, alive));
+  void first;
+
+  await assert.rejects(acquireOwnerControlLock({ ...input(root, 202, new Set([101, 202]), { waitMs: 5 }),
+    inspectProcessIdentity: async (pid) => pid === 101
+      ? { status: 'present' as const, processStartIdentity: 'start-101' }
+      : { status: 'present' as const, processStartIdentity: 'start-202' },
+  }), /timed out/u);
+
+  const reused = await acquireOwnerControlLock({ ...input(root, 202, new Set([202])),
+    inspectProcessIdentity: async (pid) => pid === 101
+      ? { status: 'present' as const, processStartIdentity: 'different-start' }
+      : { status: 'present' as const, processStartIdentity: 'start-202' },
+  });
+  await reused.release();
+
+  const unknownRoot = await mkdtemp(join(tmpdir(), 'owner-control-unknown-'));
+  await acquireOwnerControlLock(input(unknownRoot, 301, new Set([301])));
+  await assert.rejects(acquireOwnerControlLock({ ...input(unknownRoot, 302, new Set([302]), { waitMs: 5 }),
+    inspectProcessIdentity: async () => ({ status: 'unknown' as const }),
+  }), OwnerControlLockBlockedError);
+  await assert.rejects(acquireOwnerControlLock({ ...input(unknownRoot, 303, new Set([303]), { waitMs: 5 }),
+    inspectProcessIdentity: async () => { throw new Error('inspection failed'); },
+  }), OwnerControlLockBlockedError);
+});
+
+test('foreign host or boot ownership stays fail closed even when the recorded PID is absent', async () => {
+  for (const identity of [{ host: 'host-b' }, { bootId: 'boot-b' }]) {
+    const root = await mkdtemp(join(tmpdir(), 'owner-control-foreign-'));
+    await acquireOwnerControlLock(input(root, 401, new Set([401])));
+    await assert.rejects(acquireOwnerControlLock({
+      ...input(root, 402, new Set([402]), { waitMs: 5 }),
+      ...identity,
+      inspectProcessIdentity: async () => ({ status: 'absent' as const }),
+    }), OwnerControlLockBlockedError);
+  }
+});

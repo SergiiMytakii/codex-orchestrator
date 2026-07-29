@@ -120,7 +120,9 @@ After claim and worktree creation, the Runner invokes `triage` against the froze
 
 The route report records inspected evidence, explicit assumptions, and route-specific details. The Runner hashes the report and persists a route receipt bound to the workflow generation.
 
-A malformed triage report has one report repair budget. A clean transport failure has one separate transport retry. These retries do not become implementation cycles.
+A malformed triage report consumes the route-owned report-repair budget. Infrastructure failures before a recoverable report do not consume that semantic budget and are deferred to a later Runner tick; routing does not own a transport retry counter.
+
+`triage`, `ambiguity-review`, `code-review`, and `spec-review` share one canonical report-only invocation mechanism. It durably binds the exact attempt, immutable workflow generation, an opaque hash of the phase-owned prompt facts, report path, worktree baseline, and host/boot/PID/process-start/process-group fence. Recovery observes the exact attempt-owned report before considering relaunch, distinguishes a positively absent report from an uncertain read, and adopts output only after process and process-group absence are positive. Prompt-fact drift, uncertain report reads, or uncertain process identity retain the fence and fail closed. Attempt-owned read views are removed before adoption or abandonment; cleanup failure is infrastructure deferral and does not consume a phase semantic budget.
 
 An `awaiting-user` proposal is privileged because it pauses autonomous work. It must describe at least two materially different observable product outcomes and prove that repository authority does not select between them. A separate `ambiguity-review` worker receives the candidate and either approves or rejects it. Only one candidate review is allowed. A rejected candidate can use the single triage repair path; an approved candidate becomes the durable route receipt.
 
@@ -152,7 +154,7 @@ Complexity, cross-cutting behavior, or insufficient executable detail makes dire
 4. The same reviewer session performs closure review against the affected defects.
 5. Only an approved revision with resolved blockers is frozen.
 
-Prepared and launched invocation records are persisted before and after process launch. Recovery proves process-group absence before replacing an uncertain invocation. Malformed reports and transport retries are bounded; exhaustion becomes a typed blocker rather than an unbounded author/reviewer loop.
+`spec-author` retains its own prepared/launched lifecycle and bounded author transport recovery. `spec-review` uses the canonical report-only mechanism above. The specification state owns reviewer independence, target/Closure correlation, the durable reviewer session, malformed-report repair, defect ledger, repair-cycle budget, and terminal mapping. The reviewer session is persisted atomically with canonical prepare, so restart recovers the same session and a valid recovered report does not spend semantic repair.
 
 The terminal result for this route is `spec-frozen` with an immutable `FrozenSpecReceipt`. The current runtime does not silently continue from a newly authored specification into implementation. That boundary keeps specification approval separately auditable.
 
@@ -200,7 +202,9 @@ Review maintains an append-preserving defect ledger. If review returns `needs-wo
 
 Coverage text is descriptive, not an identity contract: Closure may paraphrase or omit it. Stable defect and repair-finding IDs, target revision, target fingerprint, and Closure hash carry correlation. Each target revision receives up to four report-only format repairs. Starting a new Closure revision resets that local budget. An eligible legacy terminal malformed-review report can resume only when its evidence ID proves that cause, its per-revision budget remains, and issue authorization, trusted claim, worktree identity, head, changed files, and target fingerprint still match. Current exhausted revisions remain terminal and replay without new effects.
 
-Review invocation intent, process IDs, report hashes, transport retries, report repairs, target revisions, and target fingerprints are durable. A crash after launch cannot cause a replacement review until process absence is proven. Review target drift after approval is a safety failure.
+Canonical review invocation identity, process fencing, prompt correlation, and attempt-owned report recovery are durable. Direct-review state separately owns report repairs, target revisions, target fingerprints, reviewer independence, defect meaning, and terminal mapping; it has no review transport retry counter. A crash after launch cannot cause a replacement review until process and process-group absence are proven and its read view is settled. Review target or authoritative prompt-fact drift is a safety failure.
+
+The run-store performs one bounded canonicalization for active states written by the replaced route/direct-review/spec-review lifecycle owners. Safely convertible ready/completed states are rewritten once with the removed fields absent and exact source bytes backed up. An old launched or otherwise ambiguous report-only owner that lacks PID-reuse-resistant process identity is converted to an issue-local non-resumable safety outcome; it is never silently deleted or relaunched. Canonical validators remain exact and do not retain a legacy reader or dual-write path.
 
 ## 8. Issue-scoped checks and `CheckedChange`
 

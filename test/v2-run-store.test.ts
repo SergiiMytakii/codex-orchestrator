@@ -6,6 +6,7 @@ import { test } from 'node:test';
 
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
 import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
+import { acceptSpecRevision, createInitialSpecDelivery, createSpecRevision, launchSpecInvocation, prepareSpecInvocation } from '../src/v2/spec-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
   createWaitingQuestion,
@@ -100,6 +101,62 @@ test('V2 to V3 cutover preserves exact raw backup and rollback closes permanentl
     assertNoActiveProcesses: async () => undefined,
     cleanupCandidateState: async () => undefined,
   }), /forbidden/u);
+});
+
+test('one-shot report lifecycle migration rewrites safe route, direct-review, and spec-review states without legacy fields', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const route = legacySafeRouteRecord(uuid(21), 121);
+  const direct = legacySafeDirectRecord(uuid(22), 122);
+  const spec = legacySafeSpecRecord(uuid(23), 123);
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [route, direct, spec],
+  }, null, 2)}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 8);
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), legacyBytes);
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', 'previousAttemptId', 'invocation']) {
+    assert.equal(persisted.includes(`"${removed}"`), false, removed);
+  }
+  assert.equal('transportRetries' in (migrated.runs[1]!.directReview!.review as any), false);
+  assert.equal('transportRetries' in (migrated.runs[2]!.specDelivery!.budgets.review as any), false);
+  assert.equal(migrated.runs[0]?.routeExecution?.phase, 'route-complete');
+  assert.equal(migrated.runs[1]?.directReview?.stage, 'review-full');
+  assert.equal(migrated.runs[2]?.specDelivery?.stage, 'review-full');
+});
+
+test('one-shot report lifecycle migration fail-closes launched legacy owners without relaunch authority', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const route = legacyLaunchedRouteRecord(uuid(31), 131);
+  const direct = legacyLaunchedDirectRecord(uuid(32), 132);
+  const spec = legacyLaunchedSpecRecord(uuid(33), 133);
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 12);
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), legacyBytes);
+  for (const run of migrated.runs) {
+    assert.equal(run.lifecycle, 'blocked');
+    assert.deepEqual(run.terminalOutcome && {
+      status: run.terminalOutcome.status,
+      kind: run.terminalOutcome.status === 'blocked' ? run.terminalOutcome.kind : undefined,
+      resumable: run.terminalOutcome.status === 'blocked' ? run.terminalOutcome.resumable : undefined,
+    }, { status: 'blocked', kind: 'safety', resumable: false });
+    assert.match(run.outcomeEvidenceId ?? '', /report-lifecycle-migration/u);
+    assert.equal(run.process, undefined);
+    assert.equal(run.reportInvocation, undefined);
+  }
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-review"', '"invocation"']) {
+    assert.equal(persisted.includes(removed), false, removed);
+  }
 });
 
 test('candidate rollback holds the state lock and cannot overwrite an interleaved CAS', async () => {
@@ -276,12 +333,10 @@ test('run store persists exact triaging and routed state', async () => {
   const budgets = {
     version: 1 as const,
     triageRepairs: 0 as const,
-    triageTransportRetries: 0 as const,
-    ambiguityTransportRetries: 0 as const,
     candidateReviews: 0 as const,
   };
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const, previousAttemptId: null } };
+  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const } };
   const routed = { ...record(), lifecycle: 'routed' as const, routeExecution: { ...budgets, phase: 'route-complete' as const, triage: triageRef, review: null }, routeReceipt: receipt };
   await writer.compareAndSwap(0, body([triaging]));
   const second = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -358,8 +413,8 @@ test('resumed waiting history is retained through ordinary non-waiting delivery 
       delete run.routeExecution;
       delete run.routeReceipt;
       run.routeExecution = {
-        version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
-        candidateReviews: 0, phase: 'triage-ready', previousAttemptId: null,
+        version: 1, triageRepairs: 0,
+        candidateReviews: 0, phase: 'triage-ready',
       };
     }
     const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -443,6 +498,30 @@ test('file lock blocks stale, foreign, malformed, and live owners without reclai
   }
 });
 
+test('atomic state lock reclaims only a positively dead fenced owner under exclusive repository ownership', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const lock = { version: 2, token: 'dead', host: 'host-a', bootId: 'boot-a', pid: 999,
+    processStartIdentity: 'old-start', acquiredAt: timestamp() };
+  await writeFile(`${path}.lock`, `${JSON.stringify(lock)}\n`);
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions({
+    exclusiveRepositoryOwnership: true,
+    inspectProcessIdentity: async () => 'absent',
+  }));
+  assert.equal((await writer.compareAndSwap(0, body([record()]))).generation, 1);
+
+  for (const inspection of ['unknown', { processStartIdentity: 'old-start' }] as const) {
+    const blockedPath = join(await temporaryRoot(), 'run-state.json');
+    await writeFile(`${blockedPath}.lock`, `${JSON.stringify(lock)}\n`);
+    const blocked = new FileRunRecordWriter(blockedPath, deterministicAtomicOptions({
+      exclusiveRepositoryOwnership: true,
+      inspectProcessIdentity: async () => inspection,
+      lockWaitMs: 5,
+    }));
+    await assert.rejects(blocked.compareAndSwap(0, body([record()])), /lock/u);
+  }
+});
+
 test('lock release is token-safe', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
@@ -500,6 +579,99 @@ test('state publication rejects symlinked parent directories before writing outs
 
 function body(runs: RunRecordV1[]): RunStateBodyV1 {
   return { schema: 'codex-orchestrator.agent-auto-state', version: 2, runs };
+}
+
+function legacySafeRouteRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(directRoutedRecord(), runId, issueNumber);
+  run.routeExecution = {
+    ...run.routeExecution,
+    triageTransportRetries: 1,
+    ambiguityTransportRetries: 0,
+  };
+  return run;
+}
+
+function legacySafeDirectRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(directRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'implementing';
+  run.directReview = createInitialDirectReview({
+    targetFingerprint: '7'.repeat(64), codeReviewerSessionId: 'review-session-1',
+  });
+  run.directReview.review.transportRetries = 1;
+  return run;
+}
+
+function legacySafeSpecRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(specRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'spec-authoring';
+  const initial = createInitialSpecDelivery({
+    issueNumber, runId, workflowGenerationSha256: run.workflowGeneration.generationHash,
+  });
+  const launched = launchSpecInvocation(prepareSpecInvocation(initial, {
+    mode: 'author', attemptId: 'author-attempt-1', sessionId: 'author-session-1',
+  }), { attemptId: 'author-attempt-1', pid: 41, processGroupId: 41 });
+  run.specDelivery = acceptSpecRevision(launched, createSpecRevision({
+    revision: 1, path: '/state/spec.md', content: '# Spec\n',
+    evidence: [{ path: `issue:${issueNumber}`, sha256: 'c'.repeat(64), description: 'Issue authority' }],
+    author: { attemptId: 'author-attempt-1', sessionId: 'author-session-1' }, previousRevision: null,
+  }));
+  run.specDelivery.budgets.review.transportRetries = 1;
+  delete run.specDelivery.review.reviewerSessionId;
+  return run;
+}
+
+function legacyLaunchedRouteRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(record(), runId, issueNumber);
+  run.lifecycle = 'triaging';
+  run.routeExecution = {
+    version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+    candidateReviews: 0, phase: 'triage-in-flight', attemptId: 'triage-attempt-1', startedAt: timestamp(),
+  };
+  run.process = legacyReportProcess('route');
+  return run;
+}
+
+function legacyLaunchedDirectRecord(runId: string, issueNumber: number): any {
+  const run = legacySafeDirectRecord(runId, issueNumber);
+  run.directReview.invocation = {
+    attemptId: 'review-attempt-1', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
+    targetRevision: 1, targetFingerprint: run.directReview.targetFingerprint, closureRequestSha256: null,
+    status: 'launched', pid: 51, processGroupId: 51,
+  };
+  run.process = legacyReportProcess('code-review');
+  return run;
+}
+
+function legacyLaunchedSpecRecord(runId: string, issueNumber: number): any {
+  const run = legacySafeSpecRecord(runId, issueNumber);
+  const target = run.specDelivery.revisions.at(-1);
+  run.specDelivery.invocation = {
+    purpose: 'review', mode: 'full', attemptId: 'spec-review-attempt-1', sessionId: 'spec-review-session-1',
+    targetRevision: target.revision, targetSha256: target.revisionSha256, closureRequestSha256: null,
+    status: 'launched', pid: 61, processGroupId: 61, reportPath: '/attempts/spec-review/report.json', revisionPath: null,
+  };
+  run.process = legacyReportProcess('spec-review');
+  return run;
+}
+
+function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-review') {
+  return {
+    pid: 51, processGroupId: 51, startedAt: timestamp(), purpose,
+    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'spec-review' ? 'spec-authoring' : 'implementing',
+    resumeReviewStage: purpose === 'code-review' ? 'review-full' : null,
+    baseline: {
+      headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+      untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'legacy-worktree',
+    },
+  };
+}
+
+function reidentify(run: RunRecordV1, runId: string, issueNumber: number): any {
+  return {
+    ...structuredClone(run), runId, issueNumber, branchName: `codex/issue-${issueNumber}`,
+    worktreePath: `/tmp/worktrees/${issueNumber}`,
+    issueSnapshot: { ...run.issueSnapshot, number: issueNumber },
+  };
 }
 
 function reviewReadyRecord(): RunRecordV1 {
@@ -574,7 +746,7 @@ function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): R
     ...record(),
     lifecycle: 'waiting-human',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 1, phase: 'route-complete', triage: routeReceipt.triage, review: routeReceipt.review,
     },
     routeReceipt,
@@ -640,7 +812,7 @@ function directRoutedRecord(): RunRecordV1 {
     ...base,
     lifecycle: 'routed',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 0, phase: 'route-complete', triage, review: null,
     },
     routeReceipt,
@@ -672,7 +844,7 @@ function specRoutedRecord(): RunRecordV1 {
     ...base,
     lifecycle: 'routed',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 0, phase: 'route-complete', triage, review: null,
     },
     routeReceipt,
@@ -723,10 +895,18 @@ function deterministicAtomicOptions(overrides: {
   afterFault?: () => Promise<void>;
   processAlive?: (pid: number) => boolean;
   lockWaitMs?: number;
+  exclusiveRepositoryOwnership?: boolean;
+  inspectProcessIdentity?: (pid: number) => Promise<'absent' | 'unknown' | { processStartIdentity: string }>;
 } = {}) {
   return {
     host: 'host-a',
+    bootId: 'boot-a',
     pid: 123,
+    processStartIdentity: 'start-123',
+    inspectProcessIdentity: overrides.inspectProcessIdentity ?? (async (pid: number) => overrides.processAlive?.(pid)
+      ? { processStartIdentity: `start-${pid}` }
+      : 'unknown' as const),
+    exclusiveRepositoryOwnership: overrides.exclusiveRepositoryOwnership ?? false,
     now: () => timestamp(),
     createToken: () => overrides.token ?? 'token-a',
     isProcessAlive: overrides.processAlive ?? (() => false),

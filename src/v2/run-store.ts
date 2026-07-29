@@ -1,5 +1,6 @@
 import type { ProofReceipt } from './proof-report.js';
-import { validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
+import { validateDurableReportInvocation, type DurableReportInvocationV1 } from './contained-report-operation.js';
+import { projectTerminalDirectReview, validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
 import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
   validateRouteExecution,
@@ -136,6 +137,7 @@ export interface RunRecordV1 {
   waitingHuman?: WaitingHumanExecutionV1;
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
+  reportInvocation?: DurableReportInvocationV1;
   reviewFeedback?: ReviewFeedbackExecutionV1;
   changeBindingVersion?: 2;
   candidateBinding?: CandidateBindingV2;
@@ -161,7 +163,7 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
-    purpose: 'route' | 'implementation' | 'code-review' | 'proof' | 'spec-author' | 'spec-review';
+    purpose: 'implementation' | 'proof' | 'spec-author';
     resumeLifecycle: Lifecycle;
     resumeReviewStage: DirectReviewStage | null;
   };
@@ -215,17 +217,20 @@ export class FileRunRecordWriter implements RunRecordWriter {
   private readonly file: AtomicStateFile<RunStateFileV1>;
   private readonly backupPath: string;
   private readonly migrationMetadataPath: string;
+  private readonly reportLifecycleBackupPath: string;
   private readonly now: () => string;
 
   constructor(path: string, options: AtomicStateFileOptions = {}) {
     this.file = new AtomicStateFile(path, validateRunStateFile, options);
     this.backupPath = `${path}.pre-candidate-v3`;
     this.migrationMetadataPath = `${this.backupPath}.metadata.json`;
+    this.reportLifecycleBackupPath = `${path}.pre-report-lifecycle-v1`;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
   async read(): Promise<RunStateFileV1> {
-    return await this.file.read() ?? emptyRunState();
+    try { return await this.file.read() ?? emptyRunState(); }
+    catch (error) { return this.migrateLegacyReportLifecycle(error); }
   }
 
   async compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1> {
@@ -293,6 +298,24 @@ export class FileRunRecordWriter implements RunRecordWriter {
       createdAt: now,
       updatedAt: now,
     })}\n`);
+  }
+
+  private async migrateLegacyReportLifecycle(originalError: unknown): Promise<RunStateFileV1> {
+    return this.file.withExclusiveUnparsedRaw(async (priorBytes) => {
+      if (!priorBytes) return { result: emptyRunState() };
+      let raw: unknown;
+      try { raw = JSON.parse(priorBytes.toString('utf8')); }
+      catch { throw originalError; }
+      try { return { result: validateRunStateFile(raw) }; }
+      catch {
+        const migrated = canonicalizeLegacyReportLifecycle(raw, this.reportLifecycleBackupPath);
+        if (!migrated) throw originalError;
+        const existingBackup = await readOptionalFile(this.reportLifecycleBackupPath);
+        if (existingBackup && !existingBackup.equals(priorBytes)) throw new Error('report lifecycle migration backup conflicts with current source bytes');
+        if (!existingBackup) await writeDurableAtomicFile(this.reportLifecycleBackupPath, priorBytes);
+        return { result: migrated, replacementBytes: Buffer.from(`${canonicalJson(migrated)}\n`) };
+      }
+    });
   }
 }
 
@@ -373,6 +396,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'changeBindingVersion',
     'candidateBinding',
     'executionLease',
+    'reportInvocation',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -409,6 +433,15 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'baselineChecks')) validateChecks(value.baselineChecks, `${field}.baselineChecks`, false);
   validateChecks(value.checks, `${field}.checks`);
   if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
+  let reportInvocation: DurableReportInvocationV1 | undefined;
+  if (hasOwn(value, 'reportInvocation')) {
+    const invocation = validateDurableReportInvocation(value.reportInvocation);
+    reportInvocation = invocation;
+    const expectedLifecycle = invocation.operation === 'triage' || invocation.operation === 'ambiguity-review'
+      ? 'triaging'
+      : invocation.operation === 'code-review' ? 'implementing' : 'spec-authoring';
+    if (value.lifecycle !== expectedLifecycle) throw new Error(`${field}.reportInvocation lifecycle is invalid`);
+  }
   if (hasOwn(value, 'checkedChangeSha256')) assertSha256(value.checkedChangeSha256, `${field}.checkedChangeSha256`);
   if (hasOwn(value, 'proofId')) assertNonEmptyString(value.proofId, `${field}.proofId`);
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
@@ -432,9 +465,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     const rawProcess = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
       ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
       : undefined;
-    const process = rawProcess && !['spec-author', 'spec-review'].includes(rawProcess.purpose)
+    const process = rawProcess && rawProcess.purpose !== 'spec-author'
       ? {
-        purpose: rawProcess.purpose as 'route' | 'implementation' | 'code-review' | 'proof',
+        purpose: rawProcess.purpose as 'implementation' | 'proof',
         resumeLifecycle: rawProcess.resumeLifecycle,
         resumeReviewStage: rawProcess.resumeReviewStage,
       }
@@ -510,12 +543,43 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} resumable transport failure cannot retain intent`);
   }
   if (value.lifecycle === 'waiting-human' && !hasOwn(value, 'waitingHuman')) throw new Error(`${field} waiting-human lifecycle requires waitingHuman execution`);
+  if (reportInvocation) validateReportInvocationBinding(value as unknown as RunRecordV1, reportInvocation, routeGenerationHash, field);
   validateRouteStateInvariant({
     lifecycle: value.lifecycle,
     routeExecution: value.routeExecution,
     routeReceipt: value.routeReceipt,
     generationHash: routeGenerationHash,
   });
+}
+
+function validateReportInvocationBinding(
+  record: RunRecordV1,
+  invocation: DurableReportInvocationV1,
+  generationHash: string,
+  field: string,
+): void {
+  if (invocation.generationHash !== generationHash) throw new Error(`${field}.reportInvocation generation is invalid`);
+  if (invocation.operation === 'triage') {
+    if (!record.routeExecution || !['triage-in-flight', 'repair-in-flight'].includes(record.routeExecution.phase)) {
+      throw new Error(`${field}.triage reportInvocation phase is invalid`);
+    }
+    return;
+  }
+  if (invocation.operation === 'ambiguity-review') {
+    if (record.routeExecution?.phase !== 'review-in-flight') throw new Error(`${field}.ambiguity reportInvocation phase is invalid`);
+    return;
+  }
+  if (invocation.operation === 'code-review') {
+    if (record.directReview?.status !== 'active'
+      || !['review-full', 'review-closure'].includes(record.directReview.stage ?? '')
+      || record.executionLease?.operation !== 'direct-review') {
+      throw new Error(`${field}.code-review reportInvocation binding is invalid`);
+    }
+    return;
+  }
+  if (!record.specDelivery || !['review-full', 'review-closure'].includes(record.specDelivery.stage)) {
+    throw new Error(`${field}.spec-review reportInvocation binding is invalid`);
+  }
 }
 
 function directTerminalOutcome(outcome: RunTerminalOutcome): DirectReviewV1['terminalOutcome'] | undefined {
@@ -553,7 +617,7 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (!['route', 'implementation', 'code-review', 'proof', 'spec-author', 'spec-review'].includes(value.purpose as string)) {
+  if (!['implementation', 'proof', 'spec-author'].includes(value.purpose as string)) {
     throw new Error(`${field}.purpose is invalid`);
   }
   if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
@@ -806,6 +870,59 @@ function validateStringArray(value: unknown, field: string): void {
 
 function emptyRunState(): RunStateFileV1 {
   return { schema: 'codex-orchestrator.agent-auto-state', version: 3, generation: 0, runs: [] };
+}
+
+function canonicalizeLegacyReportLifecycle(value: unknown, backupPath: string): RunStateFileV1 | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.schema !== 'codex-orchestrator.agent-auto-state' || (raw.version !== 2 && raw.version !== 3)
+    || !Number.isSafeInteger(raw.generation) || (raw.generation as number) <= 0 || !Array.isArray(raw.runs)) return undefined;
+  const runs = structuredClone(raw.runs) as Array<Record<string, any>>;
+  const changed = runs.map((run) => canonicalizeLegacyReportRun(run, backupPath)).some(Boolean);
+  if (!changed) return undefined;
+  return validateRunStateFile({ schema: raw.schema, version: raw.version, generation: (raw.generation as number) + 1, runs });
+}
+
+function canonicalizeLegacyReportRun(run: Record<string, any>, backupPath: string): boolean {
+  let changed = false, unsafe = false, routeInFlight = false;
+  const route = run.routeExecution as Record<string, any> | undefined;
+  if (route) {
+    const triageTransport = hasOwn(route, 'triageTransportRetries'), ambiguityTransport = hasOwn(route, 'ambiguityTransportRetries');
+    if (triageTransport !== ambiguityTransport) throw new Error('legacy route transport budgets are incomplete');
+    if (triageTransport) {
+      legacyBits([route.triageTransportRetries, route.ambiguityTransportRetries], 'route');
+      delete route.triageTransportRetries; delete route.ambiguityTransportRetries; changed = true;
+    }
+    if (hasOwn(route, 'previousAttemptId')) { delete route.previousAttemptId; changed = true; }
+    routeInFlight = ['triage-in-flight', 'review-in-flight', 'repair-in-flight'].includes(route.phase);
+    if (routeInFlight) { unsafe = true; delete route.attemptId; delete route.startedAt; }
+  }
+  const direct = run.directReview as Record<string, any> | undefined;
+  if (direct?.review && hasOwn(direct.review, 'transportRetries')) {
+    legacyBits([direct.review.transportRetries], 'direct review'); delete direct.review.transportRetries; changed = true; }
+  if (direct && hasOwn(direct, 'invocation')) { delete direct.invocation; unsafe = changed = true; }
+  const spec = run.specDelivery as Record<string, any> | undefined;
+  if (spec?.budgets?.review && hasOwn(spec.budgets.review, 'transportRetries')) {
+    legacyBits([spec.budgets.review.transportRetries], 'spec review'); delete spec.budgets.review.transportRetries; changed = true; }
+  if (spec?.review && !hasOwn(spec.review, 'reviewerSessionId')) {
+    spec.review.reviewerSessionId = spec.review.reviewer?.sessionId ?? (spec.invocation?.purpose === 'review' ? spec.invocation.sessionId : null); changed = true;
+  }
+  if (spec?.invocation?.purpose === 'review') { delete spec.invocation; unsafe = changed = true; }
+  if (run.reportInvocation && !hasOwn(run.reportInvocation, 'promptFactsSha256')) { delete run.reportInvocation; unsafe = changed = true; }
+  if (run.process && ['route', 'code-review', 'spec-review'].includes(run.process.purpose)) { delete run.process; unsafe = changed = true; }
+  if (!unsafe) return changed;
+  if (routeInFlight) delete run.routeExecution;
+  delete run.reportInvocation; delete run.process; delete run.intent;
+  if (direct) run.directReview = projectTerminalDirectReview(direct as unknown as DirectReviewV1,
+    { status: 'blocked', kind: 'safety' }, 'report-lifecycle-migration-identity-unavailable');
+  run.lifecycle = 'blocked';
+  run.outcomeEvidenceId = `report-lifecycle-migration:${String(run.runId)}`;
+  run.terminalOutcome = { status: 'blocked', kind: 'safety', resumable: false, evidencePath: backupPath };
+  return true;
+}
+
+function legacyBits(values: unknown[], owner: string): void {
+  if (values.some((value) => value !== 0 && value !== 1)) throw new Error(`legacy ${owner} transport budget is invalid`);
 }
 
 interface CandidateMigrationMetadataV1 {

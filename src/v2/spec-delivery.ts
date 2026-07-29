@@ -43,8 +43,8 @@ export interface SpecReviewReportV1 {
   coverageInvalidated: boolean;
 }
 export interface SpecInvocationV1 {
-  purpose: 'author' | 'review';
-  mode: 'author' | 'repair' | 'full' | 'closure';
+  purpose: 'author';
+  mode: 'author' | 'repair';
   attemptId: string;
   sessionId: string;
   targetRevision: number;
@@ -79,6 +79,7 @@ export interface SpecDeliveryV1 {
   authorSessionId: string | null;
   review: {
     reviewer: SpecActorV1 | null;
+    reviewerSessionId: string | null;
     mode: 'full' | 'closure' | null;
     coverage: string[];
     defects: CodeReviewDefectV1[];
@@ -90,7 +91,7 @@ export interface SpecDeliveryV1 {
   };
   budgets: {
     author: { reportRepairs: 0 | 1; transportRetries: 0 | 1 };
-    review: { reportRepairs: 0 | 1; transportRetries: 0 | 1 };
+    review: { reportRepairs: 0 | 1 };
     repairCycles: 0 | 1;
   };
   invocation?: SpecInvocationV1;
@@ -103,8 +104,8 @@ export function createInitialSpecDelivery(input: {
   positive(input.issueNumber, 'issue number'); text(input.runId, 'run ID'); hash(input.workflowGenerationSha256, 'workflow generation hash');
   return {
     version: 1, ...input, stage: 'authoring', revisions: [], authorSessionId: null,
-    review: { reviewer: null, mode: null, coverage: [], defects: [], affectedDefectIds: [], affectedContracts: [], closureRequestSha256: null, acceptedRisks: [], acceptedReportSha256: null },
-    budgets: { author: { reportRepairs: 0, transportRetries: 0 }, review: { reportRepairs: 0, transportRetries: 0 }, repairCycles: 0 },
+    review: { reviewer: null, reviewerSessionId: null, mode: null, coverage: [], defects: [], affectedDefectIds: [], affectedContracts: [], closureRequestSha256: null, acceptedRisks: [], acceptedReportSha256: null },
+    budgets: { author: { reportRepairs: 0, transportRetries: 0 }, review: { reportRepairs: 0 }, repairCycles: 0 },
   };
 }
 
@@ -141,23 +142,20 @@ export function validateSpecRevision(value: unknown, previous: SpecRevisionV1 | 
 }
 
 export function prepareSpecInvocation(state: SpecDeliveryV1, input: {
-  purpose: 'author' | 'review'; mode: 'author' | 'repair' | 'full' | 'closure'; attemptId: string; sessionId: string;
+  mode: 'author' | 'repair'; attemptId: string; sessionId: string;
   reportPath?: string; revisionPath?: string;
 }): SpecDeliveryV1 {
   validateSpecDelivery(state);
   if (state.invocation) throw new Error('spec invocation already exists');
   const expected = stageInvocation(state.stage);
-  if (input.purpose !== expected.purpose || input.mode !== expected.mode) throw new Error('spec invocation does not match stage');
+  if (input.mode !== expected.mode) throw new Error('spec invocation does not match stage');
   actor({ attemptId: input.attemptId, sessionId: input.sessionId }, 'spec invocation actor');
-  if (input.purpose === 'review') {
-    if (input.sessionId === state.authorSessionId || state.revisions.some((revision) => revision.author.attemptId === input.attemptId)) throw new Error('spec reviewer is not independent');
-    if (state.review.reviewer && state.review.reviewer.sessionId !== input.sessionId) throw new Error('Closure reviewer identity changed');
-  } else if (state.authorSessionId && state.authorSessionId !== input.sessionId) throw new Error('spec author session changed');
+  if (state.authorSessionId && state.authorSessionId !== input.sessionId) throw new Error('spec author session changed');
   const target = state.revisions.at(-1);
   const { reportPath = null, revisionPath = null, ...actorInput } = input;
   const invocation: SpecInvocationV1 = {
-    ...actorInput, targetRevision: target?.revision ?? 1, targetSha256: target?.revisionSha256 ?? null,
-    closureRequestSha256: input.mode === 'closure' ? state.review.closureRequestSha256 : null,
+    purpose: 'author', ...actorInput, targetRevision: target?.revision ?? 1, targetSha256: target?.revisionSha256 ?? null,
+    closureRequestSha256: null,
     status: 'prepared', pid: null, processGroupId: null, reportPath, revisionPath,
   };
   return { ...structuredClone(state), invocation };
@@ -190,15 +188,17 @@ export function acceptSpecRevision(state: SpecDeliveryV1, revision: SpecRevision
 
 export function acceptSpecReview(state: SpecDeliveryV1, report: SpecReviewReportV1, reportSha256: string): SpecDeliveryV1 {
   hash(reportSha256, 'spec review report hash');
-  if (!state.invocation || state.invocation.purpose !== 'review' || state.invocation.status !== 'launched') throw new Error('spec review invocation is not launched');
   const target = state.revisions.at(-1)!;
   validateReviewReport(report);
   validateCodeReviewDefects(report.defects, report.targetRevision);
   if (report.acceptedRisks.length !== 0) throw new Error('reviewer cannot authorize accepted risks');
   if (report.targetRevision !== target.revision || report.targetSha256 !== target.revisionSha256
-    || report.mode !== state.invocation.mode || report.reviewer.attemptId !== state.invocation.attemptId
-    || report.reviewer.sessionId !== state.invocation.sessionId
-    || report.closureRequestSha256 !== state.invocation.closureRequestSha256) throw new Error('spec review correlation mismatch');
+    || report.mode !== (state.stage === 'review-full' ? 'full' : 'closure')
+    || report.reviewer.sessionId === state.authorSessionId
+    || state.revisions.some((revision) => revision.author.attemptId === report.reviewer.attemptId)
+    || (state.review.reviewerSessionId !== null && report.reviewer.sessionId !== state.review.reviewerSessionId)
+    || (state.review.reviewer !== null && report.reviewer.sessionId !== state.review.reviewer.sessionId)
+    || report.closureRequestSha256 !== (state.stage === 'review-closure' ? state.review.closureRequestSha256 : null)) throw new Error('spec review correlation mismatch');
   for (const required of MANDATORY_COVERAGE) if (!report.coverage.includes(required)) throw new Error('spec review omitted mandatory coverage');
   if (report.mode === 'closure' && report.coverageInvalidated) {
     const next = structuredClone(state);
@@ -223,7 +223,7 @@ export function acceptSpecReview(state: SpecDeliveryV1, report: SpecReviewReport
       : report.verdict === 'needs-work' && state.budgets.repairCycles === 0 ? 'author-repair'
       : report.verdict === 'needs-work' ? 'exhausted' : 'rejected',
     review: {
-      reviewer: structuredClone(report.reviewer), mode: report.mode, coverage: sorted(report.coverage),
+      reviewer: structuredClone(report.reviewer), reviewerSessionId: report.reviewer.sessionId, mode: report.mode, coverage: sorted(report.coverage),
       defects: defects.sort((a,b) => a.id.localeCompare(b.id)),
       affectedDefectIds: report.verdict === 'needs-work' ? sorted(report.defects.filter((defect) => ['open','reopened'].includes(defect.status)).map((defect) => defect.id)) : [],
       affectedContracts: report.verdict === 'needs-work' ? sorted(report.affectedContracts) : [],
@@ -235,6 +235,17 @@ export function acceptSpecReview(state: SpecDeliveryV1, report: SpecReviewReport
     },
   };
   delete next.invocation;
+  return validateSpecDelivery(next);
+}
+
+export function reserveSpecReviewerSession(state: SpecDeliveryV1, reviewerSessionId: string): SpecDeliveryV1 {
+  validateSpecDelivery(state);
+  text(reviewerSessionId, 'spec reviewer session ID');
+  if (state.stage !== 'review-full' && state.stage !== 'review-closure') throw new Error('spec stage does not accept a reviewer session');
+  if (reviewerSessionId === state.authorSessionId) throw new Error('spec reviewer is not independent');
+  if (state.review.reviewerSessionId !== null && state.review.reviewerSessionId !== reviewerSessionId) throw new Error('spec reviewer session changed');
+  const next = structuredClone(state);
+  next.review.reviewerSessionId = reviewerSessionId;
   return validateSpecDelivery(next);
 }
 
@@ -254,7 +265,8 @@ export function consumeSpecReportRepair(state: SpecDeliveryV1, owner: 'author' |
 }
 
 export function recoverMalformedSpecReport(state: SpecDeliveryV1, owner: 'author' | 'review'): SpecDeliveryV1 {
-  if (!state.invocation || state.invocation.purpose !== owner) throw new Error('malformed spec report owner mismatch');
+  if (owner === 'author' && (!state.invocation || state.invocation.purpose !== owner)) throw new Error('malformed spec report owner mismatch');
+  if (owner === 'review' && state.invocation) throw new Error('review report mechanics must use the canonical invocation');
   const next = consumeSpecReportRepair(state, owner);
   delete next.invocation;
   return validateSpecDelivery(next);
@@ -263,10 +275,9 @@ export function recoverMalformedSpecReport(state: SpecDeliveryV1, owner: 'author
 export function recoverSpecInvocation(state: SpecDeliveryV1, input: { attemptId: string; processGroupAbsent: boolean }): SpecDeliveryV1 {
   if (!state.invocation || state.invocation.attemptId !== input.attemptId) throw new Error('spec recovery invocation mismatch');
   if (!input.processGroupAbsent) throw new Error('spec process is still active');
-  const owner = state.invocation.purpose === 'author' ? 'author' : 'review';
-  if (state.budgets[owner].transportRetries !== 0) throw new Error(`${owner} transport retry budget exhausted`);
+  if (state.budgets.author.transportRetries !== 0) throw new Error('author transport retry budget exhausted');
   const next = structuredClone(state);
-  next.budgets[owner].transportRetries = 1;
+  next.budgets.author.transportRetries = 1;
   delete next.invocation;
   return validateSpecDelivery(next);
 }
@@ -310,7 +321,9 @@ export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
   let previous: SpecRevisionV1 | null = null;
   for (const revision of value.revisions) previous = validateSpecRevision(revision, previous);
   exact(value.budgets, ['author','review','repairCycles'], 'spec budgets');
-  for (const owner of ['author','review'] as const) { exact(value.budgets[owner], ['reportRepairs','transportRetries'], `${owner} budget`); for (const key of ['reportRepairs','transportRetries'] as const) if (![0,1].includes(value.budgets[owner][key])) throw new Error('spec budget is invalid'); }
+  exact(value.budgets.author, ['reportRepairs','transportRetries'], 'author budget');
+  exact(value.budgets.review, ['reportRepairs'], 'review budget');
+  if (![value.budgets.author.reportRepairs, value.budgets.author.transportRetries, value.budgets.review.reportRepairs].every((count) => count === 0 || count === 1)) throw new Error('spec budget is invalid');
   if (![0,1].includes(value.budgets.repairCycles)) throw new Error('spec repair cycle budget is invalid');
   validateReviewState(value.review);
   const stage = value.stage as SpecDeliveryV1['stage'];
@@ -366,8 +379,10 @@ function validateReviewReport(value: SpecReviewReportV1): void {
 }
 
 function validateReviewState(value: unknown): asserts value is SpecDeliveryV1['review'] {
-  exact(value, ['reviewer','mode','coverage','defects','affectedDefectIds','affectedContracts','closureRequestSha256','acceptedRisks','acceptedReportSha256'], 'spec review state');
+  exact(value, ['reviewer','reviewerSessionId','mode','coverage','defects','affectedDefectIds','affectedContracts','closureRequestSha256','acceptedRisks','acceptedReportSha256'], 'spec review state');
   if (value.reviewer !== null) actor(value.reviewer, 'persisted reviewer');
+  if (value.reviewerSessionId !== null) text(value.reviewerSessionId, 'persisted reviewer session ID');
+  if (value.reviewer !== null && value.reviewer.sessionId !== value.reviewerSessionId) throw new Error('persisted reviewer session correlation mismatch');
   if (value.mode !== null && !['full','closure'].includes(value.mode)) throw new Error('persisted review mode is invalid');
   strings(value.coverage,'persisted coverage'); strings(value.affectedDefectIds,'persisted affected defect IDs'); strings(value.affectedContracts,'persisted affected contracts');
   if (!Array.isArray(value.defects) || !Array.isArray(value.acceptedRisks)) throw new Error('persisted review collections are invalid');
@@ -378,23 +393,20 @@ function validateReviewState(value: unknown): asserts value is SpecDeliveryV1['r
 function validateInvocation(value: unknown, state: SpecDeliveryV1): void {
   exact(value, ['purpose','mode','attemptId','sessionId','targetRevision','targetSha256','closureRequestSha256','status','pid','processGroupId','reportPath','revisionPath'], 'spec invocation');
   const expected = stageInvocation(state.stage);
-  if (value.purpose !== expected.purpose || value.mode !== expected.mode) throw new Error('spec invocation/stage mismatch');
+  if (value.purpose !== 'author' || value.mode !== expected.mode) throw new Error('spec invocation/stage mismatch');
   actor({ attemptId: value.attemptId, sessionId: value.sessionId }, 'spec invocation actor');
   const target = state.revisions.at(-1);
   if (value.targetRevision !== (target?.revision ?? 1) || value.targetSha256 !== (target?.revisionSha256 ?? null)) throw new Error('spec invocation target mismatch');
-  if (value.closureRequestSha256 !== (value.mode === 'closure' ? state.review.closureRequestSha256 : null)) throw new Error('spec invocation Closure mismatch');
+  if (value.closureRequestSha256 !== null) throw new Error('spec author invocation has Closure correlation');
   if (value.status === 'prepared' && (value.pid !== null || value.processGroupId !== null)) throw new Error('prepared spec invocation has process identity');
   if (value.status === 'launched') { positive(value.pid,'spec invocation PID'); positive(value.processGroupId,'spec invocation process group'); }
   if (value.reportPath !== null) text(value.reportPath, 'spec invocation report path');
   if (value.revisionPath !== null) text(value.revisionPath, 'spec invocation revision path');
-  if (value.purpose === 'review' && value.revisionPath !== null) throw new Error('spec review invocation has revision path');
 }
 
-function stageInvocation(stage: SpecDeliveryV1['stage']): { purpose: 'author'|'review'; mode: SpecInvocationV1['mode'] } {
-  if (stage === 'authoring') return { purpose: 'author', mode: 'author' };
-  if (stage === 'author-repair') return { purpose: 'author', mode: 'repair' };
-  if (stage === 'review-full') return { purpose: 'review', mode: 'full' };
-  if (stage === 'review-closure') return { purpose: 'review', mode: 'closure' };
+function stageInvocation(stage: SpecDeliveryV1['stage']): { mode: SpecInvocationV1['mode'] } {
+  if (stage === 'authoring') return { mode: 'author' };
+  if (stage === 'author-repair') return { mode: 'repair' };
   throw new Error('spec stage does not accept an invocation');
 }
 
