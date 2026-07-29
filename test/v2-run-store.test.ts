@@ -9,6 +9,10 @@ import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
 import { acceptSpecRevision, createInitialSpecDelivery, createSpecRevision, launchSpecInvocation, prepareSpecInvocation } from '../src/v2/spec-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
+  activateReviewFeedback, bootstrapReviewFeedback, createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap,
+  hashReviewFeedbackSnapshot, hashReviewFeedbackText,
+} from '../src/v2/review-feedback.js';
+import {
   createWaitingQuestion,
   hashNormalizedAnswer,
   type TrustedAnswerReceiptV1,
@@ -159,6 +163,41 @@ test('one-shot report lifecycle migration fail-closes launched legacy owners wit
   }
 });
 
+test('one-shot mutable lifecycle migration rewrites prepared owners and fail-closes launched owners with a raw backup', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const qualification = legacySafeDirectRecord(uuid(41), 141);
+  qualification.transportRetries = 1;
+  qualification.checkQualification = {
+    version: 1, checkPolicySha256: 'a'.repeat(64), repairAttempts: 0, checks: [],
+    implementationStarted: false, deniedPathsBaseline: 'b'.repeat(64), repairInvocation: legacyMutableInvocation('prepared'),
+  };
+  const feedback = legacySafeDirectRecord(uuid(42), 142);
+  feedback.reviewFeedback = activateReviewFeedback(
+    bootstrapReviewFeedback(createReviewFeedbackBootstrap(), feedback.baseSha, []),
+    feedbackBatch(feedback),
+  );
+  feedback.reviewFeedback.phase = 'repairing';
+  feedback.reviewFeedback.implementationInvocation = legacyMutableInvocation('prepared');
+  const launched = legacySafeDirectRecord(uuid(43), 143);
+  launched.process = { ...legacyReportProcess('code-review'), purpose: 'implementation' };
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 15, runs: [qualification, feedback, launched],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 16);
+  assert.deepEqual(await readFile(`${path}.pre-mutable-lifecycle-v1`), legacyBytes);
+  assert.equal(migrated.runs[0]?.lifecycle, 'implementing');
+  assert.equal(migrated.runs[1]?.lifecycle, 'implementing');
+  assert.equal(migrated.runs[2]?.lifecycle, 'blocked');
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['transportRetries', 'implementationStarted', 'repairInvocation', 'deniedPathsBaseline', 'implementationInvocation', '"purpose":"implementation"']) {
+    assert.equal(persisted.includes(removed), false, removed);
+  }
+});
+
 test('candidate rollback holds the state lock and cannot overwrite an interleaved CAS', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
@@ -207,14 +246,13 @@ test('run state rejects malformed and lifecycle-inconsistent records', async () 
   await assert.rejects(writer.read(), /terminalOutcome|review-ready/u);
 });
 
-test('run state accepts bounded recovery counters and rejects values beyond the autonomous budgets', async () => {
+test('run state accepts bounded semantic budgets and rejects values beyond them', async () => {
   const root = await temporaryRoot();
   const writer = new FileRunRecordWriter(join(root, 'run-state.json'), deterministicAtomicOptions());
   const recoverable = {
     ...record(),
     cycle: 5,
     reportRepairs: 1,
-    transportRetries: 1,
     issueSnapshot: {
       number: 42,
       title: 'Implement behavior',
@@ -237,44 +275,13 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
   for (const invalid of [
     { ...recoverable, cycle: 6 },
     { ...recoverable, reportRepairs: 2 },
-    { ...recoverable, transportRetries: 2 },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification, repairAttempts: 6 } },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification!, checks: [{ ...recoverable.checkQualification!.checks[0], status: 'unchanged-failure' }] } },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, implementationStarted: true, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, repairAttempts: 0, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|repairAttempts|status/u);
   }
 });
-
-function qualificationInvocation(phase: 'prepared' | 'launched') {
-  return {
-    phase,
-    attemptId: 'qualification-attempt-1',
-    reportPath: '/tmp/qualification-attempt-1/report.json',
-    preparedAt: '2026-07-16T12:00:00.000Z',
-    baseline: {
-      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
-      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
-    },
-    pid: phase === 'launched' ? 123 : null,
-    processGroupId: phase === 'launched' ? 123 : null,
-    launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,
-  } as const;
-}
 
 test('run state round-trips the durable blocked-label publication intent exactly', async () => {
   const root = await temporaryRoot();
@@ -666,6 +673,34 @@ function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-review') {
   };
 }
 
+function legacyMutableInvocation(phase: 'prepared' | 'launched') {
+  return {
+    phase, attemptId: 'mutable-attempt-1', reportPath: '/tmp/mutable-attempt-1/report.json', preparedAt: timestamp(),
+    baseline: {
+      headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+      untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'legacy-worktree',
+    },
+    pid: phase === 'launched' ? 71 : null, processGroupId: phase === 'launched' ? 71 : null,
+    launchedAt: phase === 'launched' ? timestamp() : null,
+  };
+}
+
+function feedbackBatch(run: any) {
+  return createFrozenReviewFeedbackBatch({
+    runId: run.runId, canonicalRepository: run.canonicalRepository,
+    pullRequest: { nodeId: 'PR_1', number: 1, headSha: run.baseSha, headRefName: run.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${run.runId}:pr -->` },
+    priorPublishedHeadSha: run.baseSha,
+    sources: [{
+      sourceId: 'pr-thread:T_1', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_r1',
+      path: 'feature.txt', line: 1, body: 'Repair it.', bodySha256: hashReviewFeedbackText('Repair it.'),
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'T_1' }), threadState: { isResolved: false, isOutdated: false },
+      commitSha: run.baseSha, sourceCreatedAt: timestamp(), sourceUpdatedAt: timestamp(),
+      author: { login: 'writer', userId: '42' }, permission: { permission: 'write', userId: '42', checkedAt: timestamp() },
+    }], frozenAt: timestamp(),
+  });
+}
+
 function reidentify(run: RunRecordV1, runId: string, issueNumber: number): any {
   return {
     ...structuredClone(run), runId, issueNumber, branchName: `codex/issue-${issueNumber}`,
@@ -699,7 +734,6 @@ function record(): RunRecordV1 {
     lifecycle: 'claimed',
     cycle: 1,
     reportRepairs: 0,
-    transportRetries: 0,
     issueSnapshot: {
       number: 42,
       title: 'Implement behavior',

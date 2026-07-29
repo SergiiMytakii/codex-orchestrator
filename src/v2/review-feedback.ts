@@ -49,23 +49,6 @@ export interface FrozenReviewFeedbackBatchV1 {
   frozenAt: string;
 }
 
-export interface ReviewFeedbackImplementationInvocationV1 {
-  phase: 'prepared' | 'launched';
-  attemptId: string;
-  reportPath: string;
-  preparedAt: string;
-  baseline: {
-    headSha: string;
-    indexTreeSha: string;
-    trackedContentSha256: string;
-    untrackedContentSha256: string;
-    worktreeIdentity: string;
-  };
-  pid: number | null;
-  processGroupId: number | null;
-  launchedAt: string | null;
-}
-
 export interface ReviewFeedbackPublishedReceiptV1 {
   kind: 'published';
   batchId: string;
@@ -90,7 +73,6 @@ export interface ReviewFeedbackExecutionV1 {
   previousPublishedHeadSha: string | null;
   repairRound: 0 | 1 | 2 | 3;
   activeBatch: FrozenReviewFeedbackBatchV1 | null;
-  implementationInvocation: ReviewFeedbackImplementationInvocationV1 | null;
   history: Array<ReviewFeedbackPublishedReceiptV1 | ReviewFeedbackBlockedReceiptV1>;
   verifiedReceipt: { batchId: string; checkedChangeSha256: string; proofId: string; verifiedAt: string } | null;
   terminal: { kind: 'safety' | 'exhausted'; blockedAt: string } | null;
@@ -104,7 +86,6 @@ export function createReviewFeedbackBootstrap(): ReviewFeedbackExecutionV1 {
     previousPublishedHeadSha: null,
     repairRound: 0,
     activeBatch: null,
-    implementationInvocation: null,
     history: [],
     verifiedReceipt: null,
     terminal: null,
@@ -233,7 +214,6 @@ export function activateReviewFeedback(
     phase: 'frozen',
     repairRound: 1,
     activeBatch: structuredClone(batch),
-    implementationInvocation: null,
     verifiedReceipt: null,
     terminal: null,
   };
@@ -273,7 +253,6 @@ export function markReviewFeedbackVerified(execution: ReviewFeedbackExecutionV1,
   const result: ReviewFeedbackExecutionV1 = {
     ...structuredClone(execution),
     phase: 'verified',
-    implementationInvocation: null,
     verifiedReceipt: { batchId: execution.activeBatch.batchId, ...structuredClone(input) },
   };
   validateReviewFeedbackExecution(result);
@@ -321,7 +300,6 @@ export function blockReviewFeedback(
     ...structuredClone(execution),
     phase: receipt.kind,
     activeBatch: null,
-    implementationInvocation: null,
     history: [...execution.history, receipt],
     verifiedReceipt: null,
     terminal: { kind, blockedAt },
@@ -333,7 +311,7 @@ export function blockReviewFeedback(
 export function validateReviewFeedbackExecution(value: unknown): asserts value is ReviewFeedbackExecutionV1 {
   exactObject(value, [
     'version', 'phase', 'consumedSourceIds', 'previousPublishedHeadSha', 'repairRound', 'activeBatch',
-    'implementationInvocation', 'history', 'verifiedReceipt', 'terminal',
+    'history', 'verifiedReceipt', 'terminal',
   ], 'review feedback execution');
   if (value.version !== 1) throw new Error('review feedback execution version is invalid');
   const phases = ['bootstrap-required', 'idle', 'frozen', 'repairing', 'verified', 'publishing', 'blocked-safety', 'blocked-exhausted'];
@@ -344,7 +322,6 @@ export function validateReviewFeedbackExecution(value: unknown): asserts value i
   if (!Array.isArray(value.history) || value.history.length > MAX_SOURCES) throw new Error('review feedback history is invalid');
   for (const item of value.history) validateHistory(item);
   if (value.activeBatch !== null) validateFrozenReviewFeedbackBatch(value.activeBatch);
-  if (value.implementationInvocation !== null) validateImplementationInvocation(value.implementationInvocation);
   if (value.verifiedReceipt !== null) validateVerifiedReceipt(value.verifiedReceipt);
   if (value.terminal !== null) validateTerminal(value.terminal);
 
@@ -355,7 +332,7 @@ export function validateReviewFeedbackExecution(value: unknown): asserts value i
     throw new Error('review feedback bootstrap state is invalid');
   }
   if (phase === 'idle' && (value.previousPublishedHeadSha === null || value.repairRound !== 0 || value.activeBatch !== null
-    || value.implementationInvocation !== null || value.terminal !== null)) {
+    || value.terminal !== null)) {
     throw new Error('review feedback idle state is invalid');
   }
   if (active && (value.previousPublishedHeadSha === null || value.activeBatch === null
@@ -363,11 +340,10 @@ export function validateReviewFeedbackExecution(value: unknown): asserts value i
     || (value.activeBatch as FrozenReviewFeedbackBatchV1).priorPublishedHeadSha !== value.previousPublishedHeadSha)) {
     throw new Error('review feedback active state is invalid');
   }
-  if (blocked && (value.activeBatch !== null || value.implementationInvocation !== null || value.terminal === null
+  if (blocked && (value.activeBatch !== null || value.terminal === null
     || (phase === 'blocked-safety') !== ((value.terminal as { kind: string }).kind === 'safety'))) {
     throw new Error('review feedback terminal state cannot retain active execution');
   }
-  if (!active && value.implementationInvocation !== null) throw new Error('review feedback invocation requires an active batch');
   if (phase !== 'verified' && phase !== 'publishing' && value.verifiedReceipt !== null) {
     throw new Error('review feedback verified receipt is invalid for phase');
   }
@@ -435,25 +411,6 @@ function validateFrozenSource(value: unknown): asserts value is FrozenReviewFeed
   if (value.permission.permission !== 'write' && value.permission.permission !== 'admin') throw new Error('review feedback source permission is invalid');
   if (value.permission.userId !== value.author.userId) throw new Error('review feedback permission identity mismatch');
   assertTimestamp(value.permission.checkedAt, 'review feedback permission checkedAt');
-}
-
-export function validateImplementationInvocation(value: unknown): asserts value is ReviewFeedbackImplementationInvocationV1 {
-  exactObject(value, ['phase', 'attemptId', 'reportPath', 'preparedAt', 'baseline', 'pid', 'processGroupId', 'launchedAt'], 'review feedback implementation invocation');
-  if (value.phase !== 'prepared' && value.phase !== 'launched') throw new Error('review feedback invocation phase is invalid');
-  assertString(value.attemptId, 'review feedback invocation attempt ID');
-  assertString(value.reportPath, 'review feedback invocation report path');
-  assertTimestamp(value.preparedAt, 'review feedback invocation preparedAt');
-  exactObject(value.baseline, ['headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity'], 'review feedback invocation baseline');
-  assertGitSha(value.baseline.headSha, 'review feedback invocation head');
-  assertGitSha(value.baseline.indexTreeSha, 'review feedback invocation index tree');
-  assertSha(value.baseline.trackedContentSha256, 'review feedback invocation tracked hash');
-  assertSha(value.baseline.untrackedContentSha256, 'review feedback invocation untracked hash');
-  assertString(value.baseline.worktreeIdentity, 'review feedback invocation worktree identity');
-  if (value.phase === 'prepared' && (value.pid !== null || value.processGroupId !== null || value.launchedAt !== null)) throw new Error('prepared review feedback invocation has launch evidence');
-  if (value.phase === 'launched') {
-    if (!Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || !Number.isSafeInteger(value.processGroupId) || (value.processGroupId as number) < 1) throw new Error('launched review feedback invocation process is invalid');
-    assertTimestamp(value.launchedAt, 'review feedback invocation launchedAt');
-  }
 }
 
 function validateHistory(value: unknown): void {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { chmod, mkdir, open, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,7 @@ import type { CheckedChange, CheckedChangePayloadV1 } from '../src/v2/checked-ch
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
+import { InjectedContainedMutableOperation, type DurableMutableInvocationV1, type MutableWorktreeOperationId } from '../src/v2/contained-report-operation.js';
 import { CandidateProofInspectionError, ProofQuiescenceError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
   RunIssue,
@@ -33,47 +34,29 @@ import { createSpecRevision } from '../src/v2/spec-delivery.js';
 import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
+import { materializeWorkflowGeneration } from '../src/v2/workflow-assets.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
-test('attempt-owned continuation report recovery rejects foreign paths and reuses the completed report', async () => {
-  const orchestratorHome = await mkdtemp(join(tmpdir(), 'codex-v2-recover-report-'));
-  const runId = '00000000-0000-4000-8000-000000000001';
-  const attemptId = 'feedback-attempt-1';
-  const reportPath = join(orchestratorHome, 'v2', sha256('owner/repo'), 'runs', runId, 'attempts', attemptId, 'report.json');
-  await mkdir(join(reportPath, '..'), { recursive: true });
-  await writeFile(reportPath, canonicalJson({ report: {
-    version: 1, status: 'completed', summary: 'recovered', changedFiles: ['feature.txt'], residualRisks: [],
-  } }));
-  const agent = new ContainedImplementationAgent({
-    config: configFixture,
-    orchestratorHome,
-    parentCodexHome: '/tmp/codex-home',
-    safePath: '/usr/bin:/bin',
-    bootId: 'boot-1',
-    git: new LocalGitRunIssueAdapter(),
-  });
-  const invocation = {
-    phase: 'launched' as const,
-    attemptId,
-    reportPath,
-    preparedAt: '2026-07-16T12:00:00.000Z',
-    baseline: {
-      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
-      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
-    },
-    pid: 123,
-    processGroupId: 123,
-    launchedAt: '2026-07-16T12:00:01.000Z',
+function mutableInvocationFixture(input: {
+  operation: MutableWorktreeOperationId; attemptId: string; worktreePath: string;
+  workflowGeneration: { generationHash: string };
+  baseline: DurableMutableInvocationV1['baseline'];
+  phaseFacts?: string[];
+  repairOnly?: boolean;
+  reworkFindings?: string[];
+}): DurableMutableInvocationV1 {
+  return {
+    version: 1, operation: input.operation,
+    attemptId: input.attemptId, generationHash: input.workflowGeneration.generationHash,
+    promptFactsSha256: sha256(canonicalJson(input.phaseFacts ?? [])), worktreePath: input.worktreePath,
+    reportPath: `/tmp/${input.attemptId}-report.json`, phase: 'prepared', host: 'test-host', bootId: 'test-boot',
+    context: { repairOnly: input.repairOnly ?? false, reworkFindings: [...(input.reworkFindings ?? [])] },
+    preparedAt: '2026-07-16T12:00:00.000Z', launchedAt: null, pid: null, processStartIdentity: null,
+    processGroupId: null, baseline: structuredClone(input.baseline), reportSha256: null, resultSnapshot: null,
   };
-  const recovered = await agent.recover({ runId, canonicalRepository: 'owner/repo', invocation });
-  assert.equal(recovered?.kind, 'completed');
-  assert.equal((recovered?.report as { summary?: string }).summary, 'recovered');
-  await assert.rejects(agent.recover({
-    runId, canonicalRepository: 'owner/repo', invocation: { ...invocation, reportPath: '/tmp/foreign-report.json' },
-  }), /attempt-owned/u);
-});
+}
 
 test('continuation worktree restoration proves exact local and remote refs before creation', async () => {
   const fixture = await runFixture();
@@ -581,7 +564,7 @@ test('a qualification check launch failure resumes before implementation without
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
 });
 
-test('a dirty resumed worktree reruns a previously green qualification before implementation', async () => {
+test('a dirty resumed worktree keeps the interrupted implementation fenced without relaunch', async () => {
   const options: FixtureOptions = {
     implementationResult: { kind: 'transport-failed', resumable: false },
   };
@@ -598,10 +581,10 @@ test('a dirty resumed worktree reruns a previously green qualification before im
   await writeFile(join(fixture.worktreePath, 'feature.txt'), 'partial interrupted implementation\n');
 
   options.implementationResult = undefined;
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
-  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 2);
-  assert.equal((await fixture.store.read()).runs[0]?.cycle, 2);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
 });
 
 test('a crash after green qualification but before implementation launch does not consume a cycle', async () => {
@@ -622,6 +605,7 @@ test('a crash after green qualification but before implementation launch does no
 
   options.implementationResult = undefined;
   options.skipImplementationLaunchPersistence = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
   assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
@@ -832,22 +816,28 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   };
   let feedbackImplementationCalls = 0;
   fixture.dependencies.implementationAgent = {
-    run: async ({ worktreePath, onPrepared, onLaunched }) => {
+    run: async ({ operation, worktreePath, invocationState, beforeLaunch, workflowGeneration, phaseFacts }) => {
       feedbackImplementationCalls += 1;
       const attemptId = `feedback-implementation-${feedbackImplementationCalls}`;
       const baseline = await fixture.dependencies.git.snapshot(worktreePath);
-      await onPrepared?.({
-        attemptId, reportPath: `/tmp/${attemptId}-report.json`,
-        preparedAt: '2026-07-16T12:00:00.000Z', baseline,
-      });
-      await onLaunched?.({ attemptId, pid: 5050 + feedbackImplementationCalls, processGroupId: 5050 + feedbackImplementationCalls, launchedAt: '2026-07-16T12:00:00.000Z' });
+      const prepared = mutableInvocationFixture({ operation, attemptId, worktreePath, workflowGeneration, baseline, phaseFacts });
+      assert.equal(await invocationState.compareAndSwap(undefined, prepared), true);
+      await beforeLaunch?.();
+      const launched = { ...prepared, phase: 'launched' as const, pid: 5050 + feedbackImplementationCalls,
+        processGroupId: 5050 + feedbackImplementationCalls, processStartIdentity: `test:${5050 + feedbackImplementationCalls}`,
+        launchedAt: '2026-07-16T12:00:01.000Z' };
+      assert.equal(await invocationState.compareAndSwap(prepared, launched), true);
       fixture.events.push('feedback-implementation');
       await writeFile(join(worktreePath, 'feature.txt'), `implemented after review ${feedbackImplementationCalls}\n`);
+      const resultSnapshot = await fixture.dependencies.git.snapshot(worktreePath);
+      assert.equal(await invocationState.compareAndSwap(launched, { ...launched, phase: 'adopted',
+        reportSha256: '9'.repeat(64), resultSnapshot }), true);
       return {
         kind: 'completed', attemptId,
         report: { version: 1, status: 'completed', summary: 'review fixed', changedFiles: ['feature.txt'], residualRisks: [] },
       };
     },
+    settle: async () => ({ kind: 'safe-halt', code: 'unexpected-feedback-settlement' }),
   };
 
   const setLabels = fixture.dependencies.issues.setLabels;
@@ -986,6 +976,58 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   assert.equal(blockedRecord.reviewFeedback?.history[0]?.kind, 'published');
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+});
+
+test('trusted feedback revocation after canonical prepare settles before blocking labels and never launches', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const record = (await fixture.store.read()).runs[0]!;
+  const head = record.reviewFeedback!.previousPublishedHeadSha!;
+  const batch = createFrozenReviewFeedbackBatch({
+    runId: record.runId,
+    canonicalRepository: record.canonicalRepository,
+    pullRequest: {
+      nodeId: 'PR_1', number: 1, headSha: head, headRefName: record.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
+    },
+    priorPublishedHeadSha: head,
+    sources: [{
+      sourceId: 'pr-thread:revoked', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_revoked',
+      path: 'feature.txt', line: 1, body: 'Change this.', bodySha256: hashReviewFeedbackText('Change this.'),
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'revoked' }),
+      threadState: { isResolved: false, isOutdated: false }, commitSha: head,
+      sourceCreatedAt: '2026-07-16T12:05:00.000Z', sourceUpdatedAt: '2026-07-16T12:05:00.000Z',
+      author: { login: 'writer', userId: '42' },
+      permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:05:00.000Z' },
+    }],
+    frozenAt: '2026-07-16T12:05:00.000Z',
+  });
+  let revalidations = 0;
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch }),
+    revalidate: async ({ expectedHeadSha }: { expectedHeadSha: string }) => {
+      revalidations += 1;
+      return revalidations === 2
+        ? { status: 'blocked', reason: 'trusted permission revoked after prepare' }
+        : { status: 'valid', observedHeadSha: expectedHeadSha };
+    },
+  } as unknown as ReviewFeedbackCoordinator;
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: 'https://example.invalid/pull/1', body: `<!-- codex-orchestrator:run:${record.runId}:pr -->\n\nCloses #42`,
+    number: 1, nodeId: 'PR_1', headSha: head,
+  });
+  const canonical = installCanonicalExecution(fixture);
+  await fixture.dependencies.issues.setLabels(42, ['agent:review']);
+
+  const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  const settled = (await fixture.store.read()).runs[0]!;
+  assert.equal(settled.mutableInvocation, undefined);
+  assert.equal(settled.lifecycle, 'blocked');
+  assert.equal(canonical.launches(), 0);
+  assert.equal(revalidations, 2);
+  assert.deepEqual(pick(settled, ['cycle', 'reportRepairs']), { cycle: record.cycle, reportRepairs: record.reportRepairs });
 });
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
@@ -1351,6 +1393,8 @@ test('a launched qualification repair transport failure is recovered without spe
   };
   const fixture = await runFixture(options);
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 0);
+  assert.equal(fixture.events.filter((event) => event === 'agent:qualification-repair').length, 1);
   const terminal = await fixture.store.read();
   const interrupted = structuredClone(terminal.runs[0]!);
   interrupted.lifecycle = 'implementing';
@@ -1374,29 +1418,45 @@ test('a malformed recovered qualification report is settled once and does not we
     qualificationCheck: async () => (++qualificationCalls === 1
       ? { status: 'failed', output: Buffer.from('base is red') }
       : { status: 'passed', output: Buffer.from('base is green') }),
-    implementationResults: [{ kind: 'transport-failed', resumable: true }],
+    implementationResults: [
+      { kind: 'transport-failed', resumable: true },
+      { kind: 'completed', report: { status: 'completed' } },
+    ],
   };
   const fixture = await runFixture(options);
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const terminal = await fixture.store.read();
-  const interrupted = structuredClone(terminal.runs[0]!);
-  interrupted.lifecycle = 'implementing';
-  delete interrupted.terminalOutcome;
-  delete interrupted.outcomeEvidenceId;
-  await fixture.store.compareAndSwap(terminal.generation, {
-    schema: terminal.schema, version: terminal.version, runs: [interrupted],
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.mutableInvocation, undefined);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+});
+
+test('real canonical qualification recovery spends zero for infrastructure and one for recovered malformed output', async () => {
+  const fixture = await runFixture({
+    qualificationCheck: async () => ({ status: 'failed', output: Buffer.from('base is red') }),
   });
-  let recoverCalls = 0;
-  fixture.dependencies.implementationAgent.recover = async () => {
-    recoverCalls += 1;
-    return { kind: 'completed', report: { status: 'completed' } };
-  };
+  const canonical = installCanonicalExecution(fixture);
 
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairInvocation, null);
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(recoverCalls, 1);
-  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 0);
+  assert.equal(canonical.launches(), 1);
+
+  canonical.process = { status: 'unknown' };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 0);
+  assert.equal(canonical.launches(), 1);
+
+  canonical.process = { status: 'absent', processGroupAlive: false };
+  canonical.report = Buffer.from('{"status":"completed"}');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.mutableInvocation, undefined);
+  assert.equal(canonical.launches(), 1);
+
+  await fixture.dependencies.issues.setLabels(42, ['agent:running']);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  assert.equal((await fixture.store.read()).runs[0]?.checkQualification?.repairAttempts, 1);
 });
 
 test('recovered qualification repair rejects ignored denied-path mutation', async () => {
@@ -1407,23 +1467,11 @@ test('recovered qualification repair rejects ignored denied-path mutation', asyn
   };
   const fixture = await runFixture(options);
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const terminal = await fixture.store.read();
-  const interrupted = structuredClone(terminal.runs[0]!);
-  interrupted.lifecycle = 'implementing';
-  delete interrupted.terminalOutcome;
-  delete interrupted.outcomeEvidenceId;
-  await fixture.store.compareAndSwap(terminal.generation, {
-    schema: terminal.schema, version: terminal.version, runs: [interrupted],
-  });
   await writeFile(join(fixture.worktreePath, '.env'), 'recovered repair touched denied path\n');
-  fixture.dependencies.implementationAgent.recover = async () => ({
-    kind: 'completed', attemptId: 'qualification-repair-attempt-1',
-    report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] },
-  });
 
   assert.deepEqual(
     pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
-    { status: 'blocked', kind: 'safety', resumable: false },
+    { status: 'transport-failed', kind: undefined, resumable: true },
   );
   assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 0);
 });
@@ -1452,7 +1500,7 @@ test('qualification repair preserves an explicit external blocker without starti
   assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 0);
 });
 
-test('a changed qualification command replaces the stale same-ID receipt on restart', async () => {
+test('a changed qualification command cannot adopt or relaunch an in-flight implementation', async () => {
   const options: FixtureOptions = {
     implementationResult: { kind: 'transport-failed', resumable: false },
   };
@@ -1476,14 +1524,12 @@ test('a changed qualification command replaces the stale same-ID receipt on rest
   });
   options.implementationResult = undefined;
 
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   const resumed = (await fixture.store.read()).runs[0]!;
-  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 2);
+  assert.equal(fixture.events.filter((event) => event === 'check:qualification:typecheck').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
   assert.deepEqual(resumed.checkQualification?.checks.map(({ id, command }) => ({ id, command })), [
-    { id: 'typecheck', command: 'npm test' },
-  ]);
-  assert.deepEqual(resumed.checks.map(({ id, command }) => ({ id, command })), [
-    { id: 'typecheck', command: 'npm test' },
+    { id: 'typecheck', command: 'npm run typecheck' },
   ]);
 });
 
@@ -1609,7 +1655,7 @@ test('blocked transition resumes when the post-effect projection write fails', a
   assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
 });
 
-test('malformed report repair and clean transport retry use separate budgets without consuming a cycle', async () => {
+test('malformed report repair consumes its semantic budget without consuming a cycle', async () => {
   const malformed = await runFixture({
     implementationResults: [
       { kind: 'completed', report: { status: 'completed' } },
@@ -1620,15 +1666,86 @@ test('malformed report repair and clean transport retry use separate budgets wit
   assert.equal(malformed.events.filter((event) => event === 'agent').length, 2);
   assert.deepEqual(pick((await malformed.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 1 });
 
-  const transport = await runFixture({
+});
+
+for (const reportFault of ['schema', 'changedFiles'] as const) {
+  for (const ending of ['recover', 'revoke'] as const) {
+    test(`real contained ${reportFault} report repair ${ending === 'recover' ? 'recovers' : 'settles on revocation'} with its exact durable prompt context`, async (t) => {
+      const fixture = await runFixture();
+      const production = await installProductionContainedAgent(fixture, reportFault);
+      t.after(production.cleanup);
+
+      const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+      assert.deepEqual(
+        pick(interrupted, ['status', 'resumable']),
+        { status: 'transport-failed', resumable: true },
+        `${JSON.stringify(interrupted)}\n${JSON.stringify(fixture.evidence)}\n${fixture.events.join('\n')}`,
+      );
+      const crashed = (await fixture.store.read()).runs[0]!;
+      assert.equal(crashed.mutableInvocation?.phase, 'launched');
+      assert.equal(crashed.mutableInvocation?.context.repairOnly, true);
+      assert.deepEqual(crashed.mutableInvocation?.context.reworkFindings, reportFault === 'schema'
+        ? ['The previous implementation report did not match the generated schema.']
+        : ['The report changedFiles must equal the complete current product change set: ["feature.txt"].']);
+      assert.equal(crashed.reportRepairs, 1);
+      assert.equal(production.launches(), 2);
+      assert.match(production.prompts[1]!, /Report repair only/u);
+      assert.match(production.prompts[1]!, reportFault === 'schema'
+        ? /previous implementation report did not match the generated schema/u
+        : /report changedFiles must equal the complete current product change set/u);
+
+      await production.writeRecoveredReport();
+      if (ending === 'revoke') await fixture.dependencies.issues.setLabels(42, ['agent:running']);
+      const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+      if (ending === 'recover') assert.equal(result.status, 'review-ready', JSON.stringify(result));
+      else assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: true });
+      const settled = (await fixture.store.read()).runs[0]!;
+      assert.equal(settled.mutableInvocation, undefined);
+      assert.equal(settled.reportRepairs, 1);
+      assert.equal(settled.cycle, 1);
+      assert.equal(production.launches(), 2);
+    });
+  }
+}
+
+for (const reportFault of ['schema', 'changedFiles'] as const) {
+  test(`real contained interrupted ${reportFault} report repair rejects recovered worktree mutation without relaunch`, async (t) => {
+    const fixture = await runFixture();
+    const production = await installProductionContainedAgent(fixture, reportFault, { mutateRepairWorktree: true });
+    t.after(production.cleanup);
+
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+    const interrupted = (await fixture.store.read()).runs[0]!;
+    assert.equal(interrupted.mutableInvocation?.phase, 'launched');
+    assert.equal(interrupted.mutableInvocation?.context.repairOnly, true);
+    assert.equal(interrupted.reportRepairs, 1);
+    assert.equal(production.launches(), 2);
+    await production.writeRecoveredReport();
+
+    const rejected = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+    assert.deepEqual(pick(rejected, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: true });
+    const terminal = (await fixture.store.read()).runs[0]!;
+    assert.equal(terminal.lifecycle, 'blocked');
+    assert.equal(terminal.mutableInvocation, undefined);
+    assert.equal(terminal.reportRepairs, 1);
+    assert.equal(terminal.cycle, 1);
+    assert.equal(production.launches(), 2);
+    assert.equal(fixture.evidence.some((entry) => entry.code === 'report-repair-modified-worktree'), true);
+  });
+}
+
+test('implementation infrastructure failure yields after one launch without a durable retry budget', async () => {
+  const fixture = await runFixture({
     implementationResults: [
       { kind: 'transport-failed', resumable: true },
       { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
     ],
   });
-  assert.equal((await transport.runner.runIssue({ targetRoot: transport.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(transport.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal('transportRetries' in (await fixture.store.read()).runs[0]!, false);
 });
 
 test('incomplete cumulative changedFiles gets one report-only repair without consuming a cycle', async () => {
@@ -1656,7 +1773,7 @@ test('repeated cumulative changedFiles mismatch remains fail-closed', async () =
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
 });
 
-test('resumable implementation transport retries once when the interrupted attempt changed the worktree', async () => {
+test('implementation transport with an unreported worktree effect stays fenced without relaunch', async () => {
   const fixture = await runFixture({
     transportWrites: true,
     implementationResults: [
@@ -1665,9 +1782,10 @@ test('resumable implementation transport retries once when the interrupted attem
     ],
   });
 
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.mutableInvocation?.phase, 'launched');
 });
 
 test('invoked publication rejection is resumable, retains intent, and starts no later effect', async () => {
@@ -1896,7 +2014,7 @@ test('restart reconciles an interrupted claim without creating a second run', as
   }
 });
 
-test('restart resumes interrupted implementation in the same worktree as the next bounded cycle', async () => {
+test('restart adopts interrupted implementation in the same worktree and semantic cycle', async () => {
   const options: FixtureOptions = { implementationResult: { kind: 'transport-failed', resumable: false } };
   const fixture = await runFixture(options);
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
@@ -1918,43 +2036,82 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   assert.equal(result.status, 'review-ready');
   const state = await fixture.store.read();
   assert.equal(state.runs.length, 1);
-  assert.equal(state.runs[0]?.cycle, 2);
+  assert.equal(state.runs[0]?.cycle, 1);
   assert.equal(state.runs[0]?.packageVersion, '0.1.51');
   assert.equal(state.runs[0]?.workflowGeneration.generationHash, '1'.repeat(64));
   assert.equal(state.runs[0]?.skillHashes['agent-auto'], 'a'.repeat(64));
   assert.equal(state.runs[0]?.worktreePath, fixture.worktreePath);
 });
 
-test('safe-halt retains process ownership and owner lock until absence is confirmed', async () => {
-  const absence = deferred<void>();
+test('mutable safe-halt yields with its canonical invocation retained', async () => {
   const fixture = await runFixture({
     implementationResult: {
       kind: 'safe-halt',
-      process: {
-        pid: 123,
-        processGroupId: 123,
-        startedAt: '2026-07-16T12:00:00.000Z',
-        baseline: {
-          headSha: 'a'.repeat(40),
-          indexTreeSha: 'b'.repeat(40),
-          trackedContentSha256: 'c'.repeat(64),
-          untrackedContentSha256: 'd'.repeat(64),
-          worktreeIdentity: 'worktree',
-        },
-      },
-      waitForAbsence: () => absence.promise,
+      code: 'mutable-operation-process-active-or-uncertain',
     },
   });
-  let settled = false;
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }).finally(() => { settled = true; });
-  await waitFor(() => fixture.events.includes('state:safe-halt:none'));
-  assert.equal(settled, false);
-  assert.equal(fixture.events.includes('owner-release'), false);
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.mutableInvocation?.phase, 'launched');
   assert.equal(fixture.events.includes('git:push'), false);
-  absence.resolve();
-  const result = await running;
-  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
   assert.equal(fixture.events.at(-1), 'owner-release');
+});
+
+for (const phase of ['prepared', 'launched', 'adopted'] as const) {
+  test(`authorization revocation settles an exact ${phase} mutable invocation before terminal label effects`, async () => {
+    const fixture = await runFixture({
+      implementationResult: { kind: 'transport-failed', resumable: true },
+      skipImplementationLaunchPersistence: phase === 'prepared',
+    });
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+    let state = await fixture.store.read();
+    let invocation = state.runs[0]!.mutableInvocation!;
+    assert.equal(invocation.phase, phase === 'prepared' ? 'prepared' : 'launched');
+    let report: Buffer | undefined;
+    if (phase === 'adopted') {
+      await writeFile(join(fixture.worktreePath, 'feature.txt'), 'recovered exact implementation\n');
+      report = Buffer.from('{"version":1,"status":"completed","summary":"recovered","changedFiles":["feature.txt"],"residualRisks":[]}');
+      const resultSnapshot = await fixture.dependencies.git.snapshot(fixture.worktreePath);
+      invocation = { ...invocation, phase: 'adopted', reportSha256: sha256(report), resultSnapshot };
+      await fixture.store.compareAndSwap(state.generation, {
+        schema: state.schema, version: state.version,
+        runs: [{ ...state.runs[0]!, mutableInvocation: invocation }],
+      });
+      state = await fixture.store.read();
+    }
+    installCanonicalSettlement(fixture, {
+      report,
+      process: { status: 'absent', processGroupAlive: false },
+    });
+    await fixture.dependencies.issues.setLabels(42, ['agent:running']);
+    const labelEffectsBefore = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+    assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: true });
+    const settled = (await fixture.store.read()).runs[0]!;
+    assert.equal(settled.mutableInvocation, undefined);
+    assert.equal(settled.lifecycle, 'blocked');
+    assert.deepEqual(pick(settled, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
+    assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffectsBefore + 1);
+  });
+}
+
+test('authorization revocation defers an uncertain launched mutable invocation without terminal label effects', async () => {
+  const fixture = await runFixture({ implementationResult: { kind: 'transport-failed', resumable: true } });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  installCanonicalSettlement(fixture, { process: { status: 'unknown' } });
+  await fixture.dependencies.issues.setLabels(42, ['agent:running']);
+  const labelEffectsBefore = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.lifecycle, 'implementing');
+  assert.equal(retained.mutableInvocation?.phase, 'launched');
+  assert.deepEqual(pick(retained, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffectsBefore);
 });
 
 test('proof process quiescence also safe-halts the run until absence is confirmed', async () => {
@@ -2286,8 +2443,8 @@ async function runFixture(options: FixtureOptions = {}) {
         };
         const triageInFlight = { ...expected, phase: 'triage-in-flight' as const };
         assert.equal(await state.compareAndSwap(expected, triageInFlight), true);
-        const preparedTriage = reportInvocation(triage.attemptId, 'triage');
-        const launchedTriage = reportInvocation(triage.attemptId, 'triage', 'launched');
+        const preparedTriage = reportInvocation(triage.attemptId, 'triage', 'prepared', workflowGeneration.generationHash);
+        const launchedTriage = reportInvocation(triage.attemptId, 'triage', 'launched', workflowGeneration.generationHash);
         assert.equal(await state.invocation.compareAndSwap(undefined, preparedTriage), true);
         assert.equal(await state.invocation.compareAndSwap(preparedTriage, launchedTriage), true);
         if (awaiting) {
@@ -2295,8 +2452,8 @@ async function runFixture(options: FixtureOptions = {}) {
           assert.equal(await state.settle(triageInFlight, candidateReady, triage.attemptId), true);
           const reviewInFlight = { ...candidateReady, phase: 'review-in-flight' as const };
           assert.equal(await state.compareAndSwap(candidateReady, reviewInFlight), true);
-          const preparedReview = reportInvocation(review!.attemptId, 'ambiguity-review');
-          const launchedReview = reportInvocation(review!.attemptId, 'ambiguity-review', 'launched');
+          const preparedReview = reportInvocation(review!.attemptId, 'ambiguity-review', 'prepared', workflowGeneration.generationHash);
+          const launchedReview = reportInvocation(review!.attemptId, 'ambiguity-review', 'launched', workflowGeneration.generationHash);
           assert.equal(await state.invocation.compareAndSwap(undefined, preparedReview), true);
           assert.equal(await state.invocation.compareAndSwap(preparedReview, launchedReview), true);
           assert.equal(await state.complete(reviewInFlight, completed, receipt, review!.attemptId), true);
@@ -2431,32 +2588,54 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     implementationAgent: {
-      run: async ({ operation, worktreePath: path, reworkFindings, onPrepared, onLaunched }) => {
+      run: async ({ operation, worktreePath: path, reworkFindings, repairOnly, invocationState, beforeLaunch, workflowGeneration, phaseFacts }) => {
         const qualificationRepair = operation === 'qualification-repair';
         assert.equal(
           reworkFindings.some((finding) => finding.startsWith('Pre-implementation scoped check ')),
           qualificationRepair,
         );
-        events.push('agent');
-        events.push(qualificationRepair ? 'agent:qualification-repair' : 'agent:implementation');
-        const attemptId = qualificationRepair ? 'qualification-repair-attempt-1' : 'implementation-attempt-1';
-        await onPrepared?.({
-          attemptId,
-          reportPath: `/tmp/${attemptId}-report.json`,
-          preparedAt: '2026-07-16T12:00:00.000Z',
-          baseline: await dependencies.git.snapshot(path),
-        });
-        if (qualificationRepair || !options.skipImplementationLaunchPersistence) {
-          await onLaunched?.({
-            attemptId, pid: 6060, processGroupId: 6060, launchedAt: '2026-07-16T12:00:01.000Z',
+        const attemptId = qualificationRepair ? 'qualification-repair-attempt-1'
+          : operation === 'review-feedback-implementation' ? 'feedback-implementation-attempt-1' : 'implementation-attempt-1';
+        let invocation = await invocationState.read();
+        if (invocation && invocation.promptFactsSha256 !== sha256(canonicalJson(phaseFacts ?? []))) {
+          return { kind: 'safe-halt', code: 'mutable-operation-correlation-drift' };
+        }
+        if (invocation?.phase === 'prepared') {
+          assert.equal(await invocationState.compareAndSwap(invocation, undefined), true);
+          return { kind: 'transport-failed', resumable: true, code: 'mutable-operation-prepared-attempt-abandoned' };
+        }
+        if (invocation?.phase === 'launched'
+          && canonicalJson(await dependencies.git.snapshot(path)) !== canonicalJson(invocation.baseline)) {
+          return { kind: 'safe-halt', code: 'mutable-operation-worktree-without-report' };
+        }
+        if (invocation && options.transportWrites) return { kind: 'safe-halt', code: 'mutable-operation-worktree-without-report' };
+        if (!invocation) {
+          events.push('agent');
+          events.push(qualificationRepair ? 'agent:qualification-repair' : 'agent:implementation');
+          const baseline = await dependencies.git.snapshot(path);
+          invocation = mutableInvocationFixture({
+            operation, attemptId, worktreePath: path, workflowGeneration, baseline, phaseFacts, repairOnly, reworkFindings,
           });
+          assert.equal(await invocationState.compareAndSwap(undefined, invocation), true);
+          await beforeLaunch?.();
+          if (qualificationRepair || !options.skipImplementationLaunchPersistence) {
+            const launched = { ...invocation, phase: 'launched' as const, pid: 6060, processGroupId: 6060,
+              processStartIdentity: 'test:6060', launchedAt: '2026-07-16T12:00:01.000Z' };
+            assert.equal(await invocationState.compareAndSwap(invocation, launched), true);
+            invocation = launched;
+          }
         }
         const sequenced = options.implementationResults?.shift();
         const selected = sequenced ?? options.implementationResult;
         if (options.transportWrites && selected?.kind === 'transport-failed') {
           await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
         }
-        if (selected?.kind !== 'completed' && selected) return selected;
+        if (selected?.kind !== 'completed' && selected) {
+          if (selected.kind === 'cancelled' || selected.kind === 'internal-error') {
+            assert.equal(await invocationState.compareAndSwap(invocation, undefined), true);
+          }
+          return selected;
+        }
         if (options.agentWrites !== false) {
           await writeFile(join(path, qualificationRepair ? 'qualification-repair.txt' : 'feature.txt'), 'implemented\n');
         }
@@ -2470,9 +2649,24 @@ async function runFixture(options: FixtureOptions = {}) {
           ? ['qualification-repair.txt']
           : [...(qualificationRepairApplied ? ['feature.txt', 'qualification-repair.txt'] : ['feature.txt'])].sort();
         const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles, residualRisks: [] } };
+        if (invocation.phase === 'launched') {
+          const resultSnapshot = await dependencies.git.snapshot(path);
+          const adopted = { ...invocation, phase: 'adopted' as const,
+            reportSha256: '9'.repeat(64), resultSnapshot };
+          assert.equal(await invocationState.compareAndSwap(invocation, adopted), true);
+        }
         return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? attemptId } : completed;
       },
-      recover: async () => undefined,
+      settle: async ({ invocationState }) => {
+        const invocation = await invocationState.read();
+        if (!invocation) return { kind: 'settled' as const };
+        if (invocation.phase !== 'prepared') {
+          return { kind: 'safe-halt' as const, code: 'mutable-operation-process-active-or-uncertain' };
+        }
+        return await invocationState.compareAndSwap(invocation, undefined)
+          ? { kind: 'settled' as const }
+          : { kind: 'safe-halt' as const, code: 'mutable-operation-state-conflict' };
+      },
     },
     implementationReviewer: {
       run: async (input) => {
@@ -2480,8 +2674,8 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push('review:code-review');
         const existingInvocation = await input.invocationState.read();
         if (!existingInvocation) {
-          const preparedInvocation = reportInvocation('code-review-attempt-1', 'code-review');
-          const launchedInvocation = reportInvocation('code-review-attempt-1', 'code-review', 'launched');
+          const preparedInvocation = reportInvocation('code-review-attempt-1', 'code-review', 'prepared', input.workflowGeneration.generationHash);
+          const launchedInvocation = reportInvocation('code-review-attempt-1', 'code-review', 'launched', input.workflowGeneration.generationHash);
           assert.equal(await input.invocationState.compareAndSwap(undefined, preparedInvocation), true);
           assert.equal(await input.invocationState.compareAndSwap(preparedInvocation, launchedInvocation), true);
           events.push('review:code-review-launched');
@@ -2746,6 +2940,189 @@ function receipt() {
   };
 }
 
+function installCanonicalSettlement(
+  fixture: Awaited<ReturnType<typeof runFixture>>,
+  options: {
+    report?: Buffer;
+    process: { status: 'unknown' } | { status: 'absent'; processGroupAlive: false };
+  },
+): void {
+  const existingAgent = fixture.dependencies.implementationAgent;
+  fixture.dependencies.implementationAgent = {
+    ...existingAgent,
+    settle: async (input: Parameters<typeof existingAgent.run>[0]) => {
+      const invocation = await input.invocationState.read();
+      const operation = new InjectedContainedMutableOperation({
+        host: 'test-host', bootId: 'test-boot', now: () => '2026-07-16T12:00:02.000Z', createAttemptId: () => 'must-not-launch',
+        snapshot: (path) => fixture.dependencies.git.snapshot(path),
+        prepare: async ({ operation, workflowGeneration }) => ({
+          operation, generationHash: workflowGeneration.generationHash, policy: {
+            sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
+            writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const,
+            network: 'deny' as const, networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false,
+          }, reportPath: invocation?.reportPath ?? '/unexpected-report.json',
+        }),
+        readReport: async () => options.report
+          ? { status: 'available' as const, bytes: options.report }
+          : { status: 'absent' as const },
+        processStartIdentity: async () => 'must-not-launch',
+        inspectProcess: async () => options.process,
+        launch: async () => { throw new Error('settlement must not launch'); },
+      });
+      const settled = await operation.settle({
+        operation: input.operation, runId: input.runId, worktreePath: input.worktreePath,
+        workflowGeneration: input.workflowGeneration, promptFacts: input.phaseFacts ?? [], signal: input.signal,
+        context: { repairOnly: input.repairOnly, reworkFindings: [...input.reworkFindings] },
+        invocationState: input.invocationState,
+      });
+      return settled.status === 'settled'
+        ? { kind: 'settled' as const }
+        : { kind: 'safe-halt' as const, code: settled.code };
+    },
+  } as typeof fixture.dependencies.implementationAgent;
+}
+
+function installCanonicalExecution(fixture: Awaited<ReturnType<typeof runFixture>>) {
+  let launchCount = 0;
+  const controls = {
+    report: undefined as Buffer | undefined,
+    process: { status: 'present', processStartIdentity: 'start-6060', processGroupAlive: true } as
+      | { status: 'present'; processStartIdentity: string; processGroupAlive: boolean }
+      | { status: 'unknown' }
+      | { status: 'absent'; processGroupAlive: false },
+    launches: () => launchCount,
+  };
+  const operation = () => new InjectedContainedMutableOperation({
+    host: 'test-host', bootId: 'test-boot', now: () => '2026-07-16T12:00:02.000Z',
+    createAttemptId: () => `canonical-attempt-${launchCount + 1}`,
+    snapshot: (path) => fixture.dependencies.git.snapshot(path),
+    prepare: async ({ operation: worker, attemptId, workflowGeneration }) => ({
+      operation: worker, generationHash: workflowGeneration.generationHash, policy: {
+        sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
+        writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const,
+        network: 'deny' as const, networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false,
+      }, reportPath: `/tmp/${attemptId}-canonical-report.json`,
+    }),
+    readReport: async () => controls.report
+      ? { status: 'available' as const, bytes: controls.report }
+      : { status: 'absent' as const },
+    processStartIdentity: async () => 'start-6060',
+    inspectProcess: async () => controls.process,
+    launch: async ({ onSpawned }) => {
+      launchCount += 1;
+      await onSpawned({ pid: 6060, processGroupId: 6060 });
+      return { status: 'safe-halt' as const };
+    },
+  });
+  const promptFacts = (input: { phaseFacts?: string[] }) => input.phaseFacts ?? [];
+  fixture.dependencies.implementationAgent = {
+    run: async (input) => {
+      const result = await operation().run({
+        operation: input.operation, runId: input.runId, worktreePath: input.worktreePath,
+        workflowGeneration: input.workflowGeneration, promptFacts: promptFacts(input), signal: input.signal,
+        context: { repairOnly: input.repairOnly, reworkFindings: [...input.reworkFindings] },
+        invocationState: input.invocationState, beforeLaunch: input.beforeLaunch,
+      });
+      if (result.status === 'completed') return {
+        kind: 'completed' as const, attemptId: result.attemptId,
+        report: JSON.parse(result.reportBytes.toString('utf8')) as unknown,
+      };
+      if (result.status === 'safe-halt') return { kind: 'safe-halt' as const, code: result.code };
+      if (result.status === 'retryable') return { kind: 'transport-failed' as const, resumable: true, code: result.code };
+      if (result.status === 'cancelled') return { kind: 'cancelled' as const };
+      return result.kind === 'external'
+        ? { kind: 'transport-failed' as const, resumable: true, code: result.code }
+        : { kind: 'safe-halt' as const, code: result.code };
+    },
+    settle: async (input) => {
+      const result = await operation().settle({
+        operation: input.operation, runId: input.runId, worktreePath: input.worktreePath,
+        workflowGeneration: input.workflowGeneration, promptFacts: promptFacts(input), signal: input.signal,
+        context: { repairOnly: input.repairOnly, reworkFindings: [...input.reworkFindings] },
+        invocationState: input.invocationState,
+      });
+      return result.status === 'settled'
+        ? { kind: 'settled' as const }
+        : { kind: 'safe-halt' as const, code: result.code };
+    },
+  };
+  return controls;
+}
+
+async function installProductionContainedAgent(
+  fixture: Awaited<ReturnType<typeof runFixture>>,
+  reportFault: 'schema' | 'changedFiles',
+  options: { mutateRepairWorktree?: boolean } = {},
+) {
+  const packageRoot = join(import.meta.dirname, '..', '..');
+  const orchestratorHome = join(fixture.targetRoot, '.contained-implementation-home');
+  const parentCodexHome = join(orchestratorHome, 'parent-codex-home');
+  await mkdir(parentCodexHome, { recursive: true });
+  const generation = await materializeWorkflowGeneration({
+    packageRoot, runtimeRoot: orchestratorHome, packageVersion: '0.1.51', bootId: 'test-boot',
+  });
+  fixture.dependencies.createWorkflowGeneration = async () => ({
+    receipt: generation,
+    skillHashes: { 'agent-auto': 'a'.repeat(64), 'acceptance-proof': 'b'.repeat(64) },
+  });
+  const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+  const prompts: string[] = [];
+  let launches = 0;
+  let repairReportPath: string | undefined;
+  const process = {
+    run: async (input: {
+      prompt: string; cwd: string; reportPath: string;
+      onSpawned?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
+    }) => {
+      launches += 1;
+      prompts.push(input.prompt);
+      const child = spawn('/bin/sleep', ['1'], { detached: true, stdio: 'ignore' });
+      if (!child.pid) throw new Error('fixture process did not start');
+      await input.onSpawned?.({ pid: child.pid, processGroupId: child.pid });
+      child.kill('SIGTERM');
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      if (launches === 1) {
+        await writeFile(join(input.cwd, 'feature.txt'), 'implemented by contained fixture\n');
+        const report = reportFault === 'schema'
+          ? Buffer.from('{"status":"completed"}')
+          : Buffer.from('{"version":1,"status":"completed","summary":"wrong set","changedFiles":["wrong.ts"],"residualRisks":[]}');
+        return { kind: 'completed' as const, report: { kind: 'available' as const, bytes: report } };
+      }
+      if (launches === 2) {
+        repairReportPath = input.reportPath;
+        if (options.mutateRepairWorktree) {
+          await writeFile(join(input.cwd, 'feature.txt'), 'report repair illegally changed implementation\n');
+        }
+        return { kind: 'transport-failed' as const };
+      }
+      throw new Error('report repair was launched more than once');
+    },
+  };
+  fixture.dependencies.implementationAgent = new ContainedImplementationAgent({
+    config: () => config,
+    orchestratorHome,
+    parentCodexHome,
+    safePath: '/usr/bin:/bin:/usr/sbin:/sbin',
+    bootId: 'test-boot',
+    git: fixture.dependencies.git,
+    process: process as never,
+    createAttemptId: () => `production-attempt-${launches + 1}`,
+    now: () => '2026-07-16T12:00:00.000Z',
+  });
+  return {
+    prompts,
+    launches: () => launches,
+    writeRecoveredReport: async () => {
+      assert.ok(repairReportPath);
+      await writeFile(repairReportPath, '{"version":1,"status":"completed","summary":"repaired report","changedFiles":["feature.txt"],"residualRisks":[]}');
+    },
+    cleanup: async () => {
+      await execFileAsync('chmod', ['-R', 'u+w', orchestratorHome]);
+      await rm(orchestratorHome, { recursive: true, force: true });
+    },
+  };
+}
+
 function pick(value: object, keys: string[]): Record<string, unknown> {
   return Object.fromEntries(keys.map((key) => [key, (value as Record<string, unknown>)[key]]));
 }
@@ -2762,9 +3139,10 @@ function reportInvocation(
   attemptId: string,
   operation: 'triage' | 'ambiguity-review' | 'code-review' | 'spec-review',
   phase: 'prepared' | 'launched' = 'prepared',
+  generationHash = '1'.repeat(64),
 ) {
   return {
-    version: 1 as const, operation, attemptId, generationHash: '1'.repeat(64), promptFactsSha256: 'a'.repeat(64),
+    version: 1 as const, operation, attemptId, generationHash, promptFactsSha256: 'a'.repeat(64),
     reportPath: `/attempts/${attemptId}/report.json`, phase,
     host: 'host-a', bootId: 'boot-a', preparedAt: '2026-07-16T12:00:00.000Z',
     launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,

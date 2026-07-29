@@ -188,10 +188,7 @@ test('maps PR findings through repair and affected Closure', () => {
     id: 'pr-thread:T_1', provenance: 'pr-review', sourceId: 'pr-thread:T_1', targetRevision: 1,
     summary: 'Trusted review feedback.', affectedContracts: ['pr-review'], status: 'open',
   }]);
-  assert.deepEqual(validateDirectReview(repair, {
-    lifecycle: 'safe-halt',
-    process: { purpose: 'implementation', resumeLifecycle: 'implementing', resumeReviewStage: null },
-  }), repair);
+  assert.deepEqual(validateDirectReview(repair, { lifecycle: 'implementing' }), repair);
   const closure = prepareDirectReviewClosure(repair, 'b'.repeat(64));
   assert.equal(closure.state.repairFindings[0]?.provenance, 'pr-review');
   assert.equal(closure.state.repairFindings[0]?.status, 'fixed');

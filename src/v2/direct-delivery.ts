@@ -55,7 +55,7 @@ export interface DirectReviewValidationContext {
   lifecycle: string;
   terminalOutcome?: DirectReviewV1['terminalOutcome'];
   process?: {
-    purpose: 'implementation' | 'proof';
+    purpose: 'proof';
     resumeLifecycle: string;
     resumeReviewStage: DirectReviewStage | null;
   };
@@ -410,7 +410,7 @@ function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFinger
   if (value.terminalOutcome || value.terminalCode) throw new Error('non-terminal direct review has terminal projection');
   if (value.stage === null || value.targetRevision < 1) throw new Error('active direct review requires a stage and revision');
   if (value.status === 'active') {
-    if (context.lifecycle !== 'implementing' && context.lifecycle !== 'safe-halt') throw new Error('active direct review lifecycle is invalid');
+    if (context.lifecycle !== 'implementing') throw new Error('active direct review lifecycle is invalid');
     if (value.review.disposition !== 'active') throw new Error('active direct review stage has no active track');
     validateStageFields(value.stage, value.review, value.repairFindings);
   } else {
@@ -420,13 +420,6 @@ function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFinger
       || value.review.disposition !== 'clear') {
       throw new Error('clear direct review composite is invalid');
     }
-  }
-  if (value.status === 'active' && context.lifecycle === 'safe-halt') {
-    const feedbackImplementationProcess = value.stage === 'review-repair'
-      && context.process?.purpose === 'implementation'
-      && context.process.resumeLifecycle === 'implementing'
-      && context.process.resumeReviewStage === null;
-    if (!feedbackImplementationProcess) throw new Error('safe-halt review stage/process mismatch');
   }
 }
 

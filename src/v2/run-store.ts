@@ -1,5 +1,10 @@
 import type { ProofReceipt } from './proof-report.js';
-import { validateDurableReportInvocation, type DurableReportInvocationV1 } from './contained-report-operation.js';
+import {
+  validateDurableMutableInvocation,
+  validateDurableReportInvocation,
+  type DurableMutableInvocationV1,
+  type DurableReportInvocationV1,
+} from './contained-report-operation.js';
 import { projectTerminalDirectReview, validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
 import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
@@ -18,10 +23,9 @@ import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { canonicalJson, sha256 } from './containment.js';
 import { validateCandidateBinding, validateCandidateExecutionLease, type CandidateBindingV2, type CandidateExecutionLeaseV2 } from './candidate.js';
 import {
+  blockReviewFeedback,
   createReviewFeedbackBootstrap,
-  validateImplementationInvocation,
   validateReviewFeedbackExecution,
-  type ReviewFeedbackImplementationInvocationV1,
   type ReviewFeedbackExecutionV1,
 } from './review-feedback.js';
 
@@ -126,7 +130,6 @@ export interface RunRecordV1 {
   lifecycle: Lifecycle;
   cycle: 1 | 2 | 3 | 4 | 5;
   reportRepairs: 0 | 1;
-  transportRetries: 0 | 1;
   issueSnapshot: PersistedIssueSnapshotV1;
   frozenCriteria: PersistedFrozenCriterionV1[];
   reworkFindings: string[];
@@ -138,6 +141,7 @@ export interface RunRecordV1 {
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
   reportInvocation?: DurableReportInvocationV1;
+  mutableInvocation?: DurableMutableInvocationV1;
   reviewFeedback?: ReviewFeedbackExecutionV1;
   changeBindingVersion?: 2;
   candidateBinding?: CandidateBindingV2;
@@ -147,9 +151,7 @@ export interface RunRecordV1 {
     checkPolicySha256: string;
     repairAttempts: 0 | 1 | 2 | 3 | 4 | 5;
     checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string } | CandidateCheckReceiptV2>;
-    implementationStarted?: boolean;
-    repairInvocation?: ReviewFeedbackImplementationInvocationV1 | null;
-    deniedPathsBaseline?: string;
+    repairFindings?: string[];
   };
   skillHashes: Record<string, string>;
   process?: {
@@ -163,7 +165,7 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
-    purpose: 'implementation' | 'proof' | 'spec-author';
+    purpose: 'proof' | 'spec-author';
     resumeLifecycle: Lifecycle;
     resumeReviewStage: DirectReviewStage | null;
   };
@@ -218,6 +220,7 @@ export class FileRunRecordWriter implements RunRecordWriter {
   private readonly backupPath: string;
   private readonly migrationMetadataPath: string;
   private readonly reportLifecycleBackupPath: string;
+  private readonly mutableLifecycleBackupPath: string;
   private readonly now: () => string;
 
   constructor(path: string, options: AtomicStateFileOptions = {}) {
@@ -225,6 +228,7 @@ export class FileRunRecordWriter implements RunRecordWriter {
     this.backupPath = `${path}.pre-candidate-v3`;
     this.migrationMetadataPath = `${this.backupPath}.metadata.json`;
     this.reportLifecycleBackupPath = `${path}.pre-report-lifecycle-v1`;
+    this.mutableLifecycleBackupPath = `${path}.pre-mutable-lifecycle-v1`;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -308,11 +312,13 @@ export class FileRunRecordWriter implements RunRecordWriter {
       catch { throw originalError; }
       try { return { result: validateRunStateFile(raw) }; }
       catch {
-        const migrated = canonicalizeLegacyReportLifecycle(raw, this.reportLifecycleBackupPath);
+        const mutable = hasLegacyMutableLifecycle(raw);
+        const backupPath = mutable ? this.mutableLifecycleBackupPath : this.reportLifecycleBackupPath;
+        const migrated = canonicalizeLegacyReportLifecycle(raw, backupPath);
         if (!migrated) throw originalError;
-        const existingBackup = await readOptionalFile(this.reportLifecycleBackupPath);
+        const existingBackup = await readOptionalFile(backupPath);
         if (existingBackup && !existingBackup.equals(priorBytes)) throw new Error('report lifecycle migration backup conflicts with current source bytes');
-        if (!existingBackup) await writeDurableAtomicFile(this.reportLifecycleBackupPath, priorBytes);
+        if (!existingBackup) await writeDurableAtomicFile(backupPath, priorBytes);
         return { result: migrated, replacementBytes: Buffer.from(`${canonicalJson(migrated)}\n`) };
       }
     });
@@ -397,10 +403,11 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'candidateBinding',
     'executionLease',
     'reportInvocation',
+    'mutableInvocation',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
-    'reportRepairs', 'transportRetries', 'issueSnapshot', 'frozenCriteria', 'reworkFindings',
+    'reportRepairs', 'issueSnapshot', 'frozenCriteria', 'reworkFindings',
     'packageVersion', 'workflowGeneration', 'skillHashes', 'checks', 'createdAt', 'updatedAt', ...optional,
   ], field);
   if (typeof value.runId !== 'string' || !UUID_V4_PATTERN.test(value.runId)) throw new Error(`${field}.runId is invalid`);
@@ -416,7 +423,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (!isLifecycle(value.lifecycle)) throw new Error(`${field}.lifecycle is invalid`);
   if (!Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5) throw new Error(`${field}.cycle is invalid`);
   if (value.reportRepairs !== 0 && value.reportRepairs !== 1) throw new Error(`${field}.reportRepairs is invalid`);
-  if (value.transportRetries !== 0 && value.transportRetries !== 1) throw new Error(`${field}.transportRetries is invalid`);
   validateIssueSnapshot(value.issueSnapshot, `${field}.issueSnapshot`);
   validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
   validateStringList(value.reworkFindings, `${field}.reworkFindings`);
@@ -442,6 +448,21 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       : invocation.operation === 'code-review' ? 'implementing' : 'spec-authoring';
     if (value.lifecycle !== expectedLifecycle) throw new Error(`${field}.reportInvocation lifecycle is invalid`);
   }
+  if (hasOwn(value, 'mutableInvocation')) {
+    const invocation = validateDurableMutableInvocation(value.mutableInvocation);
+    if (value.lifecycle !== 'implementing') throw new Error(`${field}.mutableInvocation lifecycle is invalid`);
+    if (invocation.worktreePath !== value.worktreePath || invocation.generationHash !== routeGenerationHash) {
+      throw new Error(`${field}.mutableInvocation binding is invalid`);
+    }
+    if (invocation.operation === 'qualification-repair' && !hasOwn(value, 'checkQualification')) {
+      throw new Error(`${field}.qualification mutableInvocation requires check qualification`);
+    }
+    const feedbackActive = hasOwn(value, 'reviewFeedback')
+      && (value.reviewFeedback as ReviewFeedbackExecutionV1).activeBatch !== null;
+    if ((invocation.operation === 'review-feedback-implementation') !== feedbackActive) {
+      throw new Error(`${field}.mutableInvocation feedback binding is invalid`);
+    }
+  }
   if (hasOwn(value, 'checkedChangeSha256')) assertSha256(value.checkedChangeSha256, `${field}.checkedChangeSha256`);
   if (hasOwn(value, 'proofId')) assertNonEmptyString(value.proofId, `${field}.proofId`);
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
@@ -465,9 +486,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     const rawProcess = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
       ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
       : undefined;
-    const process = rawProcess && rawProcess.purpose !== 'spec-author'
+    const process = rawProcess && rawProcess.purpose === 'proof'
       ? {
-        purpose: rawProcess.purpose as 'implementation' | 'proof',
+        purpose: rawProcess.purpose,
         resumeLifecycle: rawProcess.resumeLifecycle,
         resumeReviewStage: rawProcess.resumeReviewStage,
       }
@@ -617,7 +638,7 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (!['implementation', 'proof', 'spec-author'].includes(value.purpose as string)) {
+  if (!['proof', 'spec-author'].includes(value.purpose as string)) {
     throw new Error(`${field}.purpose is invalid`);
   }
   if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
@@ -652,11 +673,7 @@ function validateChecks(value: unknown, field: string, allowUnchangedFailure = t
 }
 
 function validateCheckQualification(value: unknown, field: string): asserts value is NonNullable<RunRecordV1['checkQualification']> {
-  const optional = [
-    ...(hasOwn(value, 'implementationStarted') ? ['implementationStarted'] : []),
-    ...(hasOwn(value, 'repairInvocation') ? ['repairInvocation'] : []),
-    ...(hasOwn(value, 'deniedPathsBaseline') ? ['deniedPathsBaseline'] : []),
-  ];
+  const optional = hasOwn(value, 'repairFindings') ? ['repairFindings'] : [];
   assertExactObject(value, ['version', 'checkPolicySha256', 'repairAttempts', 'checks', ...optional], field);
   if (value.version !== 1) throw new Error(`${field}.version is invalid`);
   assertSha256(value.checkPolicySha256, `${field}.checkPolicySha256`);
@@ -664,25 +681,7 @@ function validateCheckQualification(value: unknown, field: string): asserts valu
     throw new Error(`${field}.repairAttempts is invalid`);
   }
   validateChecks(value.checks, `${field}.checks`, false);
-  if (hasOwn(value, 'implementationStarted') && typeof value.implementationStarted !== 'boolean') {
-    throw new Error(`${field}.implementationStarted is invalid`);
-  }
-  if (hasOwn(value, 'repairInvocation') && value.repairInvocation !== null) {
-    validateImplementationInvocation(value.repairInvocation);
-  }
-  if (hasOwn(value, 'deniedPathsBaseline')) assertSha256(value.deniedPathsBaseline, `${field}.deniedPathsBaseline`);
-  if (hasOwn(value, 'deniedPathsBaseline') !== (hasOwn(value, 'repairInvocation') && value.repairInvocation !== null)) {
-    throw new Error(`${field}.deniedPathsBaseline requires a repair invocation`);
-  }
-  const repairInvocation = hasOwn(value, 'repairInvocation')
-    ? value.repairInvocation as ReviewFeedbackImplementationInvocationV1 | null
-    : undefined;
-  if (value.implementationStarted === true && repairInvocation !== null && repairInvocation !== undefined) {
-    throw new Error(`${field} cannot own qualification repair and implementation launches together`);
-  }
-  if (repairInvocation?.phase === 'launched' && value.repairAttempts === 0) {
-    throw new Error(`${field}.repairAttempts must reserve a launched repair`);
-  }
+  if (hasOwn(value, 'repairFindings')) validateStringList(value.repairFindings, `${field}.repairFindings`);
 }
 
 function validateIssueSnapshot(value: unknown, field: string): asserts value is PersistedIssueSnapshotV1 {
@@ -885,6 +884,9 @@ function canonicalizeLegacyReportLifecycle(value: unknown, backupPath: string): 
 
 function canonicalizeLegacyReportRun(run: Record<string, any>, backupPath: string): boolean {
   let changed = false, unsafe = false, routeInFlight = false;
+  const mutable = canonicalizeLegacyMutableRun(run);
+  changed ||= mutable.changed;
+  unsafe ||= mutable.unsafe;
   const route = run.routeExecution as Record<string, any> | undefined;
   if (route) {
     const triageTransport = hasOwn(route, 'triageTransportRetries'), ambiguityTransport = hasOwn(route, 'ambiguityTransportRetries');
@@ -919,6 +921,37 @@ function canonicalizeLegacyReportRun(run: Record<string, any>, backupPath: strin
   run.outcomeEvidenceId = `report-lifecycle-migration:${String(run.runId)}`;
   run.terminalOutcome = { status: 'blocked', kind: 'safety', resumable: false, evidencePath: backupPath };
   return true;
+}
+
+function hasLegacyMutableLifecycle(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || !Array.isArray((value as { runs?: unknown }).runs)) return false;
+  return ((value as { runs: Array<Record<string, any>> }).runs).some((run) =>
+    hasOwn(run, 'transportRetries') || run.process?.purpose === 'implementation'
+    || hasOwn(run.checkQualification, 'implementationStarted') || hasOwn(run.checkQualification, 'repairInvocation')
+    || hasOwn(run.checkQualification, 'deniedPathsBaseline') || hasOwn(run.reviewFeedback, 'implementationInvocation'));
+}
+
+function canonicalizeLegacyMutableRun(run: Record<string, any>): { changed: boolean; unsafe: boolean } {
+  let changed = false, unsafe = false;
+  if (hasOwn(run, 'transportRetries')) {
+    legacyBits([run.transportRetries], 'mutable invocation'); delete run.transportRetries; changed = true;
+  }
+  const qualification = run.checkQualification as Record<string, any> | undefined;
+  if (qualification) {
+    if (qualification.repairInvocation?.phase === 'launched') unsafe = true;
+    for (const field of ['implementationStarted', 'repairInvocation', 'deniedPathsBaseline'])
+      if (hasOwn(qualification, field)) { delete qualification[field]; changed = true; }
+  }
+  const feedback = run.reviewFeedback as Record<string, any> | undefined;
+  if (feedback && hasOwn(feedback, 'implementationInvocation')) {
+    if (feedback.implementationInvocation?.phase === 'launched') unsafe = true;
+    delete feedback.implementationInvocation; changed = true;
+  }
+  if (run.process?.purpose === 'implementation') { delete run.process; changed = unsafe = true; }
+  if (!unsafe) return { changed, unsafe };
+  delete run.mutableInvocation;
+  if (feedback?.activeBatch) run.reviewFeedback = blockReviewFeedback(feedback as unknown as ReviewFeedbackExecutionV1, 'safety', String(run.updatedAt));
+  return { changed: true, unsafe: true };
 }
 
 function legacyBits(values: unknown[], owner: string): void {
