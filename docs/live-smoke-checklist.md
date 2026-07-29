@@ -31,8 +31,10 @@ Its scenarios are intentionally bound to these current owner behaviors:
   reaches review-ready.
 - `diagnostics`: `doctor` and `status` inspect without changing target state,
   after which the normal delivery path still succeeds.
-- `acceptance-proof-positive`: fresh checks and proof are bound to the published
-  change.
+- `authoritative-candidate-publication`: a deliberately stale shared-index entry
+  loses to final worktree bytes; V3 check receipts, the published commit tree,
+  released candidate pin, and removed immutable execution worktrees prove the
+  authoritative-candidate chain end to end.
 - `acceptance-proof-rework`: one proof rejection opens exactly one new cycle
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch

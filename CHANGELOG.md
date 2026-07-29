@@ -18,6 +18,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   detached materializations of one private-index-captured, ref-pinned Git tree.
   Publication creates and observes the exact single-parent commit from that
   tree before push, including restart-safe branch-CAS reconciliation.
+- Replaced the generic positive-proof live-smoke scenario with an
+  `authoritative-candidate-publication` scenario that injects stale shared-index
+  content and proves exact candidate-tree publication plus pin/materialization
+  cleanup.
 
 ### Fixed
 - New issue worktrees now use a freshly fetched configured remote base and are

@@ -31,7 +31,7 @@ async function source(): Promise<string> {
 const retainedScenarios = [
   'package-install', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
-  'acceptance-proof-positive', 'acceptance-proof-rework', 'acceptance-proof-negative',
+  'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
   'review-feedback-continuation', 'quality-gates', 'safety-negative',
 ];
 
@@ -50,7 +50,7 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
     [...profile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
-      'report-repair', 'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
+      'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
       'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
     ],
   );
@@ -61,9 +61,22 @@ test('live smoke omits legacy scenario aliases without distinct V2 behavior', as
   for (const alias of [
     'baseline', 'remote-base-branch', 'scoped-runner-commit', 'run-scoped',
     'loop-policy', 'proof-strategy-non-visual-smoke',
+    'acceptance-proof-positive',
   ]) {
     assert.doesNotMatch(result.stdout, new RegExp(`\\b${alias}\\b`, 'u'));
   }
+});
+
+test('authoritative candidate smoke proves mixed-index capture and exact publication cleanup', async () => {
+  const text = await source();
+  assert.match(text, /authoritative-candidate-publication/u);
+  assert.match(text, /staged content must not become authoritative/u);
+  assert.match(text, /git diff --cached --quiet/u);
+  assert.match(text, /state\.version !== 3/u);
+  assert.match(text, /candidateTreeSha !== publishedTreeSha/u);
+  assert.match(text, /candidate pin survived successful publication/u);
+  assert.match(text, /candidate execution worktree survived successful publication/u);
+  assert.match(text, /candidate execution directory survived successful publication/u);
 });
 
 test('default core release keeps only external integration proofs', async () => {
@@ -282,7 +295,7 @@ test('fixture happy paths normalize proof semantics after real model invocation'
   const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   for (const scenario of [
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'acceptance-proof-positive', 'acceptance-proof-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
   assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
 });

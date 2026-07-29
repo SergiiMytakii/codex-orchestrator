@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,7 +21,7 @@ const scenarioDefinitions = new Map([
   ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runReviewReadyScenario],
-  ['acceptance-proof-positive', runReviewReadyScenario],
+  ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
@@ -35,7 +35,7 @@ const scenarioProfiles = new Map([
   ]],
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
-    'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
+    'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
     'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
@@ -210,12 +210,14 @@ async function configureTarget(context, overrides = {}) {
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.failingCheck
     ? { smoke: `${process.execPath} -e "process.exit(1)"` }
-    : { smoke: `${process.execPath} --version` };
+    : overrides.authoritativeCandidate
+      ? { smoke: 'if [ -e src/live-smoke/authoritative-candidate-publication.txt ]; then [ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ] && git diff --cached --quiet; else git diff --cached --quiet; fi' }
+      : { smoke: `${process.execPath} --version` };
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
 async function runReviewReadyScenario(context, scenario) {
-  await configureTarget(context);
+  await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'review-ready' }, scenario);
@@ -234,7 +236,60 @@ async function runReviewReadyScenario(context, scenario) {
     const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
     if (screenshots.length !== 2) throw new Error(`${scenario}: expected two publishable responsive screenshots`);
   }
-  await recordPublication(context, issue.number);
+  const publication = await recordPublication(context, issue.number);
+  if (scenario === 'authoritative-candidate-publication') {
+    await assertAuthoritativeCandidatePublication(context, record, publication.headSha);
+  }
+}
+
+async function assertAuthoritativeCandidatePublication(context, record, publishedHeadSha) {
+  const state = await readRunState(context);
+  if (state.version !== 3) throw new Error('authoritative-candidate-publication: state.version !== 3');
+  const receipts = record.checks.filter((check) => check.status === 'passed');
+  const bindingIds = new Set(receipts.map((check) => check.bindingId));
+  const candidateTrees = new Set(receipts.map((check) => check.candidateTreeSha));
+  if (receipts.length === 0 || bindingIds.size !== 1 || bindingIds.has(undefined)
+    || candidateTrees.size !== 1 || candidateTrees.has(undefined)) {
+    throw new Error('authoritative-candidate-publication: final checks do not share one V2 candidate binding');
+  }
+  const [bindingId] = bindingIds;
+  const [candidateTreeSha] = candidateTrees;
+  const publishedTreeSha = (await runCommand('git', [
+    '-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`,
+  ], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  if (candidateTreeSha !== publishedTreeSha) {
+    throw new Error('authoritative-candidate-publication: candidateTreeSha !== publishedTreeSha');
+  }
+  const publishedContent = (await runCommand('git', [
+    '-C', context.targetRoot, 'show', `${publishedHeadSha}:src/live-smoke/authoritative-candidate-publication.txt`,
+  ], { timeoutMs: context.options.timeoutMs })).stdout;
+  if (publishedContent !== 'authoritative-candidate-publication\n') {
+    throw new Error('authoritative-candidate-publication: staged content became authoritative');
+  }
+  const pin = `refs/codex-orchestrator/candidates/${record.runId}/${bindingId}`;
+  const pinProbe = await runCommand('git', ['-C', context.targetRoot, 'show-ref', '--verify', '--quiet', pin], {
+    timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 1],
+  });
+  if (pinProbe.status === 0) throw new Error('authoritative-candidate-publication: candidate pin survived successful publication');
+  const worktrees = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout;
+  if (worktrees.includes('/.candidate-executions/')) {
+    throw new Error('authoritative-candidate-publication: candidate execution worktree survived successful publication');
+  }
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const bindingRoot = join(context.targetRoot, config.runner.workspaceRoot, '.candidate-executions', record.runId, bindingId);
+  let residualExecutionPaths = [];
+  try { residualExecutionPaths = await readdir(bindingRoot); }
+  catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+  }
+  if (residualExecutionPaths.length > 0) {
+    throw new Error('authoritative-candidate-publication: candidate execution directory survived successful publication');
+  }
+  if (record.candidateBinding !== undefined || record.executionLease !== undefined) {
+    throw new Error('authoritative-candidate-publication: durable candidate ownership survived successful publication');
+  }
 }
 
 async function assertReworkCycle(context, issueNumber) {
@@ -473,11 +528,16 @@ async function assertExclusiveDaemonCandidate(context, issueNumber) {
 }
 
 async function readRunRecord(context, issueNumber) {
-  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
-  const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
+  const state = await readRunState(context);
   const record = state.runs.find((candidate) => candidate.issueNumber === issueNumber);
   if (!record) throw new Error(`run state for issue #${issueNumber} is missing`);
   return record;
+}
+
+async function readRunState(context) {
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
+  return state;
 }
 
 async function assertEvidenceCode(context, result, expectedCode) {
@@ -750,6 +810,14 @@ function applyFault(scenario, operation, prompt) {
   if (operation === 'implementation' && scenario === 'safety-negative') {
     writeFileSync('.env', 'blocked fixture\\n'); return;
   }
+  if (operation === 'implementation' && scenario === 'authoritative-candidate-publication') {
+    const path = 'src/live-smoke/authoritative-candidate-publication.txt';
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, 'staged content must not become authoritative\\n');
+    runGit(['add', '--', path]);
+    writeFileSync(path, 'authoritative-candidate-publication\\n');
+    return;
+  }
   if (operation !== 'proof') return;
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   if (scenario === 'acceptance-proof-negative') {
@@ -784,7 +852,7 @@ function applyFault(scenario, operation, prompt) {
   }
   if ([
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'acceptance-proof-positive', 'acceptance-proof-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
     writePassingNonVisualProof(criteria, reportPath);
@@ -879,7 +947,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { prompt += chunk; });
 process.stdin.on('end', () => {
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'acceptance-proof-positive';
+  const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'authoritative-candidate-publication';
   mkdirSync(dirname(reportPath), { recursive: true });
   if (prompt.includes('/triage/')) writeTriage(reportPath);
   else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
@@ -1171,7 +1239,7 @@ async function selfTestFakeAgent() {
     await runCommand('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fake codex']);
     const version = await runCommand(fakePath, ['--version'], { cwd: root });
     if (version.stdout !== `${installedVersion}\n`) throw new Error('fake agent version contract failed');
-    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=acceptance-proof-positive' }];
+    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=authoritative-candidate-publication' }];
     const implementationPath = join(root, 'implementation.json');
     await runCommand(fakePath, ['exec', '--output-last-message', implementationPath], {
       cwd: root,
