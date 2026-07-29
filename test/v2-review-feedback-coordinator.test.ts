@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { InMemoryGitHubIssueAdapter } from '../src/v2/adapters/issues.js';
+import { GhCliPullRequestAdapter } from '../src/v2/adapters/gh-pull-request-adapter.js';
+import type { CommandExecutor } from '../src/v2/adapters/gh-cli.js';
 import { InMemoryGitHubPullRequestAdapter, type GitHubPullRequestReviewTarget } from '../src/v2/adapters/pull-requests.js';
 import { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
 
@@ -29,7 +31,7 @@ test('freezes only authorized eligible review sources', async () => {
   assert.deepEqual(issues.checked, ['42', '42', '43']);
 });
 
-test('rejects torn observations outdated threads and other-head reviews', async () => {
+test('defers torn observations to a later tick and ignores ineligible old feedback', async () => {
   const pullRequests = pullRequestFixture();
   pullRequests.reviewThreads.set(17, [thread('T_old', 'writer', '42', 'old', false, true, 'a'.repeat(40))]);
   pullRequests.submittedReviews.set(17, [review('R_old', 'writer', '42', 'old review', 'CHANGES_REQUESTED', 'b'.repeat(40))]);
@@ -46,9 +48,115 @@ test('rejects torn observations outdated threads and other-head reviews', async 
   };
   const torn = await coordinator(pullRequests, new PermissionFixture({ '42': 'write' }))
     .observeAndFreeze(observationInput());
-  assert.equal(torn.status, 'blocked');
-  if (torn.status === 'blocked') assert.match(torn.reason, /torn/u);
-  assert.equal(reads, 4);
+  assert.equal(torn.status, 'retryable');
+  if (torn.status === 'retryable') assert.match(torn.reason, /torn/u);
+  assert.equal(reads, 2);
+});
+
+test('one incomplete GraphQL page defers without an internal retry and succeeds on the next tick', async () => {
+  const pullRequests = pullRequestFixture();
+  let reads = 0;
+  const original = pullRequests.listReviewThreads.bind(pullRequests);
+  pullRequests.listReviewThreads = async (number) => {
+    reads += 1;
+    if (reads === 1) throw new Error('temporary GraphQL pagination failure');
+    return original(number);
+  };
+  const service = coordinator(pullRequests, new PermissionFixture({ '42': 'write' }));
+
+  assert.equal((await service.observeAndFreeze(observationInput())).status, 'retryable');
+  assert.equal(reads, 1);
+  assert.equal((await service.observeAndFreeze(observationInput())).status, 'none');
+  assert.equal(reads, 2);
+});
+
+for (const paginationFailure of ['omitted-end-cursor', 'page-bound'] as const) {
+  test(`real GraphQL ${paginationFailure} pagination uncertainty remains retryable`, async () => {
+    let threadPages = 0;
+    const executor: CommandExecutor = async (_file, args) => {
+      const query = args.find((argument) => argument.startsWith('query=')) ?? '';
+      if (query.includes('ReviewThreads')) {
+        threadPages += 1;
+        return jsonResult({ data: { repository: { pullRequest: { reviewThreads: {
+          nodes: [], pageInfo: {
+            hasNextPage: true,
+            endCursor: paginationFailure === 'omitted-end-cursor' ? null : `cursor-${threadPages}`,
+          },
+        } } } } });
+      }
+      if (args.some((argument) => argument.endsWith('/reviews'))) return { stdout: '', stderr: '' };
+      return jsonResult(reviewTargetGraphQl());
+    };
+    const service = new ReviewFeedbackCoordinator({
+      pullRequests: new GhCliPullRequestAdapter('owner', 'repo', executor),
+      issues: new PermissionFixture({}),
+    });
+
+    const result = await service.observeAndFreeze(observationInput());
+
+    assert.equal(result.status, 'retryable');
+    if (result.status === 'retryable') assert.match(result.reason, /pagination/u);
+    assert.equal(threadPages, paginationFailure === 'omitted-end-cursor' ? 1 : 20);
+  });
+}
+
+test('non-authoritative target metadata drift does not tear an otherwise stable authority observation', async () => {
+  const pullRequests = pullRequestFixture();
+  let reads = 0;
+  let threadReads = 0;
+  let reviewReads = 0;
+  const original = pullRequests.getReviewTarget.bind(pullRequests);
+  const originalThreads = pullRequests.listReviewThreads.bind(pullRequests);
+  const originalReviews = pullRequests.listSubmittedReviews.bind(pullRequests);
+  pullRequests.getReviewTarget = async (number) => {
+    const value = await original(number);
+    reads += 1;
+    return value ? { ...value, title: reads === 1 ? 'old title' : 'new title' } : undefined;
+  };
+  pullRequests.listReviewThreads = async (number) => { threadReads += 1; return originalThreads(number); };
+  pullRequests.listSubmittedReviews = async (number) => { reviewReads += 1; return originalReviews(number); };
+
+  assert.equal((await coordinator(pullRequests, new PermissionFixture({ '42': 'write' }))
+    .observeAndFreeze(observationInput())).status, 'none');
+  assert.deepEqual({ targetReads: reads, threadReads, reviewReads }, { targetReads: 2, threadReads: 1, reviewReads: 1 });
+});
+
+for (const heads of [
+  { rest: 'a'.repeat(40), graphQl: 'b'.repeat(40) },
+  { rest: 'b'.repeat(40), graphQl: 'a'.repeat(40) },
+]) {
+  test(`independent REST ${heads.rest[0]} and GraphQL ${heads.graphQl[0]} heads are retryable disagreement`, async () => {
+    const executor = productionObservationExecutor(heads.rest, heads.graphQl);
+    const pullRequests = new GhCliPullRequestAdapter('owner', 'repo', executor);
+    const [rest] = await pullRequests.listAllByHeadBranch('codex/issue-42');
+    assert.ok(rest?.headSha);
+    const input = { ...observationInput(), expectedHeadSha: rest.headSha, restPullRequest: {
+      number: rest.number, nodeId: rest.nodeId, headSha: rest.headSha, body: rest.body,
+    } } as Parameters<ReviewFeedbackCoordinator['observeAndFreeze']>[0];
+
+    const result = await new ReviewFeedbackCoordinator({ pullRequests, issues: new PermissionFixture({}) })
+      .observeAndFreeze(input);
+
+    assert.equal(result.status, 'retryable');
+    if (result.status === 'retryable') assert.match(result.reason, /REST.*GraphQL|disagree/iu);
+  });
+}
+
+test('authority drift during permission observation defers the whole trusted batch', async () => {
+  const pullRequests = pullRequestFixture();
+  pullRequests.reviewThreads.set(17, [thread('T_good', 'writer', '42', 'Root body', false, false, 'a'.repeat(40))]);
+  const issues = new PermissionFixture({ '42': 'write' });
+  const readPermission = issues.getRepositoryPermission.bind(issues);
+  issues.getRepositoryPermission = async (login, userId) => {
+    const permission = await readPermission(login, userId);
+    pullRequests.reviewTargets.set(17, target('b'.repeat(40)));
+    return permission;
+  };
+
+  const result = await coordinator(pullRequests, issues).observeAndFreeze(observationInput());
+
+  assert.equal(result.status, 'retryable');
+  if (result.status === 'retryable') assert.match(result.reason, /torn/u);
 });
 
 test('revalidation rejects edited or revoked sources and post-push permits only derived thread state drift', async () => {
@@ -79,10 +187,12 @@ function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: Per
 }
 
 function observationInput() {
+  const marker = '<!-- codex-orchestrator:run:00000000-0000-4000-8000-000000000001 -->';
   return {
     runId: '00000000-0000-4000-8000-000000000001', canonicalRepository: 'owner/repo', pullRequestNumber: 17,
     expectedHeadSha: 'a'.repeat(40), expectedHeadRefName: 'codex/issue-42', expectedBaseRefName: 'main',
-    marker: '<!-- codex-orchestrator:run:00000000-0000-4000-8000-000000000001 -->', consumedSourceIds: [],
+    marker, consumedSourceIds: [],
+    restPullRequest: { number: 17, nodeId: 'PR_1', headSha: 'a'.repeat(40), body: marker },
   };
 }
 
@@ -130,4 +240,40 @@ class PermissionFixture extends InMemoryGitHubIssueAdapter {
     this.checked.push(userId);
     return { permission: this.permissions[userId] ?? 'none', userId, checkedAt: '2026-07-27T10:04:00.000Z' } as const;
   }
+}
+
+function jsonResult(value: unknown): { stdout: string; stderr: string } {
+  return { stdout: JSON.stringify(value), stderr: '' };
+}
+
+function reviewTargetGraphQl(headSha = 'a'.repeat(40)) {
+  return { data: { repository: {
+    id: 'REPO_1', name: 'repo', owner: { id: 'OWNER_1', login: 'owner' },
+    pullRequest: {
+      id: 'PR_1', databaseId: 17, number: 17, url: 'https://github.com/owner/repo/pull/17',
+      state: 'OPEN', isDraft: true, isCrossRepository: false, headRefName: 'codex/issue-42',
+      headRefOid: headSha, baseRefName: 'main', title: 'Change', body: observationInput().marker,
+      authorAssociation: 'MEMBER',
+    },
+  } } };
+}
+
+function productionObservationExecutor(restHead: string, graphQlHead: string): CommandExecutor {
+  return async (_file, args) => {
+    const query = args.find((argument) => argument.startsWith('query=')) ?? '';
+    if (args.includes('--paginate')) return jsonResult([[restPullRequestPayload(restHead)]]);
+    if (query.includes('ReviewThreads')) return jsonResult({ data: { repository: { pullRequest: { reviewThreads: {
+      nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+    } } } } });
+    if (args.some((argument) => argument.endsWith('/reviews'))) return { stdout: '', stderr: '' };
+    return jsonResult(reviewTargetGraphQl(graphQlHead));
+  };
+}
+
+function restPullRequestPayload(headSha: string) {
+  return {
+    number: 17, node_id: 'PR_1', html_url: 'https://github.com/owner/repo/pull/17',
+    state: 'open', merged_at: null, draft: true, title: 'Change', body: observationInput().marker,
+    author_association: 'MEMBER', head: { ref: 'codex/issue-42', sha: headSha }, base: { ref: 'main' },
+  };
 }

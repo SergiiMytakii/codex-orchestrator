@@ -29,6 +29,7 @@ export interface ReviewFeedbackObservationInput {
   expectedBaseRefName: string;
   marker: string;
   consumedSourceIds: string[];
+  restPullRequest: { number: number; nodeId: string; headSha: string; body: string };
 }
 
 export type ReviewFeedbackObservationResult =
@@ -56,51 +57,41 @@ export class ReviewFeedbackCoordinator {
   }) {}
 
   public async observeAndFreeze(input: ReviewFeedbackObservationInput): Promise<ReviewFeedbackObservationResult> {
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const snapshot = await this.readSnapshot(input.pullRequestNumber);
-        const targetError = validateObservationTarget(snapshot.before, input, input.expectedHeadSha);
-        if (targetError) return { status: 'blocked', reason: targetError };
-        if (!sameTarget(snapshot.before, snapshot.after)) {
-          if (attempt === 1) continue;
-          return { status: 'blocked', reason: 'GitHub pull request observation remained torn after one retry' };
-        }
+    try {
+      const snapshot = await this.readBoundedSnapshot(input.pullRequestNumber, input.marker, input.restPullRequest, async ({ threads, reviews }) => {
         const consumed = new Set(input.consumedSourceIds);
-        const candidates = collectCandidates(snapshot.threads, snapshot.reviews, input.expectedHeadSha)
+        const candidates = collectCandidates(threads, reviews, input.expectedHeadSha)
           .filter((candidate) => !consumed.has(candidate.source.sourceId))
           .sort((left, right) => left.source.sourceId.localeCompare(right.source.sourceId));
         const sources: FrozenReviewFeedbackSourceV1[] = [];
         for (const candidate of candidates) {
           const permission = await this.readTrustedPermission(candidate.login, candidate.userId);
-          if (!permission) continue;
-          sources.push({ ...candidate.source, permission });
+          if (permission) sources.push({ ...candidate.source, permission });
         }
-        if (sources.length === 0) return { status: 'none', observedHeadSha: input.expectedHeadSha, eligibleSourceIds: [] };
-        return {
-          status: 'frozen',
-          batch: createFrozenReviewFeedbackBatch({
-            runId: input.runId,
-            canonicalRepository: input.canonicalRepository,
-            pullRequest: {
-              nodeId: snapshot.before.nodeId,
-              number: snapshot.before.number,
-              headSha: snapshot.before.headRefOid,
-              headRefName: snapshot.before.headRefName,
-              baseRefName: snapshot.before.baseRefName,
-              marker: input.marker,
-            },
-            priorPublishedHeadSha: input.expectedHeadSha,
-            sources,
-            frozenAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-          }),
-        };
-      } catch (error) {
-        const classified = classifyReadError(error);
-        if (classified.status === 'retryable' && attempt === 1) continue;
-        return classified;
-      }
-    }
-    return { status: 'retryable', reason: 'GitHub review observation did not converge' };
+        return sources;
+      });
+      const targetError = validateObservationTarget(snapshot.target, input, input.expectedHeadSha);
+      if (targetError) return { status: 'blocked', reason: targetError };
+      if (snapshot.value.length === 0) return { status: 'none', observedHeadSha: input.expectedHeadSha, eligibleSourceIds: [] };
+      return {
+        status: 'frozen',
+        batch: createFrozenReviewFeedbackBatch({
+          runId: input.runId,
+          canonicalRepository: input.canonicalRepository,
+          pullRequest: {
+            nodeId: snapshot.target.nodeId,
+            number: snapshot.target.number,
+            headSha: snapshot.target.headRefOid,
+            headRefName: snapshot.target.headRefName,
+            baseRefName: snapshot.target.baseRefName,
+            marker: input.marker,
+          },
+          priorPublishedHeadSha: input.expectedHeadSha,
+          sources: snapshot.value,
+          frozenAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
+        }),
+      };
+    } catch (error) { return classifyReadError(error); }
   }
 
   public async revalidate(input: {
@@ -109,8 +100,27 @@ export class ReviewFeedbackCoordinator {
     expectedHeadSha: string;
   }): Promise<ReviewFeedbackRevalidationResult> {
     try {
-      const snapshot = await this.readSnapshot(input.batch.pullRequest.number);
-      if (!sameTarget(snapshot.before, snapshot.after)) return { status: 'blocked', reason: 'GitHub pull request revalidation was torn' };
+      const snapshot = await this.readBoundedSnapshot(
+        input.batch.pullRequest.number,
+        input.batch.pullRequest.marker,
+        undefined,
+        async ({ threads, reviews }) => {
+          for (const frozen of input.batch.sources) {
+            const current = findCandidate(threads, reviews, frozen);
+            if (!current) throw new GitHubPermissionSafetyError(`Frozen review source ${frozen.sourceId} was deleted or became ineligible`);
+            if (current.source.body !== frozen.body || current.source.bodySha256 !== frozen.bodySha256
+              || current.source.snapshotSha256 !== frozen.snapshotSha256 || current.source.commitSha !== frozen.commitSha
+              || canonicalJson(current.source.author) !== canonicalJson(frozen.author)
+              || (input.epoch === 'pre-update' && canonicalJson(current.source.threadState) !== canonicalJson(frozen.threadState))) {
+              throw new GitHubPermissionSafetyError(`Frozen review source ${frozen.sourceId} drifted`);
+            }
+            const permission = await this.readTrustedPermission(current.login, current.userId);
+            if (!permission || permission.userId !== frozen.permission.userId) {
+              throw new GitHubPermissionSafetyError(`Frozen review source ${frozen.sourceId} permission was revoked`);
+            }
+          }
+        },
+      );
       const expected = {
         runId: input.batch.runId,
         canonicalRepository: input.batch.canonicalRepository,
@@ -120,24 +130,14 @@ export class ReviewFeedbackCoordinator {
         expectedBaseRefName: input.batch.pullRequest.baseRefName,
         marker: input.batch.pullRequest.marker,
         consumedSourceIds: [],
+        restPullRequest: {
+          number: input.batch.pullRequest.number, nodeId: input.batch.pullRequest.nodeId,
+          headSha: input.expectedHeadSha, body: input.batch.pullRequest.marker,
+        },
       };
-      const targetError = validateObservationTarget(snapshot.before, expected, input.expectedHeadSha);
-      if (targetError || snapshot.before.nodeId !== input.batch.pullRequest.nodeId) {
+      const targetError = validateObservationTarget(snapshot.target, expected, input.expectedHeadSha);
+      if (targetError || snapshot.target.nodeId !== input.batch.pullRequest.nodeId) {
         return { status: 'blocked', reason: targetError ?? 'GitHub pull request node identity drifted' };
-      }
-      for (const frozen of input.batch.sources) {
-        const current = findCandidate(snapshot.threads, snapshot.reviews, frozen);
-        if (!current) return { status: 'blocked', reason: `Frozen review source ${frozen.sourceId} was deleted or became ineligible` };
-        if (current.source.body !== frozen.body || current.source.bodySha256 !== frozen.bodySha256
-          || current.source.snapshotSha256 !== frozen.snapshotSha256 || current.source.commitSha !== frozen.commitSha
-          || canonicalJson(current.source.author) !== canonicalJson(frozen.author)
-          || (input.epoch === 'pre-update' && canonicalJson(current.source.threadState) !== canonicalJson(frozen.threadState))) {
-          return { status: 'blocked', reason: `Frozen review source ${frozen.sourceId} drifted` };
-        }
-        const permission = await this.readTrustedPermission(current.login, current.userId);
-        if (!permission || permission.userId !== frozen.permission.userId) {
-          return { status: 'blocked', reason: `Frozen review source ${frozen.sourceId} permission was revoked` };
-        }
       }
       return { status: 'valid', observedHeadSha: input.expectedHeadSha };
     } catch (error) {
@@ -145,21 +145,28 @@ export class ReviewFeedbackCoordinator {
     }
   }
 
-  private async readSnapshot(number: number): Promise<{
-    before: GitHubPullRequestReviewTarget;
-    after: GitHubPullRequestReviewTarget;
-    threads: GitHubPullRequestReviewThread[];
-    reviews: GitHubSubmittedPullRequestReview[];
-  }> {
+  private async readBoundedSnapshot<T>(
+    number: number,
+    marker: string,
+    rest: ReviewFeedbackObservationInput['restPullRequest'] | undefined,
+    inspect: (snapshot: { threads: GitHubPullRequestReviewThread[]; reviews: GitHubSubmittedPullRequestReview[] }) => Promise<T>,
+  ): Promise<{ target: GitHubPullRequestReviewTarget; value: T }> {
     const before = await this.dependencies.pullRequests.getReviewTarget(number);
-    if (!before) throw new GitHubPermissionSafetyError('Marker-bound pull request was not found');
+    if (!before) throw new GitHubPermissionRetryableError('Marker-bound pull request observation was incomplete');
     const [threads, reviews] = await Promise.all([
       this.dependencies.pullRequests.listReviewThreads(number),
       this.dependencies.pullRequests.listSubmittedReviews(number),
     ]);
+    let value: T | undefined;
+    let inspectionError: unknown;
+    try { value = await inspect({ threads, reviews }); }
+    catch (error) { inspectionError = error; }
     const after = await this.dependencies.pullRequests.getReviewTarget(number);
-    if (!after) throw new GitHubPermissionSafetyError('Marker-bound pull request disappeared during observation');
-    return { before, after, threads, reviews };
+    if (!after) throw new GitHubPermissionRetryableError('Marker-bound pull request observation became incomplete');
+    const uncertainty = authorityUncertainty(before, after, marker, rest);
+    if (uncertainty) throw new GitHubPermissionRetryableError(uncertainty);
+    if (inspectionError) throw inspectionError;
+    return { target: before, value: value as T };
   }
 
   private async readTrustedPermission(login: string, userId: string): Promise<FrozenReviewFeedbackSourceV1['permission'] | undefined> {
@@ -284,8 +291,33 @@ function validateObservationTarget(
   return undefined;
 }
 
-function sameTarget(left: GitHubPullRequestReviewTarget, right: GitHubPullRequestReviewTarget): boolean {
-  return canonicalJson(left) === canonicalJson(right);
+function authorityProjection(target: GitHubPullRequestReviewTarget, marker: string) {
+  return {
+    repositoryNodeId: target.repository.nodeId,
+    repositoryName: target.repository.name.toLowerCase(),
+    repositoryOwnerNodeId: target.repository.owner.nodeId,
+    repositoryOwnerLogin: target.repository.owner.login.toLowerCase(),
+    number: target.number, nodeId: target.nodeId, state: target.state, isDraft: target.isDraft,
+    isCrossRepository: target.isCrossRepository, headRefName: target.headRefName,
+    headRefOid: target.headRefOid, baseRefName: target.baseRefName, hasMarker: target.body.includes(marker),
+  };
+}
+
+function authorityUncertainty(
+  before: GitHubPullRequestReviewTarget,
+  after: GitHubPullRequestReviewTarget,
+  marker: string,
+  rest: ReviewFeedbackObservationInput['restPullRequest'] | undefined,
+): string | undefined {
+  if (canonicalJson(authorityProjection(before, marker)) !== canonicalJson(authorityProjection(after, marker))) {
+    return 'GitHub pull request authority observation was torn';
+  }
+  if (rest && canonicalJson({
+    number: rest.number, nodeId: rest.nodeId, headSha: rest.headSha, hasMarker: rest.body.includes(marker),
+  }) !== canonicalJson({
+    number: before.number, nodeId: before.nodeId, headSha: before.headRefOid, hasMarker: before.body.includes(marker),
+  })) return 'GitHub REST and GraphQL authority observations disagree';
+  return undefined;
 }
 
 function normalizePath(path: string): string {
@@ -296,7 +328,8 @@ function normalizePath(path: string): string {
 
 function classifyReadError(error: unknown): Extract<ReviewFeedbackObservationResult, { status: 'retryable' | 'blocked' }> {
   const message = error instanceof Error ? error.message : 'Unknown GitHub review read failure';
-  if (error instanceof GitHubPermissionRetryableError || /failed to run|timed out|temporar|transport/iu.test(message)) {
+  if (error instanceof GitHubPermissionRetryableError
+    || /failed to run|timed out|temporar|transport|pagination (?:omitted endCursor|exceeded (?:its )?(?:page )?bound(?: or omitted endCursor)?)/iu.test(message)) {
     return { status: 'retryable', reason: message };
   }
   return { status: 'blocked', reason: message };

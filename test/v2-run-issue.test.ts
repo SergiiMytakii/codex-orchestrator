@@ -725,7 +725,7 @@ test('repeated runIssue replays the durable terminal outcome without a second cl
   assert.equal((await fixture.store.read()).runs.length, 1);
 });
 
-test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
+test('incomplete review observation preserves the review-ready feedback baseline for a later tick', async () => {
   const fixture = await runFixture();
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   const before = (await fixture.store.read()).runs[0]!;
@@ -733,14 +733,14 @@ test('review-ready observation safety block retains the feedback baseline and hi
   fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
 
   const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.deepEqual(pick(blocked, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const after = (await fixture.store.read()).runs[0]!;
   assert.equal(after.reviewFeedback?.phase, 'idle');
   assert.equal(after.reviewFeedback?.previousPublishedHeadSha, previousHead);
   assert.deepEqual(after.reviewFeedback?.history, before.reviewFeedback?.history);
 });
 
-test('migrated bootstrap feedback can fail closed without losing its owner', async () => {
+test('migrated bootstrap feedback survives incomplete observation without losing its owner', async () => {
   const fixture = await runFixture();
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   const state = await fixture.store.read();
@@ -751,8 +751,78 @@ test('migrated bootstrap feedback can fail closed without losing its owner', asy
   fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
 
   const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.deepEqual(pick(blocked, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.phase, 'bootstrap-required');
+});
+
+test('migrated bootstrap does not consume feedback across a torn claim observation', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const persisted = await fixture.store.read();
+  const record = persisted.runs[0]!;
+  const head = record.reviewFeedback!.previousPublishedHeadSha!;
+  await fixture.store.compareAndSwap(persisted.generation, {
+    schema: persisted.schema, version: persisted.version,
+    runs: [{ ...record, reviewFeedback: createReviewFeedbackBootstrap() }],
+  });
+  const bootstrap = (await fixture.store.read()).runs[0]!;
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: 'https://example.invalid/pull/1', body: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
+    number: 1, nodeId: 'PR_1', headSha: head,
+  });
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({
+      status: 'frozen',
+      batch: trustedFeedbackBatch(record.runId, record.canonicalRepository, record.branchName, head),
+    }),
+  } as unknown as ReviewFeedbackCoordinator;
+  const readIssue = fixture.dependencies.issues.read;
+  let reads = 0;
+  fixture.dependencies.issues.read = async (issueNumber) => {
+    const issue = await readIssue(issueNumber);
+    reads += 1;
+    return issue && reads === 2 ? { ...issue, comments: [] } : issue;
+  };
+  const effectsBefore = fixture.events.filter((event) => event.startsWith('effect:') || event === 'agent').length;
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual((await fixture.store.read()).runs[0], bootstrap);
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event === 'agent').length, effectsBefore);
+});
+
+test('torn issue claim observation preserves review-ready and stable claim loss keeps the safety terminal', async () => {
+  const fixture = await runFixture();
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const before = (await fixture.store.read()).runs[0]!;
+  const head = before.reviewFeedback!.previousPublishedHeadSha!;
+  const batch = trustedFeedbackBatch(before.runId, before.canonicalRepository, before.branchName, head);
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: 'https://example.invalid/pull/1', body: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
+    number: 1, nodeId: 'PR_1', headSha: head,
+  });
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch }),
+  } as unknown as ReviewFeedbackCoordinator;
+  const readIssue = fixture.dependencies.issues.read;
+  let continuationReads = 0;
+  fixture.dependencies.issues.read = async (issueNumber) => {
+    const issue = await readIssue(issueNumber);
+    continuationReads += 1;
+    return issue && continuationReads >= 2 ? { ...issue, comments: [] } : issue;
+  };
+  const effectsBefore = fixture.events.filter((event) => event.startsWith('effect:') || event === 'agent').length;
+
+  const torn = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(torn, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual((await fixture.store.read()).runs[0], before);
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event === 'agent').length, effectsBefore);
+
+  const stable = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(stable, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
 });
 
 test('review-ready replay remains effect-free without an eligible feedback batch and updates the same PR once for a trusted batch', async () => {
@@ -762,6 +832,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   const initialState = await fixture.store.read();
   const record = initialState.runs[0]!;
   const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
+  const reviewCallsBeforeFeedback = fixture.events.filter((event) => event === 'review:code-review').length;
   assert.equal(record.reviewFeedback?.phase, 'idle');
 
   const batch = createFrozenReviewFeedbackBatch({
@@ -785,9 +856,11 @@ test('review-ready replay remains effect-free without an eligible feedback batch
     frozenAt: '2026-07-16T12:00:00.000Z',
   });
   let offered = false;
+  let observationReads = 0;
   let transientPrePush = true;
   fixture.dependencies.reviewFeedback = {
     observeAndFreeze: async () => {
+      observationReads += 1;
       if (!offered) { offered = true; return { status: 'frozen', batch }; }
       return { status: 'none', observedHeadSha: await fixture.dependencies.git.getHead(fixture.worktreePath), eligibleSourceIds: [] };
     },
@@ -849,10 +922,15 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   offered = false;
 
   let rejectActivationLabels = true;
+  let activationLabelWrites = 0;
   fixture.dependencies.issues.setLabels = async (issueNumber, next) => {
-    if (rejectActivationLabels && next.includes('agent:running')) {
-      rejectActivationLabels = false;
-      throw new Error('activation labels interrupted');
+    if (next.includes('agent:running')) {
+      activationLabelWrites += 1;
+      if (rejectActivationLabels) {
+        rejectActivationLabels = false;
+        await setLabels(issueNumber, next);
+        throw new Error('activation labels interrupted after effect');
+      }
     }
     return setLabels(issueNumber, next);
   };
@@ -866,6 +944,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   const continuationStart = fixture.events.length;
   const transient = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(transient, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal(activationLabelWrites, 1, 'effect-before-CAS recovery repeated the activation label write');
   const interruptedPublication = (await fixture.store.read()).runs[0]!;
   assert.equal(interruptedPublication.reviewFeedback?.phase, 'publishing');
   assert.equal(interruptedPublication.intent?.kind, 'review-update-push');
@@ -903,12 +982,24 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   assert.equal(after.cycle, record.cycle);
   assert.equal(after.reviewFeedback?.phase, 'idle');
   assert.equal(after.reviewFeedback?.history.length, 1);
+  assert.equal(observationReads, 1);
+  assert.equal(feedbackImplementationCalls, 1);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length - reviewCallsBeforeFeedback, 1);
+  assert.equal(activationLabelWrites, 1);
   assert.equal(prComments.length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
 
   const effectsBeforeReplay = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length;
+  const workerCallsBeforeReplay = feedbackImplementationCalls;
+  const reviewCallsBeforeReplay = fixture.events.filter((event) => event === 'review:code-review').length;
+  const labelWritesBeforeReplay = activationLabelWrites;
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(replay.status, 'review-ready');
+  assert.equal(observationReads, 2);
+  assert.equal(feedbackImplementationCalls, workerCallsBeforeReplay);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, reviewCallsBeforeReplay);
+  assert.equal(activationLabelWrites, labelWritesBeforeReplay);
+  assert.equal(prComments.length, 1);
   assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length, effectsBeforeReplay);
 
   const secondHead = after.reviewFeedback!.previousPublishedHeadSha!;
@@ -2237,6 +2328,28 @@ interface FixtureOptions {
   issueBodyAfterClaim?: string;
   expectedTriageIssueBody?: string;
   issueBody?: string;
+}
+
+function trustedFeedbackBatch(runId: string, canonicalRepository: string, branchName: string, headSha: string) {
+  return createFrozenReviewFeedbackBatch({
+    runId, canonicalRepository,
+    pullRequest: {
+      nodeId: 'PR_1', number: 1, headSha, headRefName: branchName, baseRefName: 'main',
+      marker: `<!-- codex-orchestrator:run:${runId}:pr -->`,
+    },
+    priorPublishedHeadSha: headSha,
+    sources: [{
+      sourceId: 'pr-thread:torn-claim', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_torn',
+      path: 'feature.txt', line: 1, body: 'Change this implementation.',
+      bodySha256: hashReviewFeedbackText('Change this implementation.'),
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'torn-claim' }),
+      threadState: { isResolved: false, isOutdated: false }, commitSha: headSha,
+      sourceCreatedAt: '2026-07-16T12:05:00.000Z', sourceUpdatedAt: '2026-07-16T12:05:00.000Z',
+      author: { login: 'writer', userId: '42' },
+      permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:05:00.000Z' },
+    }],
+    frozenAt: '2026-07-16T12:05:00.000Z',
+  });
 }
 
 async function runFixture(options: FixtureOptions = {}) {

@@ -1554,13 +1554,12 @@ export function createV2Runtime(input: {
         if (matches.length > 1) throw new Error('multiple open pull requests match publication intent');
         const match = matches[0];
         if (!match) return undefined;
-        const reviewTarget = await input.pullRequests.getReviewTarget(match.number);
         return {
           url: match.url,
           body: match.body,
           number: match.number,
           nodeId: match.nodeId,
-          ...(reviewTarget ? { headSha: reviewTarget.headRefOid } : {}),
+          ...(match.headSha ? { headSha: match.headSha } : {}),
         };
       },
       createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),

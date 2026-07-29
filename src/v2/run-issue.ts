@@ -893,6 +893,7 @@ export class RunIssue {
     starting: ActiveRun,
     targetRoot: string,
     config: AgentAutoConfig,
+    initialIssue: RunIssueSnapshot | undefined,
   ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
     const terminal = starting.record.terminalOutcome;
     const feedback = starting.record.reviewFeedback;
@@ -900,12 +901,19 @@ export class RunIssue {
       || starting.record.routeReceipt?.route !== 'direct' || starting.record.directReview?.status !== 'clear') {
       return { result: publicOutcome(terminal!) };
     }
-    const pullRequest = await this.dependencies.pullRequests.findOpen({
-      headBranch: starting.record.branchName,
-      baseBranch: config.github.baseBranch,
-    });
+    const reviewLabels = [config.github.labels.review.name];
+    const initialAuthority = this.reviewReadyIssueAuthority(initialIssue, starting.record);
+    if (!initialAuthority) return { result: await this.invokedFailure(starting, 'review-feedback-issue-observation-incomplete') };
+    if (!sameStrings(initialAuthority.labels, reviewLabels)) return { result: publicOutcome(terminal) };
+    let pullRequest: Awaited<ReturnType<RunIssueDependencies['pullRequests']['findOpen']>>;
+    try {
+      pullRequest = await this.dependencies.pullRequests.findOpen({
+        headBranch: starting.record.branchName,
+        baseBranch: config.github.baseBranch,
+      });
+    } catch { return { result: await this.invokedFailure(starting, 'review-feedback-pr-observation-incomplete') }; }
     if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
-      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-pr-identity-missing') };
+      return { result: await this.invokedFailure(starting, 'review-feedback-pr-observation-incomplete') };
     }
     const expectedHeadSha = feedback.phase === 'bootstrap-required'
       ? pullRequest.headSha
@@ -922,10 +930,27 @@ export class RunIssue {
       expectedBaseRefName: config.github.baseBranch,
       marker: `<!-- codex-orchestrator:run:${starting.record.runId}:pr -->`,
       consumedSourceIds: feedback.consumedSourceIds,
+      restPullRequest: {
+        number: pullRequest.number, nodeId: pullRequest.nodeId, headSha: pullRequest.headSha, body: pullRequest.body,
+      },
     });
     if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
     if (observed.status === 'blocked') {
       return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-observation-blocked') };
+    }
+    const willPersistFeedback = feedback.phase === 'bootstrap-required'
+      || (feedback.phase === 'idle' && observed.status === 'frozen');
+    if (willPersistFeedback) {
+      let currentIssue: RunIssueSnapshot | undefined;
+      try { currentIssue = await this.readIssue(starting.record.issueNumber); }
+      catch { return { result: await this.invokedFailure(starting, 'review-feedback-issue-observation-incomplete') }; }
+      const currentAuthority = this.reviewReadyIssueAuthority(currentIssue, starting.record);
+      if (!currentAuthority || canonicalJson(currentAuthority) !== canonicalJson(initialAuthority)) {
+        return { result: await this.invokedFailure(starting, 'review-feedback-issue-observation-torn') };
+      }
+      if (currentAuthority.state !== 'OPEN' || !currentAuthority.trustedClaim) {
+        return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-claim-authority-diverged') };
+      }
     }
     if (feedback.phase === 'bootstrap-required') {
       const sourceIds = observed.status === 'frozen'
@@ -937,10 +962,6 @@ export class RunIssue {
       return { result: publicOutcome(active.record.terminalOutcome!) };
     }
     if (feedback.phase !== 'idle' || observed.status === 'none') return { result: publicOutcome(terminal) };
-
-    if (!await this.authorizedForExactLabels(starting, [config.github.labels.review.name])) {
-      return { result: publicOutcome(terminal) };
-    }
 
     const projected = projectReviewFeedbackBatch(observed.batch, starting.record.directReview.targetRevision);
     const repairReview = beginDirectReviewRepair(starting.record.directReview, projected.repairFindings);
@@ -967,6 +988,13 @@ export class RunIssue {
       },
     });
     return this.resumeActivatedReviewFeedback(active, targetRoot, config);
+  }
+
+  private reviewReadyIssueAuthority(issue: RunIssueSnapshot | undefined, record: RunRecordV1): {
+    state: RunIssueSnapshot['state']; labels: string[]; trustedClaim: boolean;
+  } | undefined {
+    if (!issue) return undefined;
+    return { state: issue.state, labels: sortedUnique(issue.labels), trustedClaim: this.hasTrustedClaim(issue, record) };
   }
 
   private async resumeActivatedReviewFeedback(
@@ -1180,7 +1208,7 @@ export class RunIssue {
           if (active.record.terminalOutcome.status !== 'review-ready') {
             return publicOutcome(active.record.terminalOutcome);
           } else {
-            const continuation = await this.continueReviewReady(active, targetRoot, config);
+            const continuation = await this.continueReviewReady(active, targetRoot, config, issue);
             if ('result' in continuation) return continuation.result;
             active = continuation.active;
             issueSnapshot = structuredClone(active.record.issueSnapshot);
@@ -2404,15 +2432,6 @@ export class RunIssue {
       || labels.has(config.github.labels.review.name)
       || labels.has(config.github.labels.waitingHuman.name)) return false;
     return this.hasTrustedClaim(issue, record);
-  }
-
-  private async authorizedForExactLabels(
-    active: ActiveRun,
-    expectedLabels: string[],
-  ): Promise<boolean> {
-    const issue = await this.readIssue(active.record.issueNumber);
-    return !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, expectedLabels)
-      && this.hasTrustedClaim(issue, active.record);
   }
 
   private hasTrustedClaim(issue: RunIssueSnapshot, record: RunRecordV1): boolean {

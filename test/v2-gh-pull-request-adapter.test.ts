@@ -4,6 +4,18 @@ import { test } from 'node:test';
 import { GhCliPullRequestAdapter } from '../src/v2/adapters/gh-pull-request-adapter.js';
 import type { CommandExecutor } from '../src/v2/adapters/gh-cli.js';
 
+test('reads the authoritative head SHA from the REST pull-request snapshot', async () => {
+  const executor: CommandExecutor = async () => jsonResult([[{
+    number: 17, node_id: 'PR_rest', html_url: 'https://github.com/owner/repo/pull/17',
+    state: 'open', merged_at: null, draft: true, title: 'Change', body: '<!-- marker -->',
+    author_association: 'MEMBER', head: { ref: 'codex/issue-42', sha: 'b'.repeat(40) }, base: { ref: 'main' },
+  }]]);
+
+  const pulls = await new GhCliPullRequestAdapter('owner', 'repo', executor).listAllByHeadBranch('codex/issue-42');
+
+  assert.equal(pulls[0]?.headSha, 'b'.repeat(40));
+});
+
 test('reads an exact repository-bound pull request review target', async () => {
   const executor: CommandExecutor = async (_file, args) => {
     assert.equal(args[0], 'api');
