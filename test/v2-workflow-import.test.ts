@@ -109,10 +109,28 @@ test('workflow source v2 binds dependency skills and keeps evals outside runtime
   await mkdir(join(repoRoot, 'overlays', 'operations', 'alpha'), { recursive: true });
   await mkdir(join(repoRoot, 'overlays', 'schemas'), { recursive: true });
   await writeFile(join(codexHome, 'docs', 'agents', 'routing.md'), '# Routing\n\nSee [beta](../../skills/beta/SKILL.md).\n');
-  await writeFile(join(codexHome, 'docs', 'agents', 'coding-skill-evals.json'), `${JSON.stringify({
+  const sharedEvalPath = join(codexHome, 'docs', 'agents', 'coding-skill-evals.json');
+  const sharedEval = {
     schema_version: 1,
-    cases: [{ id: 'cross-case', prompt: 'Route work.', expected: ['routed'], forbidden: ['guessed'] }],
-  })}\n`);
+    cases: [{
+      id: 'cross-case',
+      prompt: 'Route work.',
+      expected: ['routed'],
+      forbidden: ['guessed'],
+      execution: {
+        level: 'trigger',
+        fixture: 'routing/direct',
+        sandbox: 'read-only',
+        trials: 2,
+        should_trigger: ['alpha'],
+        should_not_trigger: ['beta'],
+        assertions: [{ kind: 'route_equals', value: 'direct-medium' }],
+        ablation_skill: 'alpha',
+      },
+    }],
+  };
+  const sharedEvalBytes = `${JSON.stringify(sharedEval)}\n`;
+  await writeFile(sharedEvalPath, sharedEvalBytes);
   await writeFile(join(codexHome, 'agents', 'reviewer-fast.toml'), 'name = "reviewer_fast"\nsandbox_mode = "read-only"\n');
   const operationPath = join(repoRoot, 'overlays', 'operations', 'alpha', 'SKILL.md');
   const operationText = '# Alpha operation\n\nUse [alpha](../../skills/alpha/SKILL.md), [beta](../../skills/beta/SKILL.md), and [routing](../../docs/agents/routing.md).\n';
@@ -159,6 +177,33 @@ test('workflow source v2 binds dependency skills and keeps evals outside runtime
     'skills/alpha/evals/evals.json',
     'skills/beta/evals/evals.json',
   ]);
+  assert.equal(await readFile(join(outputRoot, 'evals', 'coding-skill-evals.json'), 'utf8'), sharedEvalBytes);
+
+  await writeFile(join(outputRoot, 'evals', 'coding-skill-evals.json'), `${JSON.stringify({
+    ...sharedEval,
+    cases: sharedEval.cases.map(({ execution: _execution, ...item }) => item),
+  })}\n`);
+  await assert.rejects(execFileAsync(process.execPath, [script, 'check', '--codex-home', codexHome,
+    '--repo-root', repoRoot, '--config', configPath, '--output-root', outputRoot]), /stale|mismatch/iu);
+  await execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
+    '--config', configPath, '--output-root', outputRoot]);
+
+  for (const [label, execution] of [
+    ['missing trials', (({ trials: _trials, ...value }) => value)(sharedEval.cases[0]!.execution)],
+    ['unknown key', { ...sharedEval.cases[0]!.execution, extra: true }],
+    ['unsafe fixture', { ...sharedEval.cases[0]!.execution, fixture: '../outside' }],
+    ['blank trigger', { ...sharedEval.cases[0]!.execution, should_trigger: ['alpha', ' '] }],
+    ['malformed assertion', { ...sharedEval.cases[0]!.execution, assertions: [{ kind: 'route_equals', value: 'direct-medium', extra: true }] }],
+    ['absent ablation target', { ...sharedEval.cases[0]!.execution, ablation_skill: 'beta' }],
+  ] as const) {
+    await writeFile(sharedEvalPath, `${JSON.stringify({
+      ...sharedEval,
+      cases: [{ ...sharedEval.cases[0], execution }],
+    })}\n`);
+    await assert.rejects(execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome,
+      '--repo-root', repoRoot, '--config', configPath, '--output-root', outputRoot]), /eval.*invalid|unknown or missing/iu, label);
+  }
+  await writeFile(sharedEvalPath, sharedEvalBytes);
 
   const generatedOperationPath = join(outputRoot, 'operations', 'alpha', 'SKILL.md');
   const unlinkedOperation = Buffer.from('# Alpha operation\n\nUse [alpha](../../skills/alpha/SKILL.md), beta, and [routing](../../docs/agents/routing.md).\n');

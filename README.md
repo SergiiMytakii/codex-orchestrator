@@ -218,6 +218,29 @@ npm pack --dry-run --json
 
 `npm run refresh:workflow` rebuilds the package-owned workflow inventory from the explicit allowlist in `scripts/agent-auto-workflow-source.json`, validates operation bindings, and runs focused contract tests. `npm run check:workflow` is the non-writing drift check; `npm run verify:workflow` verifies the committed generated workflow without reading local skills.
 
+After changing packaged skills or evals, compare the source and generated eval
+plans locally. This check is offline and does not run a model:
+
+```sh
+set -e
+PACKAGE_ROOT="$PWD"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+PARITY_ROOT="$(mktemp -d)"
+cd "$CODEX_HOME"
+python3 scripts/run_coding_skill_evals.py --output "$PARITY_ROOT/source"
+python3 scripts/run_coding_skill_evals.py \
+  --workflow-root "$PACKAGE_ROOT/internal-workflow" \
+  --fixture-root "$CODEX_HOME/scripts/fixtures/coding-skill-evals" \
+  --output "$PARITY_ROOT/package"
+jq -S '.cases' "$PARITY_ROOT/source/plan.json" > "$PARITY_ROOT/source-cases.json"
+jq -S '.cases' "$PARITY_ROOT/package/plan.json" > "$PARITY_ROOT/package-cases.json"
+diff -u "$PARITY_ROOT/source-cases.json" "$PARITY_ROOT/package-cases.json"
+```
+
+Do not add live eval profiles to `refresh:workflow`, package tests, build, or
+release scripts. Live execution remains an explicit maintainer action from the
+local skill checkout.
+
 `npm run smoke:live` packs the current package and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
 For the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model, see [docs/deep-dive.md](docs/deep-dive.md). For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).

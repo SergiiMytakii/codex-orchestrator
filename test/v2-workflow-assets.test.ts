@@ -55,6 +55,37 @@ test('workflow V2 exposes current operation dependencies and keeps evals out of 
   assert.equal(Object.keys(loaded.manifest.evals).length >= 2, true);
 });
 
+test('workflow eval execution metadata survives generation', async () => {
+  const loaded = await loadPackageWorkflow(packageRoot);
+  const shared = loaded.manifest.evals['shared/coding-skill-evals'];
+  assert.ok(shared);
+  const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...shared.path.split('/')), 'utf8')) as {
+    cases: Array<Record<string, any>>;
+  };
+  assert.equal(value.cases.length, 20);
+  const approvedSpec = value.cases.find((item) => item.id === 'approved-spec-execution');
+  assert.ok(approvedSpec);
+  assert.deepEqual(approvedSpec.execution, {
+    level: 'end_to_end',
+    fixture: 'end-to-end-approved-spec',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer', 'tdd'],
+    should_not_trigger: ['implementation-spec-maker', 'tickets-orchestrator'],
+    assertions: [
+      { kind: 'route_equals', value: 'spec-implementer' },
+      { kind: 'file_contains', path: '.eval/red.json', text: '"status": "red"' },
+      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
+      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Implement the greeting' },
+      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Run the focused test' },
+      { kind: 'event_present', event: 'file_write', value: 'greeting.py' },
+      { kind: 'event_order', before: { event: 'skill_read', value: 'spec-implementer' }, after: { event: 'file_write', value: 'greeting.py' } },
+      { kind: 'event_absent', event: 'git_push', value: 'origin' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
+});
+
 
 test('workflow loader and generation verifier fail closed on tamper and invalid ready receipts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-negative-'));

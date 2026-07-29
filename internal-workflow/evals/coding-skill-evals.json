@@ -116,18 +116,54 @@
       }
     },
     {
-      "id": "ticket-direct-vs-graph",
-      "prompt": "Choose delivery for the approved dependency graph documented in this repository, while preserving the direct route for its separate deterministic single-ticket example.",
-      "expected": ["allow direct execution for the single ticket", "use tickets-orchestrator for the graph"],
-      "forbidden": ["manufacture a wave-level spec"],
+      "id": "approved-spec-execution",
+      "prompt": "Execute the approved implementation spec in this repository and stop at its stated delivery boundary.",
+      "expected": ["use spec-implementer", "follow the approved checklist through observable proof", "update reached checklist items truthfully"],
+      "forbidden": ["create a replacement spec", "route through tickets", "commit or push"],
       "execution": {
-        "level": "trigger",
-        "fixture": "routing/ticket-graph",
-        "sandbox": "read-only",
+        "level": "end_to_end",
+        "fixture": "end-to-end-approved-spec",
+        "sandbox": "workspace-write",
         "trials": 2,
-        "should_trigger": ["tickets-orchestrator"],
-        "should_not_trigger": ["implementation-spec-maker"],
-        "assertions": [{"kind": "route_equals", "value": "ticket-graph"}],
+        "should_trigger": ["spec-implementer", "tdd"],
+        "should_not_trigger": ["implementation-spec-maker", "tickets-orchestrator"],
+        "assertions": [
+          {"kind": "route_equals", "value": "spec-implementer"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "file_contains", "path": "docs/implementation-specs/approved-greeting.md", "text": "- [x] Implement the greeting"},
+          {"kind": "file_contains", "path": "docs/implementation-specs/approved-greeting.md", "text": "- [x] Run the focused test"},
+          {"kind": "event_present", "event": "file_write", "value": "greeting.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "spec-implementer"}, "after": {"event": "file_write", "value": "greeting.py"}},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
+    },
+    {
+      "id": "ticket-direct-vs-graph",
+      "prompt": "Deliver the approved dependency graph documented in this repository through its public tests and stop at the local delivery boundary.",
+      "expected": ["use tickets-orchestrator for the graph", "deliver independent tickets before their dependent", "prove the completed graph"],
+      "forbidden": ["manufacture a wave-level spec", "skip a dependency", "commit or push"],
+      "execution": {
+        "level": "end_to_end",
+        "fixture": "end-to-end-ticket-graph",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["tdd", "tickets-orchestrator"],
+        "should_not_trigger": ["implementation-spec-maker", "spec-implementer"],
+        "assertions": [
+          {"kind": "route_equals", "value": "ticket-graph"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket A"},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket B"},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket C"},
+          {"kind": "event_present", "event": "file_write", "value": "summary.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "tickets-orchestrator"}, "after": {"event": "file_write", "value": "summary.py"}},
+          {"kind": "path_absent", "path": "PLAN.md"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ],
         "ablation_skill": "tickets-orchestrator"
       }
     },
@@ -207,18 +243,22 @@
       "expected": ["implement directly"],
       "forbidden": ["create tickets, a spec, or orchestration from file count, statefulness, or generic risk"],
       "execution": {
-        "level": "behavior",
-        "fixture": "behavior/direct-medium",
+        "level": "end_to_end",
+        "fixture": "end-to-end-direct-medium",
         "sandbox": "workspace-write",
         "trials": 2,
         "should_trigger": ["code-review", "tdd"],
         "should_not_trigger": ["implementation-spec-maker", "small-task-implementer", "tickets-orchestrator"],
         "assertions": [
           {"kind": "route_equals", "value": "direct-medium"},
-          {"kind": "command_exit", "argv": ["python3", "-m", "unittest", "tests.test_store"], "exit_code": 0, "boundary": false},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
           {"kind": "path_absent", "path": "PLAN.md"},
           {"kind": "path_absent", "path": "docs/implementation-specs"},
-          {"kind": "event_present", "event": "file_write", "value": "store.py"}
+          {"kind": "event_present", "event": "file_write", "value": "store.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "tdd"}, "after": {"event": "file_write", "value": "store.py"}},
+          {"kind": "event_present", "event": "subagent_launch", "value": "reviewer_standard"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
         ]
       }
     },
@@ -244,8 +284,8 @@
       "expected": ["activate tdd", "use code-debugger", "run affected validation"],
       "forbidden": ["restart open-ended diagnosis", "create an implementation spec"],
       "execution": {
-        "level": "behavior",
-        "fixture": "behavior/tdd-red",
+        "level": "end_to_end",
+        "fixture": "end-to-end-bounded-fix",
         "sandbox": "workspace-write",
         "trials": 2,
         "should_trigger": ["code-debugger", "tdd"],
@@ -253,10 +293,11 @@
         "assertions": [
           {"kind": "route_equals", "value": "bounded-fix"},
           {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
-          {"kind": "command_exit", "argv": ["python3", "verify_tdd.py"], "exit_code": 0, "boundary": false},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
           {"kind": "event_present", "event": "file_write", "value": "calculator.py"},
           {"kind": "event_order", "before": {"event": "skill_read", "value": "tdd"}, "after": {"event": "file_write", "value": "calculator.py"}},
-          {"kind": "path_absent", "path": "PLAN.md"}
+          {"kind": "path_absent", "path": "PLAN.md"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
         ],
         "ablation_skill": "code-debugger"
       }

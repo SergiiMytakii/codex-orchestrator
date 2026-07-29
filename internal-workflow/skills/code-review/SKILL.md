@@ -161,6 +161,24 @@ these reviewers. Preserve every fulfilled launch handle if a parallel peer
 fails, then close all launched children. Tell every reviewer not to edit or
 revert unrelated work.
 
+Begin every reviewer launch brief with an exact `Assigned role: <role>` line,
+using `reviewer_fast`, `reviewer_standard`, or `reviewer_deep`. Keep that role
+explicit for Full and Closure launches even when the profile or existing
+lineage already implies it; a generic child prompt is not evidence that the
+profile-selected reviewer topology was executed.
+
+A reviewer is launched only after the child-launch tool returns a non-empty
+handle for that brief. Wait only on returned handles, then close every launched
+child. Never treat an intended role, an empty wait, coordinator analysis, or a
+final-answer claim as reviewer execution. If launch is unavailable or returns
+no handle, report the independent review gate as unavailable and do not
+self-review or claim that the reviewer completed.
+
+A recorded reviewer role or lineage from an earlier Full review identifies
+which role must own Closure; it is never a live child handle. Every Closure
+activation must launch a new child in that same role for the current session,
+capture the new non-empty handle, and wait only on that handle.
+
 For spec-driven checkpoints, obey the track assignment in the persisted Review
 Plan instead of automatically launching both default tracks.
 
