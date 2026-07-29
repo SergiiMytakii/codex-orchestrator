@@ -8,7 +8,7 @@ The package is designed for unattended local execution without giving the Codex 
 
 Add the configured `agent:auto` label to an open issue, then run the orchestrator. It will choose one of three routes:
 
-- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, configured checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
+- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, issue-scoped verification checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
 - **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; the Runner freezes the approved revision and returns `spec-frozen`. Implementation is intentionally a separate follow-up run or workflow.
 - **Human decision required:** the repository does not contain enough authority to choose between materially different product outcomes. The package posts one precise question, applies `agent:waiting-human`, and resumes the same run after an authorized repository writer answers with the requested prefix.
 
@@ -135,7 +135,7 @@ non-empty `CHANGES_REQUESTED` review from a current repository writer or admin,
 the Runner freezes that exact feedback batch and resumes the existing run.
 
 The repair uses the existing implementation and affected Closure flow, then
-reruns configured checks and Acceptance Proof against the repaired content. It
+reruns the run's resolved check policy and Acceptance Proof against the repaired content. It
 has a separate maximum of three feedback rounds and does not consume the
 original five implementation cycles. Publication appends one fast-forward
 commit to the existing branch and PR; divergence blocks without reset, rebase,
@@ -180,7 +180,8 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite Runner-owned commands. The Runner snapshots them on the clean
+- `checks`: finite fallback commands for issues without a command-only
+  `Verification:` section. The Runner snapshots the resolved policy on the clean
   base and reruns them after implementation; only a new or changed failure is
   task-owned rework, while a byte-identical base failure is retained as an
   explicit `unchanged-failure` warning.

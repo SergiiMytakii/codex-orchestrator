@@ -27,6 +27,7 @@ import {
 } from './direct-delivery.js';
 import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
 import { ProofLaunchAuthorizationError, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
+import { CheckProcessQuiescenceError, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
@@ -183,7 +184,7 @@ export interface RunIssueDependencies {
   };
   routeContinuations: RoutedContinuationRegistry;
   checks: {
-    run(input: { id: string; command: string; cwd: string; phase: 'baseline' | 'changed'; signal: AbortSignal }): Promise<{
+    run(input: { id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'baseline' | 'changed'; signal: AbortSignal }): Promise<{
       status: 'passed' | 'failed'; output: Buffer; outputSha256: string;
     }>;
   };
@@ -1390,7 +1391,12 @@ export class RunIssue {
         });
       }
       }
-      const configuredChecks = Object.entries(config.checks);
+      let checkPolicy;
+      try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
+      catch (error) {
+        return await this.invokedFailure(active, 'issue-verification-invalid', error instanceof Error ? error.message : undefined);
+      }
+      const configuredChecks = Object.entries(checkPolicy.checks);
       const reusableChecks = active.record.checks.filter((check) =>
         configuredChecks.some(([id, command]) => check.id === id && check.command === command));
       if (reusableChecks.length !== active.record.checks.length) {
@@ -1401,16 +1407,23 @@ export class RunIssue {
           proofReceipt: undefined,
         });
       }
-      for (const [id, command] of Object.entries(config.checks)) {
+      for (const [id, command] of configuredChecks) {
         if (active.record.checks.some((check) => check.id === id
           && check.command === command
           && (check.status === 'passed' || check.status === 'unchanged-failure'))) continue;
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
         let check;
         try {
-          check = await this.dependencies.checks.run({ id, command, cwd: worktreePath, phase: 'changed', signal: this.signal });
-        } catch {
-          return await this.terminal(active, { status: 'internal-error', code: 'configured-check-execution-failed' });
+          check = await this.dependencies.checks.run({ id, command, source: checkPolicy.source, cwd: worktreePath, phase: 'changed', signal: this.signal });
+        } catch (error) {
+          if (error instanceof CheckProcessQuiescenceError) {
+            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+          }
+          return await this.invokedFailure(
+            active,
+            'configured-check-execution-failed',
+            error instanceof Error ? error.message : 'The check process did not start or settle. Retry the same run.',
+          );
         }
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
         const outputSha256 = check.outputSha256;
@@ -1472,7 +1485,7 @@ export class RunIssue {
         || reviewedStageBinding.contentSha256 !== proofContentSha256) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'checked-change-review-binding-drift');
       }
-      if (!sameCheckPolicy(active.record.checks, config.checks)) {
+      if (!sameCheckPolicy(active.record.checks, checkPolicy.checks)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'configured-check-policy-drift');
       }
       const payload: CheckedChangePayloadV1 = {
@@ -1492,7 +1505,7 @@ export class RunIssue {
           ...check,
           status: check.status === 'unchanged-failure' ? 'unchanged-failure' as const : 'passed' as const,
         })),
-        checkPolicySha256: sha256(canonicalJson(config.checks)),
+        checkPolicySha256: sha256(canonicalJson(checkPolicy.checks)),
         packageVersion: active.record.packageVersion,
         proofSchemaVersion: 1,
       };
@@ -2346,26 +2359,39 @@ export class RunIssue {
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
     let active = starting;
     if ((await this.dependencies.git.listChangedFiles(active.record.worktreePath)).length !== 0) return { active };
-    const configuredChecks = Object.entries(config.checks);
+    let checkPolicy;
+    try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
+    catch (error) {
+      active = await this.persist(active, { lifecycle: 'routed' });
+      return this.invokedFailure(active, 'issue-verification-invalid', error instanceof Error ? error.message : undefined);
+    }
+    const configuredChecks = Object.entries(checkPolicy.checks);
     const reusableBaselineChecks = (active.record.baselineChecks ?? []).filter((check) =>
       configuredChecks.some(([id, command]) => check.id === id && check.command === command));
     if (reusableBaselineChecks.length !== (active.record.baselineChecks ?? []).length) {
       active = await this.persist(active, { baselineChecks: reusableBaselineChecks });
     }
-    for (const [id, command] of Object.entries(config.checks)) {
+    for (const [id, command] of configuredChecks) {
       if (active.record.baselineChecks?.some((check) => check.id === id && check.command === command)) continue;
       if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
       let check: { status: 'passed' | 'failed'; output: Buffer; outputSha256: string };
       try {
         check = await this.dependencies.checks.run({
-          id,
-          command,
+          id, command, source: checkPolicy.source,
           cwd: active.record.worktreePath,
           phase: 'baseline',
           signal: this.signal,
         });
-      } catch {
-        continue;
+      } catch (error) {
+        if (error instanceof CheckProcessQuiescenceError) {
+          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+        }
+        active = await this.persist(active, { lifecycle: 'routed' });
+        return this.invokedFailure(
+          active,
+          'configured-check-execution-failed',
+          error instanceof Error ? error.message : 'The baseline check process did not start or settle. Retry the same run.',
+        );
       }
       if ((await this.dependencies.git.listChangedFiles(active.record.worktreePath)).length !== 0) {
         return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'baseline-check-mutated-worktree');

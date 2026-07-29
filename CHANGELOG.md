@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Direct runs now resolve bounded verification commands from the frozen issue's
+  command-only `Verification` section instead of forcing repository-wide checks.
+  Scoped npm checks execute without a shell, while repositories without scoped
+  verification retain their configured fallback policy.
+- Check launch failures and proven-quiescent timeouts resume the same durable run
+  without consuming an implementation cycle. Timeout and cancellation retain
+  ownership until the complete process group is absent; uncertain quiescence
+  fails closed as a non-resumable safety block.
+
 ## [2.0.7] - 2026-07-28
 
 ### Changed

@@ -25,6 +25,7 @@ import {
   sha256,
 } from './containment.js';
 import { FileProofRecordWriter } from './proof-store.js';
+import { CheckProcessQuiescenceError, parseIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -902,7 +903,7 @@ export function createV2Runtime(input: {
           ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
             ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
             : git.snapshot(worktreePath)),
-          checkPolicySha256: sha256(canonicalJson(config.checks)),
+          checkPolicySha256: sha256(canonicalJson(resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks)),
         }),
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
         inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
@@ -1079,7 +1080,12 @@ export function createV2Runtime(input: {
     implementationReviewer,
     waitForReviewProcessAbsence: waitForProcessGroupAbsent,
     checks: {
-      run: async ({ command, cwd, signal }) => runShellCheck(command, cwd, signal),
+      run: async ({ source, command, cwd, signal }) => {
+        const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
+        return source === 'issue'
+          ? runProcessCheck(parseIssueCheckInvocation(command), cwd, signal, timeoutMs)
+          : runShellCheck(command, cwd, signal, timeoutMs);
+      },
     },
     proof,
     checkedChangeMint: capabilities,
@@ -1161,18 +1167,45 @@ async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }>
   }
 }
 
-async function runShellCheck(
+export async function runShellCheck(
   command: string,
   cwd: string,
   signal: AbortSignal,
+  timeoutMs: number,
+): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
+  return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs);
+}
+
+async function runProcessCheck(
+  invocation: { file: string; args: string[] },
+  cwd: string,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
+  return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs);
+}
+
+async function runSpawnCheck(
+  file: string,
+  args: string[],
+  cwd: string,
+  signal: AbortSignal,
+  timeoutMs: number,
 ): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
   return new Promise((resolveCheck, rejectCheck) => {
-    const child = spawn('/bin/sh', ['-lc', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let retained = 0;
     const outputHash = createHash('sha256');
     let settled = false;
+    let timedOut = false;
+    let terminationRequested = false;
     let killTimer: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, timeoutMs);
+    timeout.unref();
     const collect = (chunk: Buffer) => {
       outputHash.update(chunk);
       if (retained >= 1024 * 1024) return;
@@ -1183,6 +1216,7 @@ async function runShellCheck(
     child.stdout.on('data', collect);
     child.stderr.on('data', collect);
     const terminate = () => {
+      terminationRequested = true;
       if (!child.pid) return;
       try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already absent */ }
       killTimer = setTimeout(() => {
@@ -1196,6 +1230,7 @@ async function runShellCheck(
     child.once('error', (error) => {
       settled = true;
       signal.removeEventListener('abort', terminate);
+      clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       rejectCheck(error);
     });
@@ -1203,14 +1238,46 @@ async function runShellCheck(
       if (settled) return;
       settled = true;
       signal.removeEventListener('abort', terminate);
-      if (killTimer) clearTimeout(killTimer);
-      resolveCheck({
-        status: code === 0 ? 'passed' : 'failed',
-        output: Buffer.concat(chunks),
-        outputSha256: outputHash.digest('hex'),
-      });
+      clearTimeout(timeout);
+      void (async () => {
+        if (terminationRequested && child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
+            if (!isErrorCode(error, 'ESRCH')) {
+              rejectCheck(new CheckProcessQuiescenceError(child.pid));
+              return;
+            }
+          }
+          if (!await waitForProcessGroupAbsentWithin(child.pid, 5_000)) {
+            rejectCheck(new CheckProcessQuiescenceError(child.pid));
+            return;
+          }
+        }
+        if (killTimer) clearTimeout(killTimer);
+        if (timedOut) {
+          rejectCheck(new Error(`Check exceeded ${timeoutMs}ms and was terminated.`));
+          return;
+        }
+        resolveCheck({
+          status: code === 0 ? 'passed' : 'failed',
+          output: Buffer.concat(chunks),
+          outputSha256: outputHash.digest('hex'),
+        });
+      })().catch(rejectCheck);
     });
   });
+}
+
+async function waitForProcessGroupAbsentWithin(processGroupId: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(-processGroupId, 0); }
+    catch (error) {
+      if (isErrorCode(error, 'ESRCH')) return true;
+      if (!isErrorCode(error, 'EPERM')) throw error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  return false;
 }
 
 function requireConfig(config: AgentAutoConfig | undefined): AgentAutoConfig {

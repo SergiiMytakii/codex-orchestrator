@@ -202,9 +202,13 @@ Coverage text is descriptive, not an identity contract: Closure may paraphrase o
 
 Review invocation intent, process IDs, report hashes, transport retries, report repairs, target revisions, and target fingerprints are durable. A crash after launch cannot cause a replacement review until process absence is proven. Review target drift after approval is a safety failure.
 
-## 8. Configured checks and `CheckedChange`
+## 8. Issue-scoped checks and `CheckedChange`
 
-For a new direct run, the Runner first executes the finite commands in `config.checks` on the clean base worktree and records their output hashes. After review clears, it executes the same commands against the implementation. Workers cannot add commands to this set.
+For a new direct run, the Runner resolves its finite check policy from the frozen issue body. A command-only `Verification:` or `## Verification:` section replaces repository-wide checks with deterministic `issue-verification-NNN` entries. Scoped entries are limited to `npm [--prefix <repository-relative-path>] test ...` and `npm [--prefix <repository-relative-path>] run <script> ...`; the Runner parses them to argv and executes them without a shell. Interpreter eval, package-exec, nested-shell, shell-composition, malformed, duplicate, mixed-validity, and ambiguous sections fail closed before any check runs. The triage worker's free-text verification output is never command authority. `config.checks` is used only when the frozen issue has no Verification section.
+
+The Runner executes the resolved policy on the clean base worktree and records output hashes. After review clears, it executes the same policy against the implementation. Issue edits after the initial snapshot cannot change the commands of an active run.
+
+A nonzero check result remains task-owned rework and returns to the implementation agent within the existing cycle budget. A check process that cannot start, or exceeds the bounded runtime and is then proven absent, returns a resumable transport outcome without consuming an implementation cycle or discarding reusable baseline/changed results; the daemon can retry the same durable run. Timeout and cancellation retain ownership until the complete process group is proven absent. Unprovable process-group quiescence is a non-resumable safety block. Invalid scoped policy also remains a resumable no-effect outcome so a package-side policy correction can continue the existing run instead of replaying a terminal failure.
 
 A new failure, or a failure whose output differs from the clean-base result, becomes a durable repair finding and starts another implementation cycle if the five-cycle budget remains. A byte-identical failure already present on the base is recorded as `unchanged-failure`; it remains visible in `CheckedChange` and proof evidence but does not become task-owned rework. Passed and unchanged-base results are reused on a safe resume, while any new repair cycle clears stale changed-check and proof bindings.
 

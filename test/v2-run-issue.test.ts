@@ -271,6 +271,63 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
 });
 
+test('direct run executes issue-scoped verification checks instead of repository-wide configured checks', async () => {
+  const scopedCommand = 'npm --prefix src/service test -- --runInBand scoped.spec.ts';
+  const fixture = await runFixture({ issueBody: `Verification:\n- ${scopedCommand}\n\nRisk:\nLow.` });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.includes('check:baseline:issue-verification-001'), true);
+  assert.equal(fixture.events.includes('check:changed:issue-verification-001'), true);
+  assert.equal(fixture.events.some((event) => event.endsWith(':typecheck')), false);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(record.baselineChecks?.map(({ id, command }) => ({ id, command })), [
+    { id: 'issue-verification-001', command: scopedCommand },
+  ]);
+  assert.deepEqual(record.checks.map(({ id, command }) => ({ id, command })), [
+    { id: 'issue-verification-001', command: scopedCommand },
+  ]);
+});
+
+test('invalid issue Verification blocks before any configured or scoped check runs', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal(fixture.events.some((event) => event.startsWith('check:')), false);
+  assert.equal((await fixture.store.read()).runs[0]?.terminalOutcome, undefined);
+});
+
+test('a check launch failure is resumable without consuming an implementation cycle', async () => {
+  const options: FixtureOptions = { checkReject: true };
+  const fixture = await runFixture(options);
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+
+  options.checkReject = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+});
+
+test('a baseline check launch failure resumes before implementation without consuming a cycle', async () => {
+  const options: FixtureOptions = { baselineCheckReject: true };
+  const fixture = await runFixture(options);
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.terminalOutcome, undefined);
+
+  options.baselineCheckReject = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+});
+
 test('malformed code review consumes one durable report-repair bit and retries before checks', async () => {
   const fixture = await runFixture({ reviewMalformedOnce: true });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1183,7 +1240,7 @@ test('implementation and proof transport, cancellation, internal failure, and ma
     { name: 'proof cancelled', options: { proof: async () => ({ status: 'cancelled', receipt: receipt() }) }, status: 'cancelled' },
     { name: 'proof internal', options: { proof: async () => ({ status: 'internal-error', receipt: receipt() }) }, status: 'internal-error' },
     { name: 'proof rejects', options: { proofReject: true }, status: 'internal-error' },
-    { name: 'check rejects', options: { checkReject: true }, status: 'internal-error' },
+    { name: 'check rejects', options: { checkReject: true }, status: 'transport-failed', resumable: true },
     { name: 'unchanged', options: { agentWrites: false }, status: 'internal-error' },
   ];
   for (const entry of cases) {
@@ -1378,6 +1435,7 @@ interface FixtureOptions {
   agentWrites?: boolean;
   agentWritesDeniedIgnoredPath?: boolean;
   checkReject?: boolean;
+  baselineCheckReject?: boolean;
   proofReject?: boolean;
   proofError?: Error;
   issueReadRejectAt?: number;
@@ -1414,6 +1472,7 @@ interface FixtureOptions {
   ordinaryCommentAfterClaim?: string;
   issueBodyAfterClaim?: string;
   expectedTriageIssueBody?: string;
+  issueBody?: string;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -1465,7 +1524,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const issue = {
     number: 42,
     title: 'Implement behavior',
-    body: '## Acceptance Criteria\n- The behavior works.',
+    body: options.issueBody ?? '## Acceptance Criteria\n- The behavior works.',
     url: 'https://example.invalid/issues/42',
     state: 'OPEN' as const,
   };
@@ -1796,9 +1855,12 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     waitForReviewProcessAbsence: async () => {},
     checks: {
-      run: async ({ phase }) => {
-        events.push(phase === 'baseline' ? 'check:baseline:typecheck' : 'check:typecheck');
-        if (options.checkReject) throw new Error('check rejected');
+      run: async ({ id, phase }) => {
+        events.push(phase === 'baseline'
+          ? `check:baseline:${id}`
+          : id === 'typecheck' ? 'check:typecheck' : `check:changed:${id}`);
+        if (options.baselineCheckReject && phase === 'baseline') throw new Error('baseline check rejected');
+        if (options.checkReject && phase === 'changed') throw new Error('check rejected');
         const fallback: { status: 'passed'; output: Buffer; outputSha256?: string } = {
           status: 'passed', output: Buffer.from('ok'),
         };
