@@ -23,6 +23,7 @@ export interface SupervisedChild {
   pid: number;
   processGroupId: number;
   lastActivityAt(): number;
+  releaseStartGate?(): Promise<void>;
   writeStdinAndClose(value: string): Promise<void>;
   waitForExit(): Promise<{ exitCode: number | null; signal: string | null }>;
   terminateGroup(signal: 'SIGTERM' | 'SIGKILL'): Promise<void>;
@@ -137,6 +138,12 @@ export class CodexProcess {
         const settled = await terminateAndSettle(child, child.waitForExit());
         return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
       }
+    }
+    try {
+      await child.releaseStartGate?.();
+    } catch (error) {
+      const settled = await terminateAndSettle(child, child.waitForExit());
+      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
     }
 
     let stdinError: unknown;
@@ -373,7 +380,7 @@ async function clearPriorReport(path: string): Promise<void> {
 }
 
 export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<SupervisedChild> {
-  const child = spawn(spec.file, spec.args, {
+  const child = spawn('/bin/sh', ['-c', 'IFS= read -r _ || exit 125; exec "$@"', 'codex-launch-gate', spec.file, ...spec.args], {
     cwd: spec.cwd,
     env: spec.env,
     detached: true,
@@ -403,6 +410,9 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
     pid,
     processGroupId: pid,
     lastActivityAt: () => lastActivity,
+    releaseStartGate: async () => {
+      if (!child.stdin.write('\n')) await new Promise<void>((resolveDrain) => child.stdin.once('drain', resolveDrain));
+    },
     writeStdinAndClose: async (value) => {
       const completion = finished(child.stdin, { cleanup: true });
       if (value.length === 0) child.stdin.end();

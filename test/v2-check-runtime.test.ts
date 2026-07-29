@@ -14,9 +14,9 @@ test('timed-out check proves a TERM-ignoring descendant is absent before returni
       "(trap '' TERM; exec sleep 300) </dev/null >/dev/null 2>&1 & echo $! > child.pid; wait",
       cwd,
       controller.signal,
-      50,
+      250,
     ),
-    /exceeded 50ms/u,
+    /exceeded 250ms/u,
   );
 
   const pid = Number((await readFile(join(cwd, 'child.pid'), 'utf8')).trim());
@@ -46,4 +46,25 @@ test('cancelled check proves a TERM-ignoring descendant is absent before returni
   assert.throws(() => process.kill(pid, 0), (error: unknown) => (
     error instanceof Error && 'code' in error && error.code === 'ESRCH'
   ));
+});
+
+test('check command cannot execute before launched ownership persistence resolves', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-check-launch-gate-'));
+  let release!: () => void;
+  const launched = new Promise<void>((resolve) => { release = resolve; });
+  const check = runShellCheck('printf executed > marker.txt', cwd, new AbortController().signal, 10_000, async () => launched);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await assert.rejects(readFile(join(cwd, 'marker.txt')));
+  release();
+  assert.equal((await check).status, 'passed');
+  assert.equal(await readFile(join(cwd, 'marker.txt'), 'utf8'), 'executed');
+});
+
+test('rejected launched ownership persistence terminates the gated check without executing it', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-check-launch-reject-'));
+  await assert.rejects(runShellCheck(
+    'printf executed > marker.txt', cwd, new AbortController().signal, 10_000,
+    async () => { throw new Error('state CAS rejected'); },
+  ), /state CAS rejected/u);
+  await assert.rejects(readFile(join(cwd, 'marker.txt')));
 });

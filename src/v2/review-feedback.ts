@@ -243,10 +243,14 @@ export function activateReviewFeedback(
 
 export function reserveNextReviewFeedbackRound(execution: ReviewFeedbackExecutionV1): ReviewFeedbackExecutionV1 {
   validateReviewFeedbackExecution(execution);
-  if (!['frozen', 'repairing'].includes(execution.phase) || execution.repairRound >= 3) {
+  if (!['frozen', 'repairing', 'verified'].includes(execution.phase) || execution.repairRound >= 3) {
     throw new Error('review feedback repair budget is exhausted or inactive');
   }
-  const result = { ...structuredClone(execution), phase: 'repairing' as const, repairRound: (execution.repairRound + 1) as 2 | 3 };
+  const result = {
+    ...structuredClone(execution), phase: 'repairing' as const,
+    repairRound: (execution.repairRound + 1) as 2 | 3,
+    verifiedReceipt: null,
+  };
   validateReviewFeedbackExecution(result);
   return result;
 }

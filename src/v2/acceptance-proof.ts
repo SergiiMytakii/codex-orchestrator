@@ -3,10 +3,12 @@ import { posix } from 'node:path';
 import {
   checkedChangeFreshnessMatches,
   type CheckedChange,
-  type CheckedChangeFreshness,
+  type CheckedChangeFreshnessAny,
+  type CheckedChangePayload,
   type CheckedChangePayloadV1,
   type CheckedChangeReadCapability,
 } from './checked-change.js';
+import type { CandidateExecutionLeaseV2 } from './candidate.js';
 import { canonicalJson, containsCredentialEvidence, sha256 } from './containment.js';
 import {
   createProofReceipt,
@@ -47,15 +49,19 @@ export type ProofAgentResult =
   | { kind: 'cancelled' }
   | { kind: 'internal-error' };
 
-export interface ProofAgent {
+export interface ProofAgent<TPayload extends CheckedChangePayload = CheckedChangePayloadV1> {
   run(input: {
+    attemptId?: string;
+    recoverOnly?: boolean;
     proofId: string;
     runId: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     checkedChangeSha256: string;
     changedFiles: string[];
-    checks: CheckedChangePayloadV1['checks'];
+    checks: TPayload['checks'];
+    worktreePath?: string;
+    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
     runnerPreparedArtifactPaths: string[];
     runnerPreparedArtifactSha256: Record<string, string>;
     runnerPreparationWarnings: string[];
@@ -76,10 +82,21 @@ export class ProofQuiescenceError extends Error {
   }
 }
 
+export class ProofReportRecoveryError extends Error {
+  constructor() {
+    super('Persisted proof attempt has no recoverable report.');
+    this.name = 'ProofReportRecoveryError';
+  }
+}
+
 export class ProofLaunchAuthorizationError extends Error {
   constructor(readonly outcome: unknown) {
     super('proof launch authorization failed');
   }
+}
+
+export class CandidateProofInspectionError extends Error {
+  constructor(readonly code: string) { super(code); }
 }
 
 export type ProveChangeResult =
@@ -90,12 +107,12 @@ export type ProveChangeResult =
   | { status: 'cancelled'; receipt: ProofReceipt }
   | { status: 'internal-error'; receipt: ProofReceipt };
 
-export class AcceptanceProof {
+export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChangePayloadV1> {
   constructor(private readonly dependencies: {
     checkedChangeReader: CheckedChangeReadCapability;
     proofRecords: ProofRecordWriter;
-    proofAgent: ProofAgent;
-    inspectFreshness: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
+    proofAgent: ProofAgent<TPayload>;
+    inspectFreshness: (payload: TPayload, executionLease?: CandidateExecutionLeaseV2) => Promise<CheckedChangeFreshnessAny>;
     readArtifact: (relativePath: string) => Promise<Buffer>;
     inspectArtifact?: (relativePath: string) => Promise<{ modifiedAt: string }>;
     androidLease?: AndroidLeaseVerifier;
@@ -112,9 +129,12 @@ export class AcceptanceProof {
     proofId: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
-    checkedChange: CheckedChange;
+    checkedChange: CheckedChange<TPayload>;
+    executionLease?: CandidateExecutionLeaseV2;
+    recoverAttemptOnly?: boolean;
     workflowGeneration?: WorkflowGenerationReceipt;
     beforeAgentLaunch?: () => Promise<void>;
+    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
     runnerPreparedArtifactPaths?: string[];
     runnerPreparedArtifactSha256?: Record<string, string>;
     runnerPreparationWarnings?: string[];
@@ -126,6 +146,11 @@ export class AcceptanceProof {
       validateCriteria(input.frozenCriteria);
       const checked = this.dependencies.checkedChangeReader.verifyAndRead(input.checkedChange);
       if (checked.payload.issueNumber !== input.issue.number) throw new Error('CheckedChange issue does not match proof issue');
+      if (checked.payload.version === 2 && (!input.executionLease
+        || input.executionLease.bindingId !== checked.payload.binding.bindingId
+        || input.executionLease.candidateCommitSha !== checked.payload.binding.candidateCommitSha)) {
+        throw new Error('CheckedChange candidate execution lease does not match proof binding');
+      }
       bindingSha256 = createBindingSha256({
         proofId: input.proofId,
         issue: input.issue,
@@ -148,6 +173,8 @@ export class AcceptanceProof {
         await this.releaseMobileLeases(input.proofId);
         throw error;
       }
+      if (error instanceof ProofReportRecoveryError) throw error;
+      if (error instanceof CandidateProofInspectionError) throw error;
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
     }
   }
@@ -156,12 +183,15 @@ export class AcceptanceProof {
     proofId: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
-    checkedChange: CheckedChange;
-    payload: CheckedChangePayloadV1;
+    checkedChange: CheckedChange<TPayload>;
+    payload: TPayload;
+    executionLease?: CandidateExecutionLeaseV2;
+    recoverAttemptOnly?: boolean;
     checkedChangeSha256: string;
     bindingSha256: string;
     workflowGeneration?: WorkflowGenerationReceipt;
     beforeAgentLaunch?: () => Promise<void>;
+    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
     runnerPreparedArtifactPaths?: string[];
     runnerPreparedArtifactSha256?: Record<string, string>;
     runnerPreparationWarnings?: string[];
@@ -171,7 +201,7 @@ export class AcceptanceProof {
       return { status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof binding mismatch.') };
     }
     if (state?.status === 'passed' && state.receipt) {
-      if (!await this.isFresh(input.payload)) {
+      if (!await this.isFresh(input.payload, input.executionLease)) {
         return { status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Checked change is stale.') };
       }
       return { status: 'passed', receipt: state.receipt };
@@ -196,7 +226,7 @@ export class AcceptanceProof {
       });
     }
 
-    if (!await this.isFresh(input.payload)) {
+    if (!await this.isFresh(input.payload, input.executionLease)) {
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Checked change is stale.');
     }
     if (this.dependencies.signal?.aborted) {
@@ -219,6 +249,9 @@ export class AcceptanceProof {
       );
     }
 
+    const recoveredAttemptId = input.executionLease?.phase === 'launched' || input.recoverAttemptOnly
+      ? state.attempts.at(-1)?.attemptId
+      : undefined;
     let report: ProofReportV1;
     let reportRepairFindings: string[] = [];
     while (true) {
@@ -227,6 +260,8 @@ export class AcceptanceProof {
       try {
         await input.beforeAgentLaunch?.();
         agentResult = await this.dependencies.proofAgent.run({
+          attemptId: state.attempts.at(-1)!.attemptId,
+          recoverOnly: state.attempts.at(-1)!.attemptId === recoveredAttemptId,
           proofId: input.proofId,
           runId: input.payload.runId,
           issue: structuredClone(input.issue),
@@ -234,6 +269,8 @@ export class AcceptanceProof {
           checkedChangeSha256: input.checkedChangeSha256,
           changedFiles: [...input.payload.changedFiles],
           checks: structuredClone(input.payload.checks),
+          worktreePath: input.executionLease?.path,
+          onLaunched: input.onLaunched,
           runnerPreparedArtifactPaths: [...(input.runnerPreparedArtifactPaths ?? [])],
           runnerPreparedArtifactSha256: { ...(input.runnerPreparedArtifactSha256 ?? {}) },
           runnerPreparationWarnings: [...(input.runnerPreparationWarnings ?? [])],
@@ -243,7 +280,7 @@ export class AcceptanceProof {
           signal: this.dependencies.signal ?? new AbortController().signal,
         });
       } catch (error) {
-        if (error instanceof ProofQuiescenceError || error instanceof ProofLaunchAuthorizationError) throw error;
+        if (error instanceof ProofQuiescenceError || error instanceof ProofLaunchAuthorizationError || error instanceof ProofReportRecoveryError) throw error;
         return this.persistOperationalTerminal(state, 'internal-error', input, 'Proof agent failed internally.');
       }
 
@@ -253,7 +290,7 @@ export class AcceptanceProof {
       }
       if (agentResult.kind === 'transport-failed') {
         const alreadyRetried = state.attempts.some((attempt) => attempt.purpose === 'transport-retry');
-        if (agentResult.resumable && !alreadyRetried && await this.isFresh(input.payload)) {
+        if (agentResult.resumable && !alreadyRetried && await this.isFresh(input.payload, input.executionLease)) {
           state = await this.startProofRetry(state, input.bindingSha256, 'transport-retry');
           continue;
         }
@@ -276,7 +313,7 @@ export class AcceptanceProof {
         }
       } catch (error) {
         const alreadyRepaired = state.attempts.some((attempt) => attempt.purpose === 'report-repair');
-        if (!alreadyRepaired && await this.isFresh(input.payload)) {
+        if (!alreadyRepaired && await this.isFresh(input.payload, input.executionLease)) {
           reportRepairFindings = [proofReportRepairDiagnostic(error)];
           state = await this.startProofRetry(state, input.bindingSha256, 'report-repair');
           continue;
@@ -300,7 +337,7 @@ export class AcceptanceProof {
       }
       break;
     }
-    if (!await this.isFresh(input.payload)) {
+    if (!await this.isFresh(input.payload, input.executionLease)) {
       return this.persistOperationalTerminal(state, 'internal-error', input, 'Checked change became stale during proof.');
     }
 
@@ -460,8 +497,8 @@ export class AcceptanceProof {
     );
   }
 
-  private async isFresh(payload: CheckedChangePayloadV1): Promise<boolean> {
-    return checkedChangeFreshnessMatches(payload, await this.dependencies.inspectFreshness(structuredClone(payload)));
+  private async isFresh(payload: TPayload, executionLease?: CandidateExecutionLeaseV2): Promise<boolean> {
+    return checkedChangeFreshnessMatches(payload, await this.dependencies.inspectFreshness(structuredClone(payload), executionLease));
   }
 
   private async persistOperationalTerminal(
@@ -508,7 +545,7 @@ function createBindingSha256(input: {
   proofId: string;
   issue: IssueSnapshot;
   frozenCriteria: FrozenCriterion[];
-  payload: CheckedChangePayloadV1;
+  payload: CheckedChangePayload;
   checkedChangeSha256: string;
   runnerPreparedArtifactPaths: string[];
 }): string {

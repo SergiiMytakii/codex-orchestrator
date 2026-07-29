@@ -7,6 +7,7 @@ import {
   beginDirectReviewRepair,
   canRecoverTerminalDirectReviewReport,
   createInitialDirectReview,
+  directReviewCandidateTargetFingerprint,
   directReviewTargetFingerprint,
   launchDirectReviewInvocation,
   prepareDirectReviewInvocation,
@@ -18,6 +19,29 @@ import {
 } from '../src/v2/direct-delivery.js';
 
 const fingerprint = 'a'.repeat(64);
+
+test('V2 direct-review fingerprint binds the pinned candidate identity without changing V1 hashing', () => {
+  const binding = {
+    version: 2 as const,
+    bindingId: '1'.repeat(64),
+    expectedHeadSha: '2'.repeat(40),
+    candidateRef: `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000001/${'1'.repeat(64)}`,
+    candidateCommitSha: '3'.repeat(40),
+    candidateTreeSha: '4'.repeat(40),
+    canonicalChangedFiles: ['src/a.ts'],
+    sourceWorktreeIdentity: '5'.repeat(64),
+  };
+  const common = {
+    routeDecisionSha256: '6'.repeat(64), workflowGenerationHash: '7'.repeat(64),
+    cycle: 1, frozenCriteria: [{ id: 'criterion-1' }],
+  };
+  const first = directReviewCandidateTargetFingerprint({ binding, ...common });
+  const second = directReviewCandidateTargetFingerprint({
+    binding: { ...binding, candidateCommitSha: '8'.repeat(40) }, ...common,
+  });
+  assert.notEqual(first, second);
+  assert.equal(first, directReviewCandidateTargetFingerprint({ binding: structuredClone(binding), ...common }));
+});
 
 test('initial direct review state has one canonical Full owner', () => {
   const state = createInitialDirectReview({

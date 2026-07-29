@@ -119,6 +119,14 @@ export class AtomicStateFile<T extends { generation: number }> {
   }
 
   async compareAndSwap(expectedGeneration: number, next: T): Promise<T> {
+    return this.compareAndSwapWithRaw(expectedGeneration, next, async () => undefined);
+  }
+
+  async compareAndSwapWithRaw(
+    expectedGeneration: number,
+    next: T,
+    beforePublish: (priorBytes: Buffer | undefined) => Promise<void>,
+  ): Promise<T> {
     if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) throw new Error('expected generation is invalid');
     const validated = this.parse(structuredClone(next));
     if (validated.generation !== expectedGeneration + 1) throw new Error('next generation is invalid');
@@ -132,8 +140,30 @@ export class AtomicStateFile<T extends { generation: number }> {
       const prior = priorBytes === undefined ? undefined : parseBytes(priorBytes, this.parse);
       const actualGeneration = prior?.generation ?? 0;
       if (actualGeneration !== expectedGeneration) throw new Error(`state generation conflict: expected ${expectedGeneration}, found ${actualGeneration}`);
+      await beforePublish(priorBytes ? Buffer.from(priorBytes) : undefined);
       await this.publishWithReconciliation(priorBytes, nextBytes);
       return structuredClone(validated);
+    } finally {
+      await release();
+    }
+  }
+
+  async withExclusiveRaw<R>(operation: (priorBytes: Buffer | undefined, prior: T | undefined) => Promise<{
+    result: R;
+    replacementBytes?: Buffer;
+  }>): Promise<R> {
+    await ensureDirectDirectoryPath(dirname(this.path));
+    const release = await acquireAdjacentLock(`${this.path}.lock`, this.options);
+    try {
+      const priorBytes = await readOptionalRegularFile(this.path, this.options.maxBytes);
+      const prior = priorBytes === undefined ? undefined : parseBytes(priorBytes, this.parse);
+      const outcome = await operation(priorBytes ? Buffer.from(priorBytes) : undefined, prior ? structuredClone(prior) : undefined);
+      if (outcome.replacementBytes) {
+        if (outcome.replacementBytes.length > this.options.maxBytes) throw new Error('state exceeds maximum size');
+        parseBytes(outcome.replacementBytes, this.parse);
+        await this.publishWithReconciliation(priorBytes, outcome.replacementBytes);
+      }
+      return outcome.result;
     } finally {
       await release();
     }

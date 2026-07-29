@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 export interface ProcessCommandOptions {
   cwd?: string;
   env?: Record<string, string>;
+  envOverlay?: Record<string, string>;
   stdin?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
@@ -46,7 +47,7 @@ function runSpawn(
     const ownsProcessGroup = options.processGroup === true && process.platform !== 'win32';
     const child = spawn(file, args, {
       cwd: options.cwd,
-      env: options.env ? { ...options.env } : process.env,
+      env: options.env ? { ...options.env } : options.envOverlay ? { ...process.env, ...options.envOverlay } : process.env,
       shell: options.shell,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: ownsProcessGroup,

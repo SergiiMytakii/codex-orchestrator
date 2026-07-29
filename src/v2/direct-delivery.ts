@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { validateCandidateBinding, type CandidateBindingV2 } from './candidate.js';
+
 import { canonicalJson } from './containment.js';
 import { hashClosureRequest, validateCodeReviewDefects, type CodeReviewDefectV1, type CodeReviewReportV1, type ReviewMode, type ReviewOperation } from './code-review-report.js';
 
@@ -95,6 +97,31 @@ export function directReviewTargetFingerprint(input: {
   return createHash('sha256').update(`codex-orchestrator-direct-review-target-v1\0${canonicalJson({
     snapshot: input.snapshot,
     changedFiles,
+    routeDecisionSha256: input.routeDecisionSha256,
+    workflowGenerationHash: input.workflowGenerationHash,
+    cycle: input.cycle,
+    frozenCriteria: input.frozenCriteria,
+  })}`).digest('hex');
+}
+
+export function directReviewCandidateTargetFingerprint(input: {
+  binding: CandidateBindingV2;
+  routeDecisionSha256: string;
+  workflowGenerationHash: string;
+  cycle: number;
+  frozenCriteria: unknown[];
+}): string {
+  const binding = validateCandidateBinding(input.binding, 'direct review candidate binding');
+  assertSha256(input.routeDecisionSha256, 'direct review route decision hash');
+  assertSha256(input.workflowGenerationHash, 'direct review workflow generation hash');
+  if (!Number.isSafeInteger(input.cycle) || input.cycle < 1) throw new Error('direct review cycle is invalid');
+  return createHash('sha256').update(`codex-orchestrator-direct-review-target-v2\0${canonicalJson({
+    bindingId: binding.bindingId,
+    expectedHeadSha: binding.expectedHeadSha,
+    candidateCommitSha: binding.candidateCommitSha,
+    candidateTreeSha: binding.candidateTreeSha,
+    canonicalChangedFiles: binding.canonicalChangedFiles,
+    sourceWorktreeIdentity: binding.sourceWorktreeIdentity,
     routeDecisionSha256: input.routeDecisionSha256,
     workflowGenerationHash: input.workflowGenerationHash,
     cycle: input.cycle,

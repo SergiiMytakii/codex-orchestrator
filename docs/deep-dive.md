@@ -212,22 +212,40 @@ A qualification process that cannot start returns a resumable transport outcome 
 
 Once qualification is green, the issue implementation starts. After independent review clears, the Runner executes the same policy against the complete change. Every final check must pass; a nonzero result becomes a durable task-owned repair finding and starts another implementation cycle if the five-cycle budget remains. There is no output-hash attribution and no `unchanged-failure` success state. Passed final results are reused on a safe resume, while any new repair cycle clears stale final-check and proof bindings.
 
-Once no task-owned check failure remains, the Runner fingerprints the reviewed files and content, stages the complete validated change, and verifies that staging did not change either binding. It then mints a `CheckedChange` capability containing:
+Once no task-owned check failure remains, the Runner captures the reviewed bytes
+twice with a private index initialized from expected HEAD. Tracked deletions,
+mode changes, symlinks, and non-ignored untracked files enter the candidate;
+ignored untracked files and only the configured untracked proof root do not. The
+two trees and canonical path sets must match. The shared index is unchanged.
+
+The stable tree is pinned by a synthetic single-parent commit under a
+package-owned candidate ref. Direct review, each qualification/final check, and
+Acceptance Proof run in a fresh detached worktree at that commit. A durable lease
+records preparation and, before child execution proceeds, PID/process-group
+ownership. Results are accepted only after HEAD, tree, and non-proof changes are
+still exact.
+
+Legacy `CheckedChange` V1 keeps its original mutable snapshot semantics. New
+runs mint V2 with:
 
 - canonical repository, run ID, issue number, and cycle;
-- base and head SHA;
-- index tree SHA;
-- tracked and untracked content hashes;
-- worktree identity;
+- base SHA and the complete candidate binding (binding ID, expected HEAD,
+  candidate commit/tree, candidate ref, changed files, and worktree identity);
 - exact changed files;
 - passed check records and check-policy hash;
 - package and proof schema versions.
 
-Any later change to Git, the index, tracked or untracked content, worktree identity, changed files, or check policy invalidates the capability.
+V2 freshness compares candidate binding/tree and check policy, so unrelated
+shared-index edits cannot invalidate or authorize the proof input.
 
 ## 9. Acceptance Proof
 
 Acceptance Proof is independent from both implementation and code review. The `acceptance-proof` worker receives the frozen issue criteria and a nominal checked-change capability. It runs in a separate contained process and may write only below its proof-owned artifact root.
+
+For V2, proof runs against its own candidate materialization. Publishable
+artifacts are hash-validated and copied back idempotently without following
+symlinks; product bytes remain immutable. The same candidate tree then becomes
+the durable commit intent and the observed publication commit tree.
 
 The Runner validates:
 

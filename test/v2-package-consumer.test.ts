@@ -64,7 +64,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('dist/src/v2/code-review-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
-      'acceptance-proof', 'atomic-store', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
+      'acceptance-proof', 'atomic-store', 'candidate', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
       'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
       'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
       'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'waiting-human', 'waiting-human-coordinator', 'workflow-assets',
@@ -75,6 +75,52 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     await installTarball(consumer, join(packDir, packed.filename));
     const installed = join(consumer, 'node_modules', 'codex-orchestrator');
     await assertInstalledContract(installed, 'Implement one issue');
+    const compileFixture = join(consumer, 'candidate-contract.mts');
+    await writeFile(compileFixture, `
+import { AcceptanceProof, createCheckedChangeCapabilities } from 'codex-orchestrator';
+import type { CandidateGitV2, CheckedChange, CheckedChangeFreshness, CheckedChangePayloadV1, ProofAgent } from 'codex-orchestrator';
+
+const payload: CheckedChangePayloadV1 = {
+  version: 1, canonicalRepository: 'owner/repo', runId: '00000000-0000-4000-8000-000000000001',
+  issueNumber: 1, cycle: 1, baseSha: '${'1'.repeat(40)}', headSha: '${'2'.repeat(40)}',
+  indexTreeSha: '${'3'.repeat(40)}', trackedContentSha256: '${'4'.repeat(64)}',
+  untrackedContentSha256: '${'5'.repeat(64)}', worktreeIdentity: 'legacy-worktree', changedFiles: ['a.ts'],
+  checks: [], checkPolicySha256: '${'6'.repeat(64)}', packageVersion: '1.0.0', proofSchemaVersion: 1,
+};
+const capabilities = createCheckedChangeCapabilities();
+const legacy: CheckedChange = capabilities.mint(payload);
+const reread: CheckedChangePayloadV1 = capabilities.verifyAndRead(legacy).payload;
+const optionalAdapter: { candidateV2?: CandidateGitV2 } = {};
+const exactApprovedCandidateAdapter: CandidateGitV2 = {
+  captureAndPin: async () => { throw new Error('fixture'); },
+  inspectPin: async () => { throw new Error('fixture'); },
+  normalizeSharedIndex: async () => { throw new Error('fixture'); },
+  prepareExecution: async () => { throw new Error('fixture'); },
+  markExecutionLaunched: () => { throw new Error('fixture'); },
+  inspectExecution: async () => { throw new Error('fixture'); },
+  removeExecution: async () => { throw new Error('fixture'); },
+  copyProofArtifacts: async () => { throw new Error('fixture'); },
+  createOrObserveCommit: async () => { throw new Error('fixture'); },
+  releasePin: async () => { throw new Error('fixture'); },
+};
+const legacyAgent: ProofAgent = { run: async () => ({ kind: 'internal-error' }) };
+const legacyFreshness = async (legacyPayload: CheckedChangePayloadV1): Promise<CheckedChangeFreshness> => ({
+  headSha: legacyPayload.headSha, indexTreeSha: legacyPayload.indexTreeSha,
+  trackedContentSha256: legacyPayload.trackedContentSha256, untrackedContentSha256: legacyPayload.untrackedContentSha256,
+  worktreeIdentity: legacyPayload.worktreeIdentity, checkPolicySha256: legacyPayload.checkPolicySha256,
+});
+const legacyProof = new AcceptanceProof({
+  checkedChangeReader: {} as never, proofRecords: {} as never, proofAgent: legacyAgent,
+  inspectFreshness: legacyFreshness, readArtifact: async () => ({} as never),
+  proofArtifactDir: '.proof', createAttemptId: () => 'attempt', now: () => new Date(0).toISOString(),
+});
+void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void legacyProof;
+`);
+    await execFileAsync(join(process.cwd(), 'node_modules', '.bin', 'tsc'), [
+      '--noEmit', '--strict', '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext',
+      '--moduleResolution', 'NodeNext', compileFixture,
+    ], { cwd: consumer });
+    await rm(compileFixture);
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
 

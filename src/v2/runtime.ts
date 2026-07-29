@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { access, lstat, mkdir, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
+import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
@@ -13,7 +13,7 @@ import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
 import type { ReviewFeedbackImplementationInvocationV1 } from './review-feedback.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, ProofQuiescenceError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, ProofQuiescenceError, ProofReportRecoveryError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
@@ -45,12 +45,365 @@ import {
   verifyWorkflowGeneration,
   type WorkflowOperationPolicy,
 } from './workflow-assets.js';
+import {
+  candidateBindingId,
+  candidateBindingSeed,
+  candidateRef,
+  type CandidateBindingV2,
+  type CandidateExecutionLeaseV2,
+  type CandidateGitV2,
+  type CandidateResult,
+} from './candidate.js';
 
 export class LocalGitRunIssueAdapter implements RunIssueGit {
   private readonly worktrees: GitWorktreeManager;
+  private readonly candidateRepositories = new Map<string, string>();
+  readonly candidateV2: CandidateGitV2;
 
-  constructor(private readonly executor: ProcessExecutor = defaultProcessExecutor) {
+  constructor(
+    private readonly executor: ProcessExecutor = defaultProcessExecutor,
+    private readonly repositoryRoot?: string,
+  ) {
     this.worktrees = new GitWorktreeManager(executor);
+    this.candidateV2 = {
+      reconcileOrphans: (input) => this.reconcileCandidateOrphans(input),
+      captureAndPin: (input) => this.captureAndPinCandidate(input),
+      inspectPin: (binding) => this.inspectCandidatePin(binding),
+      normalizeSharedIndex: (input) => this.candidateOperation('candidate-io-failed', async () => {
+        if (await this.getHead(input.worktreePath) !== input.expectedHeadSha) throw new Error('candidate expected HEAD diverged');
+        await this.git(['-C', input.worktreePath, 'read-tree', input.expectedHeadSha]);
+      }),
+      prepareExecution: (input) => this.prepareCandidateExecution(input),
+      markExecutionLaunched: ({ lease, pid, processGroupId, launchedAt }) => ({
+        ...lease, phase: 'launched', pid, processGroupId, launchedAt,
+      }),
+      inspectExecution: (input) => this.inspectCandidateExecution(input),
+      removeExecution: (input) => this.removeCandidateExecution(input.lease),
+      copyProofArtifacts: (input) => this.copyCandidateProofArtifacts(input),
+      createOrObserveCommit: (input) => this.createOrObserveCandidateCommit(input),
+      releasePin: (input) => this.releaseCandidatePin(input.binding, input.expectedPinnedCommitSha),
+    };
+  }
+
+  private async reconcileCandidateOrphans(input: Parameters<NonNullable<CandidateGitV2['reconcileOrphans']>>[0]): Promise<CandidateResult<void>> {
+    return this.candidateOperation('candidate-io-failed', async () => {
+      const root = (await this.git(['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).trim();
+      const activeRefs = new Set(input.activeCandidateRefs);
+      const adoptableRefs = new Set<string>();
+      for (const pending of input.pendingCandidates) {
+        const first = await this.captureCandidateTree(pending.worktreePath, pending.expectedHeadSha, pending.artifactDir);
+        const second = await this.captureCandidateTree(pending.worktreePath, pending.expectedHeadSha, pending.artifactDir);
+        if (canonicalJson(first) !== canonicalJson(second)) continue;
+        const bindingId = candidateBindingId({
+          bindingSeed: candidateBindingSeed(pending.runId, pending.boundary),
+          expectedHeadSha: pending.expectedHeadSha,
+          candidateTreeSha: first.treeSha,
+          canonicalChangedFiles: first.changedFiles,
+          sourceWorktreeIdentity: first.worktreeIdentity,
+        });
+        const ref = candidateRef(pending.runId, bindingId);
+        const commit = await this.resolveOptionalRef(root, ref);
+        if (commit && await this.commitMatches(root, commit, pending.expectedHeadSha, first.treeSha)) adoptableRefs.add(ref);
+      }
+      const refs = (await this.git(['-C', root, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/codex-orchestrator/candidates/']))
+        .split('\n').filter(Boolean);
+      for (const row of refs) {
+        const separator = row.indexOf(' ');
+        if (separator < 1) throw new Error('orphan candidate ref row is malformed');
+        const ref = row.slice(0, separator);
+        const sha = row.slice(separator + 1);
+        if (!activeRefs.has(ref) && !adoptableRefs.has(ref)) {
+          const deleted = await this.executor('git', ['-C', root, 'update-ref', '-d', ref, sha]);
+          if (deleted.exitCode !== 0) throw new Error('orphan candidate ref cleanup failed');
+        }
+      }
+      const executionRoot = canonicalFilesystemPath(resolve(input.workspaceRoot, '.candidate-executions'));
+      const activeExecutions = new Map(input.activeExecutions.map((execution) => [
+        canonicalFilesystemPath(execution.path), execution.candidateCommitSha,
+      ]));
+      for (const worktree of await this.worktrees.listWorktrees(root)) {
+        const path = canonicalFilesystemPath(worktree.path);
+        const relativePath = relative(executionRoot, path);
+        if (relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))) {
+          const expectedCommit = activeExecutions.get(path);
+          if (expectedCommit) {
+            if (worktree.branch !== undefined || await this.getHead(path).catch(() => '') !== expectedCommit) {
+              throw new Error('persisted candidate execution owner diverged');
+            }
+          } else {
+            if (worktree.branch !== undefined) throw new Error('orphan candidate execution unexpectedly owns a branch');
+            await this.git(['-C', root, 'worktree', 'remove', '--force', path]);
+          }
+        }
+      }
+    });
+  }
+
+  private async captureAndPinCandidate(input: Parameters<CandidateGitV2['captureAndPin']>[0]): Promise<CandidateResult<CandidateBindingV2>> {
+    try {
+      const first = await this.captureCandidateTree(input.worktreePath, input.expectedHeadSha, input.artifactDir);
+      const second = await this.captureCandidateTree(input.worktreePath, input.expectedHeadSha, input.artifactDir);
+      if (canonicalJson(first) !== canonicalJson(second)) {
+        return { kind: 'failed', code: 'candidate-unstable', detailSha256: sha256(canonicalJson({ first, second })) };
+      }
+      const bindingSeed = candidateBindingSeed(input.runId, input.boundary);
+      const bindingId = candidateBindingId({
+        bindingSeed,
+        expectedHeadSha: input.expectedHeadSha,
+        candidateTreeSha: first.treeSha,
+        canonicalChangedFiles: first.changedFiles,
+        sourceWorktreeIdentity: first.worktreeIdentity,
+      });
+      const ref = candidateRef(input.runId, bindingId);
+      const root = (await this.git(['-C', input.worktreePath, 'rev-parse', '--show-toplevel'])).trim();
+      this.candidateRepositories.set(ref, root);
+      let commitSha = await this.resolveOptionalRef(root, ref);
+      if (commitSha) {
+        if (!await this.commitMatches(root, commitSha, input.expectedHeadSha, first.treeSha)) throw new Error('existing candidate ref diverged');
+      } else {
+        commitSha = (await this.git([
+          '-C', root, '-c', 'user.name=codex-orchestrator', '-c', 'user.email=codex-orchestrator@users.noreply.github.com',
+          'commit-tree', first.treeSha, '-p', input.expectedHeadSha, '-m', `codex-orchestrator candidate ${bindingId}`,
+        ])).trim();
+        const update = await this.executor('git', ['-C', root, 'update-ref', ref, commitSha, '0'.repeat(commitSha.length)]);
+        if (update.exitCode !== 0) {
+          const observed = await this.resolveOptionalRef(root, ref);
+          if (!observed || !await this.commitMatches(root, observed, input.expectedHeadSha, first.treeSha)) {
+            return { kind: 'failed', code: 'candidate-ref-update-unknown', detailSha256: sha256(update.stderr) };
+          }
+          commitSha = observed;
+        }
+      }
+      return { kind: 'ok', value: {
+        version: 2, bindingId, expectedHeadSha: input.expectedHeadSha, candidateRef: ref,
+        candidateCommitSha: commitSha, candidateTreeSha: first.treeSha,
+        canonicalChangedFiles: first.changedFiles, sourceWorktreeIdentity: first.worktreeIdentity,
+      } };
+    } catch (error) {
+      return candidateFailure('candidate-io-failed', error);
+    }
+  }
+
+  private async captureCandidateTree(worktreePath: string, expectedHeadSha: string, artifactDir: string): Promise<{
+    expectedHeadSha: string; treeSha: string; changedFiles: string[]; worktreeIdentity: string;
+  }> {
+    validateRelativeRoot(artifactDir);
+    const [head, canonicalPath, gitDirectoryRaw] = await Promise.all([
+      this.getHead(worktreePath), realpath(worktreePath), this.git(['-C', worktreePath, 'rev-parse', '--absolute-git-dir']),
+    ]);
+    if (head !== expectedHeadSha) throw new Error('candidate expected HEAD diverged');
+    const gitDirectory = gitDirectoryRaw.trim();
+    const temporaryRoot = await mkdtemp(join(gitDirectory, 'candidate-index-'));
+    const indexPath = join(temporaryRoot, 'index');
+    const options = { envOverlay: { GIT_INDEX_FILE: indexPath } };
+    try {
+      await this.git(['-C', worktreePath, 'read-tree', expectedHeadSha], options);
+      await this.git(['-C', worktreePath, 'add', '-u', '--'], options);
+      const untracked = (await this.git(['-C', worktreePath, 'ls-files', '--others', '--exclude-standard', '-z'], options)).split('\0')
+        .filter((path) => path && path !== artifactDir && !path.startsWith(`${artifactDir}/`)).sort();
+      if (untracked.length > 0) {
+        await this.git(['-C', worktreePath, 'add', '--pathspec-from-file=-', '--pathspec-file-nul'], {
+          ...options, stdin: `${untracked.join('\0')}\0`,
+        });
+      }
+      const treeSha = (await this.git(['-C', worktreePath, 'write-tree'], options)).trim();
+      const changedFiles = (await this.git(['-C', worktreePath, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', expectedHeadSha, treeSha]))
+        .split('\0').filter(Boolean).sort();
+      return {
+        expectedHeadSha,
+        treeSha,
+        changedFiles,
+        worktreeIdentity: sha256(canonicalJson({ canonicalPath, gitDirectory })),
+      };
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }
+
+  private async inspectCandidatePin(binding: CandidateBindingV2): Promise<CandidateResult<'matching' | 'missing' | 'diverged'>> {
+    return this.candidateOperation('candidate-io-failed', async () => {
+      const root = await this.candidateRepository(binding.candidateRef);
+      if (!root) return 'missing';
+      const observed = await this.resolveOptionalRef(root, binding.candidateRef);
+      if (!observed) return 'missing';
+      return observed === binding.candidateCommitSha
+        && await this.commitMatches(root, observed, binding.expectedHeadSha, binding.candidateTreeSha) ? 'matching' : 'diverged';
+    });
+  }
+
+  private async prepareCandidateExecution(input: Parameters<CandidateGitV2['prepareExecution']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['prepareExecution']>>> {
+    return this.candidateOperation('candidate-materialization-io-failed', async () => {
+      const root = await this.repositoryFromWorkspaceRoot(input.workspaceRoot);
+      this.candidateRepositories.set(input.binding.candidateRef, root);
+      const path = join(input.workspaceRoot, '.candidate-executions', input.runId, input.binding.bindingId, `${input.operation}-${input.attemptId}`);
+      const existing = (await this.worktrees.listWorktrees(root)).find((worktree) => sameFilesystemPath(worktree.path, path));
+      if (existing) {
+        const clean = await this.worktrees.isWorktreeClean(path);
+        const head = await this.getHead(path).catch(() => 'missing');
+        if (existing.branch !== undefined || head !== input.binding.candidateCommitSha || !clean) return { kind: 'path-diverged', path };
+      } else {
+        await mkdir(dirname(path), { recursive: true });
+        await this.git(['-C', root, 'worktree', 'add', '--detach', path, input.binding.candidateCommitSha]);
+      }
+      return { kind: 'prepared', lease: {
+        version: 2, bindingId: input.binding.bindingId, candidateCommitSha: input.binding.candidateCommitSha,
+        path, operation: input.operation, attemptId: input.attemptId, phase: 'prepared', pid: null,
+        processGroupId: null, preparedAt: new Date().toISOString(), launchedAt: null,
+      } };
+    });
+  }
+
+  private async inspectCandidateExecution(input: Parameters<CandidateGitV2['inspectExecution']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['inspectExecution']>>> {
+    return this.candidateOperation('candidate-materialization-io-failed', async () => {
+      try {
+        const stat = await lstat(input.lease.path);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) return 'mutated';
+      } catch (error) {
+        if (isErrorCode(error, 'ENOENT')) return 'missing';
+        throw error;
+      }
+      const [head, tree, changed] = await Promise.all([
+        this.getHead(input.lease.path),
+        this.git(['-C', input.lease.path, 'rev-parse', 'HEAD^{tree}']).then((value) => value.trim()),
+        this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.lease.path, input.artifactDir),
+      ]);
+      return head === input.binding.candidateCommitSha && tree === input.binding.candidateTreeSha && changed.length === 0 ? 'matching' : 'mutated';
+    });
+  }
+
+  private async removeCandidateExecution(lease: CandidateExecutionLeaseV2): Promise<CandidateResult<void>> {
+    return this.candidateOperation('candidate-materialization-io-failed', async () => {
+      if (lease.phase === 'launched' && lease.processGroupId && processGroupIsAlive(lease.processGroupId)) throw new Error('candidate execution process is still active');
+      const root = await this.repositoryFromWorkspaceRoot(lease.path);
+      const registered = (await this.worktrees.listWorktrees(root)).find((worktree) => sameFilesystemPath(worktree.path, lease.path));
+      if (!registered) return;
+      if (registered.branch !== undefined || await this.getHead(lease.path) !== lease.candidateCommitSha) throw new Error('candidate execution owner diverged');
+      await this.git(['-C', root, 'worktree', 'remove', '--force', lease.path]);
+    });
+  }
+
+  private async copyCandidateProofArtifacts(input: Parameters<CandidateGitV2['copyProofArtifacts']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['copyProofArtifacts']>>> {
+    return this.candidateOperation('candidate-materialization-io-failed', async () => {
+      const proofRoot = `${input.artifactDir}/${input.proofId}`;
+      const repositoryRoot = await this.repositoryFromWorkspaceRoot(input.lease.path);
+      const registered = (await this.worktrees.listWorktrees(repositoryRoot))
+        .find((worktree) => sameFilesystemPath(worktree.path, input.lease.path));
+      if (!registered || registered.branch !== undefined
+        || await this.getHead(input.lease.path).catch(() => '') !== input.lease.candidateCommitSha) {
+        return { kind: 'artifact-conflict' as const, relativePath: proofRoot };
+      }
+      const sourceRoot = await inspectSafeArtifactRoot(input.lease.path);
+      const destinationRoot = await inspectSafeArtifactRoot(input.issueWorktreePath);
+      for (const artifact of input.artifacts) {
+        if (artifact.relativePath !== proofRoot && !artifact.relativePath.startsWith(`${proofRoot}/`)) return { kind: 'artifact-conflict', relativePath: artifact.relativePath };
+        try {
+          const source = join(input.lease.path, artifact.relativePath);
+          const destination = join(input.issueWorktreePath, artifact.relativePath);
+          const sourceBytes = await readRegularFileWithoutSymlinkAncestors(sourceRoot, source);
+          if (sha256(sourceBytes) !== artifact.sha256) return { kind: 'artifact-conflict', relativePath: artifact.relativePath };
+          await ensureSafeDirectoryPath(destinationRoot, dirname(destination));
+          await publishArtifactCreateOnly(destinationRoot, destination, sourceBytes, artifact.sha256);
+        } catch (error) {
+          if (error instanceof CandidateArtifactConflictError) return { kind: 'artifact-conflict', relativePath: artifact.relativePath };
+          throw error;
+        }
+      }
+      return { kind: 'copied-or-observed' };
+    });
+  }
+
+  private async createOrObserveCandidateCommit(input: Parameters<CandidateGitV2['createOrObserveCommit']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['createOrObserveCommit']>>> {
+    return this.candidateOperation('candidate-ref-update-unknown', async () => {
+      const root = (await this.git(['-C', input.worktreePath, 'rev-parse', '--show-toplevel'])).trim();
+      const ref = `refs/heads/${input.branchName}`;
+      const observedHead = (await this.git(['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
+      if (observedHead !== input.parentSha) {
+        const observed = await this.inspectCommit(root, observedHead);
+        if (observed.parentSha === input.parentSha && observed.treeSha === input.treeSha && observed.message === input.message) {
+          return { kind: 'created-or-observed', sha: observedHead, ...observed };
+        }
+        return { kind: 'branch-diverged', observedHeadSha: observedHead };
+      }
+      if (input.observeOnly) return { kind: 'parent-unchanged' };
+      const pin = await this.resolveOptionalRef(root, input.candidateRef);
+      if (!pin || (await this.git(['-C', root, 'rev-parse', `${pin}^{tree}`])).trim() !== input.treeSha) throw new Error('candidate pin does not authorize publication tree');
+      const sha = (await this.git([
+        '-C', root, '-c', 'user.name=codex-orchestrator', '-c', 'user.email=codex-orchestrator@users.noreply.github.com',
+        'commit-tree', input.treeSha, '-p', input.parentSha, '-m', input.message,
+      ])).trim();
+      const update = await this.executor('git', ['-C', root, 'update-ref', ref, sha, input.parentSha]);
+      if (update.exitCode !== 0) {
+        const after = (await this.git(['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`])).trim();
+        if (after === input.parentSha) return { kind: 'parent-unchanged' };
+        const observed = await this.inspectCommit(root, after);
+        if (observed.parentSha === input.parentSha && observed.treeSha === input.treeSha && observed.message === input.message) {
+          return { kind: 'created-or-observed', sha: after, ...observed };
+        }
+        return { kind: 'branch-diverged', observedHeadSha: after };
+      }
+      return { kind: 'created-or-observed', sha, parentSha: input.parentSha, treeSha: input.treeSha, message: input.message };
+    });
+  }
+
+  private async releaseCandidatePin(binding: CandidateBindingV2, expected: string): Promise<CandidateResult<void>> {
+    return this.candidateOperation('candidate-ref-update-unknown', async () => {
+      const root = await this.candidateRepository(binding.candidateRef);
+      if (!root) return;
+      const observed = await this.resolveOptionalRef(root, binding.candidateRef);
+      if (!observed) return;
+      if (observed !== expected) throw new Error('candidate pin diverged');
+      const result = await this.executor('git', ['-C', root, 'update-ref', '-d', binding.candidateRef, expected]);
+      if (result.exitCode !== 0 && await this.resolveOptionalRef(root, binding.candidateRef)) throw new Error('candidate pin deletion outcome is unknown');
+    });
+  }
+
+  private async candidateOperation<T>(code: 'candidate-io-failed' | 'candidate-materialization-io-failed' | 'candidate-ref-update-unknown', operation: () => Promise<T>): Promise<CandidateResult<T>> {
+    try { return { kind: 'ok', value: await operation() }; }
+    catch (error) { return candidateFailure(code, error); }
+  }
+
+  private async candidateRepository(ref: string): Promise<string | undefined> {
+    const known = this.candidateRepositories.get(ref);
+    if (known) return known;
+    for (const candidateRoot of [this.repositoryRoot, process.cwd()]) {
+      if (!candidateRoot) continue;
+      try {
+        const root = (await this.git(['-C', candidateRoot, 'rev-parse', '--show-toplevel'])).trim();
+        if (await this.resolveOptionalRef(root, ref)) { this.candidateRepositories.set(ref, root); return root; }
+      } catch { /* this location need not be in the target repository */ }
+    }
+    return undefined;
+  }
+
+  private async repositoryFromWorkspaceRoot(path: string): Promise<string> {
+    let current = resolve(path);
+    while (true) {
+      try { return (await this.git(['-C', current, 'rev-parse', '--show-toplevel'])).trim(); }
+      catch {
+        const parent = dirname(current);
+        if (parent === current) throw new Error('candidate workspace is not below a Git repository');
+        current = parent;
+      }
+    }
+  }
+
+  private async resolveOptionalRef(root: string, ref: string): Promise<string | undefined> {
+    const result = await this.executor('git', ['-C', root, 'rev-parse', '--verify', `${ref}^{commit}`]);
+    if (result.exitCode === 1 || result.exitCode === 128) return undefined;
+    if (result.exitCode !== 0) throw new Error(`git ref inspection failed: ${result.stderr}`);
+    return result.stdout.trim();
+  }
+
+  private async commitMatches(root: string, commit: string, parent: string, tree: string): Promise<boolean> {
+    const observed = await this.inspectCommit(root, commit);
+    return observed.parentSha === parent && observed.treeSha === tree;
+  }
+
+  private async inspectCommit(root: string, commit: string): Promise<{ parentSha: string; treeSha: string; message: string }> {
+    const output = await this.git(['-C', root, 'show', '-s', '--format=%P%n%T%n%B', commit]);
+    const [parentSha, treeSha, ...message] = output.split('\n');
+    if (!parentSha || parentSha.includes(' ') || !treeSha) throw new Error('candidate commit is not single-parent');
+    return { parentSha, treeSha, message: message.join('\n').trimEnd() };
   }
 
   async getBaseSha(input: { targetRoot: string; baseBranch: string }): Promise<string> {
@@ -245,11 +598,185 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     return this.worktrees.pushBranch(input);
   }
 
-  private async git(args: string[]): Promise<string> {
-    const result = await this.executor('git', args);
+  private async git(args: string[], options?: Parameters<ProcessExecutor>[2]): Promise<string> {
+    const result = await this.executor('git', args, options);
     if (result.exitCode !== 0) throw new Error(`git failed: ${result.stderr}`);
     return result.stdout;
   }
+}
+
+function candidateFailure<T>(
+  code: 'candidate-unstable' | 'candidate-io-failed' | 'candidate-materialization-io-failed' | 'candidate-ref-update-unknown',
+  error: unknown,
+): CandidateResult<T> {
+  const detail = error instanceof Error ? `${error.name}:${error.message}` : String(error);
+  return { kind: 'failed', code, detailSha256: sha256(detail) };
+}
+
+function processGroupIsAlive(processGroupId: number): boolean {
+  try { process.kill(-processGroupId, 0); return true; }
+  catch (error) { return !isErrorCode(error, 'ESRCH'); }
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+  return canonicalFilesystemPath(left) === canonicalFilesystemPath(right);
+}
+
+function canonicalFilesystemPath(value: string): string {
+  const resolved = resolve(value);
+  return resolved.startsWith('/private/') ? resolved.slice('/private'.length) : resolved;
+}
+
+interface SafeArtifactRoot {
+  path: string;
+  realPath: string;
+  dev: number;
+  ino: number;
+}
+
+async function inspectSafeArtifactRoot(root: string): Promise<SafeArtifactRoot> {
+  const path = resolve(root);
+  const stat = await lstat(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new CandidateArtifactConflictError('candidate artifact root is unsafe');
+  const realPath = canonicalFilesystemPath(await realpath(path));
+  if (realPath !== canonicalFilesystemPath(path)) throw new CandidateArtifactConflictError('candidate artifact root has a symlinked ancestor');
+  const identity = { path, realPath, dev: stat.dev, ino: stat.ino };
+  await assertSafeArtifactRoot(identity);
+  return identity;
+}
+
+async function assertSafeArtifactRoot(root: SafeArtifactRoot): Promise<void> {
+  const stat = await lstat(root.path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== root.dev || stat.ino !== root.ino
+    || canonicalFilesystemPath(await realpath(root.path)) !== root.realPath) {
+    throw new CandidateArtifactConflictError('candidate artifact root changed');
+  }
+}
+
+async function readRegularFileWithoutSymlinkAncestors(rootInput: string | SafeArtifactRoot, path: string): Promise<Buffer> {
+  const root = typeof rootInput === 'string' ? await inspectSafeArtifactRoot(rootInput) : rootInput;
+  await assertSafeArtifactRoot(root);
+  const relativePath = relative(root.path, resolve(path));
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) throw new CandidateArtifactConflictError('candidate artifact path escapes its root');
+  let current = root.path;
+  const rootStat = await lstat(current);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new CandidateArtifactConflictError('candidate artifact root is unsafe');
+  const ancestorIdentity = [{ path: current, dev: rootStat.dev, ino: rootStat.ino }];
+  const segments = relativePath.split('/');
+  for (const segment of segments.slice(0, -1)) {
+    current = join(current, segment);
+    const stat = await lstat(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new CandidateArtifactConflictError('candidate artifact ancestor is unsafe');
+    ancestorIdentity.push({ path: current, dev: stat.dev, ino: stat.ino });
+  }
+  const finalBeforeOpen = await lstat(path);
+  if (finalBeforeOpen.isSymbolicLink() || !finalBeforeOpen.isFile()) {
+    throw new CandidateArtifactConflictError('candidate artifact is not a regular file');
+  }
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (isErrorCode(error, 'ELOOP')) throw new CandidateArtifactConflictError('candidate artifact is not a regular file');
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new CandidateArtifactConflictError('candidate artifact is not a regular file');
+    const openedPath = await realpath(path);
+    const openedRelative = relative(root.realPath, canonicalFilesystemPath(openedPath));
+    if (!openedRelative || openedRelative.startsWith('..') || isAbsolute(openedRelative)) {
+      throw new CandidateArtifactConflictError('candidate artifact path escaped its root during read');
+    }
+    const finalStat = await lstat(path);
+    if (!finalStat.isFile() || finalStat.isSymbolicLink() || finalStat.dev !== stat.dev || finalStat.ino !== stat.ino) {
+      throw new CandidateArtifactConflictError('candidate artifact changed during read');
+    }
+    for (const identity of ancestorIdentity) {
+      const observed = await lstat(identity.path);
+      if (!observed.isDirectory() || observed.isSymbolicLink() || observed.dev !== identity.dev || observed.ino !== identity.ino) {
+        throw new CandidateArtifactConflictError('candidate artifact ancestor changed during read');
+      }
+    }
+    await assertSafeArtifactRoot(root);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function ensureSafeDirectoryPath(root: SafeArtifactRoot, directory: string): Promise<void> {
+  await assertSafeArtifactRoot(root);
+  const relativeDirectory = relative(root.path, resolve(directory));
+  if (relativeDirectory.startsWith('..') || isAbsolute(relativeDirectory)) throw new CandidateArtifactConflictError('candidate artifact directory escapes its root');
+  let current = root.path;
+  for (const segment of relativeDirectory.split('/').filter(Boolean)) {
+    current = join(current, segment);
+    try { await mkdir(current); }
+    catch (error) { if (!isErrorCode(error, 'EEXIST')) throw error; }
+    const stat = await lstat(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new CandidateArtifactConflictError('candidate artifact directory is unsafe');
+  }
+  const parentRealPath = canonicalFilesystemPath(await realpath(directory));
+  const parentRelative = relative(root.realPath, parentRealPath);
+  if (parentRelative.startsWith('..') || isAbsolute(parentRelative)) throw new CandidateArtifactConflictError('candidate artifact directory escaped its root');
+  await assertSafeArtifactRoot(root);
+}
+
+class CandidateArtifactConflictError extends Error {}
+
+async function publishArtifactCreateOnly(root: SafeArtifactRoot, destination: string, bytes: Buffer, expectedSha256: string): Promise<void> {
+  await assertSafeArtifactRoot(root);
+  const temporary = join(dirname(destination), `.${basename(destination)}.${expectedSha256}.tmp`);
+  let handle;
+  try {
+    handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  } catch (error) {
+    if (!isErrorCode(error, 'EEXIST')) throw error;
+    const stale = await readRegularFileWithoutSymlinkAncestors(root, temporary);
+    if (sha256(stale) !== expectedSha256) {
+      await unlink(temporary);
+      handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    }
+  }
+  if (handle) {
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+      const stat = await handle.stat();
+      const observed = await lstat(temporary);
+      const temporaryRealPath = canonicalFilesystemPath(await realpath(temporary));
+      const temporaryRelative = relative(root.realPath, temporaryRealPath);
+      if (!observed.isFile() || observed.isSymbolicLink() || observed.dev !== stat.dev || observed.ino !== stat.ino
+        || temporaryRelative.startsWith('..') || isAbsolute(temporaryRelative)) {
+        throw new CandidateArtifactConflictError('candidate artifact temporary path changed');
+      }
+      await assertSafeArtifactRoot(root);
+    } finally { await handle.close(); }
+  }
+  try { await link(temporary, destination); }
+  catch (error) {
+    if (!isErrorCode(error, 'EEXIST')) throw error;
+    const existing = await readRegularFileWithoutSymlinkAncestors(root, destination);
+    if (sha256(existing) !== expectedSha256) throw new CandidateArtifactConflictError('candidate artifact destination conflicts');
+  }
+  const published = await readRegularFileWithoutSymlinkAncestors(root, destination);
+  if (sha256(published) !== expectedSha256) throw new CandidateArtifactConflictError('candidate artifact destination conflicts');
+  const parent = await open(dirname(destination), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    const parentStat = await parent.stat();
+    const observedParent = await lstat(dirname(destination));
+    const parentRealPath = canonicalFilesystemPath(await realpath(dirname(destination)));
+    const parentRelative = relative(root.realPath, parentRealPath);
+    if (!observedParent.isDirectory() || observedParent.isSymbolicLink()
+      || observedParent.dev !== parentStat.dev || observedParent.ino !== parentStat.ino
+      || parentRelative.startsWith('..') || isAbsolute(parentRelative)) {
+      throw new CandidateArtifactConflictError('candidate artifact destination directory changed');
+    }
+    await parent.sync();
+    await assertSafeArtifactRoot(root);
+  } finally { await parent.close(); }
+  await unlink(temporary).catch((error) => { if (!isErrorCode(error, 'ENOENT')) throw error; });
 }
 
 export class ContainedImplementationAgent {
@@ -401,7 +928,7 @@ export class ContainedImplementationAgent {
   }
 }
 
-export class ContainedProofAgent implements ProofAgent {
+export class ContainedProofAgent implements ProofAgent<import('./checked-change.js').CheckedChangePayload> {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfig;
     orchestratorHome: string;
@@ -420,12 +947,13 @@ export class ContainedProofAgent implements ProofAgent {
     if (!input.workflowGeneration) throw new Error('proof workflow generation is required');
     const config = this.dependencies.config();
     const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
-    const worktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
+    const issueWorktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
+    const worktreePath = input.worktreePath ? resolve(input.worktreePath) : issueWorktreePath;
     const attempt = await prepareContainedAttempt({
       orchestratorHome: this.dependencies.orchestratorHome,
       canonicalRepository,
       runId: input.runId,
-      attemptId: (this.dependencies.createAttemptId ?? randomUUID)(),
+      attemptId: input.attemptId ?? (this.dependencies.createAttemptId ?? randomUUID)(),
       operationId: 'acceptance-proof',
       workflowGeneration: input.workflowGeneration,
       bootId: this.dependencies.bootId,
@@ -442,6 +970,19 @@ export class ContainedProofAgent implements ProofAgent {
     const iosTooling = await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
     try {
+      try {
+        const recoveredReport = await readRegularFile(attempt.reportPath);
+        const recoveredInventory = await artifactInventory(artifactRoot, config.proof.artifactDir);
+        const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
+        return {
+          kind: 'report',
+          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']),
+          proofPhaseChangedFiles: [...recoveredInventory.keys()].filter((path) => !runnerPrepared.has(path)).sort(),
+        };
+      } catch (error) {
+        if (!isErrorCode(error, 'ENOENT')) throw error;
+      }
+      if (input.recoverOnly) throw new ProofReportRecoveryError();
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
         cwd: worktreePath,
@@ -490,6 +1031,9 @@ export class ContainedProofAgent implements ProofAgent {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
+        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
+          pid, processGroupId, launchedAt: new Date().toISOString(),
+        }) } : {}),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -506,6 +1050,7 @@ export class ContainedProofAgent implements ProofAgent {
       if (error instanceof ProcessQuiescenceError) {
         throw new ProofQuiescenceError(error.pid, error.processGroupId, () => waitForProcessGroupAbsent(error.processGroupId));
       }
+      if (error instanceof ProofReportRecoveryError) throw error;
       return { kind: 'internal-error' };
     }
   }
@@ -548,7 +1093,7 @@ export function createV2Runtime(input: {
   implementationAgent?: {
     run(input: Parameters<NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent']['run']>[0]): Promise<ImplementationAgentResult>;
   };
-  proofAgent?: ProofAgent;
+  proofAgent?: ProofAgent<import('./checked-change.js').CheckedChangePayload>;
   parentCodexHome?: string;
   safePath?: string;
   codexProcess?: CodexProcess;
@@ -574,7 +1119,7 @@ export function createV2Runtime(input: {
     codexExecutable = { command, path };
     return path;
   };
-  const git = input.git ?? new LocalGitRunIssueAdapter(commandExecutor);
+  const git = input.git ?? new LocalGitRunIssueAdapter(commandExecutor, targetRoot);
   const proofFreshnessGit = git as RunIssueGit & {
     snapshotIgnoringUntrackedRoot?: (
       worktreePath: string,
@@ -885,15 +1430,20 @@ export function createV2Runtime(input: {
       if (!runRecords) throw new Error('run store used before config');
       return runRecords.compareAndSwap(generation, next);
     },
+    markPublicationEffectPossible: async () => {
+      if (!runRecords?.markPublicationEffectPossible) return;
+      await runRecords.markPublicationEffectPossible();
+    },
   };
   const capabilities = createCheckedChangeCapabilities();
   const proof = {
-    proveChange: async (proofInput: Parameters<AcceptanceProof['proveChange']>[0]) => {
+    proveChange: async (proofInput: Parameters<AcceptanceProof<import('./checked-change.js').CheckedChangePayload>['proveChange']>[0]) => {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
       const repoKey = sha256(checked.payload.canonicalRepository);
       const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'));
-      const worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
+      const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
+      const worktreePath = proofInput.executionLease?.path ?? issueWorktreePath;
       const androidLease = new FileAndroidLeaseVerifier({
         leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
         worktreeRoot: worktreePath,
@@ -910,16 +1460,28 @@ export function createV2Runtime(input: {
           release: (record) => releaseIosSimulator(commandExecutor, iosXcrunPath, record),
         },
       });
-      const acceptanceProof = new AcceptanceProof({
+      const acceptanceProof = new AcceptanceProof<import('./checked-change.js').CheckedChangePayload>({
         checkedChangeReader: capabilities,
         proofRecords,
         proofAgent,
-        inspectFreshness: async (payload) => ({
-          ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
-            ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
-            : git.snapshot(worktreePath)),
-          checkPolicySha256: sha256(canonicalJson(resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks)),
-        }),
+        inspectFreshness: async (payload, executionLease) => {
+          const checkPolicySha256 = sha256(canonicalJson(resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks));
+          if (payload.version === 1) return {
+            ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
+              ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
+              : git.snapshot(worktreePath)),
+            checkPolicySha256,
+          };
+          if (!executionLease || !git.candidateV2) throw new CandidateProofInspectionError('candidate-git-v2-required');
+          const inspection = await git.candidateV2.inspectExecution({
+            binding: payload.binding,
+            lease: executionLease,
+            artifactDir: config.proof.artifactDir,
+          });
+          if (inspection.kind === 'failed') throw new CandidateProofInspectionError(inspection.code);
+          if (inspection.value !== 'matching') throw new CandidateProofInspectionError('candidate-materialization-mutated');
+          return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha, checkPolicySha256 };
+        },
         readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
         inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
         androidLease,
@@ -938,7 +1500,7 @@ export function createV2Runtime(input: {
       const runnerPreparedArtifactSha256: Record<string, string> = {};
       const runnerPreparationWarnings: string[] = [];
       let preparationAttempted = false;
-      return acceptanceProof.proveChange({
+      const result = await acceptanceProof.proveChange({
         ...proofInput,
         runnerPreparedArtifactPaths,
         runnerPreparedArtifactSha256,
@@ -966,6 +1528,19 @@ export function createV2Runtime(input: {
           }
         },
       });
+      if (checked.payload.version === 2 && proofInput.executionLease && git.candidateV2 && result.status === 'passed') {
+        const artifacts = result.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
+        const copied = await git.candidateV2.copyProofArtifacts({
+          lease: proofInput.executionLease,
+          issueWorktreePath,
+          artifactDir: config.proof.artifactDir,
+          proofId: proofInput.proofId,
+          artifacts,
+        });
+        if (copied.kind === 'failed') throw new CandidateProofInspectionError(copied.code);
+        if (copied.value.kind === 'artifact-conflict') throw new CandidateProofInspectionError('candidate-artifact-conflict');
+      }
+      return result;
     },
   };
   const runner = new RunIssue({
@@ -1095,11 +1670,12 @@ export function createV2Runtime(input: {
     implementationReviewer,
     waitForReviewProcessAbsence: waitForProcessGroupAbsent,
     checks: {
-      run: async ({ source, command, cwd, signal }) => {
+      supportsLaunchOwnership: true,
+      run: async ({ source, command, cwd, signal, onLaunched }) => {
         const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
         return source === 'issue'
-          ? runProcessCheck(parseIssueCheckInvocation(command), cwd, signal, timeoutMs)
-          : runShellCheck(command, cwd, signal, timeoutMs);
+          ? runProcessCheck(parseIssueCheckInvocation(command), cwd, signal, timeoutMs, onLaunched)
+          : runShellCheck(command, cwd, signal, timeoutMs, onLaunched);
       },
     },
     proof,
@@ -1161,7 +1737,9 @@ async function acquireOwnerLock(input: {
 }
 
 async function readRegularFile(path: string): Promise<Buffer> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const beforeOpen = await lstat(path);
+  if (beforeOpen.isSymbolicLink() || !beforeOpen.isFile()) throw new Error(`${path} is not a bounded regular file`);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > 5 * 1024 * 1024) throw new Error(`${path} is not a bounded regular file`);
@@ -1187,8 +1765,9 @@ export async function runShellCheck(
   cwd: string,
   signal: AbortSignal,
   timeoutMs: number,
+  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
-  return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs);
+  return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
 }
 
 async function runProcessCheck(
@@ -1196,8 +1775,9 @@ async function runProcessCheck(
   cwd: string,
   signal: AbortSignal,
   timeoutMs: number,
+  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
-  return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs);
+  return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs, onLaunched);
 }
 
 async function runSpawnCheck(
@@ -1206,9 +1786,15 @@ async function runSpawnCheck(
   cwd: string,
   signal: AbortSignal,
   timeoutMs: number,
+  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
   return new Promise((resolveCheck, rejectCheck) => {
-    const child = spawn(file, args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('/bin/sh', [
+      '-c', 'IFS= read -r _ || exit 125; exec "$@"', 'codex-orchestrator-check-gate', file, ...args,
+    ], { cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const launchOwnership = child.pid && onLaunched
+      ? onLaunched({ pid: child.pid, processGroupId: child.pid })
+      : Promise.resolve();
     const chunks: Buffer[] = [];
     let retained = 0;
     const outputHash = createHash('sha256');
@@ -1240,6 +1826,7 @@ async function runSpawnCheck(
       }, 5_000);
       killTimer.unref();
     };
+    void launchOwnership.then(() => child.stdin.end('\n')).catch(() => terminate());
     signal.addEventListener('abort', terminate, { once: true });
     if (signal.aborted) terminate();
     child.once('error', (error) => {
@@ -1272,6 +1859,7 @@ async function runSpawnCheck(
           rejectCheck(new Error(`Check exceeded ${timeoutMs}ms and was terminated.`));
           return;
         }
+        await launchOwnership;
         resolveCheck({
           status: code === 0 ? 'passed' : 'failed',
           output: Buffer.concat(chunks),
@@ -1457,13 +2045,15 @@ async function artifactInventory(root: string, logicalRoot: string): Promise<Map
     throw error;
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('proof artifact root must be a direct directory');
+  const rootIdentity = await inspectSafeArtifactRoot(root);
   const visit = async (directory: string, relative: string): Promise<void> => {
+    await assertSafeArtifactRoot(rootIdentity);
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
       const childPath = join(directory, entry.name);
       if (entry.isSymbolicLink()) throw new Error('proof artifact tree contains a symlink');
       if (entry.isDirectory()) await visit(childPath, childRelative);
-      else if (entry.isFile()) output.set(`${logicalRoot}/${childRelative}`, sha256(await readFile(childPath)));
+      else if (entry.isFile()) output.set(`${logicalRoot}/${childRelative}`, sha256(await readRegularFileWithoutSymlinkAncestors(rootIdentity, childPath)));
       else throw new Error('proof artifact tree contains a special file');
     }
   };

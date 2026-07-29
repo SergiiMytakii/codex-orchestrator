@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Added V2 candidate-bound `CheckedChange` contracts and optional candidate Git
+  capability while preserving existing V1 payload and freshness semantics.
+- Added run-state V3 migration with an exact raw-byte backup, pre-publication
+  rollback guard, candidate bindings, execution leases, and retained commit
+  intents for observation-only recovery.
+
+### Changed
+- Direct-route review, checks, and Acceptance Proof now execute from fresh
+  detached materializations of one private-index-captured, ref-pinned Git tree.
+  Publication creates and observes the exact single-parent commit from that
+  tree before push, including restart-safe branch-CAS reconciliation.
+
 ### Fixed
 - New issue worktrees now use a freshly fetched configured remote base and are
   created from its immutable pinned SHA. Base fetch failures remain unclaimed

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -311,6 +311,7 @@ test('production supervisor captures output and exit from an immediately exiting
     env: { PATH: '/usr/bin:/bin' },
     stdin: '',
   });
+  await child.releaseStartGate?.();
   await child.writeStdinAndClose('');
   const exit = await child.waitForExit();
   await child.waitForGroupAbsent(1_000);
@@ -318,6 +319,24 @@ test('production supervisor captures output and exit from an immediately exiting
   assert.deepEqual(exit, { exitCode: 0, signal: null });
   assert.equal(streams.stdout.toString('utf8'), 'fast-output');
   assert.equal(streams.truncated, false);
+});
+
+test('production supervisor cannot exec Codex before the durable launch gate opens', { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-process-launch-gate-'));
+  const marker = join(root, 'executed');
+  try {
+    const child = await spawnNodeSupervisedProcess({
+      file: '/usr/bin/touch', args: [marker], cwd: root, env: { PATH: '/usr/bin:/bin' }, stdin: '',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await assert.rejects(access(marker));
+    await child.releaseStartGate?.();
+    await child.writeStdinAndClose('');
+    assert.deepEqual(await child.waitForExit(), { exitCode: 0, signal: null });
+    await access(marker);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 class FakeChild implements SupervisedChild {

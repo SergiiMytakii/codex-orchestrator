@@ -61,6 +61,78 @@ test('migrates V1 run state to V2 on the next atomic write', async () => {
   assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 2);
 });
 
+test('V2 to V3 cutover preserves exact raw backup and rollback closes permanently at the publication watermark', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [record()],
+  }, null, 2)}\n`);
+  await writeFile(path, legacyBytes);
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  assert.equal((await writer.read()).version, 2);
+
+  const migrated = await writer.compareAndSwap(7, {
+    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
+  });
+  assert.equal(migrated.version, 3);
+  assert.deepEqual(await readFile(`${path}.pre-candidate-v3`), legacyBytes);
+  const metadata = JSON.parse(await readFile(`${path}.pre-candidate-v3.metadata.json`, 'utf8')) as {
+    sourceGeneration: number; sourceBytesSha256: string; publicationEffectPossible: boolean;
+  };
+  assert.equal(metadata.sourceGeneration, 7);
+  assert.equal(metadata.publicationEffectPossible, false);
+
+  let cleaned = false;
+  const restored = await writer.rollbackCandidateMigration({
+    assertNoActiveProcesses: async () => undefined,
+    cleanupCandidateState: async () => { cleaned = true; },
+  });
+  assert.equal(cleaned, true);
+  assert.equal(restored.version, 2);
+  assert.deepEqual(await readFile(path), legacyBytes);
+
+  const second = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'token-b' }));
+  await second.compareAndSwap(7, {
+    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
+  });
+  await second.markPublicationEffectPossible();
+  await assert.rejects(second.rollbackCandidateMigration({
+    assertNoActiveProcesses: async () => undefined,
+    cleanupCandidateState: async () => undefined,
+  }), /forbidden/u);
+});
+
+test('candidate rollback holds the state lock and cannot overwrite an interleaved CAS', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [record()],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+  const rollbackWriter = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'rollback', processAlive: () => true, lockWaitMs: 1_000 }));
+  const casWriter = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'cas', processAlive: () => true, lockWaitMs: 1_000 }));
+  const migrated = await rollbackWriter.compareAndSwap(7, {
+    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
+  });
+  let cleanupEntered!: () => void;
+  let releaseCleanup!: () => void;
+  const entered = new Promise<void>((resolve) => { cleanupEntered = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  const rollback = rollbackWriter.rollbackCandidateMigration({
+    assertNoActiveProcesses: async () => undefined,
+    cleanupCandidateState: async () => { cleanupEntered(); await release; },
+  });
+  await entered;
+  const concurrentCas = casWriter.compareAndSwap(migrated.generation, {
+    schema: migrated.schema, version: 3, runs: [{ ...record(), cycle: 2 }],
+  });
+  const casRejected = assert.rejects(concurrentCas, /generation|state lock disappeared/u);
+  releaseCleanup();
+  assert.equal((await rollback).version, 2);
+  await casRejected;
+  assert.deepEqual(await readFile(path), legacyBytes);
+});
+
 test('run state rejects malformed and lifecycle-inconsistent records', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');

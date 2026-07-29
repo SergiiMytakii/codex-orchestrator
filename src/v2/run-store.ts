@@ -11,7 +11,11 @@ import {
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import { validateWaitingHumanExecution, type WaitingHumanExecutionV1 } from './waiting-human.js';
 import { posix } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
+import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
+import { canonicalJson, sha256 } from './containment.js';
+import { validateCandidateBinding, validateCandidateExecutionLease, type CandidateBindingV2, type CandidateExecutionLeaseV2 } from './candidate.js';
 import {
   createReviewFeedbackBootstrap,
   validateImplementationInvocation,
@@ -44,7 +48,7 @@ export type Lifecycle =
 
 export type PublicationIntent =
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
-  | { kind: 'commit'; parentSha: string; treeSha: string; message: string }
+  | { kind: 'commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'push'; branch: string; sha: string }
   | { kind: 'pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
   | { kind: 'comment'; issueNumber: number; marker: string; bodySha256: string }
@@ -58,7 +62,7 @@ export type PublicationIntent =
     evidenceCode: string;
   }
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
-  | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string }
+  | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
   | { kind: 'review-summary'; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; marker: string; bodySha256: string; epochHeadSha: string }
   | { kind: 'review-final-labels'; issueNumber: number; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; epochHeadSha: string; expected: string[] }
@@ -101,6 +105,16 @@ export interface PersistedFrozenCriterionV1 {
   source: 'explicit' | 'fallback';
 }
 
+export interface CandidateCheckReceiptV2 {
+  id: string;
+  command: string;
+  status: 'passed' | 'failed';
+  outputSha256: string;
+  bindingId: string;
+  candidateTreeSha: string;
+  checkPolicySha256: string;
+}
+
 export interface RunRecordV1 {
   runId: string;
   issueNumber: number;
@@ -123,11 +137,14 @@ export interface RunRecordV1 {
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
   reviewFeedback?: ReviewFeedbackExecutionV1;
+  changeBindingVersion?: 2;
+  candidateBinding?: CandidateBindingV2;
+  executionLease?: CandidateExecutionLeaseV2;
   checkQualification?: {
     version: 1;
     checkPolicySha256: string;
     repairAttempts: 0 | 1 | 2 | 3 | 4 | 5;
-    checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
+    checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string } | CandidateCheckReceiptV2>;
     implementationStarted?: boolean;
     repairInvocation?: ReviewFeedbackImplementationInvocationV1 | null;
     deniedPathsBaseline?: string;
@@ -151,7 +168,10 @@ export interface RunRecordV1 {
   /** Legacy read compatibility for runs created before check qualification. New runs never write this field. */
   baselineChecks?: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
   /** `unchanged-failure` is accepted only so historical terminal runs remain readable. */
-  checks: Array<{ id: string; command: string; status: 'passed' | 'failed' | 'unchanged-failure'; outputSha256: string }>;
+  checks: Array<
+    | { id: string; command: string; status: 'passed' | 'failed' | 'unchanged-failure'; outputSha256: string }
+    | CandidateCheckReceiptV2
+  >;
   checkedChangeSha256?: string;
   proofId?: string;
   proofReceipt?: ProofReceipt;
@@ -164,7 +184,7 @@ export interface RunRecordV1 {
 
 export interface RunStateFileV1 {
   schema: 'codex-orchestrator.agent-auto-state';
-  version: 2;
+  version: 2 | 3;
   generation: number;
   runs: RunRecordV1[];
 }
@@ -174,6 +194,7 @@ export type RunStateBodyV1 = Omit<RunStateFileV1, 'generation'>;
 export interface RunRecordWriter {
   read(): Promise<RunStateFileV1>;
   compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1>;
+  markPublicationEffectPossible?(): Promise<void>;
 }
 
 export class WorkflowGenerationUnrecoverableError extends Error {
@@ -192,9 +213,15 @@ export class RouteInitializationUnrecoverableError extends Error {
 
 export class FileRunRecordWriter implements RunRecordWriter {
   private readonly file: AtomicStateFile<RunStateFileV1>;
+  private readonly backupPath: string;
+  private readonly migrationMetadataPath: string;
+  private readonly now: () => string;
 
   constructor(path: string, options: AtomicStateFileOptions = {}) {
     this.file = new AtomicStateFile(path, validateRunStateFile, options);
+    this.backupPath = `${path}.pre-candidate-v3`;
+    this.migrationMetadataPath = `${this.backupPath}.metadata.json`;
+    this.now = options.now ?? (() => new Date().toISOString());
   }
 
   async read(): Promise<RunStateFileV1> {
@@ -203,7 +230,69 @@ export class FileRunRecordWriter implements RunRecordWriter {
 
   async compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1> {
     validateRunStateBody(next);
-    return this.file.compareAndSwap(expectedGeneration, { ...structuredClone(next), generation: expectedGeneration + 1 });
+    const candidate = { ...structuredClone(next), generation: expectedGeneration + 1 };
+    return this.file.compareAndSwapWithRaw(expectedGeneration, candidate, async (priorBytes) => {
+      if (!priorBytes) return;
+      const raw = parseRawState(priorBytes);
+      if (raw.version === 3 && next.version !== 3) throw new Error('run state V3 downgrade requires explicit rollback');
+      if (raw.version === 2 && next.version === 3) await this.ensureCandidateMigrationBackup(priorBytes, raw.generation);
+    });
+  }
+
+  async markPublicationEffectPossible(): Promise<void> {
+    await this.file.withExclusiveRaw(async () => {
+      const existing = await readMigrationMetadata(this.migrationMetadataPath);
+      if (!existing?.publicationEffectPossible) {
+        const now = this.now();
+        await writeDurableAtomicFile(this.migrationMetadataPath, `${canonicalJson({
+          version: 1,
+          sourceGeneration: existing?.sourceGeneration ?? null,
+          sourceBytesSha256: existing?.sourceBytesSha256 ?? null,
+          publicationEffectPossible: true,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        })}\n`);
+      }
+      return { result: undefined };
+    });
+  }
+
+  async rollbackCandidateMigration(input: {
+    assertNoActiveProcesses: () => Promise<void>;
+    cleanupCandidateState: (state: RunStateFileV1) => Promise<void>;
+  }): Promise<RunStateFileV1> {
+    return this.file.withExclusiveRaw(async (_currentBytes, current) => {
+      const metadata = await readMigrationMetadata(this.migrationMetadataPath);
+      if (!metadata || metadata.sourceGeneration === null || metadata.sourceBytesSha256 === null) throw new Error('candidate V3 rollback backup is unavailable');
+      if (metadata.publicationEffectPossible) throw new Error('candidate V3 rollback is forbidden after publication boundary');
+      if (!current || current.version !== 3) throw new Error('candidate V3 rollback requires active V3 state');
+      await input.assertNoActiveProcesses();
+      await input.cleanupCandidateState(structuredClone(current));
+      const backup = await readOptionalFile(this.backupPath);
+      if (!backup || sha256(backup) !== metadata.sourceBytesSha256) throw new Error('candidate V3 rollback backup identity is invalid');
+      const restored = parseRawState(backup);
+      if (restored.version !== 2 || restored.generation !== metadata.sourceGeneration) throw new Error('candidate V3 rollback backup generation is invalid');
+      return { result: restored, replacementBytes: backup };
+    });
+  }
+
+  private async ensureCandidateMigrationBackup(rawV2Bytes: Buffer, generation: number): Promise<void> {
+    const sourceBytesSha256 = sha256(rawV2Bytes);
+    const existing = await readMigrationMetadata(this.migrationMetadataPath);
+    const backup = await readOptionalFile(this.backupPath);
+    if (existing?.publicationEffectPossible) throw new Error('candidate V3 migration backup cannot change after publication boundary');
+    if (existing?.sourceGeneration === generation && existing.sourceBytesSha256 === sourceBytesSha256
+      && backup?.equals(rawV2Bytes)) return;
+    await writeDurableAtomicFile(this.backupPath, rawV2Bytes);
+    const now = this.now();
+    await writeDurableAtomicFile(this.migrationMetadataPath, `${canonicalJson({
+      version: 1,
+      sourceGeneration: generation,
+      sourceBytesSha256,
+      publicationEffectPossible: false,
+      createdAt: now,
+      updatedAt: now,
+    })}\n`);
   }
 }
 
@@ -216,15 +305,18 @@ export class InMemoryRunRecordWriter implements RunRecordWriter {
 
   async compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1> {
     if (this.state.generation !== expectedGeneration) throw new Error('run state generation conflict');
+    if (this.state.version === 3 && next.version !== 3) throw new Error('run state V3 downgrade requires explicit rollback');
     const value = validateRunStateFile({ ...structuredClone(next), generation: expectedGeneration + 1 });
     this.state = value;
     return structuredClone(value);
   }
+
+  async markPublicationEffectPossible(): Promise<void> {}
 }
 
 export function validateRunStateFile(value: unknown): RunStateFileV1 {
   assertExactObject(value, ['schema', 'version', 'generation', 'runs'], 'run state');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || (value.version !== 1 && value.version !== 2)) throw new Error('run state schema/version is invalid');
+  if (value.schema !== 'codex-orchestrator.agent-auto-state' || ![1, 2, 3].includes(value.version as number)) throw new Error('run state schema/version is invalid');
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) throw new Error('run state generation is invalid');
   validateRuns(value.runs);
   if (value.version === 1) {
@@ -240,13 +332,15 @@ export function validateRunStateFile(value: unknown): RunStateFileV1 {
         : structuredClone(run)),
     };
   }
+  if (value.version === 2) assertNoCandidateV3Fields(value.runs as RunRecordV1[]);
   return value as unknown as RunStateFileV1;
 }
 
 function validateRunStateBody(value: unknown): asserts value is RunStateBodyV1 {
   assertExactObject(value, ['schema', 'version', 'runs'], 'run state body');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || value.version !== 2) throw new Error('run state schema/version is invalid');
+  if (value.schema !== 'codex-orchestrator.agent-auto-state' || (value.version !== 2 && value.version !== 3)) throw new Error('run state schema/version is invalid');
   validateRuns(value.runs);
+  if (value.version === 2) assertNoCandidateV3Fields(value.runs);
 }
 
 function validateRuns(value: unknown): asserts value is RunRecordV1[] {
@@ -276,6 +370,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'reviewFeedback',
     'checkQualification',
     'baselineChecks',
+    'changeBindingVersion',
+    'candidateBinding',
+    'executionLease',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -366,6 +463,24 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     validateReviewFeedbackExecution(value.reviewFeedback);
     validateReviewFeedbackRunInvariant(value as unknown as RunRecordV1, field);
   }
+  if (hasOwn(value, 'changeBindingVersion') && value.changeBindingVersion !== 2) throw new Error(`${field}.changeBindingVersion is invalid`);
+  if (hasOwn(value, 'candidateBinding')) validateCandidateBinding(value.candidateBinding, `${field}.candidateBinding`, value.runId as string);
+  if (hasOwn(value, 'executionLease')) validateCandidateExecutionLease(value.executionLease, `${field}.executionLease`);
+  if (hasOwn(value, 'candidateBinding') !== hasOwn(value, 'changeBindingVersion')) throw new Error(`${field} candidate binding version is incomplete`);
+  if (hasOwn(value, 'executionLease')) {
+    if (!hasOwn(value, 'candidateBinding')) throw new Error(`${field}.executionLease requires candidate binding`);
+    const binding = value.candidateBinding as unknown as CandidateBindingV2;
+    const lease = value.executionLease as unknown as CandidateExecutionLeaseV2;
+    if (lease.bindingId !== binding.bindingId || lease.candidateCommitSha !== binding.candidateCommitSha) throw new Error(`${field}.executionLease binding is invalid`);
+  }
+  if (hasOwn(value, 'intent') && hasOwn(value.intent, 'candidateRef')) {
+    if (!hasOwn(value, 'candidateBinding')) throw new Error(`${field}.intent candidate ref requires candidate binding`);
+    const binding = value.candidateBinding as unknown as CandidateBindingV2;
+    const intent = value.intent as Extract<PublicationIntent, { kind: 'commit' | 'review-update-commit' }>;
+    if (intent.candidateRef !== binding.candidateRef || intent.treeSha !== binding.candidateTreeSha) {
+      throw new Error(`${field}.intent candidate binding is invalid`);
+    }
+  }
   if (hasOwn(value, 'checkQualification')) validateCheckQualification(value.checkQualification, `${field}.checkQualification`);
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
@@ -383,7 +498,13 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} review-ready requires proofReceipt and no intent`);
   }
   if (terminal && hasOwn(value, 'process')) throw new Error(`${field} terminal lifecycle cannot retain process ownership`);
-  if (terminal && hasOwn(value, 'intent') && value.lifecycle !== 'transport-failed') throw new Error(`${field} terminal lifecycle cannot retain intent`);
+  const retainedCandidateIntent = value.lifecycle === 'blocked'
+    && (value.terminalOutcome as RunTerminalOutcome | undefined)?.status === 'blocked'
+    && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'blocked' }>).kind === 'safety'
+    && !(value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'blocked' }>).resumable
+    && hasOwn(value, 'candidateBinding')
+    && ((value.intent as PublicationIntent | undefined)?.kind === 'commit' || (value.intent as PublicationIntent | undefined)?.kind === 'review-update-commit');
+  if (terminal && hasOwn(value, 'intent') && value.lifecycle !== 'transport-failed' && !retainedCandidateIntent) throw new Error(`${field} terminal lifecycle cannot retain intent`);
   if (value.lifecycle === 'transport-failed' && hasOwn(value, 'intent')
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain intent`);
@@ -445,12 +566,22 @@ function validateChecks(value: unknown, field: string, allowUnchangedFailure = t
   if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
   const ids = new Set<string>();
   for (const [index, check] of value.entries()) {
-    assertExactObject(check, ['id', 'command', 'status', 'outputSha256'], `${field}[${index}]`);
+    const candidate = hasOwn(check, 'bindingId') || hasOwn(check, 'candidateTreeSha') || hasOwn(check, 'checkPolicySha256');
+    assertExactObject(check, [
+      'id', 'command', 'status', 'outputSha256',
+      ...(candidate ? ['bindingId', 'candidateTreeSha', 'checkPolicySha256'] : []),
+    ], `${field}[${index}]`);
     assertNonEmptyString(check.id, `${field}[${index}].id`);
     assertNonEmptyString(check.command, `${field}[${index}].command`);
     if (check.status !== 'passed' && check.status !== 'failed'
       && (check.status !== 'unchanged-failure' || !allowUnchangedFailure)) throw new Error(`${field}[${index}].status is invalid`);
     assertSha256(check.outputSha256, `${field}[${index}].outputSha256`);
+    if (candidate) {
+      assertSha256(check.bindingId, `${field}[${index}].bindingId`);
+      assertGitSha(check.candidateTreeSha, `${field}[${index}].candidateTreeSha`);
+      assertSha256(check.checkPolicySha256, `${field}[${index}].checkPolicySha256`);
+      if (check.status === 'unchanged-failure') throw new Error(`${field}[${index}] candidate status is invalid`);
+    }
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);
   }
@@ -544,10 +675,11 @@ function validateIntent(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
   } else if (kind === 'commit') {
-    assertExactObject(value, ['kind', 'parentSha', 'treeSha', 'message'], field);
+    assertExactObject(value, ['kind', 'parentSha', 'treeSha', 'message', ...(hasOwn(value, 'candidateRef') ? ['candidateRef'] : [])], field);
     assertGitSha(value.parentSha, `${field}.parentSha`);
     assertGitSha(value.treeSha, `${field}.treeSha`);
     assertNonEmptyString(value.message, `${field}.message`);
+    if (hasOwn(value, 'candidateRef')) assertCandidateRef(value.candidateRef, `${field}.candidateRef`);
   } else if (kind === 'push') {
     assertExactObject(value, ['kind', 'branch', 'sha'], field);
     assertNonEmptyString(value.branch, `${field}.branch`);
@@ -567,11 +699,12 @@ function validateIntent(value: unknown, field: string): void {
     assertSha256(value.batchId, `${field}.batchId`);
     validateStringArray(value.expected, `${field}.expected`);
   } else if (kind === 'review-update-commit') {
-    assertExactObject(value, ['kind', 'batchId', 'parentSha', 'treeSha', 'message'], field);
+    assertExactObject(value, ['kind', 'batchId', 'parentSha', 'treeSha', 'message', ...(hasOwn(value, 'candidateRef') ? ['candidateRef'] : [])], field);
     assertSha256(value.batchId, `${field}.batchId`);
     assertGitSha(value.parentSha, `${field}.parentSha`);
     assertGitSha(value.treeSha, `${field}.treeSha`);
     assertNonEmptyString(value.message, `${field}.message`);
+    if (hasOwn(value, 'candidateRef')) assertCandidateRef(value.candidateRef, `${field}.candidateRef`);
   } else if (kind === 'review-update-push') {
     assertExactObject(value, ['kind', 'batchId', 'branch', 'priorRemoteSha', 'sha', 'treeSha'], field);
     assertSha256(value.batchId, `${field}.batchId`);
@@ -672,7 +805,61 @@ function validateStringArray(value: unknown, field: string): void {
 }
 
 function emptyRunState(): RunStateFileV1 {
-  return { schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 0, runs: [] };
+  return { schema: 'codex-orchestrator.agent-auto-state', version: 3, generation: 0, runs: [] };
+}
+
+interface CandidateMigrationMetadataV1 {
+  version: 1;
+  sourceGeneration: number | null;
+  sourceBytesSha256: string | null;
+  publicationEffectPossible: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function parseRawState(bytes: Buffer): RunStateFileV1 {
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { throw new Error('run state JSON is malformed'); }
+  return validateRunStateFile(value);
+}
+
+async function readOptionalFile(path: string): Promise<Buffer | undefined> {
+  try { return await readFile(path); }
+  catch (error) { if (isErrorCode(error, 'ENOENT')) return undefined; throw error; }
+}
+
+async function readMigrationMetadata(path: string): Promise<CandidateMigrationMetadataV1 | undefined> {
+  const bytes = await readOptionalFile(path);
+  if (!bytes) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { throw new Error('candidate migration metadata is malformed'); }
+  assertExactObject(value, [
+    'version', 'sourceGeneration', 'sourceBytesSha256', 'publicationEffectPossible', 'createdAt', 'updatedAt',
+  ], 'candidate migration metadata');
+  if (value.version !== 1) throw new Error('candidate migration metadata version is invalid');
+  if (value.sourceGeneration !== null && (!Number.isSafeInteger(value.sourceGeneration) || (value.sourceGeneration as number) <= 0)) {
+    throw new Error('candidate migration source generation is invalid');
+  }
+  if (value.sourceBytesSha256 !== null) assertSha256(value.sourceBytesSha256, 'candidate migration source hash');
+  if ((value.sourceGeneration === null) !== (value.sourceBytesSha256 === null)) throw new Error('candidate migration source identity is incomplete');
+  if (typeof value.publicationEffectPossible !== 'boolean') throw new Error('candidate migration publication watermark is invalid');
+  assertTimestamp(value.createdAt, 'candidate migration createdAt');
+  assertTimestamp(value.updatedAt, 'candidate migration updatedAt');
+  return value as unknown as CandidateMigrationMetadataV1;
+}
+
+function assertNoCandidateV3Fields(runs: RunRecordV1[]): void {
+  for (const run of runs) {
+    if (run.changeBindingVersion !== undefined || run.candidateBinding !== undefined || run.executionLease !== undefined) {
+      throw new Error('V2 run state cannot contain candidate V3 fields');
+    }
+  }
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): void {
@@ -747,6 +934,12 @@ function assertSha256(value: unknown, field: string): asserts value is string {
 
 function assertGitSha(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !GIT_SHA_PATTERN.test(value)) throw new Error(`${field} must be a Git object ID`);
+}
+
+function assertCandidateRef(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !/^refs\/codex-orchestrator\/candidates\/[0-9a-f-]{36}\/[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`${field} is invalid`);
+  }
 }
 
 function assertTimestamp(value: unknown, field: string): asserts value is string {

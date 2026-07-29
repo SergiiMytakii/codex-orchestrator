@@ -10,11 +10,14 @@ import {
   type ProofAgentResult,
 } from '../src/v2/acceptance-proof.js';
 import {
+  checkedChangeFreshnessMatches,
   createCheckedChangeCapabilities,
   type CheckedChange,
   type CheckedChangeFreshness,
   type CheckedChangePayloadV1,
+  type CheckedChangePayloadV2,
 } from '../src/v2/checked-change.js';
+import type { CandidateBindingV2 } from '../src/v2/candidate.js';
 import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { ProofReportV1 } from '../src/v2/proof-report.js';
@@ -36,6 +39,61 @@ test('CheckedChange is nominal at compile time and rejects forged runtime object
     checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'unchanged-failure', outputSha256: 'a'.repeat(64) }],
   };
   assert.throws(() => capabilities.mint(legacyFailure as unknown as CheckedChangePayloadV1), /status must be passed/u);
+});
+
+test('CheckedChange V2 binds every receipt and changed path to one candidate while V1 remains index-based', () => {
+  const capabilities = createCheckedChangeCapabilities();
+  const binding: CandidateBindingV2 = {
+    version: 2,
+    bindingId: '1'.repeat(64),
+    expectedHeadSha: 'a'.repeat(40),
+    candidateRef: `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000001/${'1'.repeat(64)}`,
+    candidateCommitSha: 'b'.repeat(40),
+    candidateTreeSha: 'c'.repeat(40),
+    canonicalChangedFiles: ['src/a.ts'],
+    sourceWorktreeIdentity: '2'.repeat(64),
+  };
+  const payload: CheckedChangePayloadV2 = {
+    version: 2,
+    canonicalRepository: 'owner/repo',
+    runId: '00000000-0000-4000-8000-000000000001',
+    issueNumber: 1,
+    cycle: 1,
+    baseSha: 'a'.repeat(40),
+    binding,
+    changedFiles: ['src/a.ts'],
+    checks: [{
+      id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: '3'.repeat(64),
+      bindingId: binding.bindingId, candidateTreeSha: binding.candidateTreeSha, checkPolicySha256: '4'.repeat(64),
+    }],
+    checkPolicySha256: '4'.repeat(64),
+    packageVersion: '2.0.10',
+    proofSchemaVersion: 1,
+  };
+
+  assert.deepEqual(capabilities.verifyAndRead(capabilities.mint(payload)).payload, payload);
+  assert.equal(checkedChangeFreshnessMatches(payload, {
+    bindingId: binding.bindingId,
+    candidateTreeSha: binding.candidateTreeSha,
+    checkPolicySha256: payload.checkPolicySha256,
+  }), true);
+  assert.equal(checkedChangeFreshnessMatches(payload, {
+    bindingId: binding.bindingId,
+    candidateTreeSha: 'd'.repeat(40),
+    checkPolicySha256: payload.checkPolicySha256,
+  }), false);
+  assert.throws(() => capabilities.mint({
+    ...payload,
+    binding: { ...binding, candidateRef: `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000002/${binding.bindingId}` },
+  }), /not derived/u);
+  assert.throws(() => capabilities.mint({
+    ...payload,
+    binding: { ...binding, candidateRef: `refs/codex-orchestrator/candidates/${payload.runId}/${'9'.repeat(64)}` },
+  }), /not derived/u);
+
+  const legacy = checkedPayload();
+  assert.equal(checkedChangeFreshnessMatches(legacy, freshness(legacy)), true);
+  assert.equal(checkedChangeFreshnessMatches(legacy, { ...freshness(legacy), indexTreeSha: 'f'.repeat(40) }), false);
 });
 
 test('identical proof binding reuses one passed attempt while mismatch fails before process launch', async () => {
@@ -224,6 +282,19 @@ test('proof quiescence is rethrown before waiting and releases Android ownership
   assert.deepEqual(events, ['absent', 'release']);
 });
 
+test('recovery-only applies to the recovered attempt but permits its bounded report repair', async () => {
+  const malformed = { kind: 'report' as const, report: { version: 1 }, proofPhaseChangedFiles: [] };
+  const fixture = proofFixture({
+    agentResults: [malformed, { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] }],
+  });
+  const result = await fixture.proof.proveChange(fixture.input({ recoverAttemptOnly: true }));
+  assert.equal(result.status, 'passed');
+  assert.deepEqual(
+    fixture.agentCalls.map((call) => (call as { recoverOnly?: boolean }).recoverOnly),
+    [true, false],
+  );
+});
+
 test('needs-rework, external-block, transport, cancellation, and internal agent outcomes remain typed', async () => {
   const cases: Array<{ result: ProofAgentResult; expected: string }> = [
     {
@@ -299,6 +370,7 @@ function proofFixture(options: {
       },
     },
     inspectFreshness: async (value) => {
+      if (value.version !== 1) throw new Error('legacy fixture received V2 payload');
       freshnessCalls.push(value);
       return inspectFreshness(value);
     },
@@ -323,6 +395,7 @@ function proofFixture(options: {
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange;
       beforeAgentLaunch: () => Promise<void>;
+      recoverAttemptOnly: boolean;
     }> = {}) => ({ proofId: 'proof-1', issue, frozenCriteria: criteria, checkedChange, ...overrides }),
   };
 }
