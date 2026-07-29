@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   classifyIssueWorkflow,
@@ -19,6 +21,46 @@ import {
 
 function v2RunResult(result) {
   return JSON.stringify({ schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result });
+}
+
+const runnerPath = fileURLToPath(new URL('./runner.mjs', import.meta.url));
+
+async function runStandaloneImplement({ result, exitCode, includeIssue = true }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'self-improvement-cli-test-'));
+  const binDir = path.join(root, 'bin');
+  await mkdir(binDir);
+  const npmPath = path.join(binDir, 'npm');
+  const nodePath = path.join(binDir, 'node');
+  await writeFile(npmPath, '#!/bin/sh\nexit 0\n');
+  await writeFile(nodePath, '#!/bin/sh\nprintf "%s" "$SELF_IMPROVEMENT_V2_RESULT"\nexit "$SELF_IMPROVEMENT_V2_EXIT"\n');
+  await chmod(npmPath, 0o755);
+  await chmod(nodePath, 0o755);
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const args = [runnerPath, 'implement'];
+      if (includeIssue) args.push('--issue', '123');
+      const child = spawn(process.execPath, args, {
+        cwd: root,
+        env: {
+          ...process.env,
+          CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_CWD: root,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+          SELF_IMPROVEMENT_V2_RESULT: result ? v2RunResult(result) : '',
+          SELF_IMPROVEMENT_V2_EXIT: String(exitCode ?? 0),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 function commandKey(command, args = []) {
@@ -81,6 +123,47 @@ const validFinding = {
 
 test('local boundary expects runner exports before implementation', () => {
   assert.equal(typeof createRunner, 'function');
+});
+
+for (const scenario of [
+  {
+    name: 'review-ready',
+    exitCode: 0,
+    result: { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'blocked',
+    exitCode: 20,
+    result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'not-eligible',
+    exitCode: 21,
+    result: { status: 'not-eligible', reason: 'issue is closed', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'cancelled',
+    exitCode: 130,
+    result: { status: 'cancelled', evidencePath: 'evidence.json' },
+  },
+]) {
+  test(`standalone implement preserves the ${scenario.name} V2 exit code`, async () => {
+    const result = await runStandaloneImplement(scenario);
+    assert.equal(result.code, scenario.exitCode);
+    assert.match(result.stdout, new RegExp(`implement: (passed|blocked|skipped|cancelled) issue #123`));
+  });
+}
+
+test('standalone implement rejects a missing --issue argument', async () => {
+  const result = await runStandaloneImplement({ includeIssue: false });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /--issue <number>/);
+});
+
+test('standalone implement fails closed when the candidate returns invalid V2 output with exit 0', async () => {
+  const result = await runStandaloneImplement({ exitCode: 0 });
+  assert.equal(result.code, 70);
+  assert.match(result.stdout, /implement: failed issue #123/);
 });
 
 test('issue workflow classification centralizes code, blocking, and review eligibility rules', () => {

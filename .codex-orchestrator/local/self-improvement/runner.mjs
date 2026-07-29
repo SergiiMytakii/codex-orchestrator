@@ -674,9 +674,9 @@ export function createRunner(options = {}) {
     const result = await exec('node', ['dist/src/v2/cli.js', 'run', '--target', cwd, '--issue', String(issue)], { cwd });
     let typed;
     try { typed = parseV2RunResult(result.stdout); }
-    catch { return { status: 'failed', exitCode: result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }
+    catch { return { status: 'failed', exitCode: result.code === 0 ? 70 : result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }
     const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, 'internal-error': 70, cancelled: 130 }[typed.status];
-    if (result.code !== expectedExit) return { status: 'failed', exitCode: result.code, reason: 'candidate CLI exit did not match typed V2 result', issueNumber: Number(issue) };
+    if (result.code !== expectedExit) return { status: 'failed', exitCode: result.code === 0 ? 70 : result.code, reason: 'candidate CLI exit did not match typed V2 result', issueNumber: Number(issue) };
     if (typed.status === 'review-ready') return { status: 'passed', exitCode: 0, summary: typed, issueNumber: Number(issue) };
     if (typed.status === 'blocked') return { status: 'blocked', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
     if (typed.status === 'not-eligible') return { status: 'skipped', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
@@ -860,10 +860,15 @@ async function main() {
     process.exit(result.status === 'failed' ? 1 : 0);
   }
   if (command === 'implement') {
-    const issue = args[args.indexOf('--issue') + 1];
+    const issueIndex = args.indexOf('--issue');
+    const issue = args[issueIndex + 1];
+    if (issueIndex === -1 || !/^[1-9]\d*$/.test(issue ?? '')) {
+      console.error('Usage: node runner.mjs implement --issue <number>');
+      process.exit(2);
+    }
     const result = await runner.implement({ issue: Number(issue) });
     console.log(`implement: ${result.status}${result.issueNumber ? ` issue #${result.issueNumber}` : ''}${result.reason ? ` (${result.reason})` : ''}`);
-    process.exit(result.status === 'failed' ? 1 : 0);
+    process.exit(result.exitCode ?? 1);
   }
   if (command === 'review') {
     const result = await runner.review();
