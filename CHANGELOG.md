@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.9] - 2026-07-29
+
 ### Changed
 - Direct runs now require their scoped issue checks to pass before issue
   implementation. Red qualification checks receive a separate sealed, bounded
