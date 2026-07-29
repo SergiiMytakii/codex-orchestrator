@@ -40,7 +40,7 @@ import {
 } from './route-coordinator.js';
 import type { RoutedContinuationRegistry } from './route-continuations.js';
 import type { SpecCoordinatorResult, SpecDeliveryState } from './spec-coordinator.js';
-import { reserveSpecReviewerSession, type FrozenSpecReceiptV1 } from './spec-delivery.js';
+import { reserveSpecAuthorSession, reserveSpecReviewerSession, type FrozenSpecReceiptV1, type SpecDeliveryV1 } from './spec-delivery.js';
 import type { WaitingHumanState } from './waiting-human-coordinator.js';
 import type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1 } from './waiting-human.js';
 import {
@@ -2155,6 +2155,27 @@ export class RunIssue {
   }
 
   private specState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): SpecDeliveryState {
+    const invocation = (reserveSession: (state: SpecDeliveryV1) => SpecDeliveryV1): DurableReportInvocationState => ({
+      read: async () => structuredClone(readActive().record.reportInvocation),
+      compareAndSwap: async (expected, next) => {
+        const active = readActive();
+        const observed = active.record.reportInvocation;
+        if (observed === undefined || expected === undefined ? observed !== expected
+          : canonicalJson(observed) !== canonicalJson(expected)) return false;
+        const preparing = expected === undefined && next?.phase === 'prepared';
+        const specDelivery = preparing ? reserveSession(active.record.specDelivery!) : active.record.specDelivery;
+        writeActive(await this.persist(active, { ...(specDelivery ? { specDelivery } : {}),
+          reportInvocation: next ? structuredClone(next) : undefined }));
+        return true;
+      },
+    });
+    const settle = async (expected: SpecDeliveryV1, next: SpecDeliveryV1, attemptId: string): Promise<boolean> => {
+      const active = readActive();
+      if (canonicalJson(active.record.specDelivery) !== canonicalJson(expected)
+        || active.record.reportInvocation?.attemptId !== attemptId) return false;
+      writeActive(await this.persist(active, { specDelivery: structuredClone(next), reportInvocation: undefined }));
+      return true;
+    };
     return {
       read: async () => structuredClone(readActive().record.specDelivery),
       compareAndSwap: async (expected, next) => {
@@ -2167,27 +2188,10 @@ export class RunIssue {
         writeActive(saved);
         return true;
       },
-      reviewInvocation: (reviewerSessionId) => ({
-        read: async () => structuredClone(readActive().record.reportInvocation),
-        compareAndSwap: async (expected, next) => {
-          const active = readActive();
-          const observed = active.record.reportInvocation;
-          if (observed === undefined || expected === undefined ? observed !== expected
-            : canonicalJson(observed) !== canonicalJson(expected)) return false;
-          const preparing = expected === undefined && next?.phase === 'prepared';
-          const specDelivery = preparing ? reserveSpecReviewerSession(active.record.specDelivery!, reviewerSessionId) : active.record.specDelivery;
-          writeActive(await this.persist(active, { ...(specDelivery ? { specDelivery } : {}),
-            reportInvocation: next ? structuredClone(next) : undefined }));
-          return true;
-        },
-      }),
-      settleReview: async (expected, next, attemptId) => {
-        const active = readActive();
-        if (canonicalJson(active.record.specDelivery) !== canonicalJson(expected)
-          || active.record.reportInvocation?.attemptId !== attemptId) return false;
-        writeActive(await this.persist(active, { specDelivery: structuredClone(next), reportInvocation: undefined }));
-        return true;
-      },
+      authorInvocation: (authorSessionId) => invocation((state) => reserveSpecAuthorSession(state, authorSessionId)),
+      reviewInvocation: (reviewerSessionId) => invocation((state) => reserveSpecReviewerSession(state, reviewerSessionId)),
+      settleAuthor: settle,
+      settleReview: settle,
     };
   }
 

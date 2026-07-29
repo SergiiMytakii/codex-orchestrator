@@ -24,7 +24,11 @@ const mutablePolicy: WorkflowOperationPolicy = {
   sandboxMode: 'workspace-write', cwdClass: 'worktree', worktreeAccess: 'write', writableRootClasses: ['worktree'],
   runnerPostcondition: 'change-set', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
 };
-const operations: ContainedReportOperationId[] = ['triage', 'ambiguity-review', 'code-review', 'spec-review'];
+const specAuthorPolicy: WorkflowOperationPolicy = {
+  sandboxMode: 'workspace-write', cwdClass: 'target-state', worktreeAccess: 'write', writableRootClasses: ['target-state'],
+  runnerPostcondition: 'spec-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+};
+const operations: ContainedReportOperationId[] = ['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review'];
 
 for (const operationId of operations) {
   test(`${operationId} persists prepare and fenced launch before adopting its attempt-owned report`, async () => {
@@ -134,6 +138,25 @@ test('state-CAS failure prevents launch and worktree mutation prevents report ad
   assert.deepEqual(await changed.operation.run(changed.input), { status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated' });
 });
 
+test('spec-author report/process uncertainty and prepare CAS faults retain exact ownership without duplicate launch', async () => {
+  const reportUnknown = invocationFixture('spec-author', { launch: 'safe-halt' });
+  await reportUnknown.operation.run(reportUnknown.input);
+  reportUnknown.reportReadError = new Error('EIO');
+  reportUnknown.observation = { status: 'absent', processGroupAlive: false };
+  assert.equal((await reportUnknown.operation.run(reportUnknown.input)).status, 'safe-halt');
+  assert.equal(reportUnknown.launches, 1);
+
+  const processUnknown = invocationFixture('spec-author', { launch: 'safe-halt' });
+  await processUnknown.operation.run(processUnknown.input);
+  processUnknown.observation = { status: 'unknown' };
+  assert.equal((await processUnknown.operation.run(processUnknown.input)).status, 'safe-halt');
+  assert.equal(processUnknown.launches, 1);
+
+  const casConflict = invocationFixture('spec-author', { launch: 'completed', rejectCas: true });
+  assert.equal((await casConflict.operation.run(casConflict.input)).status, 'blocked');
+  assert.equal(casConflict.launches, 0);
+});
+
 for (const operationId of ['qualification-repair', 'implementation', 'review-feedback-implementation'] as MutableWorktreeOperationId[]) {
   test(`${operationId} durably prepares, fences launch, and adopts one exact mutable result`, async () => {
     const fixture = mutableInvocationFixture(operationId, 'completed');
@@ -234,7 +257,8 @@ function invocationFixture(operationId: ContainedReportOperationId, options: {
       host: 'host-a', bootId: 'boot-a', now: () => '2026-07-17T00:00:00.000Z',
       createAttemptId: () => `attempt-${operationId}`,
       snapshot: async () => ({ ...snapshot(), ...(options.mutateSnapshot && snapshots++ > 0 ? { trackedContentSha256: '9'.repeat(64) } : {}) }),
-      prepare: async () => ({ operation: operationId, generationHash, policy, reportPath: `/attempts/attempt-${operationId}/report.json` }),
+      prepare: async () => ({ operation: operationId, generationHash, policy: operationId === 'spec-author' ? specAuthorPolicy : policy,
+        reportPath: `/attempts/attempt-${operationId}/report.json` }),
       readReport: async () => {
         if (fixture.reportReadError) throw fixture.reportReadError;
         return fixture.report

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
 import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
-import { acceptSpecRevision, createInitialSpecDelivery, createSpecRevision, launchSpecInvocation, prepareSpecInvocation } from '../src/v2/spec-delivery.js';
+import { acceptSpecRevision, createInitialSpecDelivery, createSpecRevision, reserveSpecAuthorSession } from '../src/v2/spec-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
   activateReviewFeedback, bootstrapReviewFeedback, createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap,
@@ -107,14 +107,15 @@ test('V2 to V3 cutover preserves exact raw backup and rollback closes permanentl
   }), /forbidden/u);
 });
 
-test('one-shot report lifecycle migration rewrites safe route, direct-review, and spec-review states without legacy fields', async () => {
+test('one-shot report lifecycle migration rewrites safe route, direct-review, spec-review, and prepared spec-author states without legacy fields', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
   const route = legacySafeRouteRecord(uuid(21), 121);
   const direct = legacySafeDirectRecord(uuid(22), 122);
   const spec = legacySafeSpecRecord(uuid(23), 123);
+  const author = legacySpecAuthorRecord(uuid(24), 124, 'prepared');
   const legacyBytes = Buffer.from(`${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [route, direct, spec],
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [route, direct, spec, author],
   }, null, 2)}\n`);
   await writeFile(path, legacyBytes);
 
@@ -127,9 +128,12 @@ test('one-shot report lifecycle migration rewrites safe route, direct-review, an
   }
   assert.equal('transportRetries' in (migrated.runs[1]!.directReview!.review as any), false);
   assert.equal('transportRetries' in (migrated.runs[2]!.specDelivery!.budgets.review as any), false);
+  assert.equal('transportRetries' in (migrated.runs[3]!.specDelivery!.budgets.author as any), false);
   assert.equal(migrated.runs[0]?.routeExecution?.phase, 'route-complete');
   assert.equal(migrated.runs[1]?.directReview?.stage, 'review-full');
   assert.equal(migrated.runs[2]?.specDelivery?.stage, 'review-full');
+  assert.equal(migrated.runs[3]?.specDelivery?.stage, 'authoring');
+  assert.equal(migrated.runs[3]?.specDelivery?.authorSessionId, 'author-session-1');
 });
 
 test('one-shot report lifecycle migration fail-closes launched legacy owners without relaunch authority', async () => {
@@ -138,8 +142,9 @@ test('one-shot report lifecycle migration fail-closes launched legacy owners wit
   const route = legacyLaunchedRouteRecord(uuid(31), 131);
   const direct = legacyLaunchedDirectRecord(uuid(32), 132);
   const spec = legacyLaunchedSpecRecord(uuid(33), 133);
+  const author = legacySpecAuthorRecord(uuid(34), 134, 'launched');
   const legacyBytes = Buffer.from(`${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec],
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec, author],
   })}\n`);
   await writeFile(path, legacyBytes);
 
@@ -158,9 +163,36 @@ test('one-shot report lifecycle migration fail-closes launched legacy owners wit
     assert.equal(run.reportInvocation, undefined);
   }
   const persisted = await readFile(path, 'utf8');
-  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-review"', '"invocation"']) {
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-author"', '"purpose":"spec-review"', '"invocation"']) {
     assert.equal(persisted.includes(removed), false, removed);
   }
+});
+
+test('later spec-author migration keeps a source-identified backup when the prior report backup already exists', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const priorBackup = Buffer.from('{"prior":"report-lifecycle-source"}\n');
+  await writeFile(`${path}.pre-report-lifecycle-v1`, priorBackup);
+  const prepared = legacySpecAuthorRecord(uuid(35), 135, 'prepared');
+  const launched = legacySpecAuthorRecord(uuid(36), 136, 'launched');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 13, runs: [prepared, launched],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), priorBackup);
+  const backups = (await readdir(root)).filter((name) => name.startsWith('run-state.json.pre-report-lifecycle-v1.g13-'));
+  assert.equal(backups.length, 1);
+  assert.deepEqual(await readFile(join(root, backups[0]!)), legacyBytes);
+  assert.equal(migrated.runs[0]?.lifecycle, 'spec-authoring');
+  assert.equal(migrated.runs[0]?.specDelivery?.authorSessionId, 'author-session-1');
+  assert.equal(migrated.runs[1]?.lifecycle, 'blocked');
+  assert.deepEqual(migrated.runs[1]?.terminalOutcome && {
+    status: migrated.runs[1].terminalOutcome.status,
+    kind: migrated.runs[1].terminalOutcome.status === 'blocked' ? migrated.runs[1].terminalOutcome.kind : undefined,
+    resumable: migrated.runs[1].terminalOutcome.status === 'blocked' ? migrated.runs[1].terminalOutcome.resumable : undefined,
+  }, { status: 'blocked', kind: 'safety', resumable: false });
 });
 
 test('one-shot mutable lifecycle migration rewrites prepared owners and fail-closes launched owners with a raw backup', async () => {
@@ -614,16 +646,30 @@ function legacySafeSpecRecord(runId: string, issueNumber: number): any {
   const initial = createInitialSpecDelivery({
     issueNumber, runId, workflowGenerationSha256: run.workflowGeneration.generationHash,
   });
-  const launched = launchSpecInvocation(prepareSpecInvocation(initial, {
-    mode: 'author', attemptId: 'author-attempt-1', sessionId: 'author-session-1',
-  }), { attemptId: 'author-attempt-1', pid: 41, processGroupId: 41 });
-  run.specDelivery = acceptSpecRevision(launched, createSpecRevision({
+  run.specDelivery = acceptSpecRevision(reserveSpecAuthorSession(initial, 'author-session-1'), createSpecRevision({
     revision: 1, path: '/state/spec.md', content: '# Spec\n',
     evidence: [{ path: `issue:${issueNumber}`, sha256: 'c'.repeat(64), description: 'Issue authority' }],
     author: { attemptId: 'author-attempt-1', sessionId: 'author-session-1' }, previousRevision: null,
   }));
   run.specDelivery.budgets.review.transportRetries = 1;
   delete run.specDelivery.review.reviewerSessionId;
+  return run;
+}
+
+function legacySpecAuthorRecord(runId: string, issueNumber: number, status: 'prepared' | 'launched'): any {
+  const run = reidentify(specRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'spec-authoring';
+  run.specDelivery = createInitialSpecDelivery({
+    issueNumber, runId, workflowGenerationSha256: run.workflowGeneration.generationHash,
+  });
+  run.specDelivery.budgets.author.transportRetries = 1;
+  run.specDelivery.invocation = {
+    purpose: 'author', mode: 'author', attemptId: 'author-attempt-1', sessionId: 'author-session-1',
+    targetRevision: 1, targetSha256: null, closureRequestSha256: null, status,
+    pid: status === 'launched' ? 41 : null, processGroupId: status === 'launched' ? 41 : null,
+    reportPath: '/state/attempt/report.json', revisionPath: '/state/attempt/revision-1.md',
+  };
+  if (status === 'launched') run.process = legacyReportProcess('spec-author');
   return run;
 }
 
@@ -661,10 +707,10 @@ function legacyLaunchedSpecRecord(runId: string, issueNumber: number): any {
   return run;
 }
 
-function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-review') {
+function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-author' | 'spec-review') {
   return {
     pid: 51, processGroupId: 51, startedAt: timestamp(), purpose,
-    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'spec-review' ? 'spec-authoring' : 'implementing',
+    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'spec-review' || purpose === 'spec-author' ? 'spec-authoring' : 'implementing',
     resumeReviewStage: purpose === 'code-review' ? 'review-full' : null,
     baseline: {
       headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),

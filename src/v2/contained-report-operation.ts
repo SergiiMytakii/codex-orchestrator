@@ -6,7 +6,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review' | 'spec-review';
+export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
 
 export interface ReportOnlyWorktreeSnapshot {
   headSha: string; indexTreeSha: string; trackedContentSha256: string;
@@ -219,7 +219,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     const attempt = await this.dependencies.prepare({
       operation: input.operation, attemptId, runId: input.runId, workflowGeneration: input.workflowGeneration,
     });
-    if (!hasExactReadOnlyAuthority(attempt, input) || !attempt.reportPath) throw new ReportAuthorityError();
+    if (!hasExactReportAuthority(attempt, input) || !attempt.reportPath) throw new ReportAuthorityError();
     return attempt;
   }
 
@@ -477,7 +477,7 @@ export function validateDurableReportInvocation(value: unknown): DurableReportIn
   ];
   if (!hasExactKeys(value, keys)) throw new Error('durable report invocation is invalid');
   const record = value as Record<string, unknown>;
-  if (record.version !== 1 || !['triage', 'ambiguity-review', 'code-review', 'spec-review'].includes(record.operation as string)
+  if (record.version !== 1 || !['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review'].includes(record.operation as string)
     || !nonEmpty(record.attemptId) || !/^[0-9a-f]{64}$/u.test(record.generationHash as string)
     || !nonEmpty(record.reportPath) || !nonEmpty(record.host) || !nonEmpty(record.bootId)
     || !/^[0-9a-f]{64}$/u.test(record.promptFactsSha256 as string)
@@ -492,13 +492,19 @@ export function validateDurableReportInvocation(value: unknown): DurableReportIn
   return structuredClone(value as unknown as DurableReportInvocationV1);
 }
 
-function hasExactReadOnlyAuthority(attempt: PreparedContainedReportAttempt, input: ContainedReportOperationInput): boolean {
+function hasExactReportAuthority(attempt: PreparedContainedReportAttempt, input: ContainedReportOperationInput): boolean {
   const policy = attempt.policy;
-  return attempt.operation === input.operation && attempt.generationHash === input.workflowGeneration.generationHash
-    && hasExactKeys(policy, POLICY_KEYS) && policy.sandboxMode === 'read-only' && policy.cwdClass === 'worktree'
+  if (attempt.operation !== input.operation || attempt.generationHash !== input.workflowGeneration.generationHash
+    || !hasExactKeys(policy, POLICY_KEYS) || policy.network !== 'deny' || policy.networkHosts.length !== 0
+    || policy.mcpTools.length !== 0 || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) return false;
+  if (input.operation === 'spec-author') {
+    return policy.sandboxMode === 'workspace-write' && policy.cwdClass === 'target-state'
+      && policy.worktreeAccess === 'write' && canonicalJson(policy.writableRootClasses) === canonicalJson(['target-state'])
+      && policy.runnerPostcondition === 'spec-only';
+  }
+  return policy.sandboxMode === 'read-only' && policy.cwdClass === 'worktree'
     && policy.worktreeAccess === 'read-only' && Array.isArray(policy.writableRootClasses) && policy.writableRootClasses.length === 0
-    && policy.runnerPostcondition === 'report-only' && policy.network === 'deny' && policy.networkHosts.length === 0
-    && policy.mcpTools.length === 0 && policy.approvalCeiling === 'never' && policy.externalWrite === false;
+    && policy.runnerPostcondition === 'report-only';
 }
 
 function hasExactMutableAuthority(policy: WorkflowOperationPolicy): boolean {

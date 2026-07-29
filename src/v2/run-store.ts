@@ -165,7 +165,7 @@ export interface RunRecordV1 {
       untrackedContentSha256: string;
       worktreeIdentity: string;
     };
-    purpose: 'proof' | 'spec-author';
+    purpose: 'proof';
     resumeLifecycle: Lifecycle;
     resumeReviewStage: DirectReviewStage | null;
   };
@@ -313,7 +313,14 @@ export class FileRunRecordWriter implements RunRecordWriter {
       try { return { result: validateRunStateFile(raw) }; }
       catch {
         const mutable = hasLegacyMutableLifecycle(raw);
-        const backupPath = mutable ? this.mutableLifecycleBackupPath : this.reportLifecycleBackupPath;
+        let backupPath = mutable ? this.mutableLifecycleBackupPath : this.reportLifecycleBackupPath;
+        if (!mutable) {
+          const priorReportBackup = await readOptionalFile(backupPath);
+          if (priorReportBackup && !priorReportBackup.equals(priorBytes)) {
+            const generation = (raw as { generation?: unknown }).generation;
+            backupPath = `${backupPath}.g${String(generation)}-${sha256(priorBytes).slice(0, 16)}`;
+          }
+        }
         const migrated = canonicalizeLegacyReportLifecycle(raw, backupPath);
         if (!migrated) throw originalError;
         const existingBackup = await readOptionalFile(backupPath);
@@ -598,6 +605,13 @@ function validateReportInvocationBinding(
     }
     return;
   }
+  if (invocation.operation === 'spec-author') {
+    if (!record.specDelivery || !['authoring', 'author-repair'].includes(record.specDelivery.stage)
+      || record.specDelivery.authorSessionId === null) {
+      throw new Error(`${field}.spec-author reportInvocation binding is invalid`);
+    }
+    return;
+  }
   if (!record.specDelivery || !['review-full', 'review-closure'].includes(record.specDelivery.stage)) {
     throw new Error(`${field}.spec-review reportInvocation binding is invalid`);
   }
@@ -638,7 +652,7 @@ function validateProcess(value: unknown, field: string): void {
   assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
   assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
   assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (!['proof', 'spec-author'].includes(value.purpose as string)) {
+  if (value.purpose !== 'proof') {
     throw new Error(`${field}.purpose is invalid`);
   }
   if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
@@ -904,14 +918,22 @@ function canonicalizeLegacyReportRun(run: Record<string, any>, backupPath: strin
     legacyBits([direct.review.transportRetries], 'direct review'); delete direct.review.transportRetries; changed = true; }
   if (direct && hasOwn(direct, 'invocation')) { delete direct.invocation; unsafe = changed = true; }
   const spec = run.specDelivery as Record<string, any> | undefined;
+  if (spec?.budgets?.author && hasOwn(spec.budgets.author, 'transportRetries')) {
+    legacyBits([spec.budgets.author.transportRetries], 'spec author'); delete spec.budgets.author.transportRetries; changed = true; }
   if (spec?.budgets?.review && hasOwn(spec.budgets.review, 'transportRetries')) {
     legacyBits([spec.budgets.review.transportRetries], 'spec review'); delete spec.budgets.review.transportRetries; changed = true; }
   if (spec?.review && !hasOwn(spec.review, 'reviewerSessionId')) {
     spec.review.reviewerSessionId = spec.review.reviewer?.sessionId ?? (spec.invocation?.purpose === 'review' ? spec.invocation.sessionId : null); changed = true;
   }
   if (spec?.invocation?.purpose === 'review') { delete spec.invocation; unsafe = changed = true; }
+  if (spec?.invocation?.purpose === 'author') {
+    if (spec.invocation.status === 'launched') unsafe = true;
+    if (spec.authorSessionId === null) spec.authorSessionId = spec.invocation.sessionId;
+    else if (spec.authorSessionId !== spec.invocation.sessionId) unsafe = true;
+    delete spec.invocation; changed = true;
+  }
   if (run.reportInvocation && !hasOwn(run.reportInvocation, 'promptFactsSha256')) { delete run.reportInvocation; unsafe = changed = true; }
-  if (run.process && ['route', 'code-review', 'spec-review'].includes(run.process.purpose)) { delete run.process; unsafe = changed = true; }
+  if (run.process && ['route', 'code-review', 'spec-author', 'spec-review'].includes(run.process.purpose)) { delete run.process; unsafe = changed = true; }
   if (!unsafe) return changed;
   if (routeInFlight) delete run.routeExecution;
   delete run.reportInvocation; delete run.process; delete run.intent;

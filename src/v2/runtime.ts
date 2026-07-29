@@ -1169,28 +1169,33 @@ export function createV2Runtime(input: {
       : Promise.reject(new Error('report operation attempt temporary directory is missing')),
     processStartIdentity: readProcessStartIdentity,
     inspectProcess: inspectReportProcess,
-    launch: async ({ attempt, worktreePath, promptFacts, signal, onSpawned }) => {
+    launch: async ({ operation, attempt, worktreePath, promptFacts, signal, onSpawned }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
       }
-      let readView: string;
-      try {
-        readView = await materializeReportReadView({
-          worktreePath,
-          destination: join(dirname(attempt.tmpDir), 'read-view'),
-          deniedPaths: config.deny.readPaths,
-        });
-      } catch {
-        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
+      let readView: string | undefined;
+      if (operation !== 'spec-author') {
+        try {
+          readView = await materializeReportReadView({
+            worktreePath,
+            destination: join(dirname(attempt.tmpDir), 'read-view'),
+            deniedPaths: config.deny.readPaths,
+          });
+        } catch {
+          return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
+        }
       }
+      const revisionPath = operation === 'spec-author'
+        ? join(dirname(attempt.reportPath), `revision-${promptFacts[0]}.md`)
+        : undefined;
       let result;
       let cleanupAfterSafeHalt = false;
       try {
         result = await containedProcess.run({
         codexPath: config.codex.command,
-        cwd: readView,
+        cwd: operation === 'spec-author' ? dirname(attempt.reportPath) : readView!,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
         toolHome: attempt.toolHome,
@@ -1198,7 +1203,14 @@ export function createV2Runtime(input: {
         safePath: requireRuntimeString(input.safePath, 'safePath'),
         parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
         parentEnv: process.env,
-        prompt: [
+        prompt: operation === 'spec-author' ? [
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+          `Runner-provided facts: ${canonicalJson(promptFacts)}`,
+          `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
+          'Do not modify the product worktree, prior revisions, external state, or any .env file.',
+        ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
@@ -1219,7 +1231,7 @@ export function createV2Runtime(input: {
         }
         throw error;
       } finally {
-        if (!cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
+        if (readView && !cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
       }
       if (result.kind === 'cancelled') return { status: 'cancelled' as const };
       if (result.kind === 'launch-gate-failed') {
@@ -1237,57 +1249,45 @@ export function createV2Runtime(input: {
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
   });
-  const createAttemptId = input.createAttemptId ?? randomUUID;
   const specOperation: SpecDeliveryOperation = {
-    author: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.authorSessionId ?? randomUUID();
-      let attempt;
+    author: async ({ context, state, mode, authorSessionId: sessionId, signal, invocationState }) => {
+      let completedAttemptId: string | undefined;
       try {
-        attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-author', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        const revisionPath = join(dirname(attempt.reportPath), `revision-${state.revisions.length + 1}.md`);
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
-        const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
-          codexPath: config.codex.command, cwd: dirname(attempt.reportPath), schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
-            `The immutable workflow root is ${attempt.workflowRoot}.`,
-            `Author mode: ${mode}. Issue authority: ${canonicalJson(context.issue)}.`,
-            `Frozen criteria: ${canonicalJson(context.frozenCriteria)}.`,
+        const result = await reportOperation.run({
+          operation: 'spec-author', runId: context.runId, worktreePath: context.worktreePath,
+          workflowGeneration: context.workflowGeneration, signal, invocationState,
+          promptFacts: [
+            String(state.revisions.length + 1),
+            `Author session ID: ${sessionId}. Author mode: ${mode}.`,
+            `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
             `Prior revisions and review state: ${canonicalJson({ revisions: state.revisions, review: state.review })}.`,
-            `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
-            'Do not modify the product worktree, prior revisions, external state, or any .env file.',
-          ].join('\n'),
-        }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
-        const report = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
+          ],
+        });
+        if (result.status === 'cancelled') return { status: 'cancelled' };
+        if (result.status === 'retryable' || result.status === 'safe-halt') return { status: 'retryable', code: result.code };
+        if (result.status === 'blocked') return { status: 'blocked', kind: result.kind, code: result.code };
+        completedAttemptId = result.attemptId;
+        const invocation = await invocationState.read();
+        if (!invocation || invocation.operation !== 'spec-author' || invocation.attemptId !== result.attemptId) {
+          return { status: 'blocked', kind: 'safety', code: 'spec-author-invocation-correlation-missing' };
+        }
+        const revisionPath = join(dirname(invocation.reportPath), `revision-${state.revisions.length + 1}.md`);
+        const report = decodeAgentReportForValidation(result.reportBytes) as Record<string, unknown>;
+        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) {
+          return { status: 'invalid', code: 'spec-author-report-invalid', attemptId: result.attemptId };
+        }
         const content = await readRegularFile(revisionPath);
-        if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        if (report.specSha256 !== sha256(content)) return { status: 'invalid', code: 'spec-author-report-invalid', attemptId: result.attemptId };
         const previous = state.revisions.at(-1) ?? null;
         return { status: 'completed', value: createSpecRevision({
           revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
           evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-          author: { attemptId, sessionId }, previousRevision: previous,
+          author: { attemptId: result.attemptId, sessionId }, previousRevision: previous,
         }) };
       } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-author-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-author-process-absence-unconfirmed' }; }
-        }
-        return { status: 'retryable', code: 'spec-author-report-invalid' };
+        return completedAttemptId
+          ? { status: 'invalid', code: 'spec-author-report-invalid', attemptId: completedAttemptId }
+          : { status: 'retryable', code: 'spec-author-report-invalid' };
       }
     },
     review: async ({ context, state, mode, reviewerSessionId: sessionId, signal, invocationState }) => {
@@ -1329,29 +1329,6 @@ export function createV2Runtime(input: {
           ? { status: 'invalid', code: 'spec-review-report-invalid', attemptId: completedAttemptId }
           : { status: 'retryable', code: 'spec-review-report-invalid' };
       }
-    },
-    recover: async ({ context, state, signal }) => {
-      const invocation = state.invocation;
-      if (!invocation || signal.aborted) return signal.aborted ? { status: 'cancelled' } : { status: 'blocked', kind: 'safety', code: 'spec-recovery-invocation-missing' };
-      if (invocation.status === 'launched') {
-        try { await waitForProcessGroupAbsent(invocation.processGroupId!); }
-        catch { return { status: 'blocked', kind: 'safety', code: 'spec-process-absence-unconfirmed' }; }
-      }
-      if (!invocation.reportPath) return { status: 'retryable', code: 'spec-author-transport-recovery' };
-      let reportBytes: Buffer;
-      try { reportBytes = await readRegularFile(invocation.reportPath); }
-      catch { return { status: 'retryable', code: 'spec-author-transport-recovery' }; }
-      if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
-      try {
-        const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-        const content = await readRegularFile(invocation.revisionPath);
-        if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        return { status: 'completed', value: createSpecRevision({
-          revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
-          evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-          author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
-        }) };
-      } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
     },
   };
 
@@ -1621,7 +1598,7 @@ export function createV2Runtime(input: {
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
       specRequired: (context, state, signal) => new SpecCoordinator({
-        state, operation: specOperation, createReviewerSessionId: randomUUID,
+        state, operation: specOperation, createAuthorSessionId: randomUUID, createReviewerSessionId: randomUUID,
       }).run(context, signal),
       awaitingUser: async (context, state, signal) => {
         const config = requireConfig(currentConfig);

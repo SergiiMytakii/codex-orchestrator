@@ -2494,14 +2494,16 @@ async function runFixture(options: FixtureOptions = {}) {
       direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
       specRequired: (context, state, signal) => new SpecCoordinator({
         state,
+        createAuthorSessionId: () => 'author-session',
         createReviewerSessionId: () => 'reviewer-session',
         operation: {
-          author: async ({ state: delivery, onPrepared, onLaunched }) => {
+          author: async ({ state: delivery, authorSessionId: sessionId, invocationState }) => {
             events.push('spec-author');
             const attemptId = `author-${delivery.revisions.length + 1}`;
-            const sessionId = delivery.authorSessionId ?? 'author-session';
-            await onPrepared({ attemptId, sessionId });
-            await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
+            const preparedInvocation = reportInvocation(attemptId, 'spec-author');
+            const launchedInvocation = reportInvocation(attemptId, 'spec-author', 'launched');
+            assert.equal(await invocationState.compareAndSwap(undefined, preparedInvocation), true);
+            assert.equal(await invocationState.compareAndSwap(preparedInvocation, launchedInvocation), true);
             return { status: 'completed', value: createSpecRevision({
               revision: delivery.revisions.length + 1, path: '/state/spec.md', content: '# Frozen spec\n',
               evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
@@ -2526,7 +2528,6 @@ async function runFixture(options: FixtureOptions = {}) {
               acceptedRisks: [], coverageInvalidated: false,
             } };
           },
-          recover: async () => ({ status: 'blocked', kind: 'safety', code: 'unexpected-spec-recovery' }),
         },
       }).run(context, signal),
       awaitingUser: async (context, state) => {
@@ -3137,7 +3138,7 @@ function effectCounts(events: string[]): Record<string, number> {
 
 function reportInvocation(
   attemptId: string,
-  operation: 'triage' | 'ambiguity-review' | 'code-review' | 'spec-review',
+  operation: 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review',
   phase: 'prepared' | 'launched' = 'prepared',
   generationHash = '1'.repeat(64),
 ) {
