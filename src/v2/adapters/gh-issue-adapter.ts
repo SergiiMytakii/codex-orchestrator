@@ -270,7 +270,7 @@ function normalizeComment(input: unknown): GitHubIssueComment[] {
   const id = typeof record.id === 'string' ? record.id : '';
   const url = typeof record.url === 'string' ? record.url : '';
   const body = typeof record.body === 'string' ? truncateCommentBody(record.body) : '';
-  const createdAt = typeof record.createdAt === 'string' ? record.createdAt : '';
+  const createdAt = canonicalTimestamp(record.createdAt, 'createdAt');
   const author = typeof record.author === 'object' && record.author !== null ? record.author as Record<string, unknown> : {};
   const login = typeof author.login === 'string' ? author.login : '';
   const authorAssociation = typeof record.authorAssociation === 'string' ? record.authorAssociation : '';
@@ -289,11 +289,18 @@ function normalizeRestComment(input: unknown): GitHubIssueComment {
     id: readDecimalString(record, 'id'),
     url: readString(record, 'html_url'),
     body: truncateCommentBody(readString(record, 'body')),
-    createdAt: readString(record, 'created_at'),
-    updatedAt: readString(record, 'updated_at'),
+    createdAt: canonicalTimestamp(record.created_at, 'created_at'),
+    updatedAt: canonicalTimestamp(record.updated_at, 'updated_at'),
     author: { login: readString(user, 'login'), id: readDecimalString(user, 'id') },
     authorAssociation: readString(record, 'author_association'),
   };
+}
+
+function canonicalTimestamp(value: unknown, field: string): string {
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
+    throw new Error(`GitHub issue payload ${field} must be a timestamp`);
+  }
+  return new Date(value).toISOString();
 }
 
 function readDecimalString(record: Record<string, unknown>, key: string): string {
