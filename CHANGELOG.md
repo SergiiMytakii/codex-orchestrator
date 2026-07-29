@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.10] - 2026-07-29
+
 ### Fixed
 - GitHub issue comment timestamps are canonicalized before run-state
   persistence, so second-precision API timestamps no longer prevent a fresh
