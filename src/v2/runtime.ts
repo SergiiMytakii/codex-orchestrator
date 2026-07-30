@@ -10,10 +10,9 @@ import { GitWorktreeManager } from './adapters/worktree.js';
 import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
-import type { ReviewFeedbackImplementationInvocationV1 } from './review-feedback.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, CandidateProofInspectionError, ProofQuiescenceError, ProofReportRecoveryError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
@@ -24,7 +23,6 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { FileProofRecordWriter } from './proof-store.js';
 import { CheckProcessQuiescenceError, parseIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
@@ -38,6 +36,7 @@ import { validateCodeReviewDefects } from './code-review-report.js';
 import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
 import { OwnerLockContentionError, OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
+import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity, type ProcessGroupObservation } from './process-identity.js';
 import {
   parseWorkflowExecutionProfile,
   type WorkflowExecutionProfile,
@@ -50,7 +49,7 @@ import {
   candidateBindingSeed,
   candidateRef,
   type CandidateBindingV2,
-  type CandidateExecutionLeaseV2,
+  type CandidateMaterializationV2,
   type CandidateGitV2,
   type CandidateResult,
 } from './candidate.js';
@@ -73,12 +72,9 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
         if (await this.getHead(input.worktreePath) !== input.expectedHeadSha) throw new Error('candidate expected HEAD diverged');
         await this.git(['-C', input.worktreePath, 'read-tree', input.expectedHeadSha]);
       }),
-      prepareExecution: (input) => this.prepareCandidateExecution(input),
-      markExecutionLaunched: ({ lease, pid, processGroupId, launchedAt }) => ({
-        ...lease, phase: 'launched', pid, processGroupId, launchedAt,
-      }),
-      inspectExecution: (input) => this.inspectCandidateExecution(input),
-      removeExecution: (input) => this.removeCandidateExecution(input.lease),
+      prepareMaterialization: (input) => this.prepareCandidateMaterialization(input),
+      inspectMaterialization: (input) => this.inspectCandidateMaterialization(input),
+      removeMaterialization: (input) => this.removeCandidateMaterialization(input.materialization),
       copyProofArtifacts: (input) => this.copyCandidateProofArtifacts(input),
       createOrObserveCommit: (input) => this.createOrObserveCandidateCommit(input),
       releasePin: (input) => this.releaseCandidatePin(input.binding, input.expectedPinnedCommitSha),
@@ -117,21 +113,21 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
           if (deleted.exitCode !== 0) throw new Error('orphan candidate ref cleanup failed');
         }
       }
-      const executionRoot = canonicalFilesystemPath(resolve(input.workspaceRoot, '.candidate-executions'));
-      const activeExecutions = new Map(input.activeExecutions.map((execution) => [
-        canonicalFilesystemPath(execution.path), execution.candidateCommitSha,
+      const materializationRoot = canonicalFilesystemPath(resolve(input.workspaceRoot, '.candidate-materializations'));
+      const activeMaterializations = new Map(input.activeMaterializations.map((materialization) => [
+        canonicalFilesystemPath(materialization.path), materialization.candidateCommitSha,
       ]));
       for (const worktree of await this.worktrees.listWorktrees(root)) {
         const path = canonicalFilesystemPath(worktree.path);
-        const relativePath = relative(executionRoot, path);
+        const relativePath = relative(materializationRoot, path);
         if (relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))) {
-          const expectedCommit = activeExecutions.get(path);
+          const expectedCommit = activeMaterializations.get(path);
           if (expectedCommit) {
             if (worktree.branch !== undefined || await this.getHead(path).catch(() => '') !== expectedCommit) {
-              throw new Error('persisted candidate execution owner diverged');
+              throw new Error('persisted candidate materialization diverged');
             }
           } else {
-            if (worktree.branch !== undefined) throw new Error('orphan candidate execution unexpectedly owns a branch');
+            if (worktree.branch !== undefined) throw new Error('orphan candidate materialization unexpectedly owns a branch');
             await this.git(['-C', root, 'worktree', 'remove', '--force', path]);
           }
         }
@@ -231,11 +227,11 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     });
   }
 
-  private async prepareCandidateExecution(input: Parameters<CandidateGitV2['prepareExecution']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['prepareExecution']>>> {
+  private async prepareCandidateMaterialization(input: Parameters<CandidateGitV2['prepareMaterialization']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['prepareMaterialization']>>> {
     return this.candidateOperation('candidate-materialization-io-failed', async () => {
       const root = await this.repositoryFromWorkspaceRoot(input.workspaceRoot);
       this.candidateRepositories.set(input.binding.candidateRef, root);
-      const path = join(input.workspaceRoot, '.candidate-executions', input.runId, input.binding.bindingId, `${input.operation}-${input.attemptId}`);
+      const path = join(input.workspaceRoot, '.candidate-materializations', input.runId, input.binding.bindingId, input.materializationId);
       const existing = (await this.worktrees.listWorktrees(root)).find((worktree) => sameFilesystemPath(worktree.path, path));
       if (existing) {
         const clean = await this.worktrees.isWorktreeClean(path);
@@ -245,59 +241,57 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
         await mkdir(dirname(path), { recursive: true });
         await this.git(['-C', root, 'worktree', 'add', '--detach', path, input.binding.candidateCommitSha]);
       }
-      return { kind: 'prepared', lease: {
+      return { kind: 'prepared', materialization: {
         version: 2, bindingId: input.binding.bindingId, candidateCommitSha: input.binding.candidateCommitSha,
-        path, operation: input.operation, attemptId: input.attemptId, phase: 'prepared', pid: null,
-        processGroupId: null, preparedAt: new Date().toISOString(), launchedAt: null,
+        path,
       } };
     });
   }
 
-  private async inspectCandidateExecution(input: Parameters<CandidateGitV2['inspectExecution']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['inspectExecution']>>> {
+  private async inspectCandidateMaterialization(input: Parameters<CandidateGitV2['inspectMaterialization']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['inspectMaterialization']>>> {
     return this.candidateOperation('candidate-materialization-io-failed', async () => {
       try {
-        const stat = await lstat(input.lease.path);
+        const stat = await lstat(input.materialization.path);
         if (stat.isSymbolicLink() || !stat.isDirectory()) return 'mutated';
       } catch (error) {
         if (isErrorCode(error, 'ENOENT')) return 'missing';
         throw error;
       }
       const [head, tree, changed] = await Promise.all([
-        this.getHead(input.lease.path),
-        this.git(['-C', input.lease.path, 'rev-parse', 'HEAD^{tree}']).then((value) => value.trim()),
-        this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.lease.path, input.artifactDir),
+        this.getHead(input.materialization.path),
+        this.git(['-C', input.materialization.path, 'rev-parse', 'HEAD^{tree}']).then((value) => value.trim()),
+        this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.materialization.path, input.artifactDir),
       ]);
       return head === input.binding.candidateCommitSha && tree === input.binding.candidateTreeSha && changed.length === 0 ? 'matching' : 'mutated';
     });
   }
 
-  private async removeCandidateExecution(lease: CandidateExecutionLeaseV2): Promise<CandidateResult<void>> {
+  private async removeCandidateMaterialization(materialization: CandidateMaterializationV2): Promise<CandidateResult<void>> {
     return this.candidateOperation('candidate-materialization-io-failed', async () => {
-      if (lease.phase === 'launched' && lease.processGroupId && processGroupIsAlive(lease.processGroupId)) throw new Error('candidate execution process is still active');
-      const root = await this.repositoryFromWorkspaceRoot(lease.path);
-      const registered = (await this.worktrees.listWorktrees(root)).find((worktree) => sameFilesystemPath(worktree.path, lease.path));
+      const root = await this.repositoryFromWorkspaceRoot(materialization.path);
+      const registered = (await this.worktrees.listWorktrees(root)).find((worktree) => sameFilesystemPath(worktree.path, materialization.path));
       if (!registered) return;
-      if (registered.branch !== undefined || await this.getHead(lease.path) !== lease.candidateCommitSha) throw new Error('candidate execution owner diverged');
-      await this.git(['-C', root, 'worktree', 'remove', '--force', lease.path]);
+      if (registered.branch !== undefined || await this.getHead(materialization.path) !== materialization.candidateCommitSha) throw new Error('candidate materialization diverged');
+      await this.git(['-C', root, 'worktree', 'remove', '--force', materialization.path]);
     });
   }
 
   private async copyCandidateProofArtifacts(input: Parameters<CandidateGitV2['copyProofArtifacts']>[0]): Promise<Awaited<ReturnType<CandidateGitV2['copyProofArtifacts']>>> {
     return this.candidateOperation('candidate-materialization-io-failed', async () => {
       const proofRoot = `${input.artifactDir}/${input.proofId}`;
-      const repositoryRoot = await this.repositoryFromWorkspaceRoot(input.lease.path);
+      const repositoryRoot = await this.repositoryFromWorkspaceRoot(input.materialization.path);
       const registered = (await this.worktrees.listWorktrees(repositoryRoot))
-        .find((worktree) => sameFilesystemPath(worktree.path, input.lease.path));
+        .find((worktree) => sameFilesystemPath(worktree.path, input.materialization.path));
       if (!registered || registered.branch !== undefined
-        || await this.getHead(input.lease.path).catch(() => '') !== input.lease.candidateCommitSha) {
+        || await this.getHead(input.materialization.path).catch(() => '') !== input.materialization.candidateCommitSha) {
         return { kind: 'artifact-conflict' as const, relativePath: proofRoot };
       }
-      const sourceRoot = await inspectSafeArtifactRoot(input.lease.path);
+      const sourceRoot = await inspectSafeArtifactRoot(input.materialization.path);
       const destinationRoot = await inspectSafeArtifactRoot(input.issueWorktreePath);
       for (const artifact of input.artifacts) {
         if (artifact.relativePath !== proofRoot && !artifact.relativePath.startsWith(`${proofRoot}/`)) return { kind: 'artifact-conflict', relativePath: artifact.relativePath };
         try {
-          const source = join(input.lease.path, artifact.relativePath);
+          const source = join(input.materialization.path, artifact.relativePath);
           const destination = join(input.issueWorktreePath, artifact.relativePath);
           const sourceBytes = await readRegularFileWithoutSymlinkAncestors(sourceRoot, source);
           if (sha256(sourceBytes) !== artifact.sha256) return { kind: 'artifact-conflict', relativePath: artifact.relativePath };
@@ -794,6 +788,7 @@ export class ContainedImplementationAgent {
 
   async run(input: {
     operation: 'qualification-repair' | 'implementation';
+    attemptId: string;
     runId: string;
     worktreePath: string;
     issue: IssueSnapshot;
@@ -813,7 +808,7 @@ export class ContainedImplementationAgent {
   }): Promise<ImplementationAgentResult> {
     const config = this.dependencies.config();
     const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
-    const attemptId = (this.dependencies.createAttemptId ?? randomUUID)();
+    const attemptId = input.attemptId;
     const attempt = await prepareContainedAttempt({
       orchestratorHome: this.dependencies.orchestratorHome,
       canonicalRepository,
@@ -831,6 +826,12 @@ export class ContainedImplementationAgent {
       baseline,
     });
     try {
+      try {
+        const recovered = await readRegularFile(attempt.reportPath);
+        return { kind: 'completed', attemptId, report: decodeAgentReportForValidation(recovered) };
+      } catch (error) {
+        if (!isErrorCode(error, 'ENOENT')) return { kind: 'internal-error' };
+      }
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
         cwd: input.worktreePath,
@@ -866,9 +867,9 @@ export class ContainedImplementationAgent {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
-        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
+        onSpawned: async ({ pid, processGroupId }) => input.onLaunched?.({
           attemptId, pid, processGroupId, launchedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-        }) } : {}),
+        }),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -884,48 +885,11 @@ export class ContainedImplementationAgent {
       if (!(error instanceof ProcessQuiescenceError)) return { kind: 'internal-error' };
       return {
         kind: 'safe-halt',
-        process: {
-          pid: error.pid,
-          processGroupId: error.processGroupId,
-          startedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-          baseline: { ...baseline },
-        },
         waitForAbsence: () => waitForProcessGroupAbsent(error.processGroupId),
       };
     }
   }
 
-  async recover(input: {
-    runId: string;
-    canonicalRepository: string;
-    invocation: ReviewFeedbackImplementationInvocationV1;
-  }): Promise<Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined> {
-    const expected = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(input.canonicalRepository),
-      'runs',
-      input.runId,
-      'attempts',
-      input.invocation.attemptId,
-      'report.json',
-    );
-    if (resolve(input.invocation.reportPath) !== expected) {
-      throw new Error('review feedback implementation report path is not attempt-owned');
-    }
-    let bytes: Buffer;
-    try {
-      bytes = await readRegularFile(expected);
-    } catch (error) {
-      if (isErrorCode(error, 'ENOENT')) return undefined;
-      throw error;
-    }
-    return {
-      kind: 'completed',
-      attemptId: input.invocation.attemptId,
-      report: decodeAgentReportForValidation(bytes),
-    };
-  }
 }
 
 export class ContainedProofAgent implements ProofAgent<import('./checked-change.js').CheckedChangePayload> {
@@ -982,7 +946,7 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
       } catch (error) {
         if (!isErrorCode(error, 'ENOENT')) throw error;
       }
-      if (input.recoverOnly) throw new ProofReportRecoveryError();
+      if (input.recoverOnly) return { kind: 'internal-error' };
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
         cwd: worktreePath,
@@ -1031,9 +995,9 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
-        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
+        onSpawned: async ({ pid, processGroupId }) => input.onLaunched?.({
           pid, processGroupId, launchedAt: new Date().toISOString(),
-        }) } : {}),
+        }),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
@@ -1047,10 +1011,6 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         proofPhaseChangedFiles: changedArtifactPaths(before, after),
       };
     } catch (error) {
-      if (error instanceof ProcessQuiescenceError) {
-        throw new ProofQuiescenceError(error.pid, error.processGroupId, () => waitForProcessGroupAbsent(error.processGroupId));
-      }
-      if (error instanceof ProofReportRecoveryError) throw error;
       return { kind: 'internal-error' };
     }
   }
@@ -1186,6 +1146,13 @@ export function createV2Runtime(input: {
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
       }
+      try {
+        return { status: 'completed' as const, reportBytes: await readRegularFile(attempt.reportPath) };
+      } catch (error) {
+        if (!isErrorCode(error, 'ENOENT')) {
+          return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-result-read-failed' };
+        }
+      }
       let readView: string;
       try {
         readView = await materializeReportReadView({
@@ -1221,7 +1188,7 @@ export function createV2Runtime(input: {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
-        ...(onLaunched ? { onSpawned: onLaunched } : {}),
+        onSpawned: async ({ pid, processGroupId }) => onLaunched?.({ pid, processGroupId }),
         }, signal);
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
@@ -1256,13 +1223,10 @@ export function createV2Runtime(input: {
   });
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
-    createAttemptId: input.createAttemptId ?? randomUUID,
   });
-  const createAttemptId = input.createAttemptId ?? randomUUID;
   const specOperation: SpecDeliveryOperation = {
-    author: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.authorSessionId ?? randomUUID();
+    author: async ({ attemptId, context, state, mode, recoverOnly, signal, onPrepared, onLaunched }) => {
+      const sessionId = state.authorSessionId ?? attemptId;
       let attempt;
       try {
         attempt = await prepareContainedAttempt({
@@ -1270,9 +1234,11 @@ export function createV2Runtime(input: {
           attemptId, operationId: 'spec-author', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
         });
         const revisionPath = join(dirname(attempt.reportPath), `revision-${state.revisions.length + 1}.md`);
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
+        if (!recoverOnly) await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
         const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
+        const result = recoverOnly
+          ? { kind: 'completed' as const, report: { kind: 'available' as const, bytes: await readRegularFile(attempt.reportPath) } }
+          : await containedProcess.run({
           codexPath: config.codex.command, cwd: dirname(attempt.reportPath), schemaPath: attempt.schemaPath,
           reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
           safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
@@ -1289,7 +1255,7 @@ export function createV2Runtime(input: {
             `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
             'Do not modify the product worktree, prior revisions, external state, or any .env file.',
           ].join('\n'),
-        }, signal);
+          }, signal);
         if (result.kind === 'cancelled') return { status: 'cancelled' };
         if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
         if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
@@ -1298,7 +1264,7 @@ export function createV2Runtime(input: {
         const content = await readRegularFile(revisionPath);
         if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
         const previous = state.revisions.at(-1) ?? null;
-        return { status: 'completed', value: createSpecRevision({
+        return { status: 'completed', attemptResultSha256: sha256(result.report.bytes), value: createSpecRevision({
           revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
           evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
           author: { attemptId, sessionId }, previousRevision: previous,
@@ -1311,17 +1277,18 @@ export function createV2Runtime(input: {
         return { status: 'retryable', code: 'spec-author-report-invalid' };
       }
     },
-    review: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.review.reviewer?.sessionId ?? randomUUID();
+    review: async ({ attemptId, context, state, mode, recoverOnly, signal, onPrepared, onLaunched }) => {
+      const sessionId = state.review.reviewer?.sessionId ?? attemptId;
       try {
         const attempt = await prepareContainedAttempt({
           orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
           attemptId, operationId: 'spec-review', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
         });
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
+        if (!recoverOnly) await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
         const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
+        const result = recoverOnly
+          ? { kind: 'completed' as const, report: { kind: 'available' as const, bytes: await readRegularFile(attempt.reportPath) } }
+          : await containedProcess.run({
           codexPath: config.codex.command, cwd: context.worktreePath, schemaPath: attempt.schemaPath,
           reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
           safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
@@ -1336,7 +1303,7 @@ export function createV2Runtime(input: {
             `Immutable spec delivery state: ${canonicalJson(state)}.`,
             'Return only the package spec-review report. Do not edit files or external state.',
           ].join('\n'),
-        }, signal);
+          }, signal);
         if (result.kind === 'cancelled') return { status: 'cancelled' };
         if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
         if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
@@ -1356,7 +1323,7 @@ export function createV2Runtime(input: {
           closureRequestSha256: mode === 'closure' ? state.review.closureRequestSha256 : null,
           acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
         };
-        return { status: 'completed', value: report, reportSha256: sha256(result.report.bytes) };
+        return { status: 'completed', value: report, attemptResultSha256: sha256(result.report.bytes), reportSha256: sha256(result.report.bytes) };
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
           try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-review-process-quiescence' }; }
@@ -1364,47 +1331,6 @@ export function createV2Runtime(input: {
         }
         return { status: 'retryable', code: 'spec-review-report-invalid' };
       }
-    },
-    recover: async ({ context, state, signal }) => {
-      const invocation = state.invocation;
-      if (!invocation || signal.aborted) return signal.aborted ? { status: 'cancelled' } : { status: 'blocked', kind: 'safety', code: 'spec-recovery-invocation-missing' };
-      if (invocation.status === 'launched') {
-        try { await waitForProcessGroupAbsent(invocation.processGroupId!); }
-        catch { return { status: 'blocked', kind: 'safety', code: 'spec-process-absence-unconfirmed' }; }
-      }
-      if (!invocation.reportPath) return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` };
-      let reportBytes: Buffer;
-      try { reportBytes = await readRegularFile(invocation.reportPath); }
-      catch { return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` }; }
-      if (invocation.purpose === 'author') {
-        if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        try {
-          const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-          const content = await readRegularFile(invocation.revisionPath);
-          if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
-          return { status: 'completed', value: createSpecRevision({
-            revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
-            evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-            author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
-          }) };
-        } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
-      }
-      try {
-        const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-        if (raw.mode !== invocation.mode || raw.reviewerSessionId !== invocation.sessionId || !Array.isArray(raw.coverage)
-          || !Array.isArray(raw.defects) || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts)
-          || typeof raw.coverageInvalidated !== 'boolean' || !['approved','needs-work','rejected'].includes(raw.verdict as string)) {
-          return { status: 'retryable', code: 'spec-review-report-invalid' };
-        }
-        const defects = validateCodeReviewDefects(raw.defects, invocation.targetRevision);
-        return { status: 'completed', reportSha256: sha256(reportBytes), value: {
-          version: 1, targetRevision: invocation.targetRevision, targetSha256: invocation.targetSha256!,
-          mode: invocation.mode as 'full'|'closure', verdict: raw.verdict as SpecReviewReportV1['verdict'],
-          reviewer: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, coverage: raw.coverage as string[], defects,
-          affectedDefectIds: raw.affectedDefectIds as string[], affectedContracts: raw.affectedContracts as string[],
-          closureRequestSha256: invocation.closureRequestSha256, acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
-        } };
-      } catch { return { status: 'retryable', code: 'spec-review-report-invalid' }; }
     },
   };
 
@@ -1422,6 +1348,10 @@ export function createV2Runtime(input: {
     return { bytes, config };
   };
   const records: RunRecordWriter = {
+    inspect: async () => {
+      if (!runRecords) throw new Error('run store used before config');
+      return runRecords.inspect();
+    },
     read: async () => {
       if (!runRecords) throw new Error('run store used before config');
       return runRecords.read();
@@ -1430,10 +1360,6 @@ export function createV2Runtime(input: {
       if (!runRecords) throw new Error('run store used before config');
       return runRecords.compareAndSwap(generation, next);
     },
-    markPublicationEffectPossible: async () => {
-      if (!runRecords?.markPublicationEffectPossible) return;
-      await runRecords.markPublicationEffectPossible();
-    },
   };
   const capabilities = createCheckedChangeCapabilities();
   const proof = {
@@ -1441,9 +1367,8 @@ export function createV2Runtime(input: {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
       const repoKey = sha256(checked.payload.canonicalRepository);
-      const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'));
       const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
-      const worktreePath = proofInput.executionLease?.path ?? issueWorktreePath;
+      const worktreePath = proofInput.materialization?.path ?? issueWorktreePath;
       const androidLease = new FileAndroidLeaseVerifier({
         leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
         worktreeRoot: worktreePath,
@@ -1462,9 +1387,8 @@ export function createV2Runtime(input: {
       });
       const acceptanceProof = new AcceptanceProof<import('./checked-change.js').CheckedChangePayload>({
         checkedChangeReader: capabilities,
-        proofRecords,
         proofAgent,
-        inspectFreshness: async (payload, executionLease) => {
+        inspectFreshness: async (payload, materialization) => {
           const checkPolicySha256 = sha256(canonicalJson(resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks));
           if (payload.version === 1) return {
             ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
@@ -1472,10 +1396,10 @@ export function createV2Runtime(input: {
               : git.snapshot(worktreePath)),
             checkPolicySha256,
           };
-          if (!executionLease || !git.candidateV2) throw new CandidateProofInspectionError('candidate-git-v2-required');
-          const inspection = await git.candidateV2.inspectExecution({
+          if (!materialization || !git.candidateV2) throw new CandidateProofInspectionError('candidate-git-v2-required');
+          const inspection = await git.candidateV2.inspectMaterialization({
             binding: payload.binding,
-            lease: executionLease,
+            materialization,
             artifactDir: config.proof.artifactDir,
           });
           if (inspection.kind === 'failed') throw new CandidateProofInspectionError(inspection.code);
@@ -1487,8 +1411,6 @@ export function createV2Runtime(input: {
         androidLease,
         iosLease,
         proofArtifactDir: config.proof.artifactDir,
-        createAttemptId: input.createAttemptId ?? randomUUID,
-        now,
         signal: controller.signal,
       });
       const androidRelevant = !!config.proof.android && isAndroidProofRelevant(
@@ -1528,10 +1450,10 @@ export function createV2Runtime(input: {
           }
         },
       });
-      if (checked.payload.version === 2 && proofInput.executionLease && git.candidateV2 && result.status === 'passed') {
+      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && result.status === 'passed') {
         const artifacts = result.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
         const copied = await git.candidateV2.copyProofArtifacts({
-          lease: proofInput.executionLease,
+          materialization: proofInput.materialization,
           issueWorktreePath,
           artifactDir: config.proof.artifactDir,
           proofId: proofInput.proofId,
@@ -1603,7 +1525,7 @@ export function createV2Runtime(input: {
       findOpen: async ({ headBranch, baseBranch }) => {
         const matches = (await input.pullRequests.listAllByHeadBranch(headBranch))
           .filter((pullRequest) => pullRequest.state === 'OPEN' && pullRequest.baseRefName === baseBranch);
-        if (matches.length > 1) throw new Error('multiple open pull requests match publication intent');
+        if (matches.length > 1) throw new Error('multiple open pull requests match publication pendingEffect');
         const match = matches[0];
         if (!match) return undefined;
         const reviewTarget = await input.pullRequests.getReviewTarget(match.number);
@@ -1629,7 +1551,6 @@ export function createV2Runtime(input: {
       run: ({ state, ...routeInput }) => new RouteCoordinator({
         state,
         operation: reportOperation,
-        createAttemptId: input.createAttemptId ?? randomUUID,
         now,
         createReceipt: ({ artifact, triage, review, decidedAt }) => {
           if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
@@ -1687,12 +1608,56 @@ export function createV2Runtime(input: {
       await writeDurableAtomicFile(resolve(targetRoot, relativePath), `${canonicalJson({ version: 1, runId, code, summary, recordedAt: now() })}\n`);
       return { id: `evidence:${runId}:${code}`, path: relativePath };
     },
+    outcomeEvidencePath: (runId, code, summarySha256) => `${requireConfig(currentConfig).runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`,
+    inspectOutcomeEvidence: async (path) => {
+      try { return { sha256: sha256(await readRegularFile(resolve(targetRoot, path))) }; }
+      catch (error) {
+        if (isErrorCode(error, 'ENOENT')) return undefined;
+        throw error;
+      }
+    },
+    writeOutcomeEvidence: ({ path, bytes, sha256: expectedSha256 }) => writeExactDurableBytes(
+      resolve(targetRoot, path), bytes, expectedSha256,
+    ),
     packageVersion: input.packageVersion,
     createWorkflowGeneration: input.createWorkflowGeneration,
     verifyWorkflowGeneration,
     createRunId: input.createRunId ?? randomUUID,
     createProofId: input.createProofId ?? randomUUID,
     createReviewSessionId: input.createAttemptId ?? randomUUID,
+    processIdentity: {
+      host: hostname(),
+      bootId: input.bootId,
+      capture: async (pid, processGroupId) => {
+        const captured = await captureProcessStartIdentity({ platform: process.platform, pid, processGroupId });
+        return captured.status === 'available' ? captured.identity : undefined;
+      },
+      observe: async (identity) => ({
+        leader: await observeProcessIdentity({ platform: process.platform, ...identity }),
+        group: observeProcessGroup(identity.processGroupId),
+      }),
+    },
+    inspectAttemptResult: async (path) => {
+      try {
+        const bytes = await readRegularFile(path);
+        return { bytes, sha256: sha256(bytes) };
+      }
+      catch (error) {
+        if (isErrorCode(error, 'ENOENT')) return undefined;
+        throw error;
+      }
+    },
+    writeAttemptResult: ({ path, bytes, sha256: expectedSha256 }) => writeExactDurableBytes(path, bytes, expectedSha256),
+    attemptResultPath: ({ canonicalRepository, runId, attemptId }) => join(
+      resolve(orchestratorHome),
+      'v2',
+      sha256(canonicalRepository),
+      'runs',
+      runId,
+      'attempts',
+      attemptId,
+      'report.json',
+    ),
     now,
     signal: controller.signal,
   });
@@ -1749,6 +1714,20 @@ async function readRegularFile(path: string): Promise<Buffer> {
   }
 }
 
+async function writeExactDurableBytes(path: string, bytes: Buffer, expectedSha256: string): Promise<void> {
+  if (sha256(bytes) !== expectedSha256) throw new Error('durable result bytes do not match expected SHA-256');
+  try {
+    const existing = await readRegularFile(path);
+    if (sha256(existing) !== expectedSha256) throw new Error('durable result path already contains different bytes');
+    return;
+  } catch (error) {
+    if (!isErrorCode(error, 'ENOENT')) throw error;
+  }
+  await writeDurableAtomicFile(path, bytes, 0o600);
+  const observed = await readRegularFile(path);
+  if (sha256(observed) !== expectedSha256) throw new Error('durable result write postcondition failed');
+}
+
 async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -1760,13 +1739,20 @@ async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }>
   }
 }
 
+export interface CheckExecutionResult {
+  status: 'passed' | 'failed';
+  output: Buffer;
+  outputSha256: string;
+  observation: { leader: 'absent'; group: ProcessGroupObservation };
+}
+
 export async function runShellCheck(
   command: string,
   cwd: string,
   signal: AbortSignal,
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
+): Promise<CheckExecutionResult> {
   return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
 }
 
@@ -1776,7 +1762,7 @@ async function runProcessCheck(
   signal: AbortSignal,
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
+): Promise<CheckExecutionResult> {
   return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs, onLaunched);
 }
 
@@ -1787,7 +1773,7 @@ async function runSpawnCheck(
   signal: AbortSignal,
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-): Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256: string }> {
+): Promise<CheckExecutionResult> {
   return new Promise((resolveCheck, rejectCheck) => {
     const child = spawn('/bin/sh', [
       '-c', 'IFS= read -r _ || exit 125; exec "$@"', 'codex-orchestrator-check-gate', file, ...args,
@@ -1864,6 +1850,10 @@ async function runSpawnCheck(
           status: code === 0 ? 'passed' : 'failed',
           output: Buffer.concat(chunks),
           outputSha256: outputHash.digest('hex'),
+          observation: {
+            leader: 'absent',
+            group: child.pid ? observeProcessGroup(child.pid) : 'unknown',
+          },
         });
       })().catch(rejectCheck);
     });

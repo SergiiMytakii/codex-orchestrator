@@ -3,8 +3,6 @@ import { test } from 'node:test';
 
 import {
   AcceptanceProof,
-  ProofLaunchAuthorizationError,
-  ProofQuiescenceError,
   type FrozenCriterion,
   type IssueSnapshot,
   type ProofAgentResult,
@@ -18,9 +16,8 @@ import {
   type CheckedChangePayloadV2,
 } from '../src/v2/checked-change.js';
 import type { CandidateBindingV2 } from '../src/v2/candidate.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import type { ProofReportV1 } from '../src/v2/proof-report.js';
+import type { ProofReceipt, ProofReportV1 } from '../src/v2/proof-report.js';
 import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
 
 const artifactBytes = Buffer.from('proof evidence\n');
@@ -96,15 +93,17 @@ test('CheckedChange V2 binds every receipt and changed path to one candidate whi
   assert.equal(checkedChangeFreshnessMatches(legacy, { ...freshness(legacy), indexTreeSha: 'f'.repeat(40) }), false);
 });
 
-test('identical proof binding reuses one passed attempt while mismatch fails before process launch', async () => {
+test('caller-owned passed receipt prevents a duplicate attempt while binding mismatch fails before launch', async () => {
   const fixture = proofFixture();
   const first = await fixture.proof.proveChange(fixture.input());
-  const repeated = await fixture.proof.proveChange(fixture.input());
+  assert.equal(first.status, 'passed');
+  if (first.status !== 'passed') return;
+  const repeated = await fixture.proof.proveChange(fixture.input({ passedReceipt: first.receipt }));
   const mismatched = await fixture.proof.proveChange(fixture.input({
     frozenCriteria: [{ ...fixture.criteria[0]!, text: 'Changed criterion text.' }],
+    passedReceipt: first.receipt,
   }));
 
-  assert.equal(first.status, 'passed');
   assert.deepEqual(repeated, first);
   assert.equal(mismatched.status, 'internal-error');
   assert.equal(fixture.agentCalls.length, 1);
@@ -142,7 +141,7 @@ test('freshness is rechecked after proof and stale checked input cannot be accep
   assert.equal(fixture.agentCalls.length, 1);
 });
 
-test('malformed report, rewritten criteria, raw path escape, and forbidden proof diff fail closed', async () => {
+test('malformed report, rewritten criteria, and unsafe report paths request one explicit caller-owned report repair', async () => {
   const cases: Array<{ name: string; agentResult: ProofAgentResult }> = [
     { name: 'malformed', agentResult: { kind: 'report', report: { status: 'passed' }, proofPhaseChangedFiles: [] } },
     {
@@ -157,6 +156,20 @@ test('malformed report, rewritten criteria, raw path escape, and forbidden proof
         proofPhaseChangedFiles: ['../outside.txt'],
       },
     },
+  ];
+  for (const entry of cases) {
+    const fixture = proofFixture({ agentResult: entry.agentResult });
+    const result = await fixture.proof.proveChange(fixture.input());
+    assert.equal(result.status, 'report-repair', entry.name);
+    if (result.status !== 'report-repair') continue;
+    assert.equal(result.reportRepairCount, 1, entry.name);
+    assert.equal(result.findings.length, 1, entry.name);
+    assert.equal(fixture.agentCalls.length, 1, entry.name);
+  }
+});
+
+test('forbidden proof diff fails closed without format repair', async () => {
+  const cases: Array<{ name: string; agentResult: ProofAgentResult }> = [
     {
       name: 'forbidden diff',
       agentResult: { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath(), 'src/product.ts'] },
@@ -164,8 +177,7 @@ test('malformed report, rewritten criteria, raw path escape, and forbidden proof
   ];
   for (const entry of cases) {
     const fixture = proofFixture({ agentResult: entry.agentResult });
-    const result = await fixture.proof.proveChange(fixture.input());
-    assert.equal(result.status, 'internal-error', entry.name);
+    assert.equal((await fixture.proof.proveChange(fixture.input())).status, 'internal-error', entry.name);
   }
 });
 
@@ -190,64 +202,60 @@ test('host identity filtering applies only to publishable artifacts', async () =
   assert.equal((await publishable.proof.proveChange(publishable.input())).status, 'internal-error');
 });
 
-test('one malformed-report repair and one transport retry stay proof-internal under the same binding', async () => {
+test('report repair and transport retry are explicit caller-owned attempts with bounded counters', async () => {
   const malformed = proofFixture({
-    agentResults: [
-      {
-        kind: 'report',
-        report: {
-          ...passingReport(),
-          artifacts: passingReport().artifacts.map((artifact) => ({ ...artifact, kind: 'command-output' as const })),
-        },
-        proofPhaseChangedFiles: [artifactPath()],
+    agentResult: {
+      kind: 'report',
+      report: {
+        ...passingReport(),
+        artifacts: passingReport().artifacts.map((artifact) => ({ ...artifact, kind: 'command-output' as const })),
       },
-      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
-    ],
+      proofPhaseChangedFiles: [artifactPath()],
+    },
   });
-  assert.equal((await malformed.proof.proveChange(malformed.input())).status, 'passed');
-  assert.equal(malformed.agentCalls.length, 2);
-  const repairCall = malformed.agentCalls[1] as { repairOnly: boolean; repairFindings: string[] };
+  const invalid = await malformed.proof.proveChange(malformed.input());
+  assert.equal(invalid.status, 'report-repair');
+  if (invalid.status !== 'report-repair') return;
+  const repaired = proofFixture();
+  assert.equal((await repaired.proof.proveChange(repaired.input({
+    attemptId: 'attempt-report-repair',
+    reportRepairCount: invalid.reportRepairCount,
+    reportRepairFindings: invalid.findings,
+  }))).status, 'passed');
+  assert.equal(repaired.agentCalls.length, 1);
+  const repairCall = repaired.agentCalls[0] as { repairOnly: boolean; repairFindings: string[] };
   assert.equal(repairCall.repairOnly, true);
   assert.match(repairCall.repairFindings[0] ?? '', /only screenshots or sanitized generated summaries may be publishable/u);
-  assert.deepEqual((await malformed.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'report-repair']);
+
+  const invalidRepair = proofFixture({ agentResult: {
+    kind: 'report', report: { version: 1 }, proofPhaseChangedFiles: [],
+  } });
+  const exhaustedRepair = await invalidRepair.proof.proveChange(invalidRepair.input({
+    attemptId: 'attempt-invalid-report-repair',
+    reportRepairCount: 1,
+    reportRepairFindings: invalid.findings,
+  }));
+  assert.equal(exhaustedRepair.status, 'internal-error');
+  assert.equal(invalidRepair.agentCalls.length, 1);
 
   const transport = proofFixture({
-    agentResults: [
-      { kind: 'transport-failed', resumable: true },
-      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
-    ],
+    agentResult: { kind: 'transport-failed', resumable: true },
   });
   let launchAuthorizations = 0;
-  assert.equal((await transport.proof.proveChange(transport.input({
+  const retryable = await transport.proof.proveChange(transport.input({
     beforeAgentLaunch: async () => { launchAuthorizations += 1; },
-  }))).status, 'passed');
-  assert.equal(transport.agentCalls.length, 2);
-  assert.equal(launchAuthorizations, 2);
-  assert.deepEqual((await transport.writer.read('proof-1'))?.attempts.map((attempt) => attempt.purpose), ['proof', 'transport-retry']);
+  }));
+  assert.deepEqual(retryable, { status: 'transport-failed', resumable: true });
+  assert.equal(transport.agentCalls.length, 1);
+  assert.equal(launchAuthorizations, 1);
 
-  let revokedReleaseCalls = 0;
-  const revoked = proofFixture({
-    agentResults: [
-      { kind: 'transport-failed', resumable: true },
-      { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] },
-    ],
-    androidLease: {
-      verify: async () => {},
-      release: async () => { revokedReleaseCalls += 1; },
-    },
-  });
-  let authorizationAttempt = 0;
-  await assert.rejects(revoked.proof.proveChange(revoked.input({
-    beforeAgentLaunch: async () => {
-      authorizationAttempt += 1;
-      if (authorizationAttempt === 2) throw new ProofLaunchAuthorizationError({ status: 'blocked' });
-    },
-  })), ProofLaunchAuthorizationError);
-  assert.equal(revoked.agentCalls.length, 1);
-  assert.equal(revokedReleaseCalls, 1);
+  const exhausted = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true } });
+  const terminal = await exhausted.proof.proveChange(exhausted.input({ transportRetryCount: 1 }));
+  assert.equal(terminal.status, 'transport-failed');
+  if (terminal.status === 'transport-failed') assert.equal(terminal.resumable, false);
 });
 
-test('passed proof returns a sanitized receipt and persists no run lifecycle capability', async () => {
+test('passed proof returns only a sanitized receipt and has no hidden lifecycle dependency', async () => {
   const fixture = proofFixture();
   const result = await fixture.proof.proveChange(fixture.input());
   assert.equal(result.status, 'passed');
@@ -261,38 +269,38 @@ test('passed proof returns a sanitized receipt and persists no run lifecycle cap
   ]);
   assert.equal(JSON.stringify(result.receipt).includes('.codex-orchestrator'), false);
   assert.equal(result.receipt.publishableEvidence[0]?.ref, 'artifact:evidence');
-  const state = await fixture.writer.read('proof-1');
-  assert.equal(state?.status, 'passed');
-  assert.equal('lifecycle' in (state ?? {}), false);
-  assert.equal('cycle' in (state ?? {}), false);
-  assert.equal('intent' in (state ?? {}), false);
+  assert.equal(fixture.agentCalls.length, 1);
 });
 
-test('proof quiescence is rethrown before waiting and releases Android ownership only after absence', async () => {
-  const events: string[] = [];
+test('passed receipt remains monotonic when mobile lease cleanup must be retried', async () => {
+  let releaseCalls = 0;
   const fixture = proofFixture({
-    agentError: new ProofQuiescenceError(71, 71, async () => { events.push('absent'); }),
-    androidLease: { verify: async () => {}, release: async () => { events.push('release'); } },
+    androidLease: {
+      verify: async () => {},
+      release: async () => {
+        releaseCalls += 1;
+        if (releaseCalls === 1) throw new Error('cleanup pending');
+      },
+    },
   });
-  let captured: unknown;
-  try { await fixture.proof.proveChange(fixture.input()); } catch (error) { captured = error; }
-  assert.ok(captured instanceof ProofQuiescenceError);
-  assert.deepEqual(events, []);
-  await captured.waitForAbsence();
-  assert.deepEqual(events, ['absent', 'release']);
+  const result = await fixture.proof.proveChange(fixture.input());
+  assert.equal(result.status, 'cleanup-pending');
+  if (result.status !== 'cleanup-pending') return;
+  assert.equal(result.outcome.status, 'passed');
+  await fixture.proof.cleanupMobileLeases('proof-1');
+  assert.equal(releaseCalls, 2);
+  assert.equal(result.outcome.receipt.summary, 'Acceptance proof passed.');
 });
 
-test('recovery-only applies to the recovered attempt but permits its bounded report repair', async () => {
-  const malformed = { kind: 'report' as const, report: { version: 1 }, proofPhaseChangedFiles: [] };
-  const fixture = proofFixture({
-    agentResults: [malformed, { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] }],
-  });
-  const result = await fixture.proof.proveChange(fixture.input({ recoverAttemptOnly: true }));
-  assert.equal(result.status, 'passed');
-  assert.deepEqual(
-    fixture.agentCalls.map((call) => (call as { recoverOnly?: boolean }).recoverOnly),
-    [true, false],
-  );
+test('caller-owned passed receipt is strictly validated before reuse', async () => {
+  const fixture = proofFixture();
+  const forged: ProofReceipt = {
+    proofId: 'proof-1', bindingSha256: '0'.repeat(64), summary: 'Passed.',
+    publishableEvidence: [], localEvidenceId: 'proof:proof-1',
+  };
+  const result = await fixture.proof.proveChange(fixture.input({ passedReceipt: forged }));
+  assert.equal(result.status, 'internal-error');
+  assert.equal(fixture.agentCalls.length, 0);
 });
 
 test('needs-rework, external-block, transport, cancellation, and internal agent outcomes remain typed', async () => {
@@ -331,22 +339,23 @@ test('needs-rework, external-block, transport, cancellation, and internal agent 
     const fixture = proofFixture({ agentResult: entry.result });
     const outcome = await fixture.proof.proveChange(fixture.input());
     assert.equal(outcome.status, entry.expected);
-    assert.deepEqual(Object.keys(outcome).includes('receipt'), true);
+    if (entry.expected === 'transport-failed') {
+      assert.equal(outcome.status === 'transport-failed' && outcome.resumable, true);
+    } else {
+      assert.deepEqual(Object.keys(outcome).includes('receipt'), true);
+    }
   }
 });
 
 function proofFixture(options: {
   agentResult?: ProofAgentResult;
-  agentResults?: ProofAgentResult[];
   artifactContent?: Buffer;
   inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
   androidLease?: AndroidLeaseVerifier;
-  agentError?: Error;
 } = {}) {
   const capabilities = createCheckedChangeCapabilities();
   const payload = checkedPayload();
   const checkedChange = capabilities.mint(payload);
-  const writer = new InMemoryProofRecordWriter();
   const agentCalls: unknown[] = [];
   const freshnessCalls: CheckedChangePayloadV1[] = [];
   const criteria: FrozenCriterion[] = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'The behavior works.' }];
@@ -361,12 +370,10 @@ function proofFixture(options: {
   const inspectFreshness = options.inspectFreshness ?? (async (value: CheckedChangePayloadV1) => freshness(value));
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofRecords: writer,
     proofAgent: {
       run: async (input) => {
         agentCalls.push(input);
-        if (options.agentError) throw options.agentError;
-        return options.agentResults?.shift() ?? options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
+        return options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
       },
     },
     inspectFreshness: async (value) => {
@@ -379,13 +386,10 @@ function proofFixture(options: {
       return options.artifactContent ?? artifactBytes;
     },
     proofArtifactDir: 'proofs/proof-1',
-    createAttemptId: (() => { let attempt = 0; return () => `attempt-${++attempt}`; })(),
-    now: () => '2026-07-16T12:00:00.000Z',
     androidLease: options.androidLease,
   });
   return {
     proof,
-    writer,
     agentCalls,
     freshnessCalls,
     criteria,
@@ -395,8 +399,26 @@ function proofFixture(options: {
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange;
       beforeAgentLaunch: () => Promise<void>;
-      recoverAttemptOnly: boolean;
-    }> = {}) => ({ proofId: 'proof-1', issue, frozenCriteria: criteria, checkedChange, ...overrides }),
+      attemptId: string;
+      recoverOnly: boolean;
+      proofStartedAt: string;
+      transportRetryCount: number;
+      reportRepairCount: number;
+      reportRepairFindings: string[];
+      passedReceipt: ProofReceipt;
+    }> = {}) => ({
+      proofId: 'proof-1',
+      attemptId: 'attempt-proof',
+      recoverOnly: false,
+      proofStartedAt: '2026-07-16T12:00:00.000Z',
+      transportRetryCount: 0,
+      reportRepairCount: 0,
+      reportRepairFindings: [],
+      issue,
+      frozenCriteria: criteria,
+      checkedChange,
+      ...overrides,
+    }),
   };
 }
 

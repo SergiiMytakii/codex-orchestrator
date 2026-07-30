@@ -145,6 +145,7 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     createAttemptId: () => 'attempt-android-proof',
   });
   const result = await agent.run({
+    attemptId: 'attempt-android-proof',
     proofId: 'proof-177',
     runId: 'run-177',
     issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
@@ -191,7 +192,7 @@ test('contained Android proof receives only Runner-prepared evidence and no host
   assert.equal(processRuns, 1);
 
   await unlink(recoveredReportPath);
-  await assert.rejects(agent.run({
+  const missingRecovery = await agent.run({
     attemptId: recoveredAttemptId,
     recoverOnly: true,
     proofId: 'proof-177', runId: 'run-177',
@@ -201,7 +202,8 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
     runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
     signal: new AbortController().signal,
-  }), /no recoverable report/iu);
+  });
+  assert.equal(missingRecovery.kind, 'internal-error');
   assert.equal(processRuns, 1);
 });
 

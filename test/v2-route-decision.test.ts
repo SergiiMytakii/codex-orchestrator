@@ -164,14 +164,10 @@ test('route execution validator accepts every exact phase', () => {
     generationHash,
   };
   const phases = [
-    { ...budgets, phase: 'triage-ready', previousAttemptId: null },
-    { ...budgets, phase: 'triage-in-flight', attemptId: 'triage-1', startedAt: '2026-07-17T00:00:00.000Z' },
+    { ...budgets, phase: 'triage-ready' },
     { ...budgets, phase: 'candidate-ready', candidate: waitingArtifact, triage },
-    { ...budgets, phase: 'review-in-flight', attemptId: 'review-1', startedAt: '2026-07-17T00:00:00.000Z', candidate: waitingArtifact, triage },
     { ...budgets, triageRepairs: 1, phase: 'malformed-repair-ready', findings: ['Invalid status.'] },
     { ...budgets, triageRepairs: 1, candidateReviews: 1, phase: 'candidate-repair-ready', candidate: waitingArtifact, triage, review, findings: ['Not a real ambiguity.'] },
-    { ...budgets, triageRepairs: 1, phase: 'repair-in-flight', attemptId: 'repair-1', startedAt: '2026-07-17T00:00:00.000Z', repairInput: { kind: 'malformed', findings: ['Invalid status.'] } },
-    { ...budgets, triageRepairs: 1, candidateReviews: 1, phase: 'repair-in-flight', attemptId: 'repair-1', startedAt: '2026-07-17T00:00:00.000Z', repairInput: { kind: 'rejected-candidate', candidate: waitingArtifact, triage, review, findings: ['Not a real ambiguity.'] } },
     { ...budgets, phase: 'route-complete', triage: { ...triage, artifactSha256: directArtifactSha256 }, review: null },
     { ...budgets, triageRepairs: 1, candidateReviews: 1, phase: 'route-complete', triage: { ...triage, artifactSha256: directArtifactSha256 }, review: null },
   ];
@@ -186,7 +182,6 @@ test('route execution validator rejects impossible counters and embedded evidenc
     ambiguityTransportRetries: 0,
     candidateReviews: 0,
     phase: 'triage-ready',
-    previousAttemptId: null,
   };
   assert.throws(() => validateRouteExecution({ ...ready, triageRepairs: 2 }, generationHash), /triageRepairs/u);
   assert.throws(() => validateRouteExecution({ ...ready, extra: true }, generationHash), /unknown|missing keys/u);
@@ -220,7 +215,6 @@ test('route state guard enforces claimed, triaging, routed, downstream, and term
     ambiguityTransportRetries: 0 as const,
     candidateReviews: 0 as const,
     phase: 'triage-ready' as const,
-    previousAttemptId: null,
   };
   assert.doesNotThrow(() => validateRouteStateInvariant({ lifecycle: 'claimed', routeExecution: undefined, routeReceipt: undefined, generationHash }));
   assert.doesNotThrow(() => validateRouteStateInvariant({ lifecycle: 'triaging', routeExecution: triageReady, routeReceipt: undefined, generationHash }));

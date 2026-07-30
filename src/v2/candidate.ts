@@ -22,18 +22,11 @@ export type CandidateBoundaryV2 =
   | { kind: 'implementation-cycle'; cycle: 1 | 2 | 3 | 4 | 5 }
   | { kind: 'review-feedback'; batchId: string; repairRound: 1 | 2 | 3 };
 
-export interface CandidateExecutionLeaseV2 {
+export interface CandidateMaterializationV2 {
   version: 2;
   bindingId: string;
   candidateCommitSha: string;
   path: string;
-  operation: 'qualification-check' | 'direct-review' | 'final-check' | 'acceptance-proof';
-  attemptId: string;
-  phase: 'prepared' | 'launched';
-  pid: number | null;
-  processGroupId: number | null;
-  preparedAt: string;
-  launchedAt: string | null;
 }
 
 export type CandidateOperationFailureCode =
@@ -58,7 +51,7 @@ export interface CandidateGitV2 {
       boundary: CandidateBoundaryV2;
       artifactDir: string;
     }>;
-    activeExecutions: Array<{ path: string; candidateCommitSha: string }>;
+    activeMaterializations: Array<{ path: string; candidateCommitSha: string }>;
   }): Promise<CandidateResult<void>>;
   captureAndPin(input: {
     worktreePath: string;
@@ -69,27 +62,20 @@ export interface CandidateGitV2 {
   }): Promise<CandidateResult<CandidateBindingV2>>;
   inspectPin(binding: CandidateBindingV2): Promise<CandidateResult<'matching' | 'missing' | 'diverged'>>;
   normalizeSharedIndex(input: { worktreePath: string; expectedHeadSha: string }): Promise<CandidateResult<void>>;
-  prepareExecution(input: {
+  prepareMaterialization(input: {
     binding: CandidateBindingV2;
     runId: string;
     workspaceRoot: string;
-    operation: CandidateExecutionLeaseV2['operation'];
-    attemptId: string;
-  }): Promise<CandidateResult<{ kind: 'prepared'; lease: CandidateExecutionLeaseV2 } | { kind: 'path-diverged'; path: string }>>;
-  markExecutionLaunched(input: {
-    lease: CandidateExecutionLeaseV2;
-    pid: number;
-    processGroupId: number;
-    launchedAt: string;
-  }): CandidateExecutionLeaseV2;
-  inspectExecution(input: {
+    materializationId: string;
+  }): Promise<CandidateResult<{ kind: 'prepared'; materialization: CandidateMaterializationV2 } | { kind: 'path-diverged'; path: string }>>;
+  inspectMaterialization(input: {
     binding: CandidateBindingV2;
-    lease: CandidateExecutionLeaseV2;
+    materialization: CandidateMaterializationV2;
     artifactDir: string;
   }): Promise<CandidateResult<'matching' | 'mutated' | 'missing'>>;
-  removeExecution(input: { lease: CandidateExecutionLeaseV2; requireProcessAbsent: true }): Promise<CandidateResult<void>>;
+  removeMaterialization(input: { materialization: CandidateMaterializationV2 }): Promise<CandidateResult<void>>;
   copyProofArtifacts(input: {
-    lease: CandidateExecutionLeaseV2;
+    materialization: CandidateMaterializationV2;
     issueWorktreePath: string;
     artifactDir: string;
     proofId: string;
@@ -159,27 +145,15 @@ export function validateCandidateBinding(value: unknown, field = 'candidate bind
   return value as unknown as CandidateBindingV2;
 }
 
-export function validateCandidateExecutionLease(value: unknown, field = 'candidate execution lease'): CandidateExecutionLeaseV2 {
+export function validateCandidateMaterialization(value: unknown, field = 'candidate materialization'): CandidateMaterializationV2 {
   assertExactObject(value, [
-    'version', 'bindingId', 'candidateCommitSha', 'path', 'operation', 'attemptId', 'phase', 'pid',
-    'processGroupId', 'preparedAt', 'launchedAt',
+    'version', 'bindingId', 'candidateCommitSha', 'path',
   ], field);
   if (value.version !== 2) throw new Error(`${field}.version is invalid`);
   assertSha256(value.bindingId, `${field}.bindingId`);
   assertGitSha(value.candidateCommitSha, `${field}.candidateCommitSha`);
   if (typeof value.path !== 'string' || value.path.length === 0) throw new Error(`${field}.path is invalid`);
-  if (!['qualification-check', 'direct-review', 'final-check', 'acceptance-proof'].includes(value.operation as string)) {
-    throw new Error(`${field}.operation is invalid`);
-  }
-  assertSha256(value.attemptId, `${field}.attemptId`);
-  if (value.phase !== 'prepared' && value.phase !== 'launched') throw new Error(`${field}.phase is invalid`);
-  const prepared = value.phase === 'prepared';
-  if (prepared ? value.pid !== null || value.processGroupId !== null || value.launchedAt !== null
-    : !isPositiveInteger(value.pid) || !isPositiveInteger(value.processGroupId) || !isTimestamp(value.launchedAt)) {
-    throw new Error(`${field} launch ownership is invalid`);
-  }
-  if (!isTimestamp(value.preparedAt)) throw new Error(`${field}.preparedAt is invalid`);
-  return value as unknown as CandidateExecutionLeaseV2;
+  return value as unknown as CandidateMaterializationV2;
 }
 
 function validateCandidateBoundary(value: CandidateBoundaryV2): void {
@@ -224,12 +198,4 @@ function assertExactObject(value: unknown, keys: string[], field: string): asser
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${field} has unknown or missing keys`);
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
-}
-
-function isTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 }

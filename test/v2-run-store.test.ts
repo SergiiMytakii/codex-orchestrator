@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { FileProofRecordWriter } from '../src/v2/proof-store.js';
+import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
@@ -16,8 +16,10 @@ import {
 } from '../src/v2/waiting-human.js';
 import {
   FileRunRecordWriter,
-  type RunRecordV1,
-  type RunStateBodyV1,
+  InMemoryRunRecordWriter,
+  createPendingEffect,
+  type RunRecord,
+  type RunStateBody,
 } from '../src/v2/run-store.js';
 import { mkdtemp } from './mission-test-temp.js';
 
@@ -36,101 +38,69 @@ test('run state performs absent-state CAS and rejects stale or concurrent writer
   assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
   assert.equal((await left.read()).generation, 1);
   await assert.rejects(left.compareAndSwap(0, body([record()])), /generation/u);
+  await assert.rejects(left.compareAndSwap(1, {
+    ...body([record()]),
+    version: 1,
+  } as never), /keys/u);
+  assert.equal((await left.read()).generation, 1);
 });
 
-test('migrates V1 run state to V2 on the next atomic write', async () => {
+test('run state inspection reports absent without creating storage', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
-  const prior = reviewReadyRecord();
-  await writeFile(path, `${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 1, generation: 7, runs: [prior],
-  })}\n`);
-
-  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
-  const migrated = await writer.read();
-  assert.equal(migrated.version, 2);
-  assert.equal(migrated.generation, 7);
-  assert.deepEqual(migrated.runs[0]!.terminalOutcome, prior.terminalOutcome);
-  assert.equal(migrated.runs[0]!.reviewFeedback?.phase, 'bootstrap-required');
-
-  const saved = await writer.compareAndSwap(7, {
-    schema: migrated.schema, version: 2, runs: migrated.runs,
+  assert.deepEqual(await new FileRunRecordWriter(path, deterministicAtomicOptions()).inspect(), {
+    status: 'absent',
+    rawSha256: null,
   });
-  assert.equal(saved.version, 2);
-  assert.equal(saved.generation, 8);
-  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 2);
+  assert.deepEqual(await new InMemoryRunRecordWriter().inspect(), {
+    status: 'absent',
+    rawSha256: null,
+  });
+  assert.deepEqual(await readdir(root), []);
 });
 
-test('V2 to V3 cutover preserves exact raw backup and rollback closes permanently at the publication watermark', async () => {
+test('run state inspection reports supported exact-schema state with its raw SHA', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
-  const legacyBytes = Buffer.from(`${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [record()],
-  }, null, 2)}\n`);
-  await writeFile(path, legacyBytes);
-  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
-  assert.equal((await writer.read()).version, 2);
-
-  const migrated = await writer.compareAndSwap(7, {
-    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
+  const fileWriter = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  const saved = await fileWriter.compareAndSwap(0, body([record()]));
+  const rawBytes = await readFile(path);
+  assert.deepEqual(await fileWriter.inspect(), {
+    status: 'supported',
+    rawSha256: sha256(rawBytes),
+    state: saved,
   });
-  assert.equal(migrated.version, 3);
-  assert.deepEqual(await readFile(`${path}.pre-candidate-v3`), legacyBytes);
-  const metadata = JSON.parse(await readFile(`${path}.pre-candidate-v3.metadata.json`, 'utf8')) as {
-    sourceGeneration: number; sourceBytesSha256: string; publicationEffectPossible: boolean;
-  };
-  assert.equal(metadata.sourceGeneration, 7);
-  assert.equal(metadata.publicationEffectPossible, false);
+  assert.equal('version' in saved, false);
 
-  let cleaned = false;
-  const restored = await writer.rollbackCandidateMigration({
-    assertNoActiveProcesses: async () => undefined,
-    cleanupCandidateState: async () => { cleaned = true; },
+  const memoryWriter = new InMemoryRunRecordWriter();
+  const memoryState = await memoryWriter.compareAndSwap(0, body([record()]));
+  assert.deepEqual(await memoryWriter.inspect(), {
+    status: 'supported',
+    rawSha256: sha256(`${canonicalJson(memoryState)}\n`),
+    state: memoryState,
   });
-  assert.equal(cleaned, true);
-  assert.equal(restored.version, 2);
-  assert.deepEqual(await readFile(path), legacyBytes);
-
-  const second = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'token-b' }));
-  await second.compareAndSwap(7, {
-    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
-  });
-  await second.markPublicationEffectPossible();
-  await assert.rejects(second.rollbackCandidateMigration({
-    assertNoActiveProcesses: async () => undefined,
-    cleanupCandidateState: async () => undefined,
-  }), /forbidden/u);
 });
 
-test('candidate rollback holds the state lock and cannot overwrite an interleaved CAS', async () => {
-  const root = await temporaryRoot();
-  const path = join(root, 'run-state.json');
-  const legacyBytes = Buffer.from(`${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [record()],
-  })}\n`);
-  await writeFile(path, legacyBytes);
-  const rollbackWriter = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'rollback', processAlive: () => true, lockWaitMs: 1_000 }));
-  const casWriter = new FileRunRecordWriter(path, deterministicAtomicOptions({ token: 'cas', processAlive: () => true, lockWaitMs: 1_000 }));
-  const migrated = await rollbackWriter.compareAndSwap(7, {
-    schema: 'codex-orchestrator.agent-auto-state', version: 3, runs: [record()],
-  });
-  let cleanupEntered!: () => void;
-  let releaseCleanup!: () => void;
-  const entered = new Promise<void>((resolve) => { cleanupEntered = resolve; });
-  const release = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-  const rollback = rollbackWriter.rollbackCandidateMigration({
-    assertNoActiveProcesses: async () => undefined,
-    cleanupCandidateState: async () => { cleanupEntered(); await release; },
-  });
-  await entered;
-  const concurrentCas = casWriter.compareAndSwap(migrated.generation, {
-    schema: migrated.schema, version: 3, runs: [{ ...record(), cycle: 2 }],
-  });
-  const casRejected = assert.rejects(concurrentCas, /generation|state lock disappeared/u);
-  releaseCleanup();
-  assert.equal((await rollback).version, 2);
-  await casRejected;
-  assert.deepEqual(await readFile(path), legacyBytes);
+test('run state inspection reports malformed and unknown schemas as unsupported without effects', async () => {
+  const unsupportedBytes = [
+    Buffer.from('{malformed-json\n'),
+    Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.agent-auto-state', generation: 7, runs: [] })}\n`),
+    Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.run-state', version: 1, generation: 7, runs: [] })}\n`),
+    Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.run-state', generation: 7, runs: [], unknown: true })}\n`),
+  ];
+
+  for (const [index, bytes] of unsupportedBytes.entries()) {
+    const root = await temporaryRoot();
+    const path = join(root, `run-state-${index}.json`);
+    await writeFile(path, bytes);
+    const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+    assert.deepEqual(await writer.inspect(), {
+      status: 'unsupported',
+      rawSha256: sha256(bytes),
+    });
+    assert.deepEqual(await readFile(path), bytes);
+    assert.deepEqual(await readdir(root), [`run-state-${index}.json`]);
+  }
 });
 
 test('run state rejects malformed and lifecycle-inconsistent records', async () => {
@@ -139,15 +109,14 @@ test('run state rejects malformed and lifecycle-inconsistent records', async () 
   const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
   await mkdir(root, { recursive: true });
   await writeFile(path, '{"schema":"wrong"}\n');
-  await assert.rejects(writer.read(), /schema|keys/u);
+  await assert.rejects(writer.read(), /unsupported/u);
 
   await writeFile(path, `${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state',
-    version: 1,
+    schema: 'codex-orchestrator.run-state',
     generation: 1,
     runs: [{ ...record(), lifecycle: 'review-ready' }],
   })}\n`);
-  await assert.rejects(writer.read(), /terminalOutcome|review-ready/u);
+  await assert.rejects(writer.read(), /unsupported/u);
 });
 
 test('run state accepts bounded recovery counters and rejects values beyond the autonomous budgets', async () => {
@@ -174,7 +143,7 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
       repairAttempts: 5,
       checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'failed', outputSha256: 'b'.repeat(64) }],
     },
-  } as unknown as RunRecordV1;
+  } as unknown as RunRecord;
   assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 5);
 
   for (const invalid of [
@@ -183,62 +152,32 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     { ...recoverable, transportRetries: 2 },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification, repairAttempts: 6 } },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification!, checks: [{ ...recoverable.checkQualification!.checks[0], status: 'unchanged-failure' }] } },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, implementationStarted: true, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, repairAttempts: 0, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecord])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
   }
 });
 
-function qualificationInvocation(phase: 'prepared' | 'launched') {
-  return {
-    phase,
-    attemptId: 'qualification-attempt-1',
-    reportPath: '/tmp/qualification-attempt-1/report.json',
-    preparedAt: '2026-07-16T12:00:00.000Z',
-    baseline: {
-      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
-      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
-    },
-    pid: phase === 'launched' ? 123 : null,
-    processGroupId: phase === 'launched' ? 123 : null,
-    launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,
-  } as const;
-}
-
-test('run state round-trips the durable blocked-label publication intent exactly', async () => {
+test('run state round-trips the durable blocked-label pending effect exactly', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
   const active = {
     ...record(),
-    intent: {
+    pendingEffect: createPendingEffect({
       kind: 'blocked-labels' as const,
       issueNumber: 42,
       expected: ['agent:auto', 'agent:blocked'],
       blockKind: 'external' as const,
       resumable: true,
       evidenceCode: 'proof-external-block',
-    },
+    }),
   };
   const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
   await writer.compareAndSwap(0, body([active]));
-  assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0]?.intent, active.intent);
+  assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0]?.pendingEffect, active.pendingEffect);
 
-  const invalid = structuredClone(active) as RunRecordV1;
-  (invalid.intent as { blockKind: string }).blockKind = 'unknown';
+  const invalid = structuredClone(active) as RunRecord;
+  (invalid.pendingEffect as { blockKind: string }).blockKind = 'unknown';
   const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /blockKind/u);
 });
@@ -281,14 +220,14 @@ test('run store persists exact triaging and routed state', async () => {
     candidateReviews: 0 as const,
   };
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const, previousAttemptId: null } };
+  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const } };
   const routed = { ...record(), lifecycle: 'routed' as const, routeExecution: { ...budgets, phase: 'route-complete' as const, triage: triageRef, review: null }, routeReceipt: receipt };
   await writer.compareAndSwap(0, body([triaging]));
   const second = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   assert.equal((await second.compareAndSwap(0, body([routed]))).runs[0]?.lifecycle, 'routed');
 
   const malformed = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready', previousAttemptId: null } } as RunRecordV1])), /route-complete|keys/u);
+  await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready' } } as RunRecord])), /route-complete|keys/u);
 });
 
 test('run store persists direct review composites and rejects them on non-direct routes', async () => {
@@ -298,7 +237,7 @@ test('run store persists direct review composites and rejects them on non-direct
   });
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   const saved = await writer.compareAndSwap(0, body([{ ...routed, lifecycle: 'implementing', directReview }]));
-  assert.equal((saved.runs[0] as RunRecordV1 & { directReview: typeof directReview }).directReview.stage, 'review-full');
+  assert.equal((saved.runs[0] as RunRecord & { directReview: typeof directReview }).directReview.stage, 'review-full');
 
   const invalid = { ...record(), lifecycle: 'implementing' as const, directReview };
   const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -312,10 +251,9 @@ test('run store strictly persists active waiting execution bound to the run rout
   assert.equal(saved.runs[0]?.waitingHuman?.phase, 'awaiting-answer');
 
   for (const mutate of [
-    (run: RunRecordV1) => { (run.waitingHuman as any).effectRetries.questionComment = 2; },
-    (run: RunRecordV1) => { (run.waitingHuman as any).questionReceipt.question.workflowGenerationHash = 'a'.repeat(64); },
-    (run: RunRecordV1) => { (run.waitingHuman as any).questionReceipt.question.routeDecisionSha256 = '0'.repeat(64); },
-    (run: RunRecordV1) => { (run.waitingHuman as any).extra = true; },
+    (run: RunRecord) => { (run.waitingHuman as any).questionReceipt.question.workflowGenerationHash = 'a'.repeat(64); },
+    (run: RunRecord) => { (run.waitingHuman as any).questionReceipt.question.routeDecisionSha256 = '0'.repeat(64); },
+    (run: RunRecord) => { (run.waitingHuman as any).extra = true; },
   ]) {
     const invalid = structuredClone(active);
     mutate(invalid);
@@ -359,7 +297,7 @@ test('resumed waiting history is retained through ordinary non-waiting delivery 
       delete run.routeReceipt;
       run.routeExecution = {
         version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
-        candidateReviews: 0, phase: 'triage-ready', previousAttemptId: null,
+        candidateReviews: 0, phase: 'triage-ready',
       };
     }
     const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -389,7 +327,7 @@ test('terminal waiting history must use history-only and exactly project the ter
     (() => { const run = structuredClone(blocked); run.lifecycle = 'cancelled'; run.terminalOutcome = { status: 'cancelled', evidencePath: 'waiting-evidence.json' }; return run; })(),
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /history-only|terminal|outcome|lifecycle|keys/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecord])), /history-only|terminal|outcome|lifecycle|keys/u);
   }
 });
 
@@ -460,35 +398,6 @@ test('lock release is token-safe', async () => {
   assert.equal(JSON.parse(await readFile(`${path}.lock`, 'utf8')).token, 'replacement');
 });
 
-test('proof writer persists only proof schema and cannot encode run lifecycle fields', async () => {
-  const root = await temporaryRoot();
-  const writer = new FileProofRecordWriter(root, deterministicAtomicOptions());
-  const state = await writer.compareAndSwap('proof-1', 'a'.repeat(64), 0, {
-    schema: 'codex-orchestrator.acceptance-proof-state',
-    version: 1,
-    proofId: 'proof-1',
-    bindingSha256: 'a'.repeat(64),
-    status: 'prepared',
-    attempts: [{ attemptId: 'attempt-1', purpose: 'proof', status: 'prepared' }],
-    startedAt: timestamp(),
-    updatedAt: timestamp(),
-  });
-  assert.equal(state.generation, 1);
-  assert.equal('lifecycle' in state, false);
-
-  await assert.rejects(writer.compareAndSwap('proof-2', 'b'.repeat(64), 0, {
-    schema: 'codex-orchestrator.acceptance-proof-state',
-    version: 1,
-    proofId: 'proof-2',
-    bindingSha256: 'b'.repeat(64),
-    status: 'prepared',
-    attempts: [{ attemptId: 'attempt-2', purpose: 'proof', status: 'prepared' }],
-    startedAt: timestamp(),
-    updatedAt: timestamp(),
-    lifecycle: 'publishing',
-  } as never), /keys/u);
-});
-
 test('state publication rejects symlinked parent directories before writing outside', async () => {
   const root = await temporaryRoot();
   const outside = await temporaryRoot();
@@ -498,11 +407,11 @@ test('state publication rejects symlinked parent directories before writing outs
   assert.deepEqual(await readdir(outside), []);
 });
 
-function body(runs: RunRecordV1[]): RunStateBodyV1 {
-  return { schema: 'codex-orchestrator.agent-auto-state', version: 2, runs };
+function body(runs: RunRecord[]): RunStateBody {
+  return { schema: 'codex-orchestrator.run-state', runs };
 }
 
-function reviewReadyRecord(): RunRecordV1 {
+function reviewReadyRecord(): RunRecord {
   return {
     ...record(),
     lifecycle: 'review-ready',
@@ -516,7 +425,7 @@ function reviewReadyRecord(): RunRecordV1 {
   };
 }
 
-function record(): RunRecordV1 {
+function record(): RunRecord {
   return {
     runId: uuid(1),
     issueNumber: 42,
@@ -553,7 +462,7 @@ function record(): RunRecordV1 {
   };
 }
 
-function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): RunRecordV1 {
+function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): RunRecord {
   const routeReceipt = awaitingUserReceipt();
   const receipt = questionReceipt(routeReceipt);
   const answer = answerReceipt(receipt.question);
@@ -561,7 +470,6 @@ function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): R
     version: 1 as const,
     clarificationAttempts: 0 as const,
     permissionRetries: 0 as const,
-    effectRetries: { questionComment: 0 as const, waitLabels: 0 as const, resumeLabels: 0 as const, revokeLabels: 0 as const },
     history: phase === 'awaiting-answer'
       ? []
       : [{ routeReceipt, question: receipt.question, questionReceipt: receipt, answerReceipt: answer, conflictHashes: [] }],
@@ -620,7 +528,7 @@ function awaitingUserReceipt(): RouteReceiptV1 {
   return receipt;
 }
 
-function directRoutedRecord(): RunRecordV1 {
+function directRoutedRecord(): RunRecord {
   const base = record();
   const artifact = {
     version: 1 as const, status: 'direct' as const,
@@ -647,7 +555,7 @@ function directRoutedRecord(): RunRecordV1 {
   };
 }
 
-function specRoutedRecord(): RunRecordV1 {
+function specRoutedRecord(): RunRecord {
   const base = record();
   const artifact = {
     version: 1 as const, status: 'spec-required' as const,

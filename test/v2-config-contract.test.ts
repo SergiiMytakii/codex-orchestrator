@@ -62,6 +62,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
     'cancelled',
     'internal-error',
     'requeued',
+    'state-schema-unsupported',
   ]);
   assert.deepEqual(Object.values(parsed.github.labels).map((label) => label.name), [
     'agent:auto',

@@ -67,13 +67,10 @@ export type CandidateRepairInputV1 = {
 };
 
 export type RouteExecutionV1 = RouteBudgetsV1 & (
-  | { phase: 'triage-ready'; previousAttemptId: string | null }
-  | { phase: 'triage-in-flight'; attemptId: string; startedAt: string }
+  | { phase: 'triage-ready' }
   | { phase: 'candidate-ready'; candidate: TriageRouteV1; triage: RouteArtifactRefV1 }
-  | { phase: 'review-in-flight'; attemptId: string; startedAt: string; candidate: TriageRouteV1; triage: RouteArtifactRefV1 }
   | { phase: 'malformed-repair-ready'; findings: string[] }
   | { phase: 'candidate-repair-ready'; candidate: TriageRouteV1; triage: RouteArtifactRefV1; review: AmbiguityReviewRefV1; findings: string[] }
-  | { phase: 'repair-in-flight'; attemptId: string; startedAt: string; repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 }
   | { phase: 'route-complete'; triage: RouteArtifactRefV1; review: AmbiguityReviewRefV1 | null }
 );
 
@@ -212,21 +209,11 @@ export function validateRouteExecution(value: unknown, expectedGenerationHash?: 
     'version', 'triageRepairs', 'triageTransportRetries', 'ambiguityTransportRetries', 'candidateReviews',
   ];
   if (value.phase === 'triage-ready') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'previousAttemptId'], 'route execution');
-    if (value.previousAttemptId !== null) assertString(value.previousAttemptId, 'route execution.previousAttemptId');
-  } else if (value.phase === 'triage-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'attemptId', 'startedAt'], 'route execution');
-    assertAttemptAndTimestamp(value);
+    assertExactObject(value, [...budgetKeys, 'phase'], 'route execution');
   } else if (value.phase === 'candidate-ready') {
     assertExactObject(value, [...budgetKeys, 'phase', 'candidate', 'triage'], 'route execution');
     validateWaitingCandidate(value.candidate, value.triage, expectedGenerationHash);
     if (value.candidateReviews !== 0) throw new Error('candidate-ready candidateReviews must be 0');
-  } else if (value.phase === 'review-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'attemptId', 'startedAt', 'candidate', 'triage'], 'route execution');
-    assertAttemptAndTimestamp(value);
-    const triage = validateWaitingCandidate(value.candidate, value.triage, expectedGenerationHash);
-    if (value.attemptId === triage.attemptId) throw new Error('review attempt ID must be distinct from triage attempt ID');
-    if (value.candidateReviews !== 0) throw new Error('review-in-flight candidateReviews must be 0');
   } else if (value.phase === 'malformed-repair-ready') {
     assertExactObject(value, [...budgetKeys, 'phase', 'findings'], 'route execution');
     validateFindings(value.findings, 'route execution.findings');
@@ -235,16 +222,6 @@ export function validateRouteExecution(value: unknown, expectedGenerationHash?: 
     assertExactObject(value, [...budgetKeys, 'phase', 'candidate', 'triage', 'review', 'findings'], 'route execution');
     validateRejectedCandidate(value.candidate, value.triage, value.review, value.findings, expectedGenerationHash);
     assertRejectedRepairBudgets(value);
-  } else if (value.phase === 'repair-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'attemptId', 'startedAt', 'repairInput'], 'route execution');
-    assertAttemptAndTimestamp(value);
-    validateRepairInput(value.repairInput, expectedGenerationHash);
-    assertRepairConsumed(value);
-    if ((value.repairInput as Record<string, unknown>).kind === 'rejected-candidate') {
-      if (value.candidateReviews !== 1) throw new Error('rejected-candidate repair requires candidateReviews 1');
-    } else if (value.candidateReviews !== 0) {
-      throw new Error('malformed repair requires candidateReviews 0');
-    }
   } else if (value.phase === 'route-complete') {
     assertExactObject(value, [...budgetKeys, 'phase', 'triage', 'review'], 'route execution');
     const triage = validateRouteArtifactRef(value.triage, expectedGenerationHash);
@@ -280,13 +257,7 @@ export function validateRouteStateInvariant(input: {
     if (execution.phase === 'route-complete') throw new Error('triaging route execution cannot be route-complete');
     return;
   }
-  if (input.lifecycle === 'safe-halt' && hasExecution && !hasReceipt) {
-    const execution = validateRouteExecution(input.routeExecution, input.generationHash);
-    if (!['triage-in-flight', 'repair-in-flight', 'review-in-flight'].includes(execution.phase)) {
-      throw new Error('pre-route safe-halt requires an in-flight route execution');
-    }
-    return;
-  }
+  if (input.lifecycle === 'safe-halt' && hasExecution && !hasReceipt) return void validateRouteExecution(input.routeExecution, input.generationHash);
   if (TERMINAL_LIFECYCLES.includes(input.lifecycle) && !hasExecution && !hasReceipt) return;
   if (!hasExecution || !hasReceipt) throw new Error(`${input.lifecycle} route execution and receipt are required as an exact pair`);
   const execution = validateRouteExecution(input.routeExecution, input.generationHash);
@@ -359,7 +330,7 @@ export function validateTrustedAnswerResumeTransition(
   if (waitingHuman.phase !== 'resume-ready') throw new Error('trusted answer resume requires resume-ready evidence');
   if (next.lifecycle !== 'triaging' || next.routeReceipt !== undefined) throw new Error('trusted answer resume must restart triage without a receipt');
   const execution = validateRouteExecution(next.routeExecution, next.generationHash);
-  if (execution.phase !== 'triage-ready' || execution.previousAttemptId !== null
+  if (execution.phase !== 'triage-ready'
     || execution.triageRepairs !== 0 || execution.triageTransportRetries !== 0
     || execution.ambiguityTransportRetries !== 0 || execution.candidateReviews !== 0) {
     throw new Error('trusted answer resume requires initial route execution');
@@ -410,21 +381,6 @@ function validateRejectedCandidate(
   validateFindings(findings, 'route execution findings');
 }
 
-function validateRepairInput(value: unknown, expectedGenerationHash?: string): void {
-  assertRecord(value, 'route execution.repairInput');
-  if (value.kind === 'malformed') {
-    assertExactObject(value, ['kind', 'findings'], 'route execution.repairInput');
-    validateFindings(value.findings, 'route execution.repairInput.findings');
-    return;
-  }
-  if (value.kind === 'rejected-candidate') {
-    assertExactObject(value, ['kind', 'candidate', 'triage', 'review', 'findings'], 'route execution.repairInput');
-    validateRejectedCandidate(value.candidate, value.triage, value.review, value.findings, expectedGenerationHash);
-    return;
-  }
-  throw new Error('route execution.repairInput.kind is invalid');
-}
-
 function validateReviewBinding(triage: RouteArtifactRefV1, review: AmbiguityReviewRefV1): void {
   if (review.generationHash !== triage.generationHash) throw new Error('ambiguity review generation mismatch');
   if (review.candidateSha256 !== triage.artifactSha256) throw new Error('ambiguity review candidate hash mismatch');
@@ -443,11 +399,6 @@ function assertRejectedRepairBudgets(value: Record<string, unknown>): void {
 function validateFindings(value: unknown, field: string): void {
   assertStringArray(value, field, 1);
   assertUnique(value, field);
-}
-
-function assertAttemptAndTimestamp(value: Record<string, unknown>): void {
-  assertString(value.attemptId, 'route execution.attemptId');
-  assertTimestamp(value.startedAt, 'route execution.startedAt');
 }
 
 function hashDomain(domain: string, value: unknown): string {

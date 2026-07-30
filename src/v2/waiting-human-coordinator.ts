@@ -18,6 +18,16 @@ import {
 export interface WaitingHumanState {
   read(): Promise<WaitingHumanExecutionV1 | undefined>;
   compareAndSwap(expected: WaitingHumanExecutionV1 | undefined, next: WaitingHumanExecutionV1): Promise<boolean>;
+  publishQuestion(input: { issueNumber: number; marker: string; body: string }): Promise<
+    | { status: 'settled' }
+    | { status: 'retryable'; code: string }
+    | { status: 'conflict'; evidence: string[] }
+  >;
+  projectLabels(input: {
+    kind: 'waiting-wait-labels' | 'waiting-resume-labels' | 'waiting-revoke-labels';
+    issueNumber: number;
+    expected: string[];
+  }): Promise<{ status: 'settled' } | { status: 'retryable'; code: string } | { status: 'cancelled' }>;
 }
 
 export type WaitingHumanResult =
@@ -49,8 +59,6 @@ export class WaitingHumanCoordinator {
 
   public async run(input: RoutedRunContext, state: WaitingHumanState, signal: AbortSignal): Promise<WaitingHumanResult> {
     let current = await state.read();
-    let enteredCommentIntent = false;
-    let enteredLabelIntent = false;
     for (let step = 0; step < 24; step += 1) {
       if (signal.aborted) return { status: 'cancelled' };
       if (!current) {
@@ -110,7 +118,6 @@ export class WaitingHumanCoordinator {
           delete (next as Partial<{ questionReceipt: unknown }>).questionReceipt;
           if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
           current = next;
-          enteredLabelIntent = true;
           continue;
         }
         const next: WaitingHumanExecutionV1 = { ...current, phase: 'answer-frozen', answerReceipt: frozen.answer };
@@ -156,184 +163,64 @@ export class WaitingHumanCoordinator {
           return { status: 'retryable', owner: 'permission', code: 'answer-revalidation-failed' };
         }
         if (authority === 'revoked') {
-          const next: WaitingHumanExecutionV1 = { ...current, phase: 'revoke-labels-intent', reason: 'permission-revoked' };
-          if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
-          current = next;
-          enteredLabelIntent = true;
-          continue;
+          const revoked = await state.projectLabels({
+            kind: 'waiting-revoke-labels', issueNumber: input.issue.number,
+            expected: [this.dependencies.labels.auto, this.dependencies.labels.blocked].sort(),
+          });
+          if (revoked.status === 'retryable') return { status: 'retryable', owner: 'github-effect', code: revoked.code };
+          if (revoked.status === 'cancelled') return { status: 'cancelled' };
+          return safety('answer-permission-revoked', [current.answerReceipt.commentId]);
         }
-        const next: WaitingHumanExecutionV1 = { ...current, phase: 'resume-labels-intent' };
+        const resumed = await state.projectLabels({
+          kind: 'waiting-resume-labels', issueNumber: input.issue.number,
+          expected: [this.dependencies.labels.auto, this.dependencies.labels.running].sort(),
+        });
+        if (resumed.status === 'retryable') return { status: 'retryable', owner: 'github-effect', code: resumed.code };
+        if (resumed.status === 'cancelled') return safety('resume-label-authority-revoked');
+        const finalAuthority = await this.revalidateAnswer(input.issue.number, current.answerReceipt);
+        if (finalAuthority === 'retryable') return { status: 'retryable', owner: 'permission', code: 'answer-final-revalidation-failed' };
+        if (finalAuthority === 'revoked') {
+          const revoked = await state.projectLabels({
+            kind: 'waiting-revoke-labels', issueNumber: input.issue.number,
+            expected: [this.dependencies.labels.auto, this.dependencies.labels.blocked].sort(),
+          });
+          if (revoked.status === 'retryable') return { status: 'retryable', owner: 'github-effect', code: revoked.code };
+          return revoked.status === 'cancelled' ? { status: 'cancelled' } : safety('answer-permission-revoked', [current.answerReceipt.commentId]);
+        }
+        const next: WaitingHumanExecutionV1 = { ...current, phase: 'resume-ready' };
         if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
         current = next;
-        enteredLabelIntent = true;
         continue;
       }
       if (current.phase === 'question-ready') {
-        const next: WaitingHumanExecutionV1 = { ...current, phase: 'question-comment-intent' };
+        const body = renderWaitingQuestionBody(current.question);
+        const effect = await state.publishQuestion({ issueNumber: input.issue.number, marker: current.question.marker, body });
+        if (effect.status === 'retryable') return { status: 'retryable', owner: 'github-effect', code: effect.code };
+        if (effect.status === 'conflict') return safety('question-comment-conflict', effect.evidence);
+        let observation: Awaited<ReturnType<WaitingHumanCoordinator['observeQuestion']>>;
+        try { observation = await this.observeQuestion(input.issue.number, current.question.marker, body); }
+        catch { return { status: 'retryable', owner: 'github-effect', code: 'question-comment-observation-failed' }; }
+        if (observation.status !== 'found') return observation.status === 'conflict'
+          ? safety('question-comment-conflict', observation.evidence)
+          : { status: 'retryable', owner: 'github-effect', code: 'question-comment-observation-failed' };
+        const next: WaitingHumanExecutionV1 = {
+          ...current, phase: 'question-published', questionReceipt: receiptFor(current.question, observation.comment, this.now()),
+        };
+        delete (next as Partial<{ question: unknown }>).question;
         if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
         current = next;
-        enteredCommentIntent = true;
         continue;
-      }
-      if (current.phase === 'question-comment-intent') {
-        let observation: Awaited<ReturnType<WaitingHumanCoordinator['observeQuestion']>>;
-        const questionBody = renderWaitingQuestionBody(current.question);
-        try { observation = await this.observeQuestion(input.issue.number, current.question.marker, questionBody); }
-        catch { return { status: 'retryable', owner: 'github-effect', code: 'question-comment-observation-failed' }; }
-        if (observation.status === 'conflict') return safety('question-comment-conflict', observation.evidence);
-        if (observation.status === 'found') {
-          const next: WaitingHumanExecutionV1 = {
-            ...current,
-            phase: 'question-published',
-            questionReceipt: receiptFor(current.question, observation.comment, this.now()),
-          };
-          delete (next as Partial<{ question: unknown }>).question;
-          if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
-          current = next;
-          continue;
-        }
-        if (!enteredCommentIntent) {
-          if (current.effectRetries.questionComment === 1) {
-            return { status: 'blocked', kind: 'external', resumable: true, code: 'question-comment-exhausted', evidence: [] };
-          }
-          const retry: WaitingHumanExecutionV1 = {
-            ...current, effectRetries: { ...current.effectRetries, questionComment: 1 },
-          };
-          if (!await state.compareAndSwap(current, retry)) { current = await state.read(); continue; }
-          current = retry;
-        }
-        enteredCommentIntent = false;
-        try {
-          await this.dependencies.issues.postComment(input.issue.number, questionBody);
-          continue;
-        } catch {
-          return { status: 'retryable', owner: 'github-effect', code: 'question-comment-unknown' };
-        }
       }
       if (current.phase === 'question-published') {
-        const next: WaitingHumanExecutionV1 = { ...current, phase: 'wait-labels-intent' };
+        const effect = await state.projectLabels({
+          kind: 'waiting-wait-labels', issueNumber: input.issue.number,
+          expected: [this.dependencies.labels.auto, this.dependencies.labels.waitingHuman].sort(),
+        });
+        if (effect.status === 'retryable') return { status: 'retryable', owner: 'github-effect', code: effect.code };
+        if (effect.status === 'cancelled') return { status: 'cancelled' };
+        const next: WaitingHumanExecutionV1 = { ...current, phase: 'awaiting-answer' };
         if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
         current = next;
-        enteredLabelIntent = true;
-        continue;
-      }
-      if (current.phase === 'wait-labels-intent') {
-        let issue;
-        try { issue = await this.dependencies.issues.getIssue(input.issue.number); }
-        catch { return { status: 'retryable', owner: 'github-effect', code: 'wait-label-observation-failed' }; }
-        if (!issue || issue.state !== 'OPEN') return { status: 'cancelled' };
-        const labels = new Set(issue.labels.map((label) => label.name));
-        if (!labels.has(this.dependencies.labels.auto)) return { status: 'cancelled' };
-        if (labels.has(this.dependencies.labels.review) || labels.has(this.dependencies.labels.blocked)
-          || labels.has(this.dependencies.labels.manual ?? 'agent:manual')) return { status: 'cancelled' };
-        if (isWaitingPostcondition(labels, this.dependencies.labels)) {
-          const next: WaitingHumanExecutionV1 = { ...current, phase: 'awaiting-answer' };
-          if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
-          current = next;
-          continue;
-        }
-        if (!enteredLabelIntent) {
-          if (current.effectRetries.waitLabels === 1) {
-            return { status: 'blocked', kind: 'external', resumable: true, code: 'wait-labels-exhausted', evidence: [] };
-          }
-          const retry: WaitingHumanExecutionV1 = { ...current, effectRetries: { ...current.effectRetries, waitLabels: 1 } };
-          if (!await state.compareAndSwap(current, retry)) { current = await state.read(); continue; }
-          current = retry;
-        }
-        enteredLabelIntent = false;
-        try {
-          await this.dependencies.issues.updateIssue(input.issue.number, {
-            addLabels: [this.dependencies.labels.auto, this.dependencies.labels.waitingHuman],
-            removeLabels: [this.dependencies.labels.running, this.dependencies.labels.blocked, this.dependencies.labels.review],
-          });
-        } catch {
-          return { status: 'retryable', owner: 'github-effect', code: 'wait-labels-unknown' };
-        }
-        continue;
-      }
-      if (current.phase === 'resume-labels-intent') {
-        let issue;
-        try { issue = await this.dependencies.issues.getIssue(input.issue.number); }
-        catch { return { status: 'retryable', owner: 'github-effect', code: 'resume-label-observation-failed' }; }
-        if (!issue || issue.state !== 'OPEN') return safety('resume-issue-revoked');
-        const labels = new Set(issue.labels.map((label) => label.name));
-        if (!labels.has(this.dependencies.labels.auto) || labels.has(this.dependencies.labels.review) || labels.has(this.dependencies.labels.blocked)
-          || labels.has(this.dependencies.labels.manual ?? 'agent:manual')) {
-          return safety('resume-label-authority-revoked');
-        }
-        if (isResumePostcondition(labels, this.dependencies.labels)) {
-          const authority = await this.revalidateAnswer(input.issue.number, current.answerReceipt);
-          if (authority === 'retryable') {
-            if (current.permissionRetries === 1) {
-              return { status: 'blocked', kind: 'external', resumable: true, code: 'permission-retries-exhausted', evidence: [] };
-            }
-            const retry: WaitingHumanExecutionV1 = { ...current, permissionRetries: 1 };
-            if (!await state.compareAndSwap(current, retry)) { current = await state.read(); continue; }
-            return { status: 'retryable', owner: 'permission', code: 'answer-final-revalidation-failed' };
-          }
-          if (authority === 'revoked') {
-            const next: WaitingHumanExecutionV1 = { ...current, phase: 'revoke-labels-intent', reason: 'permission-revoked' };
-            if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
-            current = next;
-            enteredLabelIntent = true;
-            continue;
-          }
-          const next: WaitingHumanExecutionV1 = { ...current, phase: 'resume-ready' };
-          if (!await state.compareAndSwap(current, next)) { current = await state.read(); continue; }
-          current = next;
-          continue;
-        }
-        if (!enteredLabelIntent) {
-          if (current.effectRetries.resumeLabels === 1) {
-            return { status: 'blocked', kind: 'external', resumable: true, code: 'resume-labels-exhausted', evidence: [] };
-          }
-          const retry: WaitingHumanExecutionV1 = { ...current, effectRetries: { ...current.effectRetries, resumeLabels: 1 } };
-          if (!await state.compareAndSwap(current, retry)) { current = await state.read(); continue; }
-          current = retry;
-        }
-        enteredLabelIntent = false;
-        try {
-          await this.dependencies.issues.updateIssue(input.issue.number, {
-            addLabels: [this.dependencies.labels.auto, this.dependencies.labels.running],
-            removeLabels: [this.dependencies.labels.waitingHuman, this.dependencies.labels.blocked, this.dependencies.labels.review],
-          });
-        } catch {
-          return { status: 'retryable', owner: 'github-effect', code: 'resume-labels-unknown' };
-        }
-        continue;
-      }
-      if (current.phase === 'revoke-labels-intent') {
-        let issue;
-        try { issue = await this.dependencies.issues.getIssue(input.issue.number); }
-        catch { return { status: 'retryable', owner: 'github-effect', code: 'revoke-label-observation-failed' }; }
-        if (!issue || issue.state !== 'OPEN') return { status: 'cancelled' };
-        const labels = new Set(issue.labels.map((label) => label.name));
-        if (labels.has(this.dependencies.labels.auto) && labels.has(this.dependencies.labels.blocked)
-          && !labels.has(this.dependencies.labels.running) && !labels.has(this.dependencies.labels.waitingHuman)
-          && !labels.has(this.dependencies.labels.review)) {
-          return safety('answer-permission-revoked', [current.answerReceipt.commentId]);
-        }
-        if (!labels.has(this.dependencies.labels.auto) || labels.has(this.dependencies.labels.blocked)
-          || labels.has(this.dependencies.labels.review) || labels.has(this.dependencies.labels.manual ?? 'agent:manual')) {
-          return { status: 'cancelled' };
-        }
-        if (!enteredLabelIntent) {
-          if (current.effectRetries.revokeLabels === 1) {
-            return { status: 'blocked', kind: 'external', resumable: true, code: 'revoke-labels-exhausted', evidence: [] };
-          }
-          const retry: WaitingHumanExecutionV1 = { ...current, effectRetries: { ...current.effectRetries, revokeLabels: 1 } };
-          if (!await state.compareAndSwap(current, retry)) { current = await state.read(); continue; }
-          current = retry;
-        }
-        enteredLabelIntent = false;
-        try {
-          await this.dependencies.issues.updateIssue(input.issue.number, {
-            addLabels: [this.dependencies.labels.auto, this.dependencies.labels.blocked],
-            removeLabels: [this.dependencies.labels.running, this.dependencies.labels.waitingHuman],
-          });
-        } catch {
-          return { status: 'retryable', owner: 'github-effect', code: 'revoke-labels-unknown' };
-        }
         continue;
       }
       return safety('waiting-phase-not-implemented');
@@ -425,7 +312,6 @@ function emptyExecution(): Omit<WaitingHumanExecutionV1, 'phase'> {
     version: 1,
     clarificationAttempts: 0,
     permissionRetries: 0,
-    effectRetries: { questionComment: 0, waitLabels: 0, resumeLabels: 0, revokeLabels: 0 },
     history: [],
   } as Omit<WaitingHumanExecutionV1, 'phase'>;
 }
@@ -435,16 +321,6 @@ function receiptFor(question: WaitingQuestionReceiptV1['question'], comment: Git
     question: structuredClone(question), commentId: comment.id, commentUrl: comment.url,
     authorId: comment.author.id, author: comment.author.login, createdAt: comment.createdAt, observedAt,
   };
-}
-
-function isWaitingPostcondition(labels: Set<string>, policy: WaitingHumanCoordinatorDependencies['labels']): boolean {
-  return labels.has(policy.auto) && labels.has(policy.waitingHuman)
-    && !labels.has(policy.running) && !labels.has(policy.blocked) && !labels.has(policy.review);
-}
-
-function isResumePostcondition(labels: Set<string>, policy: WaitingHumanCoordinatorDependencies['labels']): boolean {
-  return labels.has(policy.auto) && labels.has(policy.running)
-    && !labels.has(policy.waitingHuman) && !labels.has(policy.blocked) && !labels.has(policy.review);
 }
 
 function awaitingResult(receipt: WaitingQuestionReceiptV1): WaitingHumanResult {

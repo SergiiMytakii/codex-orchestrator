@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import { canonicalJson, containsCredentialEvidence } from './containment.js';
 import type { ContainedReportOperation, ContainedReportOperationResult, ReportOnlyWorktreeSnapshot } from './contained-report-operation.js';
@@ -19,6 +19,7 @@ export interface ImplementationReviewInvocation {
 }
 
 export interface ImplementationReviewerInput {
+  attemptId: string;
   runId: string;
   worktreePath: string;
   operation: ReviewOperation;
@@ -54,13 +55,13 @@ export type ImplementationReviewerResult =
   | { kind: 'internal-error'; code: string };
 
 export class ContainedImplementationReviewer {
-  constructor(private readonly dependencies: { operation: ContainedReportOperation; createAttemptId?: () => string }) {}
+  constructor(private readonly dependencies: { operation: ContainedReportOperation }) {}
 
   async run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult> {
     let attemptId: string;
     let promptFacts: string[];
     try {
-      attemptId = (this.dependencies.createAttemptId ?? randomUUID)();
+      attemptId = input.attemptId;
       assertText(attemptId, 'review attempt ID');
       assertText(input.reviewerSessionId, 'reviewer session ID');
       assertText(input.implementationAttemptId, 'implementation attempt ID');

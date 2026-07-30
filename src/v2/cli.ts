@@ -87,23 +87,47 @@ async function executeProductionDaemon(
   let exitCode = 0;
   const lastResults = new Map<number, string>();
   do {
-    const discovered = await issues.listOpenIssuesWithAnyLabel([
-      config.github.labels.auto.name,
-      config.github.labels.review.name,
-    ]);
-    const candidates = intent.issueNumber === undefined
-      ? discovered
-      : discovered.filter((issue) => issue.number === intent.issueNumber);
-    exitCode = Math.max(exitCode, await executeDaemonCandidates({
-      targetRoot: intent.targetRoot,
-      candidates,
-      executeRun: executeProductionRun,
-      write,
-      lastResults,
-    }));
+    try {
+      exitCode = Math.max(exitCode, await executeDaemonTick({
+        targetRoot: intent.targetRoot,
+        issueNumber: intent.issueNumber,
+        discoverCandidates: () => issues.listOpenIssuesWithAnyLabel([
+          config.github.labels.auto.name,
+          config.github.labels.review.name,
+        ]),
+        executeRun: executeProductionRun,
+        write,
+        lastResults,
+      }));
+    } catch (error) {
+      if (intent.once) throw error;
+      exitCode = Math.max(exitCode, 70);
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    }
     if (intent.once) return exitCode;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, config.runner.pollIntervalSeconds * 1_000));
   } while (true);
+}
+
+export async function executeDaemonTick(input: {
+  targetRoot: string;
+  issueNumber?: number;
+  discoverCandidates(): Promise<GitHubIssue[]>;
+  executeRun(input: RunIntent): Promise<RunIssueResult>;
+  write(text: string): void;
+  lastResults: Map<number, string>;
+}): Promise<number> {
+  const discovered = await input.discoverCandidates();
+  const candidates = input.issueNumber === undefined
+    ? discovered
+    : discovered.filter((issue) => issue.number === input.issueNumber);
+  return executeDaemonCandidates({
+    targetRoot: input.targetRoot,
+    candidates,
+    executeRun: input.executeRun,
+    write: input.write,
+    lastResults: input.lastResults,
+  });
 }
 
 export async function executeDaemonCandidates(input: {

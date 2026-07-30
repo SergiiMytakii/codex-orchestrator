@@ -50,6 +50,16 @@ test('CLI renders only the typed runIssue outcome and matching exit', async () =
   });
 });
 
+test('CLI renders effect-free unsupported state as the exact public result with blocked exit', async () => {
+  const output: string[] = [];
+  const exit = await runCli(['run', '--target', '/tmp/target', '--issue', '17'], {
+    executeRun: async () => ({ status: 'state-schema-unsupported' }),
+    write: (text) => { output.push(text); },
+  });
+  assert.equal(exit, 20);
+  assert.equal(output.join(''), '{"result":{"status":"state-schema-unsupported"},"schema":"codex-orchestrator.agent-auto-run-result","version":1}\n');
+});
+
 test('CLI daemon accepts one absolute target and delegates the serial loop', async () => {
   assert.deepEqual(parseDaemonArgs(['daemon', '--target', '/tmp/target']), {
     targetRoot: '/tmp/target', once: false,

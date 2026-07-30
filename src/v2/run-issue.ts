@@ -9,7 +9,16 @@ import {
   type CheckedChangePayloadV2,
 } from './checked-change.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
-import { canonicalJson, sha256 } from './containment.js';
+import { canonicalJson, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
+import {
+  adoptActiveAttempt,
+  confirmActiveAttemptCleanup,
+  createActiveAttempt,
+  launchActiveAttempt,
+  observeActiveAttempt,
+  type AttemptProcessIdentity,
+  type ProcessStartIdentity,
+} from './active-attempt.js';
 import { validateImplementationReport } from './implementation-report.js';
 import {
   acceptApprovedDirectReview,
@@ -20,15 +29,13 @@ import {
   directReviewCandidateTargetFingerprint,
   directReviewClosureRequestSha256,
   directReviewTargetFingerprint,
-  launchDirectReviewInvocation,
   MAX_DIRECT_REVIEW_REPORT_REPAIRS,
   prepareDirectReviewClosure,
-  prepareDirectReviewInvocation,
   projectTerminalDirectReview,
   recoverTerminalDirectReviewReport,
 } from './direct-delivery.js';
 import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
-import { CandidateProofInspectionError, ProofLaunchAuthorizationError, ProofQuiescenceError, ProofReportRecoveryError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
+import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
 import { CheckProcessQuiescenceError, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
@@ -54,12 +61,15 @@ import {
   type RouteExecutionV1,
 } from './route-decision.js';
 import type {
-  PublicationIntent,
-  RunRecordV1,
+  PendingEffect,
+  PendingEffectInput,
+  RunRecord,
   RunRecordWriter,
-  RunStateFileV1,
+  RunStateInspection,
+  RunStateFile,
   RunTerminalOutcome,
 } from './run-store.js';
+import { createPendingEffect } from './run-store.js';
 import type { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
 import {
   activateReviewFeedback,
@@ -71,12 +81,37 @@ import {
   projectReviewFeedbackBatch,
   publishReviewFeedback,
   reserveNextReviewFeedbackRound,
-  type ReviewFeedbackImplementationInvocationV1,
 } from './review-feedback.js';
 import type { CandidateGitV2 } from './candidate.js';
-import type { CandidateBindingV2, CandidateBoundaryV2, CandidateExecutionLeaseV2 } from './candidate.js';
+import type { CandidateBindingV2, CandidateBoundaryV2, CandidateMaterializationV2 } from './candidate.js';
+import {
+  archiveWaiting,
+  blockedLabelPolicy,
+  blockedLabelProjection,
+  claimComment,
+  claimRunId,
+  freezeCriteria,
+  historicalClaimCounts,
+  isClaimMarkerComment,
+  isExactClaimMarkerLine,
+  isAdoptableAttempt,
+  observedHistoricalClaimKeys,
+  outcomeEvidenceBytes,
+  publicOutcome,
+  publicIssueSnapshot,
+  requireRouteExecution,
+  refreshClaimedIssueSnapshot,
+  snapshotIssue,
+  sameInspectionIdentity,
+  sameRouteExecution,
+  sameStrings,
+  semanticChangesMatch,
+  terminalWaiting,
+  waitingAnswer,
+} from './run-state-projections.js';
 
 export type RunIssueResult =
+  | { status: 'state-schema-unsupported' }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
   | { status: 'route-ready'; route: 'spec-required' | 'awaiting-user'; evidencePath: string }
   | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1; evidencePath: string }
@@ -86,7 +121,8 @@ export type RunIssueResult =
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; evidencePath: string }
-  | { status: 'requeued'; reason: 'owner-contention'; evidencePath: string };
+  | { status: 'requeued'; reason: 'owner-contention'; evidencePath: string }
+  | { status: 'requeued'; reason: 'state-changed' };
 
 export interface RunIssueSnapshot {
   number: number;
@@ -124,14 +160,12 @@ export interface RunIssueGit {
   push(input: { worktreePath: string; branchName: string }): Promise<void>;
 }
 
-type InterruptedProcess = Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
-
 export type ImplementationAgentResult =
   | { kind: 'completed'; report: unknown; attemptId?: string }
   | { kind: 'transport-failed'; resumable: boolean }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
-  | { kind: 'safe-halt'; process: InterruptedProcess; waitForAbsence(): Promise<void> };
+  | { kind: 'safe-halt'; waitForAbsence(): Promise<void> };
 
 export interface RunIssueDependencies {
   readConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }>;
@@ -161,6 +195,7 @@ export interface RunIssueDependencies {
   implementationAgent: {
     run(input: {
       operation: 'qualification-repair' | 'implementation';
+      attemptId: string;
       runId: string;
       worktreePath: string;
       issue: IssueSnapshot;
@@ -171,20 +206,26 @@ export interface RunIssueDependencies {
       workflowGeneration: WorkflowGenerationReceipt;
       reviewFeedbackRound?: number;
       reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
-      onPrepared?: (input: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => Promise<void>;
+      onPrepared?: (input: { attemptId: string; reportPath: string; preparedAt: string; baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'> }) => Promise<void>;
       onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
       signal: AbortSignal;
     }): Promise<ImplementationAgentResult>;
-    recover?(input: {
-      runId: string;
-      canonicalRepository: string;
-      invocation: ReviewFeedbackImplementationInvocationV1;
-    }): Promise<Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined>;
   };
   implementationReviewer: {
     run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult>;
   };
   waitForReviewProcessAbsence(processGroupId: number): Promise<void>;
+  processIdentity: {
+    host: string;
+    bootId: string;
+    capture(pid: number, processGroupId: number): Promise<ProcessStartIdentity | undefined>;
+    observe(process: AttemptProcessIdentity): Promise<{
+      leader: 'same' | 'reused' | 'absent' | 'unknown';
+      group: 'live' | 'absent' | 'unknown';
+    }>;
+  };
+  inspectAttemptResult(path: string): Promise<{ bytes: Buffer; sha256: string } | undefined>;
+  writeAttemptResult(input: { path: string; bytes: Buffer; sha256: string }): Promise<void>;
   routeCoordinator: {
     run(input: RouteCoordinatorInput & { state: RouteCoordinatorState }): Promise<RouteCoordinatorResult>;
   };
@@ -196,16 +237,23 @@ export interface RunIssueDependencies {
       onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>;
     }): Promise<{
       status: 'passed' | 'failed'; output: Buffer; outputSha256: string;
+      observation: { leader: 'absent'; group: 'live' | 'absent' | 'unknown' };
     }>;
   };
   proof: {
     proveChange(input: {
       proofId: string;
+      attemptId: string;
+      recoverOnly: boolean;
+      proofStartedAt: string;
+      transportRetryCount: number;
+      reportRepairCount: number;
+      reportRepairFindings: string[];
+      passedReceipt?: ProofReceipt;
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
       checkedChange: CheckedChange<CheckedChangePayloadV1 | CheckedChangePayloadV2>;
-      executionLease?: CandidateExecutionLeaseV2;
-      recoverAttemptOnly?: boolean;
+      materialization?: CandidateMaterializationV2;
       workflowGeneration: WorkflowGenerationReceipt;
       beforeAgentLaunch?: () => Promise<void>;
       onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
@@ -214,10 +262,14 @@ export interface RunIssueDependencies {
   checkedChangeMint: CheckedChangeMintCapability;
   runRecords: RunRecordWriter;
   writeEvidence(input: { runId: string; code: string; summary: string }): Promise<{ id: string; path: string }>;
+  outcomeEvidencePath(runId: string, code: string, summarySha256: string): string;
+  inspectOutcomeEvidence(path: string): Promise<{ sha256: string } | undefined>;
+  writeOutcomeEvidence(input: { path: string; bytes: Buffer; sha256: string }): Promise<void>;
   packageVersion: string;
   createWorkflowGeneration(): Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
   verifyWorkflowGeneration(receipt: WorkflowGenerationReceipt): Promise<void>;
   createRunId(): string;
+  attemptResultPath(input: { canonicalRepository: string; runId: string; attemptId: string }): string;
   createProofId(): string;
   createReviewSessionId(): string;
   now(): string;
@@ -232,13 +284,21 @@ export class OwnerLockSafetyError extends Error {}
 export class OwnerLockContentionError extends Error {}
 
 interface ActiveRun {
-  state: RunStateFileV1;
-  record: RunRecordV1;
+  state: RunStateFile;
+  record: RunRecord;
   config: AgentAutoConfig;
 }
 
+interface DurableConfiguredCheckResult {
+  status: 'passed' | 'failed';
+  output: Buffer;
+  outputSha256: string;
+  observation: { leader: 'absent'; group: 'live' | 'absent' | 'unknown' };
+  attemptResultSha256: string;
+}
+
 type TerminalSeed =
-  | { status: 'review-ready'; pullRequestUrl: string }
+  | { status: 'review-ready'; pullRequestUrl: string; continuationEpoch?: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean }
   | { status: 'transport-failed'; resumable: boolean }
   | { status: 'cancelled' }
@@ -258,43 +318,25 @@ export class RunIssue {
     let active = starting;
     const { issueNumber, runId, branchName } = active.record;
     const expectedLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
-    if (active.record.intent && !['claim-labels', 'comment'].includes(active.record.intent.kind)) {
-      return { result: await this.publicationDiverged(active, 'claim-intent-diverged') };
+    if (active.record.pendingEffect && !['claim-labels', 'claim-comment'].includes(active.record.pendingEffect.kind)) {
+      return { result: await this.publicationDiverged(active, 'claim-pendingEffect-diverged') };
     }
     let observation = await this.readIssue(issueNumber);
     if (!observation || observation.state !== 'OPEN') return { result: await this.publicationDiverged(active, 'claim-issue-missing') };
     const body = claimComment(runId, issueNumber, branchName);
     const marker = body.split('\n')[0]!;
-    const commentIntent = { kind: 'comment' as const, issueNumber, marker, bodySha256: sha256(body) };
+    const commentEffect = { kind: 'claim-comment' as const, issueNumber, marker, bodySha256: sha256(body) };
 
-    // Compatibility with runs persisted by the former label-first claim order.
-    // If the label effect is already visible, confirm it. Otherwise establish
-    // the trusted claim comment before granting the running status label.
-    if (active.record.intent?.kind === 'claim-labels') {
-      if (sameStrings(observation.labels, expectedLabels)) {
-        active = await this.confirmEffect(active);
-      } else if (!this.hasTrustedClaim(observation, active.record)) {
-        const labels = new Set(observation.labels);
-        if (!labels.has(config.github.labels.auto.name)
-          || labels.has(config.github.labels.blocked.name)
-          || labels.has(config.github.labels.review.name)
-          || labels.has(config.github.labels.waitingHuman.name)) {
-          return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
-        }
-        active = await this.persist(active, { intent: commentIntent });
-      }
-    }
-
-    if (!active.record.intent) {
+    if (!active.record.pendingEffect) {
       observation = await this.readIssue(issueNumber);
       if (!observation || observation.state !== 'OPEN') return { result: await this.publicationDiverged(active, 'claim-issue-missing') };
       if (!this.hasTrustedClaim(observation, active.record)) {
-        active = await this.persist(active, { intent: commentIntent });
+        active = await this.persist(active, { pendingEffect: commentEffect });
       }
     }
-    if (active.record.intent?.kind === 'comment') {
-      if (active.record.intent.marker !== marker || active.record.intent.bodySha256 !== sha256(body)) {
-        return { result: await this.publicationDiverged(active, 'claim-comment-intent-diverged') };
+    if (active.record.pendingEffect?.kind === 'claim-comment') {
+      if (active.record.pendingEffect.marker !== marker || active.record.pendingEffect.bodySha256 !== sha256(body)) {
+        return { result: await this.publicationDiverged(active, 'claim-comment-pendingEffect-diverged') };
       }
       observation = await this.readIssue(issueNumber);
       let comments = observation ? commentsWithMarker(observation, marker) : [];
@@ -302,7 +344,7 @@ export class RunIssue {
         return { result: await this.publicationDiverged(active, 'claim-comment-diverged') };
       }
       if (comments.length === 0) {
-        try { await this.markV3ExternalEffect(active); await this.dependencies.issues.postComment(issueNumber, body); }
+        try { await this.dependencies.issues.postComment(issueNumber, body); }
         catch { return { result: await this.invokedFailure(active, 'claim-comment-delivery-unknown') }; }
         observation = await this.readIssue(issueNumber);
         comments = observation ? commentsWithMarker(observation, marker) : [];
@@ -326,13 +368,13 @@ export class RunIssue {
       || labels.has(config.github.labels.waitingHuman.name)) {
       return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
     }
-    if (!active.record.intent) {
-      active = await this.persist(active, { intent: { kind: 'claim-labels', issueNumber, expected: expectedLabels } });
+    if (!active.record.pendingEffect) {
+      active = await this.persist(active, { pendingEffect: { kind: 'claim-labels', issueNumber, expected: expectedLabels } });
     }
-    if (active.record.intent?.kind !== 'claim-labels' || !sameStrings(active.record.intent.expected, expectedLabels)) {
-      return { result: await this.publicationDiverged(active, 'claim-labels-intent-diverged') };
+    if (active.record.pendingEffect?.kind !== 'claim-labels' || !sameStrings(active.record.pendingEffect.expected, expectedLabels)) {
+      return { result: await this.publicationDiverged(active, 'claim-labels-pendingEffect-diverged') };
     }
-    try { await this.markV3ExternalEffect(active); await this.dependencies.issues.setLabels(issueNumber, expectedLabels); }
+    try { await this.dependencies.issues.setLabels(issueNumber, expectedLabels); }
     catch { return { result: await this.invokedFailure(active, 'claim-labels-delivery-unknown') }; }
     observation = await this.readIssue(issueNumber);
     if (!observation || !sameStrings(observation.labels, expectedLabels) || !this.hasTrustedClaim(observation, active.record)) {
@@ -357,8 +399,8 @@ export class RunIssue {
     if (candidateBinding) {
       const candidate = this.dependencies.git.candidateV2;
       if (!candidate) return this.persistRetainedCommitIntentTerminal(active, 'candidate-git-v2-required');
-      if (!active.record.intent) {
-        if (commitSha !== candidateBinding.expectedHeadSha) return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-branch-diverged-without-intent');
+      if (!active.record.pendingEffect) {
+        if (commitSha !== candidateBinding.expectedHeadSha) return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-branch-diverged-without-pendingEffect');
         const recaptured = await candidate.captureAndPin({
           worktreePath,
           expectedHeadSha: candidateBinding.expectedHeadSha,
@@ -383,34 +425,33 @@ export class RunIssue {
           if ('status' in reopened) return reopened;
           return this.invokedFailure(reopened, 'candidate-worktree-drift', 'The mutable issue worktree changed after proof; the next bounded repair cycle is ready.');
         }
-        active = await this.persist(active, { intent: {
-          kind: 'commit',
+        active = await this.persist(active, { pendingEffect: {
+          kind: 'initial-commit',
           parentSha: candidateBinding.expectedHeadSha,
           treeSha: candidateBinding.candidateTreeSha,
           message,
           candidateRef: candidateBinding.candidateRef,
         } });
       }
-      const intent = active.record.intent;
-      if (intent?.kind !== 'commit' || intent.parentSha !== candidateBinding.expectedHeadSha
-        || intent.treeSha !== candidateBinding.candidateTreeSha || intent.message !== message
-        || intent.candidateRef !== candidateBinding.candidateRef) {
-        return this.persistRetainedCommitIntentTerminal(active, 'candidate-commit-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'initial-commit' || pendingEffect.parentSha !== candidateBinding.expectedHeadSha
+        || pendingEffect.treeSha !== candidateBinding.candidateTreeSha || pendingEffect.message !== message
+        || pendingEffect.candidateRef !== candidateBinding.candidateRef) {
+        return this.persistRetainedCommitIntentTerminal(active, 'candidate-commit-pendingEffect-diverged');
       }
       if (this.signal.aborted) return await this.persistRetainedCommitIntentTerminal(active, 'candidate-publication-cancelled');
       if (!await this.authorized(active, config)) return await this.persistRetainedCommitIntentTerminal(active, 'candidate-publication-authority-revoked');
-      await this.markV3ExternalEffect(active);
       const publication = await candidate.createOrObserveCommit({
         worktreePath,
         branchName,
-        parentSha: intent.parentSha,
-        treeSha: intent.treeSha,
-        message: intent.message,
-        candidateRef: intent.candidateRef,
+        parentSha: pendingEffect.parentSha,
+        treeSha: pendingEffect.treeSha,
+        message: pendingEffect.message,
+        candidateRef: pendingEffect.candidateRef,
       });
       if (publication.kind === 'failed') {
         return publication.code === 'candidate-ref-update-unknown'
-          ? this.persistTerminal(active, { status: 'transport-failed', resumable: false }, publication.code, true)
+          ? this.invokedFailure(active, publication.code, 'Candidate commit outcome is unknown; retain and observe the exact commit effect.')
           : this.mapCandidateFailure(active, publication.code);
       }
       if (publication.value.kind === 'parent-unchanged') return this.invokedFailure(active, 'candidate-branch-update-not-observed');
@@ -422,7 +463,7 @@ export class RunIssue {
       if (residual.length > 0) return this.persistRetainedCommitIntentTerminal(active, 'candidate-residual-worktree-drift');
       try {
         active = await this.persist(active, {
-          intent: { kind: 'push', branch: branchName, sha: commitSha },
+          pendingEffect: { kind: 'initial-push', branch: branchName, sha: commitSha },
           changeBindingVersion: undefined,
           candidateBinding: undefined,
         });
@@ -433,25 +474,25 @@ export class RunIssue {
       if (released.kind === 'failed') {
         return this.invokedFailure(active, 'candidate-pin-release-unknown', 'The publication commit is confirmed; orphan reconciliation will retry exact pin cleanup.');
       }
-    } else if (active.record.intent?.kind === 'commit' || !active.record.intent) {
-      if (!active.record.intent) {
+    } else if (active.record.pendingEffect?.kind === 'initial-commit' || !active.record.pendingEffect) {
+      if (!active.record.pendingEffect) {
         if (commitSha === baseSha) {
           active = await this.persist(active, {
-            intent: { kind: 'commit', parentSha: baseSha, treeSha: await this.dependencies.git.getTreeSha(worktreePath), message },
+            pendingEffect: { kind: 'initial-commit', parentSha: baseSha, treeSha: await this.dependencies.git.getTreeSha(worktreePath), message },
           });
         }
       }
-      const intent = active.record.intent;
-      if (intent?.kind === 'commit') {
-        if (commitSha === intent.parentSha) {
-          if (await this.dependencies.git.getTreeSha(worktreePath) !== intent.treeSha) return await this.publicationDiverged(active, 'commit-tree-diverged');
-          if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind === 'initial-commit') {
+        if (commitSha === pendingEffect.parentSha) {
+          if (await this.dependencies.git.getTreeSha(worktreePath) !== pendingEffect.treeSha) return await this.publicationDiverged(active, 'commit-tree-diverged');
+          if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
           if (!await this.authorized(active, config)) return await this.revoked(active);
-          try { commitSha = await this.dependencies.git.commit({ worktreePath, message: intent.message }); }
+          try { commitSha = await this.dependencies.git.commit({ worktreePath, message: pendingEffect.message }); }
           catch { return await this.invokedFailure(active, 'commit-delivery-unknown'); }
         }
         const observed = await this.dependencies.git.inspectHead(worktreePath);
-        if (observed.sha !== commitSha || observed.parentSha !== intent.parentSha || observed.treeSha !== intent.treeSha || observed.message !== intent.message) {
+        if (observed.sha !== commitSha || observed.parentSha !== pendingEffect.parentSha || observed.treeSha !== pendingEffect.treeSha || observed.message !== pendingEffect.message) {
           return await this.publicationDiverged(active, 'commit-observation-diverged');
         }
         active = await this.confirmEffect(active);
@@ -462,14 +503,14 @@ export class RunIssue {
       return await this.publicationDiverged(active, 'commit-identity-diverged');
     }
 
-    if (active.record.intent?.kind === 'push' || !active.record.intent) {
-      if (!active.record.intent) active = await this.persist(active, { intent: { kind: 'push', branch: branchName, sha: commitSha } });
-      const intent = active.record.intent;
-      if (intent?.kind !== 'push' || intent.branch !== branchName || intent.sha !== commitSha) return await this.publicationDiverged(active, 'push-intent-diverged');
+    if (active.record.pendingEffect?.kind === 'initial-push' || !active.record.pendingEffect) {
+      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { kind: 'initial-push', branch: branchName, sha: commitSha } });
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'initial-push' || pendingEffect.branch !== branchName || pendingEffect.sha !== commitSha) return await this.publicationDiverged(active, 'push-pendingEffect-diverged');
       let remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
       if (remoteSha && remoteSha !== commitSha) return await this.publicationDiverged(active, 'remote-branch-diverged');
       if (!remoteSha) {
-        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
         if (!await this.authorized(active, config)) return await this.revoked(active);
         try { await this.dependencies.git.push({ worktreePath, branchName }); }
         catch { return await this.invokedFailure(active, 'push-delivery-unknown'); }
@@ -483,11 +524,11 @@ export class RunIssue {
 
     const prMarker = `<!-- codex-orchestrator:run:${runId}:pr -->`;
     const prBody = `${prMarker}\n\nCloses #${issueNumber}`;
-    if (active.record.intent?.kind === 'pr' || !active.record.intent) {
-      if (!active.record.intent) {
+    if (active.record.pendingEffect?.kind === 'draft-pr' || !active.record.pendingEffect) {
+      if (!active.record.pendingEffect) {
         active = await this.persist(active, {
-          intent: {
-            kind: 'pr', owner: config.github.owner, repo: config.github.repo, head: branchName,
+          pendingEffect: {
+            kind: 'draft-pr', owner: config.github.owner, repo: config.github.repo, head: branchName,
             base: config.github.baseBranch, issueNumber, marker: prMarker,
           },
         });
@@ -495,10 +536,10 @@ export class RunIssue {
       let observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
       if (observed && observed.body !== prBody) return await this.publicationDiverged(active, 'pr-marker-diverged');
       if (!observed) {
-        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
         if (!await this.authorized(active, config)) return await this.revoked(active);
         try {
-          await this.markV3ExternalEffect(active);
+
           await this.dependencies.pullRequests.createDraft({
             title: `Implement #${issueNumber}: ${issue.title}`,
             body: prBody,
@@ -516,10 +557,10 @@ export class RunIssue {
 
     const handoffMarker = `<!-- codex-orchestrator:run:${runId}:handoff -->`;
     const handoffBody = `${handoffMarker}\nReview-ready draft PR: ${pullRequest.url}`;
-    if (active.record.intent?.kind === 'comment' || !active.record.intent) {
-      if (!active.record.intent) {
+    if (active.record.pendingEffect?.kind === 'handoff-comment' || !active.record.pendingEffect) {
+      if (!active.record.pendingEffect) {
         active = await this.persist(active, {
-          intent: { kind: 'comment', issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
+          pendingEffect: { kind: 'handoff-comment', issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
         });
       }
       let observation = await this.readIssue(issueNumber);
@@ -529,9 +570,10 @@ export class RunIssue {
         return await this.publicationDiverged(active, 'handoff-comment-diverged');
       }
       if (matching.length === 0) {
-        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
         if (!await this.authorized(active, config)) return await this.revoked(active);
-        try { await this.markV3ExternalEffect(active); await this.dependencies.issues.postComment(issueNumber, handoffBody); }
+        try {
+ await this.dependencies.issues.postComment(issueNumber, handoffBody); }
         catch { return await this.invokedFailure(active, 'handoff-comment-delivery-unknown'); }
         observation = await this.readIssue(issueNumber);
         matching = observation ? commentsWithMarker(observation, handoffMarker) : [];
@@ -543,40 +585,34 @@ export class RunIssue {
     }
 
     const terminalLabels = [config.github.labels.review.name];
-    if (active.record.intent?.kind === 'labels' || !active.record.intent) {
-      if (!active.record.intent) active = await this.persist(active, { intent: { kind: 'labels', issueNumber, expected: terminalLabels } });
+    if (active.record.pendingEffect?.kind === 'final-labels' || !active.record.pendingEffect) {
+      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { kind: 'final-labels', issueNumber, expected: terminalLabels } });
       let observation = await this.readIssue(issueNumber);
       if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-labels');
       if (!sameStrings(observation.labels, terminalLabels)) {
-        if (this.signal.aborted) return await this.terminal(await this.clearIntent(active), { status: 'cancelled' });
+        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
         if (!await this.authorized(active, config)) return await this.revoked(active);
-        try { await this.markV3ExternalEffect(active); await this.dependencies.issues.setLabels(issueNumber, terminalLabels); }
+        try {
+ await this.dependencies.issues.setLabels(issueNumber, terminalLabels); }
         catch { return await this.invokedFailure(active, 'terminal-labels-delivery-unknown'); }
         observation = await this.readIssue(issueNumber);
       }
       if (!observation || !sameStrings(observation.labels, terminalLabels)) return await this.publicationDiverged(active, 'terminal-labels-diverged');
+      active = await this.confirmEffect(active);
     }
-
-    const evidence = await this.dependencies.writeEvidence({ runId, code: 'review-ready', summary: pullRequest.url });
-    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl: pullRequest.url, evidencePath: evidence.path, continuationEpoch: commitSha };
-    try {
-      await this.persist(active, {
-        lifecycle: 'review-ready', intent: undefined, outcomeEvidenceId: evidence.id, terminalOutcome: outcome,
-        ...(active.record.routeReceipt?.route === 'direct' ? {
-          reviewFeedback: bootstrapReviewFeedback(
-            active.record.reviewFeedback ?? {
-              version: 1, phase: 'bootstrap-required', consumedSourceIds: [], previousPublishedHeadSha: null,
-              repairRound: 0, activeBatch: null, implementationInvocation: null, history: [],
-              verifiedReceipt: null, terminal: null,
-            },
-            commitSha,
-            [],
-          ),
-        } : {}),
-        ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'review-ready' }) } : {}),
-      });
-    } catch { throw new PostEffectStateError(active); }
-    return outcome;
+    return this.persistTerminal(active, {
+      status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: commitSha,
+    }, 'review-ready', false, {
+      ...(active.record.routeReceipt?.route === 'direct' ? {
+        reviewFeedback: bootstrapReviewFeedback(
+          active.record.reviewFeedback ?? {
+            version: 1, phase: 'bootstrap-required', consumedSourceIds: [], previousPublishedHeadSha: null,
+            repairRound: 0, activeBatch: null, history: [], verifiedReceipt: null, terminal: null,
+          }, commitSha, [],
+        ),
+      } : {}),
+      ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'review-ready' }) } : {}),
+    });
   }
 
   private publicationDiverged(active: ActiveRun, code: string): Promise<RunIssueResult> {
@@ -600,7 +636,7 @@ export class RunIssue {
     const message = `fix: address review feedback for #${issueNumber}`;
     let head = await this.dependencies.git.getHead(active.record.worktreePath);
     let remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
-    if (!active.record.intent) {
+    if (!active.record.pendingEffect) {
       if (head !== oldHead || remote !== oldHead) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-update-baseline-diverged');
       }
@@ -610,7 +646,7 @@ export class RunIssue {
     if (candidateBinding) {
       const candidate = this.dependencies.git.candidateV2;
       if (!candidate) return this.persistRetainedCommitIntentTerminal(active, 'candidate-git-v2-required');
-      if (!active.record.intent) {
+      if (!active.record.pendingEffect) {
         const recaptured = await candidate.captureAndPin({
           worktreePath: active.record.worktreePath,
           expectedHeadSha: oldHead,
@@ -641,33 +677,32 @@ export class RunIssue {
           });
           return this.invokedFailure(reopened, 'review-feedback-candidate-worktree-drift', 'The next review-feedback repair round is ready.');
         }
-        active = await this.persist(active, { intent: {
+        active = await this.persist(active, { pendingEffect: {
           kind: 'review-update-commit', batchId: batch.batchId, parentSha: oldHead,
           treeSha: candidateBinding.candidateTreeSha, message, candidateRef: candidateBinding.candidateRef,
         } });
       }
-      const intent = active.record.intent;
-      if (intent?.kind !== 'review-update-commit' || intent.batchId !== batch.batchId
-        || intent.parentSha !== oldHead || intent.treeSha !== candidateBinding.candidateTreeSha
-        || intent.message !== message || intent.candidateRef !== candidateBinding.candidateRef) {
-        return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-candidate-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'review-update-commit' || pendingEffect.batchId !== batch.batchId
+        || pendingEffect.parentSha !== oldHead || pendingEffect.treeSha !== candidateBinding.candidateTreeSha
+        || pendingEffect.message !== message || pendingEffect.candidateRef !== candidateBinding.candidateRef) {
+        return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-candidate-pendingEffect-diverged');
       }
       if (!await this.authorized(active, config)) return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-publication-authority-revoked');
       const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
       if (validationFailure) return validationFailure;
-      await this.markV3ExternalEffect(active);
       const publication = await candidate.createOrObserveCommit({
         worktreePath: active.record.worktreePath,
         branchName: active.record.branchName,
-        parentSha: intent.parentSha,
-        treeSha: intent.treeSha,
-        message: intent.message,
-        candidateRef: intent.candidateRef,
+        parentSha: pendingEffect.parentSha,
+        treeSha: pendingEffect.treeSha,
+        message: pendingEffect.message,
+        candidateRef: pendingEffect.candidateRef,
       });
       if (publication.kind === 'failed') {
         return publication.code === 'candidate-ref-update-unknown'
-          ? this.persistTerminal(active, { status: 'transport-failed', resumable: false }, publication.code, true)
+          ? this.invokedFailure(active, publication.code, 'Candidate update outcome is unknown; retain and observe the exact commit effect.')
           : this.mapCandidateFailure(active, publication.code);
       }
       if (publication.value.kind === 'parent-unchanged') return this.invokedFailure(active, 'review-feedback-candidate-branch-update-not-observed');
@@ -680,7 +715,7 @@ export class RunIssue {
       }
       try {
         active = await this.persist(active, {
-          intent: {
+          pendingEffect: {
             kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
             priorRemoteSha: oldHead, sha: head, treeSha: candidateBinding.candidateTreeSha,
           },
@@ -694,58 +729,58 @@ export class RunIssue {
       if (released.kind === 'failed') {
         return this.invokedFailure(active, 'candidate-pin-release-unknown', 'The review update commit is confirmed; orphan reconciliation will retry exact pin cleanup.');
       }
-    } else if (!active.record.intent || active.record.intent.kind === 'review-update-commit') {
-      if (!active.record.intent) {
-        active = await this.persist(active, { intent: {
+    } else if (!active.record.pendingEffect || active.record.pendingEffect.kind === 'review-update-commit') {
+      if (!active.record.pendingEffect) {
+        active = await this.persist(active, { pendingEffect: {
           kind: 'review-update-commit', batchId: batch.batchId, parentSha: oldHead,
           treeSha: await this.dependencies.git.getTreeSha(active.record.worktreePath), message,
         } });
       }
-      const intent = active.record.intent;
-      if (intent?.kind !== 'review-update-commit' || intent.batchId !== batch.batchId
-        || intent.parentSha !== oldHead || intent.message !== message) {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'review-update-commit' || pendingEffect.batchId !== batch.batchId
+        || pendingEffect.parentSha !== oldHead || pendingEffect.message !== message) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-pendingEffect-diverged');
       }
       head = await this.dependencies.git.getHead(active.record.worktreePath);
-      if (head === intent.parentSha) {
+      if (head === pendingEffect.parentSha) {
         if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
         const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
         const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
         if (validationFailure) return validationFailure;
-        if (await this.dependencies.git.getTreeSha(active.record.worktreePath) !== intent.treeSha) {
+        if (await this.dependencies.git.getTreeSha(active.record.worktreePath) !== pendingEffect.treeSha) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-tree-diverged');
         }
-        try { head = await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: intent.message }); }
+        try { head = await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: pendingEffect.message }); }
         catch { return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown'); }
       }
       const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
-      if (commit.sha !== head || commit.parentSha !== intent.parentSha || commit.treeSha !== intent.treeSha || commit.message !== intent.message) {
+      if (commit.sha !== head || commit.parentSha !== pendingEffect.parentSha || commit.treeSha !== pendingEffect.treeSha || commit.message !== pendingEffect.message) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-observation-diverged');
       }
-      active = await this.persist(active, { intent: {
+      active = await this.persist(active, { pendingEffect: {
         kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
         priorRemoteSha: oldHead, sha: commit.sha, treeSha: commit.treeSha,
       } });
     }
     const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
-    const recordedCommit = active.record.intent?.kind === 'review-update-push' ? active.record.intent : undefined;
+    const recordedCommit = active.record.pendingEffect?.kind === 'review-update-push' ? active.record.pendingEffect : undefined;
     if (commit.parentSha !== oldHead || commit.message !== message
       || (recordedCommit && (commit.sha !== recordedCommit.sha || commit.treeSha !== recordedCommit.treeSha))) {
       return this.blockReviewFeedback(active, 'safety', 'review-feedback-update-commit-identity-diverged');
     }
     head = commit.sha;
 
-    if (!active.record.intent || active.record.intent.kind === 'review-update-push') {
-      if (!active.record.intent) active = await this.persist(active, { intent: {
+    if (!active.record.pendingEffect || active.record.pendingEffect.kind === 'review-update-push') {
+      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: {
         kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
         priorRemoteSha: oldHead, sha: head, treeSha: commit.treeSha,
       } });
-      const intent = active.record.intent;
-      if (intent?.kind !== 'review-update-push' || intent.batchId !== batch.batchId || intent.sha !== head
-        || intent.treeSha !== commit.treeSha || intent.branch !== active.record.branchName || intent.priorRemoteSha !== oldHead) {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'review-update-push' || pendingEffect.batchId !== batch.batchId || pendingEffect.sha !== head
+        || pendingEffect.treeSha !== commit.treeSha || pendingEffect.branch !== active.record.branchName || pendingEffect.priorRemoteSha !== oldHead) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-pendingEffect-diverged');
       }
       remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
       if (remote === oldHead) {
@@ -774,23 +809,23 @@ export class RunIssue {
       'Affected Closure, configured checks, and Acceptance Proof passed.',
       'Review threads remain for human resolution.',
     ].join('\n');
-    if (active.record.intent?.kind === 'review-update-push') {
-      active = await this.persist(active, { intent: {
+    if (active.record.pendingEffect?.kind === 'review-update-push') {
+      active = await this.persist(active, { pendingEffect: {
         kind: 'review-summary', batchId: batch.batchId, pullRequestNumber: batch.pullRequest.number,
         pullRequestNodeId: batch.pullRequest.nodeId, marker, bodySha256: sha256(body), epochHeadSha: head,
       } });
     }
     let summaryId = '';
-    if (!active.record.intent || active.record.intent.kind === 'review-summary') {
-      if (!active.record.intent) active = await this.persist(active, { intent: {
+    if (!active.record.pendingEffect || active.record.pendingEffect.kind === 'review-summary') {
+      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: {
         kind: 'review-summary', batchId: batch.batchId, pullRequestNumber: batch.pullRequest.number,
         pullRequestNodeId: batch.pullRequest.nodeId, marker, bodySha256: sha256(body), epochHeadSha: head,
       } });
-      const intent = active.record.intent;
-      if (intent?.kind !== 'review-summary' || intent.batchId !== batch.batchId
-        || intent.pullRequestNumber !== batch.pullRequest.number || intent.pullRequestNodeId !== batch.pullRequest.nodeId
-        || intent.marker !== marker || intent.bodySha256 !== sha256(body) || intent.epochHeadSha !== head) {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'review-summary' || pendingEffect.batchId !== batch.batchId
+        || pendingEffect.pullRequestNumber !== batch.pullRequest.number || pendingEffect.pullRequestNodeId !== batch.pullRequest.nodeId
+        || pendingEffect.marker !== marker || pendingEffect.bodySha256 !== sha256(body) || pendingEffect.epochHeadSha !== head) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-pendingEffect-diverged');
       }
       const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-summary-revalidation-failed');
@@ -804,14 +839,15 @@ export class RunIssue {
         if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
-        try { await this.markV3ExternalEffect(active); await this.dependencies.pullRequests.postConversationComment(batch.pullRequest.number, body); }
+        try {
+ await this.dependencies.pullRequests.postConversationComment(batch.pullRequest.number, body); }
         catch { return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown'); }
         matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
           .filter((comment) => comment.body.split('\n')[0] === marker);
       }
       if (matches.length !== 1 || matches[0]!.body !== body) return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-observation-diverged');
       summaryId = matches[0]!.id;
-      active = await this.persist(active, { intent: {
+      active = await this.persist(active, { pendingEffect: {
         kind: 'review-final-labels', issueNumber, batchId: batch.batchId,
         pullRequestNumber: batch.pullRequest.number, pullRequestNodeId: batch.pullRequest.nodeId,
         epochHeadSha: head, expected: [config.github.labels.review.name],
@@ -825,18 +861,18 @@ export class RunIssue {
     }
 
     const finalLabels = [config.github.labels.review.name];
-    if (!active.record.intent || active.record.intent.kind === 'review-final-labels') {
-      if (!active.record.intent) active = await this.persist(active, { intent: {
+    if (!active.record.pendingEffect || active.record.pendingEffect.kind === 'review-final-labels') {
+      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: {
         kind: 'review-final-labels', issueNumber, batchId: batch.batchId,
         pullRequestNumber: batch.pullRequest.number, pullRequestNodeId: batch.pullRequest.nodeId,
         epochHeadSha: head, expected: finalLabels,
       } });
-      const intent = active.record.intent;
-      if (intent?.kind !== 'review-final-labels' || intent.issueNumber !== issueNumber
-        || intent.batchId !== batch.batchId || intent.pullRequestNumber !== batch.pullRequest.number
-        || intent.pullRequestNodeId !== batch.pullRequest.nodeId || intent.epochHeadSha !== head
-        || !sameStrings(intent.expected, finalLabels)) {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-intent-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'review-final-labels' || pendingEffect.issueNumber !== issueNumber
+        || pendingEffect.batchId !== batch.batchId || pendingEffect.pullRequestNumber !== batch.pullRequest.number
+        || pendingEffect.pullRequestNodeId !== batch.pullRequest.nodeId || pendingEffect.epochHeadSha !== head
+        || !sameStrings(pendingEffect.expected, finalLabels)) {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-pendingEffect-diverged');
       }
       const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-final-labels-revalidation-failed');
@@ -846,11 +882,13 @@ export class RunIssue {
         if (!await this.authorized(active, config)) {
           return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
         }
-        try { await this.markV3ExternalEffect(active); await this.dependencies.issues.setLabels(issueNumber, finalLabels); }
+        try {
+ await this.dependencies.issues.setLabels(issueNumber, finalLabels); }
         catch { return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown'); }
         issue = await this.readIssue(issueNumber);
       }
       if (!issue || !sameStrings(issue.labels, finalLabels)) return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-diverged');
+      active = await this.confirmEffect(active);
     }
 
     const receipt = {
@@ -863,19 +901,12 @@ export class RunIssue {
       summaryCommentId: summaryId,
       publishedAt: this.timestamp(),
     };
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'review-ready', summary: active.record.terminalOutcome?.status === 'review-ready' ? active.record.terminalOutcome.pullRequestUrl : `PR #${batch.pullRequest.number}` });
     const pullRequestUrl = `https://github.com/${active.record.canonicalRepository}/pull/${batch.pullRequest.number}`;
-    const outcome: RunTerminalOutcome = { status: 'review-ready', pullRequestUrl, evidencePath: evidence.path, continuationEpoch: head };
-    try {
-      await this.persist(active, {
-        lifecycle: 'review-ready',
-        reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
-        terminalOutcome: outcome,
-        outcomeEvidenceId: evidence.id,
-        intent: undefined,
-      });
-    } catch { throw new PostEffectStateError(active); }
-    return publicOutcome(outcome);
+    return this.persistTerminal(active, {
+      status: 'review-ready', pullRequestUrl, continuationEpoch: head,
+    }, 'review-ready', false, {
+      reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
+    });
   }
 
   private async continueReviewReady(
@@ -949,7 +980,7 @@ export class RunIssue {
       proofReceipt: undefined,
       terminalOutcome: undefined,
       outcomeEvidenceId: undefined,
-      intent: {
+      pendingEffect: {
         kind: 'review-activation-labels',
         issueNumber: starting.record.issueNumber,
         batchId: observed.batch.batchId,
@@ -973,12 +1004,12 @@ export class RunIssue {
     const expectedHeadSha = batch.priorPublishedHeadSha;
     const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
     const reviewLabels = [config.github.labels.review.name];
-    const intent = active.record.intent;
-    if (intent && (intent.kind !== 'review-activation-labels'
-      || intent.issueNumber !== active.record.issueNumber
-      || intent.batchId !== batch.batchId
-      || !sameStrings(intent.expected, runningLabels))) {
-      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-intent-diverged') };
+    const pendingEffect = active.record.pendingEffect;
+    if (pendingEffect && (pendingEffect.kind !== 'review-activation-labels'
+      || pendingEffect.issueNumber !== active.record.issueNumber
+      || pendingEffect.batchId !== batch.batchId
+      || !sameStrings(pendingEffect.expected, runningLabels))) {
+      return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-pendingEffect-diverged') };
     }
     const issue = await this.readIssue(active.record.issueNumber);
     const labelsAreRunning = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, runningLabels)
@@ -994,7 +1025,8 @@ export class RunIssue {
     const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-activation-revalidation-failed');
     if (validationFailure) return { result: validationFailure };
     if (labelsAreReview) {
-      try { await this.markV3ExternalEffect(active); await this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels); }
+      try {
+ await this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels); }
       catch { return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') }; }
       const observed = await this.readIssue(active.record.issueNumber);
       if (!observed || !sameStrings(observed.labels, runningLabels)
@@ -1002,31 +1034,11 @@ export class RunIssue {
         return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-labels-diverged') };
       }
     }
-    if (intent) active = await this.confirmEffect(active);
-    let worktree = await this.dependencies.git.inspectWorktree({
-      worktreePath: active.record.worktreePath,
-      branchName: active.record.branchName,
-      baseSha: expectedHeadSha,
-    });
-    if (worktree === 'absent' && this.dependencies.git.ensureContinuationWorktree) {
-      try {
-        await this.dependencies.git.ensureContinuationWorktree({
-          targetRoot,
-          worktreePath: active.record.worktreePath,
-          branchName: active.record.branchName,
-          baseBranch: config.github.baseBranch,
-          publishedHeadSha: expectedHeadSha,
-        });
-        worktree = await this.dependencies.git.inspectWorktree({
-          worktreePath: active.record.worktreePath,
-          branchName: active.record.branchName,
-          baseSha: expectedHeadSha,
-        });
-      } catch { worktree = 'diverged'; }
-    }
-    const remoteSha = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
-    if (worktree !== 'matching' || remoteSha !== expectedHeadSha
-      || (await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(
+    if (pendingEffect) active = await this.confirmEffect(active);
+    const worktree = await this.createContinuationWorktreeEffect(active, targetRoot, expectedHeadSha);
+    if ('status' in worktree) return { result: worktree };
+    active = worktree.active;
+    if ((await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(
         active.record.worktreePath,
         config.proof.artifactDir,
       )).length !== 0) {
@@ -1037,32 +1049,19 @@ export class RunIssue {
   }
 
   private async reviewReadyObservationBlocked(active: ActiveRun, code: string): Promise<RunIssueResult> {
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary: 'Review feedback observation failed closed before activation.' });
-    const terminalOutcome: RunTerminalOutcome = {
-      status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path,
-    };
-    await this.persist(active, {
-      lifecycle: 'blocked',
-      reviewFeedback: active.record.reviewFeedback,
-      directReview: active.record.directReview && active.record.directReview.status !== 'terminal'
-        ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind: 'safety' })
-        : active.record.directReview,
-      terminalOutcome,
-      outcomeEvidenceId: evidence.id,
-      intent: undefined,
-    });
-    return publicOutcome(terminalOutcome);
+    return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, code, false);
   }
 
   async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
     let owner: { release(): Promise<void> } | undefined;
     let active: ActiveRun | undefined;
-    let recoveredFeedbackImplementation: Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined;
     try {
       assertPositiveInteger(input.issueNumber, 'issueNumber');
       const targetRoot = resolve(input.targetRoot);
       const initialConfig = await this.readStrictConfig(targetRoot);
       const canonicalRepository = `${initialConfig.config.github.owner.toLowerCase()}/${initialConfig.config.github.repo.toLowerCase()}`;
+      const preflightState = await this.dependencies.runRecords.inspect();
+      if (preflightState.status === 'unsupported') return { status: 'state-schema-unsupported' };
       try {
         owner = await this.dependencies.ownerLock.acquire({ canonicalRepository, targetRoot });
       } catch (error) {
@@ -1090,13 +1089,26 @@ export class RunIssue {
       const config = confirmedConfig.config;
       if (this.signal.aborted) return await this.preClaimCancelled(input.issueNumber);
 
+      let authoritativeState = await this.dependencies.runRecords.inspect();
+      if (authoritativeState.status === 'unsupported') return { status: 'state-schema-unsupported' };
+      if (!sameInspectionIdentity(preflightState, authoritativeState)) {
+        const stableState = await this.dependencies.runRecords.inspect();
+        if (stableState.status === 'unsupported') return { status: 'state-schema-unsupported' };
+        if (!sameInspectionIdentity(authoritativeState, stableState)) {
+          return { status: 'requeued', reason: 'state-changed' };
+        }
+        authoritativeState = stableState;
+      }
+      const persisted: RunStateFile = authoritativeState.status === 'supported'
+        ? authoritativeState.state
+        : { schema: 'codex-orchestrator.run-state', generation: 0, runs: [] };
+
       let issue: RunIssueSnapshot | undefined;
       try {
         issue = await this.dependencies.issues.read(input.issueNumber);
       } catch {
         return await this.preClaimTransport(input.issueNumber);
       }
-      const persisted = await this.dependencies.runRecords.read();
       if (this.dependencies.git.candidateV2?.reconcileOrphans) {
         const reconciled = await this.dependencies.git.candidateV2.reconcileOrphans({
           repositoryRoot: targetRoot,
@@ -1108,8 +1120,8 @@ export class RunIssue {
               ? [{ runId: run.runId, worktreePath: run.worktreePath, expectedHeadSha: expectedImplementationHead(run), boundary, artifactDir: config.proof.artifactDir }]
               : [];
           }),
-          activeExecutions: persisted.runs.flatMap((run) => run.executionLease
-            ? [{ path: run.executionLease.path, candidateCommitSha: run.executionLease.candidateCommitSha }]
+          activeMaterializations: persisted.runs.flatMap((run) => run.candidateMaterialization
+            ? [{ path: run.candidateMaterialization.path, candidateCommitSha: run.candidateMaterialization.candidateCommitSha }]
             : []),
         });
         if (reconciled.kind === 'failed') return this.preClaimTransport(input.issueNumber);
@@ -1136,22 +1148,35 @@ export class RunIssue {
         branchName = existing.branchName;
         worktreePath = existing.worktreePath;
         baseSha = existing.baseSha;
-        if (active.record.intent?.kind === 'review-blocked-labels') {
+        if (active.record.pendingEffect?.kind === 'outcome-evidence') {
+          if (active.record.terminalOutcome) {
+            const observed = await this.observeOutcomeEvidenceEffect(
+              active,
+              active.record.pendingEffect.code,
+              active.record.pendingEffect.summary,
+            );
+            await this.confirmEffect(observed.active);
+            return publicOutcome(active.record.terminalOutcome);
+          }
+          const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
+          return await this.persistTerminal(active, seed, active.record.pendingEffect.code, false);
+        }
+        if (active.record.pendingEffect?.kind === 'review-blocked-labels') {
           return await this.blockReviewFeedback(
             active,
-            active.record.intent.blockKind,
-            active.record.intent.evidenceCode,
+            active.record.pendingEffect.blockKind,
+            active.record.pendingEffect.evidenceCode,
           );
         }
-        if (active.record.intent?.kind === 'blocked-labels') {
+        if (active.record.pendingEffect?.kind === 'blocked-labels') {
           return await this.publishBlockedTerminal(
             active,
             {
               status: 'blocked',
-              kind: active.record.intent.blockKind,
-              resumable: active.record.intent.resumable,
+              kind: active.record.pendingEffect.blockKind,
+              resumable: active.record.pendingEffect.resumable,
             },
-            active.record.intent.evidenceCode,
+            active.record.pendingEffect.evidenceCode,
           );
         }
         if (existing.terminalOutcome?.status === 'blocked'
@@ -1162,8 +1187,24 @@ export class RunIssue {
         if (active.record.terminalOutcome?.status === 'transport-failed'
           && !active.record.terminalOutcome.resumable
           && active.record.candidateBinding
-          && (active.record.intent?.kind === 'commit' || active.record.intent?.kind === 'review-update-commit')) {
+          && (active.record.pendingEffect?.kind === 'initial-commit' || active.record.pendingEffect?.kind === 'review-update-commit')) {
           const reconciled = await this.reconcileUnknownCandidatePublication(active);
+          if ('status' in reconciled) return reconciled;
+          active = reconciled.active;
+        }
+        if (active.record.terminalOutcome && active.record.activeAttempt) {
+          const reconciled = await this.reconcilePersistedAttempt(active);
+          if ('status' in reconciled) return reconciled;
+          active = reconciled.active;
+          const attempt = active.record.activeAttempt;
+          if (attempt?.stage === 'observed' && attempt.result) {
+            active = await this.adoptAttempt(active, attempt.result.sha256, {});
+          } else if (attempt && attempt.stage !== 'launched') {
+            active = await this.clearAttempt(active);
+          }
+        }
+        if (active.record.terminalOutcome && active.record.candidateMaterialization) {
+          const reconciled = await this.reconcilePersistedCandidateMaterialization(active, config);
           if ('status' in reconciled) return reconciled;
           active = reconciled.active;
         }
@@ -1180,21 +1221,15 @@ export class RunIssue {
             frozenCriteria = structuredClone(active.record.frozenCriteria);
           }
         }
-        if (active.record.executionLease) {
-          const reconciled = await this.reconcilePersistedCandidateExecution(active, config);
+        if (active.record.activeAttempt && active.record.lifecycle !== 'safe-halt') {
+          const reconciled = await this.reconcilePersistedAttempt(active);
           if ('status' in reconciled) return reconciled;
           active = reconciled.active;
         }
-        if (active.state.version === 2 && active.record.lifecycle === 'proving'
-          && active.record.routeReceipt?.route === 'direct') {
-          const resumed = await this.resumeLegacyProof(active, config, issueSnapshot, frozenCriteria);
-          if ('status' in resumed) return resumed;
-          active = resumed.active;
-        } else if (active.state.version === 2 && active.record.lifecycle === 'checking'
-          && active.record.routeReceipt?.route === 'direct') {
-          const cutover = await this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
-          if ('status' in cutover) return cutover;
-          active = cutover.active;
+        if (active.record.candidateMaterialization) {
+          const reconciled = await this.reconcilePersistedCandidateMaterialization(active, config);
+          if ('status' in reconciled) return reconciled;
+          active = reconciled.active;
         }
         if (active.record.reviewFeedback?.phase === 'frozen') {
           const activation = await this.resumeActivatedReviewFeedback(active, targetRoot, config);
@@ -1207,56 +1242,28 @@ export class RunIssue {
             : await this.publish(active, config, issueSnapshot, input.issueNumber);
         }
         if (active.record.lifecycle === 'claimed') {
-          const claim = await this.reconcileClaim(active, config);
-          if ('result' in claim) return claim.result;
-          active = claim.active;
-          let worktree: 'absent' | 'matching' | 'diverged';
-          try {
-            worktree = await this.dependencies.git.inspectWorktree({ worktreePath, branchName, baseSha });
-          } catch (error) {
-            return await this.invokedFailure(
-              active,
-              'local-git-worktree-inspection-failed',
-              claimedWorktreeInspectionFailureSummary(error),
-            );
+          if (active.record.pendingEffect?.kind !== 'worktree-create') {
+            const claim = await this.reconcileClaim(active, config);
+            if ('result' in claim) return claim.result;
+            active = claim.active;
           }
-          if (worktree === 'diverged') {
-            return await this.invokedFailure(
-              active,
-              'local-git-worktree-diverged',
-              'The claimed worktree path is present but does not match the expected branch and base. Correct or preserve the local artifact, then retry the same run.',
-            );
-          }
-          if (worktree === 'absent') {
-            try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
-            catch (error) {
-              return await this.invokedFailure(
-                active,
-                'local-git-worktree-creation-failed',
-                worktreeCreationFailureSummary(error),
-              );
-            }
-          }
+          const worktree = await this.createInitialWorktreeEffect(active, targetRoot);
+          if ('status' in worktree) return worktree;
+          active = worktree.active;
           active = await this.initializeClaimedRun(active, issue);
           issueSnapshot = structuredClone(active.record.issueSnapshot);
         } else {
           if (active.record.lifecycle === 'safe-halt') {
-            const process = active.record.process;
-            if (!process) return await this.publicationDiverged(active, 'safe-halt-process-missing');
-            try { await this.dependencies.waitForReviewProcessAbsence(process.processGroupId); }
+            const attempt = active.record.activeAttempt;
+            if (!attempt || attempt.stage !== 'launched') return await this.publicationDiverged(active, 'safe-halt-attempt-missing');
+            try { await this.dependencies.waitForReviewProcessAbsence(attempt.process.processGroupId); }
             catch { return await this.invokedFailure(active, 'safe-halt-process-absence-unconfirmed'); }
-            active = await this.persist(active, { lifecycle: process.resumeLifecycle, process: undefined });
-            if (active.state.version === 2 && active.record.lifecycle === 'proving'
-              && active.record.routeReceipt?.route === 'direct') {
-              const resumed = await this.resumeLegacyProof(active, config, issueSnapshot, frozenCriteria, true);
-              if ('status' in resumed) return resumed;
-              active = resumed.active;
-            } else if (active.state.version === 2 && active.record.lifecycle === 'checking'
-              && active.record.routeReceipt?.route === 'direct') {
-              const cutover = await this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
-              if ('status' in cutover) return cutover;
-              active = cutover.active;
-            }
+            const observed = observeActiveAttempt(attempt, {
+              leader: 'absent', group: 'absent', result: null, observedAt: this.timestamp(),
+            });
+            active = await this.persist(active, { activeAttempt: observed });
+            active = await this.clearAttempt(active);
+            active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
           }
           if (active.record.lifecycle === 'publishing') {
             return active.record.reviewFeedback?.activeBatch
@@ -1273,32 +1280,6 @@ export class RunIssue {
           if (active.record.lifecycle === 'spec-authoring') {
             if (!await this.authorized(active, config)) return await this.revoked(active);
             return await this.continueSpecRequired(active);
-          }
-          const feedbackInvocation = active.record.reviewFeedback?.implementationInvocation;
-          if (feedbackInvocation?.phase === 'prepared') {
-            return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-launch-ambiguous');
-          }
-          if (feedbackInvocation?.phase === 'launched') {
-            try { await this.dependencies.waitForReviewProcessAbsence(feedbackInvocation.processGroupId!); }
-            catch { return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-process-absence-unconfirmed'); }
-            if (!this.dependencies.implementationAgent.recover) {
-              return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-report-recovery-unavailable');
-            }
-            try {
-              recoveredFeedbackImplementation = await this.dependencies.implementationAgent.recover({
-                runId: active.record.runId,
-                canonicalRepository: active.record.canonicalRepository,
-                invocation: feedbackInvocation,
-              });
-            } catch {
-              return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-report-recovery-failed');
-            }
-            if (!recoveredFeedbackImplementation) {
-              const snapshot = await this.dependencies.git.snapshot(active.record.worktreePath);
-              if (!sameFreshness(snapshot, feedbackInvocation.baseline)) {
-                return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-worktree-ambiguous');
-              }
-            }
           }
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
@@ -1318,7 +1299,9 @@ export class RunIssue {
             const qualificationRecovery = active.record.lifecycle === 'implementing'
               && !active.record.directReview
               && !this.hasRecordedImplementationStart(active.record, config);
-            if (!reviewRecovery && !checkRecovery && !proofRecovery && !directReviewRepair && !qualificationRecovery) {
+            const attemptResultRecovery = active.record.activeAttempt?.stage === 'observed'
+              && active.record.activeAttempt.result !== null;
+            if (!reviewRecovery && !checkRecovery && !proofRecovery && !directReviewRepair && !qualificationRecovery && !attemptResultRecovery) {
               if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
               }
@@ -1352,21 +1335,16 @@ export class RunIssue {
         active = await this.createRun({
           runId, issueNumber: input.issueNumber, canonicalRepository, baseSha, branchName, worktreePath,
           issueSnapshot, frozenCriteria, config,
-          intent: {
-            kind: 'comment', issueNumber: input.issueNumber, marker: claimBody.split('\n')[0]!, bodySha256: sha256(claimBody),
+          pendingEffect: {
+            kind: 'claim-comment', issueNumber: input.issueNumber, marker: claimBody.split('\n')[0]!, bodySha256: sha256(claimBody),
           },
         });
         const claim = await this.reconcileClaim(active, config);
         if ('result' in claim) return claim.result;
         active = claim.active;
-        try { await this.dependencies.git.createWorktree({ targetRoot, worktreePath, branchName, baseBranch: config.github.baseBranch, baseSha }); }
-        catch (error) {
-          return await this.invokedFailure(
-            active,
-            'local-git-worktree-creation-failed',
-            worktreeCreationFailureSummary(error),
-          );
-        }
+        const worktree = await this.createInitialWorktreeEffect(active, targetRoot);
+        if ('status' in worktree) return worktree;
+        active = worktree.active;
         active = await this.initializeClaimedRun(active, issue);
         issueSnapshot = structuredClone(active.record.issueSnapshot);
       }
@@ -1401,9 +1379,6 @@ export class RunIssue {
       if (active.record.lifecycle === 'implementing'
         && active.record.directReview?.status === 'active'
         && (active.record.directReview.stage === 'review-full' || active.record.directReview.stage === 'review-closure')) {
-        const recovered = await this.recoverDirectReviewInvocation(active);
-        if ('status' in recovered) return recovered;
-        active = recovered;
         const recoveryBoundary = active.record.reviewFeedback?.activeBatch
           ? {
             kind: 'review-feedback' as const,
@@ -1449,47 +1424,47 @@ export class RunIssue {
         ? projectReviewFeedbackBatch(feedbackBatch, active.record.directReview!.targetRevision)
         : undefined;
       let feedbackImplementationLaunchFailure: RunIssueResult | undefined;
-      const implementationLaunch = feedbackBatch ? {
-        reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
-        reviewFeedback: feedbackProjection!.workerFeedback,
-        onPrepared: async (invocation: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => {
-          const currentActive = active!;
-          active = await this.persist(currentActive, {
-            reviewFeedback: {
-              ...structuredClone(currentActive.record.reviewFeedback!),
-              implementationInvocation: { ...structuredClone(invocation), phase: 'prepared', pid: null, processGroupId: null, launchedAt: null },
-            },
-          });
+      const implementationLaunch = {
+        ...(feedbackBatch ? {
+          reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
+          reviewFeedback: feedbackProjection!.workerFeedback,
+        } : {}),
+        onPrepared: async (prepared: { attemptId: string; reportPath: string }) => {
+          if (active!.record.activeAttempt?.attemptId !== prepared.attemptId
+            || active!.record.activeAttempt.resultPath !== prepared.reportPath) {
+            throw new Error('implementation attempt identity mismatch');
+          }
         },
-        onLaunched: async (invocation: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => {
+        onLaunched: async (launched: { attemptId: string; pid: number; processGroupId: number }) => {
           const currentActive = active!;
           const failure = await this.revalidateFeedbackWorker(currentActive, config, input.issueNumber);
           if (failure) {
             feedbackImplementationLaunchFailure = failure;
-            throw new Error('review feedback implementation launch authorization changed');
+            throw new Error('implementation launch authorization changed');
           }
-          const current = currentActive.record.reviewFeedback?.implementationInvocation;
-          if (!current || current.phase !== 'prepared' || current.attemptId !== invocation.attemptId) throw new Error('review feedback implementation launch mismatch');
-          active = await this.persist(currentActive, {
-            reviewFeedback: {
-              ...structuredClone(currentActive.record.reviewFeedback!),
-              implementationInvocation: { ...current, phase: 'launched', pid: invocation.pid, processGroupId: invocation.processGroupId, launchedAt: invocation.launchedAt },
-            },
-          });
-        },
-      } : {
-        onLaunched: async () => {
-          const currentActive = active!;
-          const qualification = currentActive.record.checkQualification;
-          if (!qualification) throw new Error('implementation launch requires check qualification');
-          active = await this.persist(currentActive, {
+          if (currentActive.record.activeAttempt?.attemptId !== launched.attemptId) throw new Error('implementation launch mismatch');
+          active = await this.launchAttempt(currentActive, launched.pid, launched.processGroupId);
+          const qualification = active.record.checkQualification;
+          if (qualification) active = await this.persist(active, {
             checkQualification: { ...qualification, implementationStarted: true },
           });
         },
       };
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
-      let implementation = recoveredFeedbackImplementation ?? await this.runImplementation({
+      if (!active.record.activeAttempt) {
+        active = await this.prepareAttempt(
+          active,
+          'implementation',
+          feedbackBatch
+            ? `${feedbackBatch.batchId}:${active.record.reviewFeedback!.repairRound}`
+            : `${active.record.cycle}:${active.record.reportRepairs}`,
+        );
+      }
+      const implementationAttempt = active.record.activeAttempt;
+      if (!implementationAttempt) return await this.terminal(active, { status: 'internal-error', code: 'implementation-attempt-missing' });
+      let implementation = await this.runImplementation({
         operation: 'implementation',
+        attemptId: implementationAttempt.attemptId,
         runId,
         worktreePath,
         issue: publicIssueSnapshot(issueSnapshot),
@@ -1501,17 +1476,11 @@ export class RunIssue {
         ...implementationLaunch,
       });
       if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
-      recoveredFeedbackImplementation = undefined;
+      if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
+        active, implementation.kind === 'completed' ? implementation.report : implementation,
+      );
       if (implementation.kind === 'safe-halt') {
-        active = await this.persist(active, {
-          lifecycle: 'safe-halt',
-          process: {
-            ...implementation.process,
-            purpose: 'implementation',
-            resumeLifecycle: 'implementing',
-            resumeReviewStage: null,
-          },
-        });
+        active = await this.persist(active, { lifecycle: 'safe-halt' });
         while (true) {
           try {
             await implementation.waitForAbsence();
@@ -1529,10 +1498,7 @@ export class RunIssue {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
       }
       if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
-        const invocation = active.record.reviewFeedback?.implementationInvocation;
-        if (invocation && !sameFreshness(await this.dependencies.git.snapshot(worktreePath), invocation.baseline)) {
-          return await this.blockReviewFeedback(active, 'safety', 'review-feedback-implementation-worktree-ambiguous');
-        }
+        active = await this.clearAttempt(active);
         active = await this.persist(active, { transportRetries: 1 });
         continue attemptLoop;
       }
@@ -1545,11 +1511,18 @@ export class RunIssue {
           return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' });
         }
         const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
-        active = await this.persist(active, { reportRepairs: 1 });
+        if (isAdoptableAttempt(active.record.activeAttempt)) {
+          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: 1 });
+          active = await this.clearAttempt(active);
+        } else {
+          active = await this.persist(active, { reportRepairs: 1 });
+        }
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
+        active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:report-repair`);
         implementation = await this.runImplementation({
           operation: 'implementation',
+          attemptId: active.record.activeAttempt!.attemptId,
           runId,
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
@@ -1561,16 +1534,11 @@ export class RunIssue {
           ...implementationLaunch,
         });
         if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
+        if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
+          active, implementation.kind === 'completed' ? implementation.report : implementation,
+        );
         if (implementation.kind === 'safe-halt') {
-          active = await this.persist(active, {
-            lifecycle: 'safe-halt',
-            process: {
-              ...implementation.process,
-              purpose: 'implementation',
-              resumeLifecycle: 'implementing',
-              resumeReviewStage: null,
-            },
-          });
+          active = await this.persist(active, { lifecycle: 'safe-halt' });
           while (true) {
             try { await implementation.waitForAbsence(); break; }
             catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
@@ -1597,11 +1565,18 @@ export class RunIssue {
           return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
         }
         const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
-        active = await this.persist(active, { reportRepairs: 1 });
+        if (isAdoptableAttempt(active.record.activeAttempt)) {
+          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: 1 });
+          active = await this.clearAttempt(active);
+        } else {
+          active = await this.persist(active, { reportRepairs: 1 });
+        }
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
+        active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:changed-files-repair`);
         implementation = await this.runImplementation({
           operation: 'implementation',
+          attemptId: active.record.activeAttempt!.attemptId,
           runId,
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
@@ -1613,16 +1588,11 @@ export class RunIssue {
           ...implementationLaunch,
         });
         if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
+        if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
+          active, implementation.kind === 'completed' ? implementation.report : implementation,
+        );
         if (implementation.kind === 'safe-halt') {
-          active = await this.persist(active, {
-            lifecycle: 'safe-halt',
-            process: {
-              ...implementation.process,
-              purpose: 'implementation',
-              resumeLifecycle: 'implementing',
-              resumeReviewStage: null,
-            },
-          });
+          active = await this.persist(active, { lifecycle: 'safe-halt' });
           while (true) {
             try { await implementation.waitForAbsence(); break; }
             catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
@@ -1642,6 +1612,14 @@ export class RunIssue {
         if (!sameStrings(changedFiles, report.changedFiles)) {
           return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
         }
+      }
+
+      if (isAdoptableAttempt(active.record.activeAttempt)) {
+        active = await this.adoptAttempt(active, sha256(canonicalJson(report)), {
+          transportRetries: active.record.transportRetries,
+          reportRepairs: active.record.reportRepairs,
+        });
+        active = await this.clearAttempt(active);
       }
 
       if (active.record.routeReceipt?.route === 'direct') {
@@ -1671,9 +1649,6 @@ export class RunIssue {
         if (active.record.directReview?.stage === 'review-repair') {
           active = await this.persist(active, {
             directReview: prepareDirectReviewClosure(active.record.directReview, targetFingerprint).state,
-            ...(active.record.reviewFeedback ? {
-              reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
-            } : {}),
           });
         } else {
           const reviewerSessionId = this.dependencies.createReviewSessionId();
@@ -1683,9 +1658,6 @@ export class RunIssue {
               targetFingerprint,
               codeReviewerSessionId: reviewerSessionId,
             }),
-            ...(active.record.reviewFeedback ? {
-              reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
-            } : {}),
           });
         }
         const reviewed = await this.runDirectReviewFull(
@@ -1702,9 +1674,6 @@ export class RunIssue {
       } else {
         active = await this.persist(active, {
           lifecycle: 'checking',
-          ...(active.record.reviewFeedback ? {
-            reviewFeedback: { ...structuredClone(active.record.reviewFeedback), implementationInvocation: null },
-          } : {}),
         });
       }
       }
@@ -1744,43 +1713,34 @@ export class RunIssue {
         if (this.dependencies.checks.supportsLaunchOwnership !== true) {
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-check-launch-ownership-required');
         }
-        const execution = await this.prepareCandidateExecution(active, config, 'final-check', `${id}:${finalCheckPolicySha256}`);
+        const execution = await this.prepareCandidateMaterialization(active, config, 'final-check', `${id}:${finalCheckPolicySha256}`);
         if ('status' in execution) return execution;
         active = execution.active;
-        const lease = execution.lease;
-        let check;
-        try {
-          check = await this.dependencies.checks.run({
-            id, command, source: checkPolicy.source, cwd: lease.path, phase: 'changed', signal: this.signal,
-            onLaunched: async ({ pid, processGroupId }) => {
-              active = await this.persist(active!, {
-                executionLease: this.dependencies.git.candidateV2!.markExecutionLaunched({
-                  lease, pid, processGroupId, launchedAt: this.timestamp(),
-                }),
-              });
-            },
-          });
-        } catch (error) {
-          if (error instanceof CheckProcessQuiescenceError) {
-            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
-          }
+        const materialization = execution.materialization;
+        const checked = await this.executeOrRecoverConfiguredCheck(active, {
+          id, command, source: checkPolicy.source, cwd: materialization.path, phase: 'changed',
+        });
+        if ('status' in checked) return checked;
+        active = checked.active;
+        const check = checked.check;
+        if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
+        if (check.observation.group !== 'absent') {
           return await this.invokedFailure(
             active,
-            'configured-check-execution-failed',
-            error instanceof Error ? error.message : 'The check process did not start or settle. Retry the same run.',
+            'check-process-quiescence-unconfirmed',
+            'The configured check leader exited but its process group is still live or cannot be proven absent.',
           );
         }
-        if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
-        const settledExecution = await this.settleCandidateExecution(active, config);
-        if ('status' in settledExecution) return settledExecution;
-        active = settledExecution.active;
         const row = {
           id, command, status: check.status, outputSha256: check.outputSha256,
           bindingId: finalBinding.bindingId,
           candidateTreeSha: finalBinding.candidateTreeSha,
           checkPolicySha256: finalCheckPolicySha256,
         } as const;
-        active = await this.persist(active, { checks: [...active.record.checks, row] });
+        active = await this.adoptAttempt(active, check.attemptResultSha256, { checks: [...active.record.checks, row] });
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        if ('status' in settledExecution) return settledExecution;
+        active = settledExecution.active;
         if (check.status === 'failed') {
           if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
             const released = await this.clearAndReleaseCandidate(active);
@@ -1831,26 +1791,43 @@ export class RunIssue {
       }
       const proofId = active.record.proofId ?? this.dependencies.createProofId();
       assertNonEmptyString(proofId, 'proofId');
-      active = await this.persist(active, { lifecycle: 'proving', checkedChangeSha256, proofId });
-      const retainedProofLease = active.record.executionLease?.operation === 'acceptance-proof'
-        ? active.record.executionLease
-        : undefined;
-      const preparedProofExecution = retainedProofLease
-        ? { active, lease: retainedProofLease }
-        : await this.prepareCandidateExecution(active, config, 'acceptance-proof', proofId);
-      if ('status' in preparedProofExecution) return preparedProofExecution;
-      active = preparedProofExecution.active;
-      const proofExecution = preparedProofExecution;
+      const proofExecutionState = active.record.proofExecution ?? {
+        startedAt: this.timestamp(), transportRetryCount: 0 as const, reportRepairCount: 0 as const, reportRepairFindings: [],
+      };
+      active = await this.persist(active, { lifecycle: 'proving', checkedChangeSha256, proofId, proofExecution: proofExecutionState });
+      if (active.record.activeAttempt?.operationId === 'acceptance-proof'
+        && active.record.activeAttempt.stage === 'observed' && !active.record.activeAttempt.result) {
+        active = await this.clearAttempt(active);
+      }
+      const retainedProofMaterialization = active.record.candidateMaterialization;
+      if (retainedProofMaterialization && !active.record.activeAttempt) {
+        active = await this.prepareAttempt(active, 'acceptance-proof', proofId);
+      }
+      const preparedProofMaterialization = retainedProofMaterialization
+        ? { active, materialization: retainedProofMaterialization }
+        : await this.prepareCandidateMaterialization(active, config, 'acceptance-proof', proofId);
+      if ('status' in preparedProofMaterialization) return preparedProofMaterialization;
+      active = preparedProofMaterialization.active;
+      const proofMaterialization = preparedProofMaterialization.materialization;
+      const proofAttempt = active.record.activeAttempt;
+      if (!proofAttempt) return this.persistCandidateEvidenceSafetyTerminal(active, 'proof-active-attempt-missing');
 
       let proof: ProveChangeResult;
       let proofLaunchFailure: RunIssueResult | undefined;
       try {
         proof = await this.dependencies.proof.proveChange({
           proofId,
+          attemptId: proofAttempt.attemptId,
+          recoverOnly: proofAttempt.stage !== 'prepared',
+          proofStartedAt: proofExecutionState.startedAt,
+          transportRetryCount: proofExecutionState.transportRetryCount,
+          reportRepairCount: proofExecutionState.reportRepairCount,
+          reportRepairFindings: proofExecutionState.reportRepairFindings,
+          passedReceipt: active.record.proofReceipt,
           issue: publicIssueSnapshot(issueSnapshot),
           frozenCriteria,
           checkedChange,
-          executionLease: proofExecution.lease,
+          materialization: proofMaterialization,
           workflowGeneration: structuredClone(active.record.workflowGeneration),
           onLaunched: async ({ pid, processGroupId, launchedAt }) => {
             const failure = await this.revalidateFeedbackWorker(active!, config, input.issueNumber);
@@ -1858,11 +1835,7 @@ export class RunIssue {
               proofLaunchFailure = failure;
               throw new Error('proof launch authorization changed');
             }
-            active = await this.persist(active!, {
-              executionLease: this.dependencies.git.candidateV2!.markExecutionLaunched({
-                lease: proofExecution.lease, pid, processGroupId, launchedAt,
-              }),
-            });
+            active = await this.launchAttempt(active!, pid, processGroupId);
           },
           beforeAgentLaunch: async () => {
             const failure = await this.revalidateFeedbackWorker(active!, config, input.issueNumber);
@@ -1872,49 +1845,20 @@ export class RunIssue {
       } catch (error) {
         if (proofLaunchFailure) return proofLaunchFailure;
         if (error instanceof ProofLaunchAuthorizationError) return error.outcome as RunIssueResult;
-        if (error instanceof ProofQuiescenceError) {
-          active = await this.persist(active, {
-            lifecycle: 'safe-halt',
-            process: {
-              pid: error.pid,
-              processGroupId: error.processGroupId,
-              startedAt: this.timestamp(),
-              baseline: {
-                headSha: proofBinding.expectedHeadSha,
-                indexTreeSha: proofBinding.candidateTreeSha,
-                trackedContentSha256: proofBinding.bindingId,
-                untrackedContentSha256: proofBinding.bindingId,
-                worktreeIdentity: proofBinding.sourceWorktreeIdentity,
-              },
-              purpose: 'proof',
-              resumeLifecycle: 'proving',
-              resumeReviewStage: null,
-            },
-          });
-          while (true) {
-            try {
-              await error.waitForAbsence();
-              break;
-            } catch {
-              await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-            }
-          }
-          return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'proof-process-quiescence-delayed');
-        }
         if (error instanceof CandidateProofInspectionError) {
           return error.code === 'candidate-artifact-conflict'
             ? this.persistCandidateEvidenceSafetyTerminal(active, error.code)
             : this.mapCandidateFailure(active, error.code);
         }
-        if (error instanceof ProofReportRecoveryError) {
-          return this.invokedFailure(active, 'proof-report-recovery-pending', 'The launched proof attempt exited without a recoverable report; its exact lease is retained for inspection.');
-        }
         return await this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
       }
       if (proofLaunchFailure) return proofLaunchFailure;
-      const settledProofExecution = await this.settleCandidateExecution(active, config);
-      if ('status' in settledProofExecution) return settledProofExecution;
-      active = settledProofExecution.active;
+      if (active.record.activeAttempt?.stage === 'launched') {
+        active = await this.adoptAttempt(active, sha256(canonicalJson(proof)), proof.status === 'passed' ? { proofReceipt: proof.receipt } : {});
+      }
+      const settledProofMaterialization = await this.settleCandidateMaterialization(active, config);
+      if ('status' in settledProofMaterialization) return settledProofMaterialization;
+      active = settledProofMaterialization.active;
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
       if (proof.status === 'needs-rework') {
         if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
@@ -1967,6 +1911,9 @@ export class RunIssue {
       if (active && error instanceof TransportReadError) {
         return await this.invokedFailure(active, 'authorization-read-failed');
       }
+      if (error instanceof LaunchAuthorizationRevokedError) {
+        return await this.revoked(error.active);
+      }
       if (active && error instanceof RouteInitializationUnrecoverableError) {
         const evidence = await this.dependencies.writeEvidence({
           runId: active.record.runId,
@@ -1979,7 +1926,11 @@ export class RunIssue {
         try {
           return await this.terminal(active, { status: 'internal-error', code: 'state-write-failed' });
         } catch {
-          const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'state-write-failed', summary: 'Run state failed.' });
+          const evidence = await this.dependencies.writeEvidence({
+            runId: active.record.runId,
+            code: 'state-write-failed',
+            summary: error instanceof Error ? error.message : 'Run state failed.',
+          });
           return { status: 'internal-error', evidencePath: evidence.path };
         }
       }
@@ -2002,8 +1953,8 @@ export class RunIssue {
 
   async initializeClaimedRun(active: ActiveRun, issue?: RunIssueSnapshot): Promise<ActiveRun> {
     if (active.record.lifecycle !== 'claimed'
-      || active.record.process
-      || active.record.intent
+      || active.record.activeAttempt
+      || active.record.pendingEffect
       || active.record.routeExecution
       || active.record.routeReceipt) {
       throw new RouteInitializationUnrecoverableError();
@@ -2028,7 +1979,7 @@ export class RunIssue {
 
   private async routeRun(
     starting: ActiveRun,
-    issue: RunRecordV1['issueSnapshot'],
+    issue: RunRecord['issueSnapshot'],
     frozenCriteria: FrozenCriterion[],
     worktreePath: string,
     config: AgentAutoConfig,
@@ -2060,31 +2011,38 @@ export class RunIssue {
           active = await this.persist(active, { routeExecution: structuredClone(next) });
           return true;
         },
-        complete: async (expected, next, receipt) => {
+        prepareAttempt: async (operationId, sourceId) => {
+          active = await this.prepareAttempt(active, operationId, sourceId);
+          return active.record.activeAttempt!.attemptId;
+        },
+        launchAttempt: async (attemptId, pid, processGroupId) => {
+          if (active.record.activeAttempt?.attemptId !== attemptId) throw new Error('route active attempt mismatch');
+          active = await this.launchAttempt(active, pid, processGroupId);
+        },
+        adopt: async (expected, next, resultSha256) => {
           if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
-          active = await this.persist(active, {
-            lifecycle: 'routed',
+          active = isAdoptableAttempt(active.record.activeAttempt)
+            ? await this.adoptAttempt(active, resultSha256, { routeExecution: structuredClone(next) })
+            : await this.persist(active, { routeExecution: structuredClone(next) });
+          return true;
+        },
+        clearAttempt: async () => {
+          active = await this.clearAttempt(active);
+        },
+        complete: async (expected, next, receipt, resultSha256) => {
+          if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
+          const changes = {
+            lifecycle: 'routed' as const,
             routeExecution: structuredClone(next),
             routeReceipt: structuredClone(receipt),
-          });
+          };
+          active = isAdoptableAttempt(active.record.activeAttempt)
+            ? await this.adoptAttempt(active, resultSha256, changes)
+            : await this.persist(active, changes);
           return true;
         },
         cancel: async (expected) => {
-          if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
-          const evidence = await this.dependencies.writeEvidence({
-            runId: active.record.runId,
-            code: 'cancelled',
-            summary: 'Routing was cancelled.',
-          });
-          active = await this.persist(active, {
-            lifecycle: 'cancelled',
-            routeExecution: undefined,
-            routeReceipt: undefined,
-            outcomeEvidenceId: evidence.id,
-            terminalOutcome: { status: 'cancelled', evidencePath: evidence.path },
-            ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'cancelled' }) } : {}),
-          });
-          return true;
+          return sameRouteExecution(active.record.routeExecution, expected);
         },
       };
       const result = await this.dependencies.routeCoordinator.run({
@@ -2108,12 +2066,6 @@ export class RunIssue {
       if (result.status === 'safe-halt') {
         active = await this.persist(active, {
           lifecycle: 'safe-halt',
-          process: {
-            ...result.process,
-            purpose: 'route',
-            resumeLifecycle: 'triaging',
-            resumeReviewStage: null,
-          },
         });
         while (true) {
           try {
@@ -2130,8 +2082,7 @@ export class RunIssue {
         return { result: await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed') };
       }
       if (result.status === 'cancelled') {
-        if (!active.record.terminalOutcome) throw new Error('route cancellation was not persisted');
-        return { result: publicOutcome(active.record.terminalOutcome) };
+        return { result: await this.terminal(active, { status: 'cancelled' }) };
       }
       if (result.status === 'blocked') {
         return { result: await this.terminal(active, {
@@ -2215,6 +2166,115 @@ export class RunIssue {
     return { active };
   }
 
+  private async publishWaitingQuestionEffect(
+    active: ActiveRun,
+    input: { issueNumber: number; marker: string; body: string },
+  ): Promise<{ active: ActiveRun; result: Awaited<ReturnType<WaitingHumanState['publishQuestion']>> }> {
+    const expected = { kind: 'waiting-question-comment' as const, issueNumber: input.issueNumber, marker: input.marker, bodySha256: sha256(input.body) };
+    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== expected.kind || effect.issueNumber !== expected.issueNumber
+      || effect.marker !== expected.marker || effect.bodySha256 !== expected.bodySha256) {
+      return { active, result: { status: 'conflict', evidence: ['waiting-question-pending-effect-diverged'] } };
+    }
+    let issue = await this.readIssue(input.issueNumber);
+    if (!issue) return { active, result: { status: 'retryable', code: 'question-comment-observation-failed' } };
+    let matches = commentsWithMarker(issue, input.marker);
+    if (matches.length > 1 || matches.some((comment) => sha256(comment.body) !== expected.bodySha256)) {
+      return { active, result: { status: 'conflict', evidence: matches.map((comment) => sha256(comment.body)) } };
+    }
+    if (matches.length === 0) {
+      try { await this.dependencies.issues.postComment(input.issueNumber, input.body); }
+      catch { return { active, result: { status: 'retryable', code: 'question-comment-unknown' } }; }
+      issue = await this.readIssue(input.issueNumber);
+      matches = issue ? commentsWithMarker(issue, input.marker) : [];
+    }
+    if (matches.length !== 1 || sha256(matches[0]!.body) !== expected.bodySha256) {
+      return { active, result: { status: 'retryable', code: 'question-comment-observation-failed' } };
+    }
+    return { active: await this.confirmEffect(active), result: { status: 'settled' } };
+  }
+
+  private async createInitialWorktreeEffect(active: ActiveRun, targetRoot: string): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const expected = {
+      kind: 'worktree-create' as const, worktreePath: active.record.worktreePath, branchName: active.record.branchName,
+      baseBranch: active.config.github.baseBranch, baseSha: active.record.baseSha,
+    };
+    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
+    const effect = active.record.pendingEffect;
+    if (!effect || effect.kind !== expected.kind || canonicalJson(effect) !== canonicalJson(createPendingEffect(expected))) {
+      return this.invokedFailure(active, 'worktree-create-pending-effect-diverged');
+    }
+    let observed;
+    try { observed = await this.dependencies.git.inspectWorktree({ worktreePath: effect.worktreePath, branchName: effect.branchName, baseSha: effect.baseSha }); }
+    catch (error) { return this.invokedFailure(active, 'local-git-worktree-inspection-failed', claimedWorktreeInspectionFailureSummary(error)); }
+    if (observed === 'diverged') return this.invokedFailure(active, 'local-git-worktree-diverged', 'The claimed worktree path does not match the persisted worktree effect.');
+    if (observed === 'absent') {
+      try { await this.dependencies.git.createWorktree({ targetRoot, ...effect }); }
+      catch (error) { return this.invokedFailure(active, 'local-git-worktree-creation-failed', worktreeCreationFailureSummary(error)); }
+      try { observed = await this.dependencies.git.inspectWorktree({ worktreePath: effect.worktreePath, branchName: effect.branchName, baseSha: effect.baseSha }); }
+      catch (error) { return this.invokedFailure(active, 'local-git-worktree-inspection-failed', claimedWorktreeInspectionFailureSummary(error)); }
+    }
+    if (observed !== 'matching') return this.invokedFailure(active, 'local-git-worktree-observation-failed');
+    return { active: await this.confirmEffect(active) };
+  }
+
+  private async createContinuationWorktreeEffect(
+    active: ActiveRun,
+    targetRoot: string,
+    expectedHeadSha: string,
+  ): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const expected = {
+      kind: 'continuation-worktree-create' as const, worktreePath: active.record.worktreePath,
+      branchName: active.record.branchName, baseBranch: active.config.github.baseBranch, publishedHeadSha: expectedHeadSha,
+    };
+    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
+    const effect = active.record.pendingEffect;
+    if (!effect || effect.kind !== expected.kind || canonicalJson(effect) !== canonicalJson(createPendingEffect(expected))) {
+      return this.invokedFailure(active, 'continuation-worktree-create-pending-effect-diverged');
+    }
+    let observed = await this.dependencies.git.inspectWorktree({
+      worktreePath: effect.worktreePath, branchName: effect.branchName, baseSha: effect.publishedHeadSha,
+    });
+    if (observed === 'absent') {
+      if (!this.dependencies.git.ensureContinuationWorktree) return this.invokedFailure(active, 'continuation-worktree-create-unavailable');
+      try { await this.dependencies.git.ensureContinuationWorktree({ targetRoot, ...effect }); }
+      catch { return this.invokedFailure(active, 'continuation-worktree-create-unknown'); }
+      observed = await this.dependencies.git.inspectWorktree({
+        worktreePath: effect.worktreePath, branchName: effect.branchName, baseSha: effect.publishedHeadSha,
+      });
+    }
+    const remoteSha = observed === 'matching'
+      ? await this.dependencies.git.getRemoteBranchSha(effect.worktreePath, effect.branchName) : undefined;
+    if (observed !== 'matching' || remoteSha !== effect.publishedHeadSha) {
+      return this.invokedFailure(active, 'review-feedback-worktree-diverged');
+    }
+    return { active: await this.confirmEffect(active) };
+  }
+
+  private async projectWaitingLabelsEffect(
+    active: ActiveRun,
+    input: { kind: 'waiting-wait-labels' | 'waiting-resume-labels' | 'waiting-revoke-labels'; issueNumber: number; expected: string[] },
+  ): Promise<{ active: ActiveRun; result: Awaited<ReturnType<WaitingHumanState['projectLabels']>> }> {
+    let issue = await this.readIssue(input.issueNumber);
+    if (!issue || issue.state !== 'OPEN') return { active, result: { status: 'cancelled' } };
+    const expected = sortedUnique(input.expected);
+    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { ...input, expected } });
+    const effect = active.record.pendingEffect;
+    if (!effect || effect.kind !== input.kind || effect.issueNumber !== input.issueNumber || !sameStrings(effect.expected, expected)) {
+      return { active, result: { status: 'retryable', code: 'waiting-labels-pending-effect-diverged' } };
+    }
+    if (!sameStrings(issue.labels, expected)) {
+      try { await this.dependencies.issues.setLabels(input.issueNumber, expected); }
+      catch { return { active, result: { status: 'retryable', code: `${input.kind}-unknown` } }; }
+      issue = await this.readIssue(input.issueNumber);
+    }
+    if (!issue || issue.state !== 'OPEN' || !sameStrings(issue.labels, expected)) {
+      return { active, result: { status: 'retryable', code: `${input.kind}-observation-failed` } };
+    }
+    return { active: await this.confirmEffect(active), result: { status: 'settled' } };
+  }
+
   private waitingState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): WaitingHumanState {
     return {
       read: async () => structuredClone(readActive().record.waitingHuman),
@@ -2234,6 +2294,16 @@ export class RunIssue {
         writeActive(saved);
         return true;
       },
+      publishQuestion: async (input) => {
+        const handled = await this.publishWaitingQuestionEffect(readActive(), input);
+        writeActive(handled.active);
+        return handled.result;
+      },
+      projectLabels: async (input) => {
+        const handled = await this.projectWaitingLabelsEffect(readActive(), input);
+        writeActive(handled.active);
+        return handled.result;
+      },
     };
   }
 
@@ -2249,6 +2319,30 @@ export class RunIssue {
         const saved = await this.persist(active, { specDelivery: structuredClone(next) });
         writeActive(saved);
         return true;
+      },
+      prepareAttempt: async (operationId, sourceId) => {
+        const saved = await this.prepareAttempt(readActive(), operationId, sourceId);
+        writeActive(saved);
+        const attempt = saved.record.activeAttempt!;
+        return { attemptId: attempt.attemptId, recoverOnly: attempt.stage === 'observed' && attempt.result !== null };
+      },
+      launchAttempt: async (attemptId, pid, processGroupId) => {
+        const active = readActive();
+        if (active.record.activeAttempt?.attemptId !== attemptId) throw new Error('spec active attempt mismatch');
+        writeActive(await this.launchAttempt(active, pid, processGroupId));
+      },
+      adopt: async (expected, next, resultSha256) => {
+        const active = readActive();
+        if (canonicalJson(active.record.specDelivery) !== canonicalJson(expected)) return false;
+        const saved = isAdoptableAttempt(active.record.activeAttempt)
+          ? await this.adoptAttempt(active, resultSha256, { specDelivery: structuredClone(next) })
+          : await this.persist(active, { specDelivery: structuredClone(next) });
+        writeActive(saved);
+        return true;
+      },
+      clearAttempt: async () => {
+        const saved = await this.clearAttempt(readActive());
+        writeActive(saved);
       },
     };
   }
@@ -2366,14 +2460,15 @@ export class RunIssue {
     issueSnapshot: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     config: AgentAutoConfig;
-    intent: PublicationIntent;
+    pendingEffect: PendingEffectInput;
   }): Promise<ActiveRun> {
     const state = await this.dependencies.runRecords.read();
     const now = this.timestamp();
     const workflow = await this.dependencies.createWorkflowGeneration();
     const { config, ...persistedInput } = input;
-    const record: RunRecordV1 = {
+    const record: RunRecord = {
       ...persistedInput,
+      pendingEffect: createPendingEffect(persistedInput.pendingEffect),
       lifecycle: 'claimed', cycle: 1, reportRepairs: 0, transportRetries: 0,
       reworkFindings: [],
       packageVersion: workflow.receipt.packageVersion,
@@ -2382,36 +2477,39 @@ export class RunIssue {
       checks: [], createdAt: now, updatedAt: now,
     };
     const saved = await this.dependencies.runRecords.compareAndSwap(state.generation, {
-      schema: 'codex-orchestrator.agent-auto-state', version: state.version, runs: [...state.runs, record],
+      schema: 'codex-orchestrator.run-state', runs: [...state.runs, record],
     });
     return { state: saved, record: findRun(saved, input.runId), config };
   }
 
   private async persist(
     active: ActiveRun,
-    changes: Partial<RunRecordV1> & { intent?: PublicationIntent | undefined },
-    stateVersion: 2 | 3 = active.state.version,
+    changes: Omit<Partial<RunRecord>, 'pendingEffect'> & { pendingEffect?: PendingEffect | PendingEffectInput | undefined },
   ): Promise<ActiveRun> {
-    const record = { ...active.record, ...changes, updatedAt: this.timestamp() } as RunRecordV1;
-    if (Object.hasOwn(changes, 'intent') && changes.intent === undefined) delete record.intent;
-    if (Object.hasOwn(changes, 'process') && changes.process === undefined) delete record.process;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback', 'checkQualification', 'baselineChecks', 'changeBindingVersion', 'candidateBinding', 'executionLease'] as const) {
+    let normalized = changes;
+    if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect) {
+      const { effectId: _priorEffectId, ...payload } = changes.pendingEffect as PendingEffect;
+      normalized = { ...changes, pendingEffect: createPendingEffect(payload as PendingEffectInput) };
+    }
+    const record = { ...active.record, ...normalized, updatedAt: this.timestamp() } as RunRecord;
+    if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback', 'checkQualification', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
     const saved = await this.dependencies.runRecords.compareAndSwap(active.state.generation, {
-      schema: 'codex-orchestrator.agent-auto-state', version: stateVersion, runs,
+      schema: 'codex-orchestrator.run-state', runs,
     });
     return { state: saved, record: findRun(saved, record.runId), config: active.config };
   }
 
-  private clearIntent(active: ActiveRun): Promise<ActiveRun> {
-    return this.persist(active, { intent: undefined });
+  private clearEffect(active: ActiveRun): Promise<ActiveRun> {
+    return this.persist(active, { pendingEffect: undefined });
   }
 
   private async confirmEffect(active: ActiveRun): Promise<ActiveRun> {
     try {
-      return await this.clearIntent(active);
+      return await this.clearEffect(active);
     } catch {
       throw new PostEffectStateError(active);
     }
@@ -2424,7 +2522,7 @@ export class RunIssue {
 
   private isAuthorizedIssue(
     issue: RunIssueSnapshot,
-    record: RunRecordV1,
+    record: RunRecord,
     config: AgentAutoConfig,
   ): boolean {
     if (issue.state !== 'OPEN') return false;
@@ -2445,12 +2543,12 @@ export class RunIssue {
       && this.hasTrustedClaim(issue, active.record);
   }
 
-  private hasTrustedClaim(issue: RunIssueSnapshot, record: RunRecordV1): boolean {
+  private hasTrustedClaim(issue: RunIssueSnapshot, record: RunRecord): boolean {
     const exactBody = claimComment(record.runId, record.issueNumber, record.branchName);
     const markers = issue.comments.filter(isClaimMarkerComment);
     if (issue.comments.some((comment) => {
       const firstLine = comment.body.split('\n')[0] ?? '';
-      return firstLine.startsWith(`<!-- codex-orchestrator:run:${record.runId}:claim`) && !claimMarkerPattern.test(firstLine);
+      return firstLine.startsWith(`<!-- codex-orchestrator:run:${record.runId}:claim`) && !isExactClaimMarkerLine(firstLine);
     })) return false;
     const currentMarkers = markers.filter((comment) => claimRunId(comment) === record.runId);
     if (currentMarkers.some((comment) => comment.body !== exactBody
@@ -2541,195 +2639,320 @@ export class RunIssue {
     return { active: await this.persist(active, {
       changeBindingVersion: 2,
       candidateBinding: captured.value,
-    }, 3) };
-  }
-
-  private async cutoverLegacyImmutableBoundary(
-    active: ActiveRun,
-    config: AgentAutoConfig,
-    frozenCriteria: FrozenCriterion[],
-  ): Promise<{ active: ActiveRun } | RunIssueResult> {
-    const captured = await this.ensureCandidateBinding(active, config, {
-      kind: 'implementation-cycle', cycle: active.record.cycle,
-    });
-    if ('status' in captured) return captured;
-    active = captured.active;
-    const binding = active.record.candidateBinding!;
-    const targetFingerprint = directReviewCandidateTargetFingerprint({
-      binding,
-      routeDecisionSha256: active.record.routeReceipt!.decisionSha256,
-      workflowGenerationHash: active.record.workflowGeneration.generationHash,
-      cycle: active.record.cycle,
-      frozenCriteria,
-    });
-    return { active: await this.persist(active, {
-      lifecycle: 'implementing',
-      directReview: createInitialDirectReview({
-        targetFingerprint,
-        codeReviewerSessionId: this.dependencies.createReviewSessionId(),
-      }),
-      checks: [], checkedChangeSha256: undefined, proofId: undefined, proofReceipt: undefined,
-      checkQualification: undefined, baselineChecks: undefined,
-      terminalOutcome: undefined, outcomeEvidenceId: undefined,
     }) };
   }
 
-  private async resumeLegacyProof(
+  private async prepareAttempt(
     active: ActiveRun,
-    config: AgentAutoConfig,
-    issue: IssueSnapshot,
-    frozenCriteria: FrozenCriterion[],
-    recoverAttemptOnly = false,
-  ): Promise<{ active: ActiveRun } | RunIssueResult> {
-    const proofId = active.record.proofId;
-    const recordedCheckedChange = active.record.checkedChangeSha256;
-    if (!proofId || !recordedCheckedChange || active.record.checks.some((check) => check.status !== 'passed' || 'bindingId' in check)) {
-      return this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
+    operationId: string,
+    operationSourceId: string,
+    resultPath?: string,
+  ): Promise<ActiveRun> {
+    if (active.record.activeAttempt) {
+      const attempt = active.record.activeAttempt;
+      if (attempt.stage === 'observed' && attempt.result
+        && attempt.operationId === operationId && attempt.operationSourceId === operationSourceId
+        && (resultPath === undefined || attempt.resultPath === resultPath)) {
+        return active;
+      }
+      throw new Error('run already owns an active attempt');
     }
-    let checkPolicy;
-    try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
-    catch (error) { return this.invokedFailure(active, 'issue-verification-invalid', error instanceof Error ? error.message : undefined); }
-    if (!sameCheckPolicy(active.record.checks, checkPolicy.checks)) {
-      return this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
-    }
-    const snapshot = await this.dependencies.git.snapshot(active.record.worktreePath);
-    const payload: CheckedChangePayloadV1 = {
-      version: 1,
+    const incarnationId = this.dependencies.createRunId();
+    const provisional = createActiveAttempt({
+      runId: active.record.runId,
+      operationId,
+      operationSourceId,
+      resultPath: resultPath ?? '/pending-attempt-result',
+      preparedAt: this.timestamp(),
+    }, () => incarnationId);
+    const exactResultPath = resultPath ?? this.dependencies.attemptResultPath({
       canonicalRepository: active.record.canonicalRepository,
       runId: active.record.runId,
-      issueNumber: active.record.issueNumber,
-      cycle: active.record.cycle,
-      baseSha: expectedImplementationHead(active.record),
-      headSha: snapshot.headSha,
-      indexTreeSha: snapshot.indexTreeSha,
-      trackedContentSha256: snapshot.trackedContentSha256,
-      untrackedContentSha256: snapshot.untrackedContentSha256,
-      worktreeIdentity: snapshot.worktreeIdentity,
-      changedFiles: await this.dependencies.git.listChangedFiles(active.record.worktreePath),
-      checks: active.record.checks.map(({ id, command, outputSha256 }) => ({ id, command, status: 'passed' as const, outputSha256 })),
-      checkPolicySha256: sha256(canonicalJson(checkPolicy.checks)),
-      packageVersion: active.record.packageVersion,
-      proofSchemaVersion: 1,
-    };
-    if (checkedChangePayloadSha256(payload) !== recordedCheckedChange) {
-      return this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
-    }
-    const checkedChange = this.dependencies.checkedChangeMint.mint(payload);
-    let proof: ProveChangeResult;
-    try {
-      proof = await this.dependencies.proof.proveChange({
-        proofId,
-        issue: publicIssueSnapshot(issue),
-        frozenCriteria,
-        checkedChange,
-        recoverAttemptOnly,
-        workflowGeneration: structuredClone(active.record.workflowGeneration),
-        beforeAgentLaunch: async () => {
-          const failure = await this.revalidateFeedbackWorker(active, config, active.record.issueNumber);
-          if (failure) throw new ProofLaunchAuthorizationError(failure);
-        },
-        onLaunched: async ({ pid, processGroupId, launchedAt }) => {
-          active = await this.persist(active, {
-            lifecycle: 'safe-halt',
-            process: {
-              pid, processGroupId, startedAt: launchedAt, baseline: snapshot,
-              purpose: 'proof', resumeLifecycle: 'proving', resumeReviewStage: null,
-            },
-          });
-        },
-      });
-    } catch (error) {
-      if (error instanceof ProofLaunchAuthorizationError) return error.outcome as RunIssueResult;
-      if (error instanceof ProofQuiescenceError) {
-        return this.persistTerminal(active, { status: 'transport-failed', resumable: false }, 'proof-process-quiescence-delayed', false);
-      }
-      return this.persistTerminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' }, 'acceptance-proof-internal-failure', false);
-    }
-    active = await this.persist(active, { lifecycle: 'proving', process: undefined });
-    if (proof.status === 'passed') {
-      return { active: await this.persist(active, { lifecycle: 'publishing', proofReceipt: proof.receipt, reworkFindings: [] }) };
-    }
-    if (proof.status === 'needs-rework') return this.cutoverLegacyImmutableBoundary(active, config, frozenCriteria);
-    return this.mapProofFailure(active, proof);
+      attemptId: provisional.attemptId,
+    });
+    return this.persist(active, {
+      activeAttempt: createActiveAttempt({
+        runId: active.record.runId,
+        operationId,
+        operationSourceId,
+        resultPath: exactResultPath,
+        preparedAt: provisional.preparedAt,
+      }, () => incarnationId),
+    });
   }
 
-  private async prepareCandidateExecution(
+  private async reconcilePersistedAttempt(
+    active: ActiveRun,
+  ): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const attempt = active.record.activeAttempt;
+    if (!attempt) return { active };
+    if (attempt.stage === 'prepared') return { active };
+    if (attempt.stage === 'adopted') {
+      return active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
+    }
+    if (attempt.stage === 'observed') {
+      if (attempt.result) return { active };
+      return active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
+    }
+    const observation = await this.dependencies.processIdentity.observe(attempt.process);
+    if (!['absent', 'reused'].includes(observation.leader) || observation.group !== 'absent') {
+      return this.invokedFailure(
+        active,
+        'active-attempt-process-absence-unconfirmed',
+        'The prior attempt remains active or its process identity cannot yet be proven absent.',
+      );
+    }
+    const result = await this.dependencies.inspectAttemptResult(attempt.resultPath);
+    const observed = observeActiveAttempt(attempt, {
+      ...observation,
+      result: result ? { path: attempt.resultPath, sha256: result.sha256 } : null,
+      observedAt: this.timestamp(),
+    });
+    active = await this.persist(active, { activeAttempt: observed });
+    return observed.result || active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
+  }
+
+  private async launchAttempt(
+    active: ActiveRun,
+    pid: number,
+    processGroupId: number,
+    semanticChanges: Omit<Partial<RunRecord>, 'activeAttempt'> = {},
+  ): Promise<ActiveRun> {
+    const attempt = active.record.activeAttempt;
+    if (!attempt || attempt.stage !== 'prepared') throw new Error('prepared active attempt is missing');
+    const processStartIdentity = await this.dependencies.processIdentity.capture(pid, processGroupId);
+    if (!processStartIdentity) throw new Error('process start identity is unknown');
+    if (!await this.authorized(active, active.config)) throw new LaunchAuthorizationRevokedError(active);
+    return this.persist(active, {
+      ...semanticChanges,
+      activeAttempt: launchActiveAttempt(attempt, {
+        host: this.dependencies.processIdentity.host,
+        bootId: this.dependencies.processIdentity.bootId,
+        pid,
+        processGroupId,
+        processStartIdentity,
+        launchedAt: this.timestamp(),
+      }),
+    });
+  }
+
+  private async adoptAttempt(
+    active: ActiveRun,
+    resultSha256: string,
+    semanticChanges: Omit<Partial<RunRecord>, 'activeAttempt'>,
+  ): Promise<ActiveRun> {
+    let attempt = active.record.activeAttempt;
+    if (!attempt || (attempt.stage !== 'launched' && attempt.stage !== 'observed')) {
+      throw new Error('adoptable active attempt is missing');
+    }
+    if (attempt.stage === 'launched') {
+      const observed = observeActiveAttempt(attempt, {
+        leader: 'absent',
+        group: 'absent',
+        result: { path: attempt.resultPath, sha256: resultSha256 },
+        observedAt: this.timestamp(),
+      });
+      active = await this.persistAttemptTransition(active, observed, {});
+      attempt = active.record.activeAttempt;
+    }
+    if (!attempt || attempt.stage !== 'observed' || !attempt.result
+      || attempt.result.path !== attempt.resultPath || attempt.result.sha256 !== resultSha256) {
+      throw new Error('observed active attempt result identity mismatch');
+    }
+    return this.persistAttemptTransition(active, adoptActiveAttempt(attempt, this.timestamp()), semanticChanges);
+  }
+
+  private async observeReturnedAttempt(active: ActiveRun, result: unknown): Promise<ActiveRun> {
+    const attempt = active.record.activeAttempt;
+    if (!attempt || attempt.stage !== 'launched') return active;
+    return this.persistAttemptTransition(active, observeActiveAttempt(attempt, {
+      leader: 'absent', group: 'absent',
+      result: { path: attempt.resultPath, sha256: sha256(canonicalJson(result)) },
+      observedAt: this.timestamp(),
+    }), {});
+  }
+
+  private async clearAttempt(active: ActiveRun): Promise<ActiveRun> {
+    const attempt = active.record.activeAttempt;
+    if (!attempt) return active;
+    if (attempt.stage === 'launched') throw new Error('active attempt cleanup cannot be confirmed while launched');
+    const confirmed = confirmActiveAttemptCleanup(
+      attempt,
+      attempt.cleanupConfirmedAt ?? this.timestamp(),
+    );
+    active = await this.persist(active, { activeAttempt: confirmed });
+    return this.persist(active, { activeAttempt: undefined });
+  }
+
+  private async persistAttemptTransition(
+    active: ActiveRun,
+    nextAttempt: RunRecord['activeAttempt'],
+    semanticChanges: Omit<Partial<RunRecord>, 'activeAttempt'>,
+  ): Promise<ActiveRun> {
+    try {
+      return await this.persist(active, { ...semanticChanges, activeAttempt: nextAttempt });
+    } catch (error) {
+      const currentState = await this.dependencies.runRecords.read();
+      const current = currentState.runs.find((record) => record.runId === active.record.runId);
+      if (!current?.activeAttempt || !nextAttempt
+        || current.activeAttempt.attemptId !== nextAttempt.attemptId) throw error;
+      const currentResult = current.activeAttempt.stage === 'observed' || current.activeAttempt.stage === 'adopted'
+        ? current.activeAttempt.result : undefined;
+      const nextResult = nextAttempt.stage === 'observed' || nextAttempt.stage === 'adopted'
+        ? nextAttempt.result : undefined;
+      if (!currentResult || !nextResult || currentResult.path !== nextResult.path || currentResult.sha256 !== nextResult.sha256) throw error;
+      if (nextAttempt.stage === 'observed' && (current.activeAttempt.stage === 'observed' || current.activeAttempt.stage === 'adopted')) {
+        return { state: currentState, record: current, config: active.config };
+      }
+      if (nextAttempt.stage === 'adopted' && current.activeAttempt.stage === 'adopted'
+        && semanticChangesMatch(current, semanticChanges)) {
+        return { state: currentState, record: current, config: active.config };
+      }
+      if (nextAttempt.stage === 'adopted' && current.activeAttempt.stage === 'observed') {
+        return this.persist(
+          { state: currentState, record: current, config: active.config },
+          { ...semanticChanges, activeAttempt: nextAttempt },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async executeOrRecoverConfiguredCheck(
+    active: ActiveRun,
+    input: { id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'qualification' | 'changed' },
+  ): Promise<{ active: ActiveRun; check: DurableConfiguredCheckResult } | RunIssueResult> {
+    const attempt = active.record.activeAttempt;
+    if (attempt?.stage === 'observed' && attempt.result) {
+      const stored = await this.dependencies.inspectAttemptResult(attempt.resultPath);
+      if (!stored || stored.sha256 !== attempt.result.sha256) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'configured-check-result-missing');
+      }
+      try {
+        const recovered = validateConfiguredCheckAttemptBytes(stored.bytes, input);
+        return { active, check: {
+          status: recovered.status, output: recovered.output, outputSha256: recovered.outputSha256,
+          observation: { leader: 'absent', group: 'absent' }, attemptResultSha256: stored.sha256,
+        } };
+      } catch {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'configured-check-result-invalid');
+      }
+    }
+    let executed: Awaited<ReturnType<RunIssueDependencies['checks']['run']>>;
+    try {
+      executed = await this.dependencies.checks.run({
+        ...input, signal: this.signal,
+        onLaunched: async ({ pid, processGroupId }) => { active = await this.launchAttempt(active, pid, processGroupId); },
+      });
+    } catch (error) {
+      if (error instanceof CheckProcessQuiescenceError) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+      }
+      return this.invokedFailure(active, input.phase === 'qualification'
+        ? 'qualification-check-execution-failed' : 'configured-check-execution-failed',
+      error instanceof Error ? error.message : 'The configured check process did not start or settle. Retry the same run.');
+    }
+    if (executed.outputSha256 !== sha256(executed.output)) {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'configured-check-output-sha-invalid');
+    }
+    const launched = active.record.activeAttempt;
+    if (!launched || launched.stage !== 'launched') throw new Error('launched configured check attempt is missing');
+    const bytes = configuredCheckAttemptBytes({ ...input, status: executed.status, output: executed.output });
+    const attemptResultSha256 = sha256(bytes);
+    try { await this.dependencies.writeAttemptResult({ path: launched.resultPath, bytes, sha256: attemptResultSha256 }); }
+    catch { return this.invokedFailure(active, 'configured-check-result-write-failed'); }
+    const stored = await this.dependencies.inspectAttemptResult(launched.resultPath);
+    if (!stored || stored.sha256 !== attemptResultSha256) {
+      return this.invokedFailure(active, 'configured-check-result-observation-failed');
+    }
+    return { active, check: { ...executed, attemptResultSha256 } };
+  }
+
+  private async prepareCandidateMaterialization(
     active: ActiveRun,
     config: AgentAutoConfig,
-    operation: CandidateExecutionLeaseV2['operation'],
+    operation: 'qualification-check' | 'direct-review' | 'final-check' | 'acceptance-proof',
     operationSourceId: string,
-  ): Promise<{ active: ActiveRun; lease: CandidateExecutionLeaseV2 } | RunIssueResult> {
+  ): Promise<{ active: ActiveRun; materialization: CandidateMaterializationV2 } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
     if (!candidate || !binding) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
-    const attemptId = sha256(canonicalJson({ bindingId: binding.bindingId, operation, operationSourceId }));
-    const prepared = await candidate.prepareExecution({
+    const materializationId = sha256(canonicalJson({ bindingId: binding.bindingId, operation, operationSourceId }));
+    const prepared = await candidate.prepareMaterialization({
       binding,
       runId: active.record.runId,
       workspaceRoot: resolve(dirname(active.record.worktreePath)),
-      operation,
-      attemptId,
+      materializationId,
     });
     if (prepared.kind === 'failed') return this.mapCandidateFailure(active, prepared.code);
     if (prepared.value.kind === 'path-diverged') {
       return this.persistCandidateEvidenceSafetyTerminal(active, 'path-diverged');
     }
-    const next = await this.persist(active, { executionLease: prepared.value.lease });
-    return { active: next, lease: prepared.value.lease };
+    let next = await this.persist(active, { candidateMaterialization: prepared.value.materialization });
+    next = await this.prepareAttempt(
+      next,
+      operation === 'direct-review' ? 'code-review' : operation === 'acceptance-proof' ? 'acceptance-proof' : 'configured-check',
+      operationSourceId,
+    );
+    return { active: next, materialization: prepared.value.materialization };
   }
 
-  private async settleCandidateExecution(
+  private async settleCandidateMaterialization(
     active: ActiveRun,
     config: AgentAutoConfig,
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
-    const lease = active.record.executionLease;
-    if (!candidate || !binding || !lease) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-execution-state-missing');
-    const inspection = await candidate.inspectExecution({ binding, lease, artifactDir: config.proof.artifactDir });
+    const materialization = active.record.candidateMaterialization;
+    if (!candidate || !binding || !materialization) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-state-missing');
+    if (active.record.activeAttempt?.stage !== 'adopted') {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-result-adoption-unconfirmed');
+    }
+    const inspection = await candidate.inspectMaterialization({ binding, materialization, artifactDir: config.proof.artifactDir });
     if (inspection.kind === 'failed') return this.mapCandidateFailure(active, inspection.code);
     if (inspection.value !== 'matching') {
-      return this.reconcilePersistedCandidateExecution(active, config);
+      return this.reconcilePersistedCandidateMaterialization(active, config);
     }
-    const cleared = await this.persist(active, { executionLease: undefined });
-    const removed = await candidate.removeExecution({ lease, requireProcessAbsent: true });
-    if (removed.kind === 'failed') return this.mapCandidateFailure(cleared, removed.code);
+    const removed = await candidate.removeMaterialization({ materialization });
+    if (removed.kind === 'failed') return this.mapCandidateFailure(active, removed.code);
+    let cleared = await this.persist(active, { candidateMaterialization: undefined });
+    cleared = await this.clearAttempt(cleared);
     return { active: cleared };
   }
 
-  private async reconcilePersistedCandidateExecution(
+  private async reconcilePersistedCandidateMaterialization(
     active: ActiveRun,
     config: AgentAutoConfig,
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
-    const lease = active.record.executionLease;
-    if (!candidate || !binding || !lease) {
-      return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-execution-state-missing');
+    const materialization = active.record.candidateMaterialization;
+    if (!candidate || !binding || !materialization) {
+      return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-materialization-state-missing');
     }
-    if (lease.phase === 'launched') {
-      try { await this.dependencies.waitForReviewProcessAbsence(lease.processGroupId!); }
-      catch { return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-execution-process-absence-unconfirmed'); }
-    }
-    const inspection = await candidate.inspectExecution({ binding, lease, artifactDir: config.proof.artifactDir });
+    const inspection = await candidate.inspectMaterialization({ binding, materialization, artifactDir: config.proof.artifactDir });
     if (inspection.kind === 'failed') return this.mapCandidateFailure(active, inspection.code);
-    if (inspection.value === 'missing') return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-execution-missing');
-    if (inspection.value === 'mutated') {
-      const cleared = await this.persist(active, {
-        executionLease: undefined, changeBindingVersion: undefined, candidateBinding: undefined,
-      });
-      const removed = await candidate.removeExecution({ lease, requireProcessAbsent: true });
-      if (removed.kind === 'failed') return this.mapCandidateFailure(cleared, removed.code);
-      const released = await candidate.releasePin({ binding, expectedPinnedCommitSha: binding.candidateCommitSha });
-      if (released.kind === 'failed') return this.mapCandidateFailure(cleared, released.code);
-      return this.persistTerminal(cleared, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-mutated', false);
+    if (inspection.value === 'missing') {
+      return active.record.terminalOutcome
+        ? { active: await this.persist(active, { candidateMaterialization: undefined }) }
+        : this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-execution-missing');
     }
-    if (lease.operation === 'acceptance-proof') {
+    if (inspection.value === 'mutated') {
+      return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-mutated', false);
+    }
+    if (active.record.activeAttempt?.stage === 'observed' && active.record.activeAttempt.result) {
       return { active };
     }
-    const cleared = await this.persist(active, { executionLease: undefined });
-    const removed = await candidate.removeExecution({ lease, requireProcessAbsent: true });
-    if (removed.kind === 'failed') return this.mapCandidateFailure(cleared, removed.code);
+    if (active.record.terminalOutcome && !active.record.activeAttempt) {
+      const removed = await candidate.removeMaterialization({ materialization });
+      if (removed.kind === 'failed') return this.mapCandidateFailure(active, removed.code);
+      return { active: await this.persist(active, { candidateMaterialization: undefined }) };
+    }
+    if (active.record.activeAttempt?.stage !== 'adopted') return { active };
+    const removed = await candidate.removeMaterialization({ materialization });
+    if (removed.kind === 'failed') return this.mapCandidateFailure(active, removed.code);
+    let cleared = await this.persist(active, { candidateMaterialization: undefined });
+    cleared = await this.clearAttempt(cleared);
     return { active: cleared };
   }
 
@@ -2737,7 +2960,7 @@ export class RunIssue {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
     if (!candidate || !binding) return { active };
-    if (active.record.executionLease) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-execution-not-quiescent');
+    if (active.record.candidateMaterialization) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-not-cleared');
     const normalized = await candidate.normalizeSharedIndex({
       worktreePath: active.record.worktreePath,
       expectedHeadSha: expectedImplementationHead(active.record),
@@ -2752,48 +2975,31 @@ export class RunIssue {
   }
 
   private async persistRetainedCommitIntentTerminal(active: ActiveRun, evidenceCode: string): Promise<RunIssueResult> {
-    const intent = active.record.intent;
-    if (!active.record.candidateBinding || (intent?.kind !== 'commit' && intent?.kind !== 'review-update-commit')) {
-      return this.invokedFailure(active, 'retained-candidate-intent-state-invalid');
+    const pendingEffect = active.record.pendingEffect;
+    if (!active.record.candidateBinding || (pendingEffect?.kind !== 'initial-commit' && pendingEffect?.kind !== 'review-update-commit')) {
+      return this.invokedFailure(active, 'retained-candidate-pendingEffect-state-invalid');
     }
-    const evidence = await this.dependencies.writeEvidence({
-      runId: active.record.runId,
-      code: evidenceCode,
-      summary: 'Candidate publication stopped locally with the exact commit intent and pin retained.',
-    });
-    const terminalOutcome: RunTerminalOutcome = {
-      status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path,
-    };
-    const directReview = active.record.directReview && active.record.directReview.status !== 'terminal'
-      ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind: 'safety' })
-      : active.record.directReview;
-    await this.persist(active, {
-      lifecycle: 'blocked',
-      terminalOutcome,
-      outcomeEvidenceId: evidence.id,
-      ...(directReview ? { directReview } : {}),
-      ...(active.record.reviewFeedback?.activeBatch ? {
-        reviewFeedback: blockReviewFeedback(active.record.reviewFeedback, 'safety', this.timestamp()),
-      } : {}),
-      process: undefined,
-    });
-    return publicOutcome(terminalOutcome);
+    return this.invokedFailure(
+      active,
+      evidenceCode,
+      'Candidate publication stopped locally with the exact commit pendingEffect and pin retained for observation.',
+    );
   }
 
   private async reconcileUnknownCandidatePublication(active: ActiveRun): Promise<{ active: ActiveRun } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
-    const intent = active.record.intent;
-    if (!candidate || !binding || (intent?.kind !== 'commit' && intent?.kind !== 'review-update-commit')) {
+    const pendingEffect = active.record.pendingEffect;
+    if (!candidate || !binding || (pendingEffect?.kind !== 'initial-commit' && pendingEffect?.kind !== 'review-update-commit')) {
       return publicOutcome(active.record.terminalOutcome!);
     }
     const observation = await candidate.createOrObserveCommit({
       worktreePath: active.record.worktreePath,
       branchName: active.record.branchName,
-      parentSha: intent.parentSha,
-      treeSha: intent.treeSha,
-      message: intent.message,
-      candidateRef: intent.candidateRef!,
+      parentSha: pendingEffect.parentSha,
+      treeSha: pendingEffect.treeSha,
+      message: pendingEffect.message,
+      candidateRef: pendingEffect.candidateRef!,
       observeOnly: true,
     });
     if (observation.kind === 'failed') {
@@ -2815,26 +3021,12 @@ export class RunIssue {
 
   private async persistCandidateEvidenceSafetyTerminal(active: ActiveRun, evidenceCode: string): Promise<RunIssueResult> {
     if (!active.record.candidateBinding) return this.invokedFailure(active, 'candidate-evidence-state-invalid');
-    const evidence = await this.dependencies.writeEvidence({
-      runId: active.record.runId,
-      code: evidenceCode,
-      summary: 'Candidate evidence was retained without a Git or GitHub effect.',
-    });
-    const terminalOutcome: RunTerminalOutcome = {
-      status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path,
-    };
-    const directReview = active.record.directReview && active.record.directReview.status !== 'terminal'
-      ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind: 'safety' })
-      : active.record.directReview;
-    await this.persist(active, {
-      lifecycle: 'blocked', terminalOutcome, outcomeEvidenceId: evidence.id,
-      ...(directReview ? { directReview } : {}),
-      ...(active.record.reviewFeedback?.activeBatch ? {
+    if (active.record.reviewFeedback?.activeBatch) {
+      active = await this.persist(active, {
         reviewFeedback: blockReviewFeedback(active.record.reviewFeedback, 'safety', this.timestamp()),
-      } : {}),
-      process: undefined,
-    });
-    return publicOutcome(terminalOutcome);
+      });
+    }
+    return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, evidenceCode, false);
   }
 
   private mapCandidateFailure(active: ActiveRun, code: string): Promise<RunIssueResult> {
@@ -2846,6 +3038,7 @@ export class RunIssue {
 
   private async runImplementation(input: {
     operation: 'qualification-repair' | 'implementation';
+    attemptId: string;
     runId: string;
     worktreePath: string;
     issue: IssueSnapshot;
@@ -2856,7 +3049,7 @@ export class RunIssue {
     workflowGeneration: WorkflowGenerationReceipt;
     reviewFeedbackRound?: number;
     reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
-    onPrepared?: (input: Omit<ReviewFeedbackImplementationInvocationV1, 'phase' | 'pid' | 'processGroupId' | 'launchedAt'>) => Promise<void>;
+    onPrepared?: (input: { attemptId: string; reportPath: string; preparedAt: string; baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'> }) => Promise<void>;
     onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
   }): Promise<ImplementationAgentResult> {
     try {
@@ -2902,7 +3095,7 @@ export class RunIssue {
           ? this.invokedFailure(active, `${reviewerAuthorization.code}-retryable`)
           : this.blockReviewFeedback(active, 'safety', reviewerAuthorization.code);
       }
-      const execution = await this.prepareCandidateExecution(
+      const execution = await this.prepareCandidateMaterialization(
         active,
         config,
         'direct-review',
@@ -2910,16 +3103,13 @@ export class RunIssue {
       );
       if ('status' in execution) return execution;
       active = execution.active;
-      const executionLease = execution.lease;
+      const materialization = execution.materialization;
       const abortPreparedReview = async (
         validation: Exclude<FeedbackWorkerObservation, { status: 'valid' }>,
       ): Promise<RunIssueResult> => {
-        const settledExecution = await this.settleCandidateExecution(active, config);
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
-        const recoveredReview = await this.recoverDirectReviewInvocation(active);
-        if ('status' in recoveredReview) return recoveredReview;
-        active = recoveredReview;
         const released = await this.clearAndReleaseCandidate(active);
         if ('status' in released) return released;
         active = released.active;
@@ -2931,8 +3121,9 @@ export class RunIssue {
       if (launchAuthorization.status !== 'valid') return abortPreparedReview(launchAuthorization);
       let gatedLaunchAuthorizationFailure: Exclude<FeedbackWorkerObservation, { status: 'valid' }> | undefined;
       const result = await this.dependencies.implementationReviewer.run({
+        attemptId: active.record.activeAttempt!.attemptId,
         runId: active.record.runId,
-        worktreePath: executionLease.path,
+        worktreePath: materialization.path,
         operation: 'code-review',
         mode,
         reviewerSessionId,
@@ -2955,11 +3146,10 @@ export class RunIssue {
         originalReportBytes: reportRepair?.originalReportBytes ?? null,
         signal: this.signal,
         onPrepared: async (invocation) => {
-          const current = active.record.directReview;
-          if (!current) throw new Error('direct review disappeared before prepare');
-          active = await this.persist(active, {
-            directReview: prepareDirectReviewInvocation(current, invocation),
-          });
+          if (!active.record.directReview) throw new Error('direct review disappeared before prepare');
+          if (invocation.attemptId !== active.record.activeAttempt?.attemptId
+            || invocation.operation !== 'code-review' || invocation.mode !== mode
+            || invocation.reviewerSessionId !== reviewerSessionId) throw new Error('direct review prepare correlation mismatch');
         },
         onLaunched: async (invocation) => {
           const validation = await this.observeFeedbackWorker(active, config, active.record.issueNumber);
@@ -2967,42 +3157,23 @@ export class RunIssue {
             gatedLaunchAuthorizationFailure = validation;
             throw new Error('direct review launch authorization changed');
           }
-          const current = active.record.directReview;
-          if (!current) throw new Error('direct review disappeared before launch');
-          active = await this.persist(active, {
-            directReview: launchDirectReviewInvocation(current, invocation),
-            executionLease: this.dependencies.git.candidateV2!.markExecutionLaunched({
-              lease: executionLease,
-              pid: invocation.pid,
-              processGroupId: invocation.processGroupId,
-              launchedAt: this.timestamp(),
-            }),
-          });
+          if (!active.record.directReview) throw new Error('direct review disappeared before launch');
+          active = await this.launchAttempt(active, invocation.pid, invocation.processGroupId);
         },
       });
       if (gatedLaunchAuthorizationFailure) {
         return abortPreparedReview(gatedLaunchAuthorizationFailure);
       }
-      if (result.kind !== 'safe-halt') {
-        const settledExecution = await this.settleCandidateExecution(active, config);
-        if ('status' in settledExecution) return settledExecution;
-        active = settledExecution.active;
-      }
       if (result.kind === 'completed') {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
         if (result.report.verdict === 'needs-work') {
-          const released = await this.clearAndReleaseCandidate(active);
-          if ('status' in released) return released;
-          active = released.active;
-          const currentReview = active.record.directReview;
-          if (!currentReview) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
           if (this.repairBudgetExhausted(active, maxCycles)) {
             return active.record.reviewFeedback?.activeBatch
               ? this.blockReviewFeedback(active, 'exhausted', 'direct-review-repair-exhausted')
               : this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
           }
-          const repaired = acceptNeedsWorkDirectReview(currentReview, result.report, result.artifactSha256);
+          const repaired = acceptNeedsWorkDirectReview(current, result.report, result.artifactSha256);
           const findings = [
             ...result.report.defects
             .filter((defect) => defect.status === 'open' || defect.status === 'reopened')
@@ -3011,11 +3182,11 @@ export class RunIssue {
               .filter((finding) => finding.status === 'reopened')
               .map((finding) => `${finding.id}: ${finding.summary}`),
           ];
-          return this.persist(active, {
+          active = await this.adoptAttempt(active, result.artifactSha256, {
             lifecycle: 'implementing',
             cycle: active.record.reviewFeedback?.activeBatch
               ? active.record.cycle
-              : (active.record.cycle + 1) as RunRecordV1['cycle'],
+              : (active.record.cycle + 1) as RunRecord['cycle'],
             ...(active.record.reviewFeedback?.activeBatch ? {
               reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
             } : {}),
@@ -3026,12 +3197,18 @@ export class RunIssue {
             proofId: undefined,
             proofReceipt: undefined,
           });
+          const settledExecution = await this.settleCandidateMaterialization(active, config);
+          if ('status' in settledExecution) return settledExecution;
+          const released = await this.clearAndReleaseCandidate(settledExecution.active);
+          return 'status' in released ? released : released.active;
         }
         if (result.report.verdict !== 'approved') return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-rejected');
-        return this.persist(active, {
+        active = await this.adoptAttempt(active, result.artifactSha256, {
           lifecycle: 'checking',
           directReview: acceptApprovedDirectReview(current, result.report, result.artifactSha256),
         });
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        return 'status' in settledExecution ? settledExecution : settledExecution.active;
       }
       if (result.kind === 'report-invalid') {
         const current = active.record.directReview;
@@ -3043,16 +3220,18 @@ export class RunIssue {
             'direct-review-report-malformed',
           );
         }
-        const { invocation: _invocation, ...withoutInvocation } = structuredClone(current);
-        active = await this.persist(active, {
+        active = await this.adoptAttempt(active, result.originalReportSha256, {
           directReview: {
-            ...withoutInvocation,
+            ...structuredClone(current),
             review: {
-              ...withoutInvocation.review,
-              reportRepairs: (withoutInvocation.review.reportRepairs + 1) as typeof withoutInvocation.review.reportRepairs,
+              ...current.review,
+              reportRepairs: (current.review.reportRepairs + 1) as typeof current.review.reportRepairs,
             },
           },
         });
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        if ('status' in settledExecution) return settledExecution;
+        active = settledExecution.active;
         reportRepair = {
           originalReportSha256: result.originalReportSha256,
           originalReportBytes: Buffer.from(result.originalReportBytes),
@@ -3065,25 +3244,22 @@ export class RunIssue {
         if (!current || current.review.transportRetries >= 1) {
           return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-transport-exhausted');
         }
-        const { invocation: _invocation, ...withoutInvocation } = structuredClone(current);
-        active = await this.persist(active, {
-          directReview: {
-            ...withoutInvocation,
-            review: { ...withoutInvocation.review, transportRetries: 1 },
-          },
-        });
+        const nextReview = {
+          ...structuredClone(current),
+          review: { ...current.review, transportRetries: 1 as const },
+        };
+      if (isAdoptableAttempt(active.record.activeAttempt)) {
+          active = await this.adoptAttempt(active, sha256(canonicalJson(result)), { directReview: nextReview });
+        } else {
+          active = await this.persist(active, { directReview: nextReview });
+        }
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        if ('status' in settledExecution) return settledExecution;
+        active = settledExecution.active;
         continue;
       }
       if (result.kind === 'safe-halt') {
-        active = await this.persist(active, {
-          lifecycle: 'safe-halt',
-          process: {
-            ...result.process,
-            purpose: 'code-review',
-            resumeLifecycle: 'implementing',
-            resumeReviewStage: directReview.stage,
-          },
-        });
+        active = await this.persist(active, { lifecycle: 'safe-halt' });
         try { await result.waitForAbsence(); }
         catch { return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-unconfirmed'); }
         return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-delayed');
@@ -3091,30 +3267,6 @@ export class RunIssue {
       if (result.kind === 'cancelled') return this.terminal(active, { status: 'cancelled' });
       return this.terminal(active, { status: 'internal-error', code: result.code });
     }
-  }
-
-  private async recoverDirectReviewInvocation(starting: ActiveRun): Promise<ActiveRun | RunIssueResult> {
-    const directReview = starting.record.directReview;
-    const invocation = directReview?.invocation;
-    if (!directReview || !invocation) return starting;
-    const { invocation: _invocation, ...withoutInvocation } = structuredClone(directReview);
-    if (invocation.status === 'prepared') {
-      return this.persist(starting, { directReview: withoutInvocation });
-    }
-    if (invocation.status === 'launched') {
-      try { await this.dependencies.waitForReviewProcessAbsence(invocation.processGroupId!); }
-      catch { return this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-process-absence-unconfirmed'); }
-      if (directReview.review.transportRetries >= 1) {
-        return this.terminal(starting, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-transport-exhausted');
-      }
-      return this.persist(starting, {
-        directReview: {
-          ...withoutInvocation,
-          review: { ...withoutInvocation.review, transportRetries: 1 },
-        },
-      });
-    }
-    return this.persist(starting, { directReview: withoutInvocation });
   }
 
   private async qualifyChecks(
@@ -3137,48 +3289,12 @@ export class RunIssue {
       ? existingQualification
       : undefined;
     let repairAttempts = prior?.repairAttempts ?? 0;
-    const pendingInvocation = existingQualification?.repairInvocation ?? null;
-    if (pendingInvocation) {
-      if (pendingInvocation.phase === 'launched') {
-        try { await this.dependencies.waitForReviewProcessAbsence(pendingInvocation.processGroupId!); }
-        catch { return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-process-absence-unconfirmed'); }
-      }
-      if (!this.dependencies.implementationAgent.recover) {
-        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-report-recovery-unavailable');
-      }
-      let recovered;
-      try {
-        recovered = await this.dependencies.implementationAgent.recover({
-          runId: active.record.runId,
-          canonicalRepository: active.record.canonicalRepository,
-          invocation: pendingInvocation,
-        });
-      } catch {
-        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-report-recovery-failed');
-      }
-      if (recovered) {
-        const settled = await this.settleQualificationRepair(active, config, recovered);
-        if ('status' in settled) return settled;
-        active = settled.active;
-      } else {
-        const deniedPathsBaseline = active.record.checkQualification?.deniedPathsBaseline;
-        if (!deniedPathsBaseline
-          || await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
-          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
-        }
-        if (!sameFreshness(await this.dependencies.git.snapshot(active.record.worktreePath), pendingInvocation.baseline)) {
-          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'qualification-repair-worktree-ambiguous');
-        }
-        active = await this.clearQualificationRepairInvocation(active);
-      }
-    }
     if (!prior) {
       active = await this.persist(active, {
         checkQualification: {
           version: 1, checkPolicySha256, repairAttempts, checks: [],
-          implementationStarted: false, repairInvocation: null,
+          implementationStarted: false,
         },
-        baselineChecks: undefined,
       });
     }
 
@@ -3189,52 +3305,55 @@ export class RunIssue {
       if ('status' in captured) return captured;
       active = captured.active;
       const qualificationBinding = active.record.candidateBinding!;
-      const checks: NonNullable<RunRecordV1['checkQualification']>['checks'] = [];
+      const checks: NonNullable<RunRecord['checkQualification']>['checks'] = (active.record.checkQualification?.checks ?? [])
+        .filter((check) => 'bindingId' in check && check.bindingId === qualificationBinding.bindingId
+          && check.candidateTreeSha === qualificationBinding.candidateTreeSha
+          && check.checkPolicySha256 === checkPolicySha256);
       const failures: string[] = [];
       for (const [id, command] of configuredChecks) {
+        const adopted = checks.find((check) => check.id === id && check.command === command);
+        if (adopted) {
+          if (adopted.status === 'failed') failures.push(`Pre-implementation scoped check ${id} failed (${command}); output SHA-256 ${adopted.outputSha256}.`);
+          continue;
+        }
         if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
         if (this.dependencies.checks.supportsLaunchOwnership !== true) {
           return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-check-launch-ownership-required');
         }
-        const execution = await this.prepareCandidateExecution(active, config, 'qualification-check', `${id}:${checkPolicySha256}`);
+        const execution = await this.prepareCandidateMaterialization(active, config, 'qualification-check', `${id}:${checkPolicySha256}`);
         if ('status' in execution) return execution;
         active = execution.active;
-        const lease = execution.lease;
-        let check: { status: 'passed' | 'failed'; output: Buffer; outputSha256: string };
-        try {
-          check = await this.dependencies.checks.run({
-            id, command, source: checkPolicy.source,
-            cwd: lease.path,
-            phase: 'qualification',
-            signal: this.signal,
-            onLaunched: async ({ pid, processGroupId }) => {
-              active = await this.persist(active, {
-                executionLease: this.dependencies.git.candidateV2!.markExecutionLaunched({
-                  lease, pid, processGroupId, launchedAt: this.timestamp(),
-                }),
-              });
-            },
-          });
-        } catch (error) {
-          if (error instanceof CheckProcessQuiescenceError) {
-            return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
-          }
+        const materialization = execution.materialization;
+        const checked = await this.executeOrRecoverConfiguredCheck(active, {
+          id, command, source: checkPolicy.source, cwd: materialization.path, phase: 'qualification',
+        });
+        if ('status' in checked) return checked;
+        active = checked.active;
+        const check = checked.check;
+        if (check.observation.group !== 'absent') {
           return this.invokedFailure(
             active,
-            'qualification-check-execution-failed',
-            error instanceof Error ? error.message : 'The qualification check process did not start or settle. Retry the same run.',
+            'check-process-quiescence-unconfirmed',
+            'The configured check leader exited but its process group is still live or cannot be proven absent.',
           );
         }
-        const settledExecution = await this.settleCandidateExecution(active, config);
-        if ('status' in settledExecution) return settledExecution;
-        active = settledExecution.active;
-        if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
-        checks.push({
+        const receipt = {
           id, command, status: check.status, outputSha256: check.outputSha256,
           bindingId: qualificationBinding.bindingId,
           candidateTreeSha: qualificationBinding.candidateTreeSha,
           checkPolicySha256,
+        };
+        active = await this.adoptAttempt(active, check.attemptResultSha256, {
+          checkQualification: {
+            ...active.record.checkQualification!,
+            checks: [...checks, receipt],
+          },
         });
+        checks.push(receipt);
+        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        if ('status' in settledExecution) return settledExecution;
+        active = settledExecution.active;
+        if (this.signal.aborted) return this.terminal(active, { status: 'cancelled' });
         if (check.status === 'failed') {
           failures.push(`Pre-implementation scoped check ${id} failed (${command}):\n${check.output.toString('utf8').slice(0, 8 * 1024)}`);
         }
@@ -3243,9 +3362,8 @@ export class RunIssue {
       active = await this.persist(active, {
         checkQualification: {
           version: 1, checkPolicySha256, repairAttempts, checks,
-          implementationStarted: false, repairInvocation: null,
+          implementationStarted: false,
         },
-        baselineChecks: undefined,
       });
       if (failures.length === 0) {
         const released = await this.clearAndReleaseCandidate(active);
@@ -3263,8 +3381,22 @@ export class RunIssue {
       active = released.active;
 
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths);
+      active = await this.persist(active, {
+        checkQualification: {
+          ...active.record.checkQualification!,
+          implementationStarted: false,
+          deniedPathsBaseline,
+        },
+      });
+      active = await this.prepareAttempt(
+        active,
+        'implementation',
+        `qualification-repair:${repairAttempts + 1}:${checkPolicySha256}`,
+      );
+      const attemptId = active.record.activeAttempt!.attemptId;
       const repair = await this.runImplementation({
         operation: 'qualification-repair',
+        attemptId,
         runId: active.record.runId,
         worktreePath: active.record.worktreePath,
         issue,
@@ -3274,45 +3406,27 @@ export class RunIssue {
         repairOnly: false,
         workflowGeneration: active.record.workflowGeneration,
         onPrepared: async (invocation) => {
-          active = await this.persist(active, {
-            checkQualification: {
-              ...active.record.checkQualification!,
-              implementationStarted: false,
-              deniedPathsBaseline,
-              repairInvocation: {
-                ...structuredClone(invocation), phase: 'prepared',
-                pid: null, processGroupId: null, launchedAt: null,
-              },
-            },
-          });
+          if (invocation.attemptId !== attemptId
+            || invocation.reportPath !== active.record.activeAttempt?.resultPath) {
+            throw new Error('qualification repair prepare correlation mismatch');
+          }
         },
         onLaunched: async (invocation) => {
-          const current = active.record.checkQualification?.repairInvocation;
-          if (!current || current.phase !== 'prepared' || current.attemptId !== invocation.attemptId) {
+          if (active.record.activeAttempt?.stage !== 'prepared'
+            || active.record.activeAttempt.attemptId !== invocation.attemptId) {
             throw new Error('qualification repair launch mismatch');
           }
-          repairAttempts = (repairAttempts + 1) as NonNullable<RunRecordV1['checkQualification']>['repairAttempts'];
-          active = await this.persist(active, {
+          repairAttempts = (repairAttempts + 1) as NonNullable<RunRecord['checkQualification']>['repairAttempts'];
+          active = await this.launchAttempt(active, invocation.pid, invocation.processGroupId, {
             checkQualification: {
-              ...active.record.checkQualification!, repairAttempts,
-              repairInvocation: {
-                ...current, phase: 'launched', pid: invocation.pid,
-                processGroupId: invocation.processGroupId, launchedAt: invocation.launchedAt,
-              },
+              ...active.record.checkQualification!,
+              repairAttempts,
             },
           });
         },
       });
       if (repair.kind === 'safe-halt') {
-        active = await this.persist(active, {
-          lifecycle: 'safe-halt',
-          process: {
-            ...repair.process,
-            purpose: 'implementation',
-            resumeLifecycle: 'implementing',
-            resumeReviewStage: null,
-          },
-        });
+        active = await this.persist(active, { lifecycle: 'safe-halt' });
         while (true) {
           try { await repair.waitForAbsence(); break; }
           catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
@@ -3346,7 +3460,6 @@ export class RunIssue {
       || await this.dependencies.git.fingerprintDeniedPaths(active.record.worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
     }
-    active = await this.clearQualificationRepairInvocation(active);
     let report;
     try { report = validateImplementationReport(repair.report); }
     catch { return this.invokedFailure(active, 'qualification-repair-report-invalid', 'Qualification repair report was invalid. Retry the same run.'); }
@@ -3360,16 +3473,13 @@ export class RunIssue {
     if (changedFiles.length === 0 || !sameStrings(changedFiles, report.changedFiles)) {
       return this.invokedFailure(active, 'qualification-repair-change-set-invalid', 'Qualification repair must report the complete cumulative worktree change set.');
     }
-    return { active };
-  }
-
-  private async clearQualificationRepairInvocation(active: ActiveRun): Promise<ActiveRun> {
-    const qualification = { ...active.record.checkQualification!, implementationStarted: false, repairInvocation: null };
+    const qualification = { ...active.record.checkQualification!, implementationStarted: false };
     delete qualification.deniedPathsBaseline;
-    return this.persist(active, { checkQualification: qualification });
+    active = await this.adoptAttempt(active, sha256(canonicalJson(report)), { checkQualification: qualification });
+    return { active: await this.clearAttempt(active) };
   }
 
-  private hasRecordedImplementationStart(record: RunRecordV1, config: AgentAutoConfig): boolean {
+  private hasRecordedImplementationStart(record: RunRecord, config: AgentAutoConfig): boolean {
     const qualification = record.checkQualification;
     if (!qualification) return false;
     let policy;
@@ -3390,7 +3500,7 @@ export class RunIssue {
     const directReview = active.record.directReview;
     const allowLegacyMalformed = directReview?.terminalCode === undefined
       && active.record.outcomeEvidenceId === `evidence:${active.record.runId}:direct-review-report-malformed`;
-    if (!issue || !directReview || active.record.intent || active.record.process
+    if (!issue || !directReview || active.record.pendingEffect || active.record.activeAttempt
       || active.record.terminalOutcome?.status !== 'internal-error'
       || directReview.status !== 'terminal' || directReview.terminalOutcome?.status !== 'internal-error'
       || !canRecoverTerminalDirectReviewReport(directReview, { allowLegacyMalformed })
@@ -3464,7 +3574,7 @@ export class RunIssue {
         candidateBinding: undefined,
         cycle: active.record.reviewFeedback?.activeBatch
           ? active.record.cycle
-          : (active.record.cycle + 1) as RunRecordV1['cycle'],
+          : (active.record.cycle + 1) as RunRecord['cycle'],
         ...(active.record.reviewFeedback?.activeBatch ? {
           reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
         } : {}),
@@ -3483,7 +3593,7 @@ export class RunIssue {
       candidateBinding: undefined,
       cycle: active.record.reviewFeedback?.activeBatch
         ? active.record.cycle
-        : (active.record.cycle + 1) as RunRecordV1['cycle'],
+        : (active.record.cycle + 1) as RunRecord['cycle'],
       ...(active.record.reviewFeedback?.activeBatch ? {
         reviewFeedback: reserveNextReviewFeedbackRound(active.record.reviewFeedback),
       } : {}),
@@ -3502,7 +3612,7 @@ export class RunIssue {
     const binding = active.record.candidateBinding;
     const candidate = this.dependencies.git.candidateV2;
     if (!binding || !candidate) return this.startNextCycle(active, findings, sources);
-    if (active.record.executionLease) {
+    if (active.record.candidateMaterialization || active.record.activeAttempt) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-execution-not-quiescent');
     }
     const normalized = await candidate.normalizeSharedIndex({
@@ -3534,9 +3644,9 @@ export class RunIssue {
     {
       const config = active.config;
       const blockedLabels = [config.github.labels.auto.name, config.github.labels.blocked.name].sort();
-      const existingIntent = active.record.intent;
+      const existingIntent = active.record.pendingEffect;
       if (existingIntent?.kind !== 'review-blocked-labels') {
-        active = await this.persist(active, { intent: {
+        active = await this.persist(active, { pendingEffect: {
           kind: 'review-blocked-labels', issueNumber: active.record.issueNumber,
           batchId: feedback.activeBatch.batchId, expected: blockedLabels, blockKind: kind, evidenceCode,
         } });
@@ -3545,7 +3655,7 @@ export class RunIssue {
         || !sameStrings(existingIntent.expected, blockedLabels)
         || existingIntent.blockKind !== kind
         || existingIntent.evidenceCode !== evidenceCode) {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-intent-diverged');
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-pendingEffect-diverged');
       }
       let issue = await this.readIssue(active.record.issueNumber);
       const ownedRunningLabels = [config.github.labels.auto.name, config.github.labels.running.name].sort();
@@ -3556,7 +3666,8 @@ export class RunIssue {
         return this.invokedFailure(active, 'review-feedback-blocked-labels-source-diverged');
       }
       if (canReduceAuthority && !sameStrings(issue!.labels, blockedLabels)) {
-        try { await this.markV3ExternalEffect(active); await this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels); }
+        try {
+ await this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels); }
         catch { return this.invokedFailure(active, 'review-feedback-blocked-labels-delivery-unknown'); }
         issue = await this.readIssue(active.record.issueNumber);
       }
@@ -3564,21 +3675,9 @@ export class RunIssue {
         return this.invokedFailure(active, 'review-feedback-blocked-labels-observation-diverged');
       }
     }
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: evidenceCode, summary: `review feedback ${kind}` });
-    const terminalOutcome: RunTerminalOutcome = { status: 'blocked', kind, resumable: false, evidencePath: evidence.path };
-    const directReview = active.record.directReview && active.record.directReview.status !== 'terminal'
-      ? projectTerminalDirectReview(active.record.directReview, { status: 'blocked', kind })
-      : active.record.directReview;
-    await this.persist(active, {
-      lifecycle: 'blocked',
+    return this.persistTerminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode, false, {
       reviewFeedback: blockReviewFeedback(feedback, kind, this.timestamp()),
-      ...(directReview ? { directReview } : {}),
-      terminalOutcome,
-      outcomeEvidenceId: evidence.id,
-      process: undefined,
-      intent: undefined,
-    });
-    return publicOutcome(terminalOutcome);
+    }, true);
   }
 
   private async mapImplementationFailure(
@@ -3599,7 +3698,8 @@ export class RunIssue {
   }
 
   private async revoked(active: ActiveRun): Promise<RunIssueResult> {
-    return this.terminal(await this.clearIntent(active), { status: 'blocked', kind: 'safety', resumable: true });
+    if (active.record.pendingEffect) return this.invokedFailure(active, 'revoked-with-pending-effect');
+    return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
   }
 
   private async invokedFailure(
@@ -3611,12 +3711,36 @@ export class RunIssue {
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
 
-  private async markV3ExternalEffect(active: ActiveRun): Promise<void> {
-    if (active.state.version !== 3) return;
-    if (!this.dependencies.runRecords.markPublicationEffectPossible) {
-      throw new Error('run-state publication watermark is unavailable');
+  private async observeOutcomeEvidenceEffect(
+    active: ActiveRun,
+    code: string,
+    summary: string,
+    replaceConfirmedEffect = false,
+  ): Promise<{ active: ActiveRun; path: string; id: string }> {
+    if (!active.record.pendingEffect || replaceConfirmedEffect) {
+      const recordedAt = this.timestamp();
+      const path = this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary));
+      const bytes = outcomeEvidenceBytes({ runId: active.record.runId, code, summary, recordedAt });
+      active = await this.persist(active, { pendingEffect: {
+        kind: 'outcome-evidence', path, runId: active.record.runId, code, summary, recordedAt, bytesSha256: sha256(bytes),
+      } });
     }
-    await this.dependencies.runRecords.markPublicationEffectPossible();
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== 'outcome-evidence' || effect.runId !== active.record.runId
+      || effect.code !== code || effect.summary !== summary
+      || effect.path !== this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary))) {
+      throw new PostEffectStateError(active);
+    }
+    const bytes = outcomeEvidenceBytes(effect);
+    if (sha256(bytes) !== effect.bytesSha256) throw new PostEffectStateError(active);
+    let observed = await this.dependencies.inspectOutcomeEvidence(effect.path);
+    if (!observed) {
+      try { await this.dependencies.writeOutcomeEvidence({ path: effect.path, bytes, sha256: effect.bytesSha256 }); }
+      catch { throw new PostEffectStateError(active); }
+      observed = await this.dependencies.inspectOutcomeEvidence(effect.path);
+    }
+    if (!observed || observed.sha256 !== effect.bytesSha256) throw new PostEffectStateError(active);
+    return { active, path: effect.path, id: `evidence:${effect.runId}:${effect.code}` };
   }
 
   private async terminal(
@@ -3647,9 +3771,9 @@ export class RunIssue {
     const autoBlocked = [active.config.github.labels.auto.name, active.config.github.labels.blocked.name].sort();
     const blockedOnly = [active.config.github.labels.blocked.name];
     let expected = autoBlocked;
-    const existing = active.record.intent;
+    const existing = active.record.pendingEffect;
     if (!existing) {
-      active = await this.persist(active, { intent: {
+      active = await this.persist(active, { pendingEffect: {
         kind: 'blocked-labels',
         issueNumber: active.record.issueNumber,
         expected,
@@ -3662,11 +3786,11 @@ export class RunIssue {
       || existing.blockKind !== outcome.kind
       || existing.resumable !== outcome.resumable
       || existing.evidenceCode !== evidenceCode) {
-      return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+      return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
     } else {
       expected = existing.expected;
       if (!sameStrings(expected, autoBlocked) && !sameStrings(expected, blockedOnly) && expected.length !== 0) {
-        return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+        return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
       }
     }
 
@@ -3678,7 +3802,7 @@ export class RunIssue {
         return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
       }
       try {
-        await this.markV3ExternalEffect(active);
+
         await this.dependencies.issues.transitionToBlocked(
           active.record.issueNumber,
           blockedLabelPolicy(active.config),
@@ -3695,16 +3819,18 @@ export class RunIssue {
       }
       if (!sameStrings(expected, projection.expected)) {
         expected = projection.expected;
-        const intent = active.record.intent;
-        if (intent?.kind !== 'blocked-labels') return this.invokedFailure(active, 'blocked-labels-intent-diverged');
+        const pendingEffect = active.record.pendingEffect;
+        if (pendingEffect?.kind !== 'blocked-labels') return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
         try {
-          active = await this.persist(active, { intent: { ...intent, expected } });
+          const { effectId: _effectId, ...intent } = pendingEffect;
+          active = await this.persist(active, { pendingEffect: { ...intent, expected } });
         } catch {
           throw new PostEffectStateError(active);
         }
       }
     }
     try {
+      active = await this.confirmEffect(active);
       return await this.persistTerminal(active, outcome, evidenceCode, false);
     } catch {
       throw new PostEffectStateError(active);
@@ -3720,7 +3846,7 @@ export class RunIssue {
       return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
     }
     try {
-      await this.markV3ExternalEffect(active);
+
       await this.dependencies.issues.transitionToBlocked(
         active.record.issueNumber,
         blockedLabelPolicy(active.config),
@@ -3740,14 +3866,19 @@ export class RunIssue {
     outcome: TerminalSeed,
     evidenceCode: string,
     retainIntent: boolean,
+    additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
+    replaceConfirmedEffect = false,
   ): Promise<RunIssueResult> {
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: evidenceCode, summary: outcome.status });
+    const evidence = await this.observeOutcomeEvidenceEffect(
+      active, evidenceCode, canonicalJson(outcome), replaceConfirmedEffect,
+    );
+    active = evidence.active;
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
-    const changes: Partial<RunRecordV1> & { intent?: PublicationIntent | undefined } = {
+    const changes: Partial<RunRecord> & { pendingEffect?: PendingEffect | undefined } = {
+      ...additionalChanges,
       lifecycle: outcome.status,
       terminalOutcome,
       outcomeEvidenceId: evidence.id,
-      process: undefined,
     };
     if (outcome.status !== 'review-ready' && active.record.directReview && active.record.directReview.status !== 'terminal') {
       changes.directReview = projectTerminalDirectReview(active.record.directReview, outcome.status === 'blocked'
@@ -3760,7 +3891,6 @@ export class RunIssue {
           version: 1,
           clarificationAttempts: active.record.waitingHuman.clarificationAttempts,
           permissionRetries: active.record.waitingHuman.permissionRetries,
-          effectRetries: structuredClone(active.record.waitingHuman.effectRetries),
           history: structuredClone(active.record.waitingHuman.history),
           phase: 'history-only',
           terminalOutcome: outcome.status === 'blocked'
@@ -3780,8 +3910,8 @@ export class RunIssue {
       changes.routeExecution = undefined;
       changes.routeReceipt = undefined;
     }
-    if (!retainIntent) changes.intent = undefined;
-    await this.persist(active, changes);
+    active = await this.persist(active, changes);
+    if (!retainIntent) active = await this.confirmEffect(active);
     return publicOutcome(terminalOutcome);
   }
 
@@ -3812,246 +3942,115 @@ export class RunIssue {
 }
 
 class TransportReadError extends Error {}
-
+class LaunchAuthorizationRevokedError extends Error {
+  constructor(readonly active: ActiveRun) {
+    super('launch authorization revoked');
+  }
+}
 class PostEffectStateError extends Error {
   constructor(readonly active: ActiveRun) {
     super('post-effect state write failed');
   }
 }
-
-const claimMarkerPattern = /^<!-- codex-orchestrator:run:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):claim -->$/u;
-
-function isClaimMarkerComment(comment: { body: string }): boolean {
-  return claimMarkerPattern.test(comment.body.split('\n')[0] ?? '');
+function lifecycleForAttempt(operationId: string): RunRecord['lifecycle'] {
+  if (operationId === 'triage' || operationId === 'ambiguity-review') return 'triaging';
+  if (operationId === 'configured-check') return 'checking';
+  if (operationId === 'acceptance-proof') return 'proving';
+  return 'implementing';
 }
-
-function claimRunId(comment: { body: string }): string | undefined {
-  return (comment.body.split('\n')[0] ?? '').match(claimMarkerPattern)?.[1];
-}
-
-function trustedHistoricalClaimBodyKey(
-  comment: { body: string; authorAssociation: string },
-  issueNumber: number,
-  branchName: string,
-): string | undefined {
-  const runId = claimRunId(comment);
-  if (!runId || !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comment.authorAssociation)) return undefined;
-  if (comment.body !== claimComment(runId, issueNumber, branchName)) return undefined;
-  return `${comment.authorAssociation}\u0000${comment.body}`;
-}
-
-function frozenHistoricalClaimKey(
-  comment: { id?: string; body: string; authorAssociation: string },
-  issueNumber: number,
-  branchName: string,
-): string | undefined {
-  const bodyKey = trustedHistoricalClaimBodyKey(comment, issueNumber, branchName);
-  if (!bodyKey) return undefined;
-  return comment.id ? `id\u0000${comment.id}\u0000${bodyKey}` : `legacy\u0000${bodyKey}`;
-}
-
-function observedHistoricalClaimKeys(
-  comment: RunIssueSnapshot['comments'][number],
-  record: RunRecordV1,
-): string[] {
-  const bodyKey = trustedHistoricalClaimBodyKey(comment, record.issueNumber, record.branchName);
-  if (!bodyKey) return [];
-  const keys = comment.id ? [`id\u0000${comment.id}\u0000${bodyKey}`] : [];
-  if (timestampAtOrBefore(comment.createdAt, record.createdAt)
-    && timestampAtOrBefore(comment.updatedAt, record.createdAt)) {
-    keys.push(`legacy\u0000${bodyKey}`);
-  }
-  return keys;
-}
-
-function timestampAtOrBefore(value: string | undefined, cutoff: string): boolean {
-  if (!value) return false;
-  const timestamp = Date.parse(value);
-  return !Number.isNaN(timestamp) && timestamp <= Date.parse(cutoff);
-}
-
-function historicalClaimCounts(record: RunRecordV1): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const comment of record.issueSnapshot.comments ?? []) {
-    const key = frozenHistoricalClaimKey(comment, record.issueNumber, record.branchName);
-    if (!key || claimRunId(comment) === record.runId) continue;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return counts;
-}
-
-function refreshClaimedIssueSnapshot(
-  baseline: RunRecordV1['issueSnapshot'],
-  issue: RunIssueSnapshot,
-): RunRecordV1['issueSnapshot'] {
-  return {
-    ...structuredClone(baseline),
-    comments: [
-      ...(baseline.comments ?? []).filter(isClaimMarkerComment),
-      ...issue.comments.filter((comment) => !isClaimMarkerComment(comment)),
-    ],
-  };
-}
-
-function snapshotIssue(issue: RunIssueSnapshot): IssueSnapshot & Pick<RunIssueSnapshot, 'comments'> {
-  if (issue.state !== 'OPEN') throw new Error('cannot snapshot a closed issue');
-  return {
-    number: issue.number,
-    title: issue.title,
-    body: issue.body,
-    url: issue.url,
-    state: 'OPEN',
-    labels: sortedUnique(issue.labels),
-    comments: structuredClone(issue.comments),
-  };
-}
-
-function publicIssueSnapshot(issue: IssueSnapshot): IssueSnapshot {
-  return {
-    number: issue.number,
-    title: issue.title,
-    body: issue.body,
-    url: issue.url,
-    state: issue.state,
-    labels: [...issue.labels],
-  };
-}
-
-function freezeCriteria(issue: IssueSnapshot): FrozenCriterion[] {
-  const lines = issue.body.split(/\r?\n/u);
-  const heading = lines.findIndex((line) => /^#{1,6}\s+acceptance criteria\s*$/iu.test(line.trim()));
-  const texts: string[] = [];
-  if (heading >= 0) {
-    for (const line of lines.slice(heading + 1)) {
-      if (/^#{1,6}\s+/u.test(line.trim())) break;
-      const match = line.match(/^\s*[-*]\s+(?:\[[ xX]\]\s*)?(.+?)\s*$/u);
-      const text = match?.[1]?.trim();
-      if (text && !texts.includes(text)) texts.push(text);
-    }
-  }
-  if (texts.length === 0) return [{ id: 'fallback-001', order: 1, source: 'fallback', text: `${issue.title}\n\n${issue.body}` }];
-  return texts.map((text, index) => ({ id: `ac-${String(index + 1).padStart(3, '0')}`, order: index + 1, source: 'explicit', text }));
-}
-
-function claimComment(runId: string, issueNumber: number, branchName: string): string {
-  return `<!-- codex-orchestrator:run:${runId}:claim -->\ncodex-orchestrator claimed #${issueNumber} for branch ${branchName}`;
-}
-
-function findRun(state: RunStateFileV1, runId: string): RunRecordV1 {
+function findRun(state: RunStateFile, runId: string): RunRecord {
   const record = state.runs.find((candidate) => candidate.runId === runId);
   if (!record) throw new Error('persisted run is missing');
   return record;
 }
-
-function waitingAnswer(waiting: WaitingHumanExecutionV1): TrustedAnswerReceiptV1 | null {
-  if ('answerReceipt' in waiting) return structuredClone(waiting.answerReceipt);
-  if (waiting.phase === 'resumed') return structuredClone(waiting.trustedAnswer);
-  return null;
+interface ConfiguredCheckAttemptResult {
+  schema: 'codex-orchestrator.configured-check-result';
+  id: string;
+  command: string;
+  status: 'passed' | 'failed';
+  outputBase64: string;
+  outputSha256: string;
 }
 
-function archiveWaiting(
-  record: RunRecordV1,
-  answer: TrustedAnswerReceiptV1 | null,
-  terminal: Pick<Extract<WaitingHumanExecutionV1, { phase: 'resumed' }>, 'phase' | 'trustedAnswer'>
-    | Pick<Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>, 'phase' | 'terminalOutcome'>,
-): WaitingHumanExecutionV1 {
-  const waiting = record.waitingHuman;
-  const routeReceipt = record.routeReceipt;
-  if (!waiting || !routeReceipt) throw new Error('waiting archive requires active route evidence');
-  const question = 'question' in waiting ? waiting.question : 'questionReceipt' in waiting ? waiting.questionReceipt.question : undefined;
-  if (!question) throw new Error('waiting archive requires current question');
-  const questionReceipt = 'questionReceipt' in waiting ? waiting.questionReceipt : null;
-  const entry = {
-    routeReceipt: structuredClone(routeReceipt),
-    question: structuredClone(question),
-    questionReceipt: questionReceipt ? structuredClone(questionReceipt) : null,
-    answerReceipt: answer ? structuredClone(answer) : null,
-    conflictHashes: [...question.conflictHashes],
-  };
-  const history = [...waiting.history];
-  if (history.at(-1)?.question.questionSha256 === question.questionSha256) {
-    if (canonicalJson(history.at(-1)) !== canonicalJson(entry)) throw new Error('waiting archive evidence mismatch');
-  } else {
-    history.push(entry);
+function configuredCheckAttemptBytes(input: {
+  id: string;
+  command: string;
+  status: 'passed' | 'failed';
+  output: Buffer;
+}): Buffer {
+  return Buffer.from(`${canonicalJson({
+    schema: 'codex-orchestrator.configured-check-result',
+    id: input.id,
+    command: input.command,
+    status: input.status,
+    outputBase64: input.output.toString('base64'),
+    outputSha256: sha256(input.output),
+  })}\n`, 'utf8');
+}
+
+function parseTerminalSeedSummary(summary: string): TerminalSeed {
+  const value = parseJsonWithoutDuplicateKeys(summary);
+  if (!value || typeof value !== 'object' || Array.isArray(value) || canonicalJson(value) !== summary) {
+    throw new Error('outcome evidence terminal seed is invalid');
   }
-  return {
-    version: 1,
-    clarificationAttempts: waiting.clarificationAttempts,
-    permissionRetries: waiting.permissionRetries,
-    effectRetries: structuredClone(waiting.effectRetries),
-    history,
-    ...terminal,
-  } as WaitingHumanExecutionV1;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const exact = (expected: string[]) => keys.length === expected.length
+    && keys.every((key, index) => key === [...expected].sort()[index]);
+  if (record.status === 'review-ready'
+    && typeof record.pullRequestUrl === 'string'
+    && (record.continuationEpoch === undefined || typeof record.continuationEpoch === 'string')
+    && exact(record.continuationEpoch === undefined ? ['pullRequestUrl', 'status'] : ['continuationEpoch', 'pullRequestUrl', 'status'])) {
+    return record as unknown as Extract<TerminalSeed, { status: 'review-ready' }>;
+  }
+  if (record.status === 'blocked' && ['external', 'safety', 'exhausted'].includes(record.kind as string)
+    && typeof record.resumable === 'boolean' && exact(['kind', 'resumable', 'status'])) {
+    return record as unknown as Extract<TerminalSeed, { status: 'blocked' }>;
+  }
+  if (record.status === 'transport-failed' && typeof record.resumable === 'boolean' && exact(['resumable', 'status'])) {
+    return record as unknown as Extract<TerminalSeed, { status: 'transport-failed' }>;
+  }
+  if (record.status === 'cancelled' && exact(['status'])) return { status: 'cancelled' };
+  if (record.status === 'internal-error' && typeof record.code === 'string' && record.code.length > 0 && exact(['code', 'status'])) {
+    return record as unknown as Extract<TerminalSeed, { status: 'internal-error' }>;
+  }
+  throw new Error('outcome evidence terminal seed is invalid');
 }
 
-function terminalWaiting(
-  waiting: WaitingHumanExecutionV1,
-  terminalOutcome: Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>['terminalOutcome'],
-): WaitingHumanExecutionV1 {
-  if (waiting.phase !== 'resumed' && waiting.phase !== 'history-only') throw new Error('terminal waiting projection requires archived history');
-  return {
-    version: 1,
-    clarificationAttempts: waiting.clarificationAttempts,
-    permissionRetries: waiting.permissionRetries,
-    effectRetries: structuredClone(waiting.effectRetries),
-    history: structuredClone(waiting.history),
-    phase: 'history-only',
-    terminalOutcome,
-  };
+function validateConfiguredCheckAttemptBytes(
+  bytes: Buffer,
+  expected: { id: string; command: string },
+): ConfiguredCheckAttemptResult & { output: Buffer } {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes) || !text.endsWith('\n')) throw new Error('configured check result bytes are invalid');
+  const value = parseJsonWithoutDuplicateKeys(text.slice(0, -1));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('configured check result is invalid');
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expectedKeys = ['command', 'id', 'outputBase64', 'outputSha256', 'schema', 'status'].sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new Error('configured check result must contain exact keys');
+  }
+  if (record.schema !== 'codex-orchestrator.configured-check-result'
+    || record.id !== expected.id || record.command !== expected.command
+    || (record.status !== 'passed' && record.status !== 'failed')
+    || typeof record.outputBase64 !== 'string' || typeof record.outputSha256 !== 'string') {
+    throw new Error('configured check result identity is invalid');
+  }
+  const output = Buffer.from(record.outputBase64, 'base64');
+  if (output.toString('base64') !== record.outputBase64 || sha256(output) !== record.outputSha256) {
+    throw new Error('configured check output identity is invalid');
+  }
+  if (!bytes.equals(configuredCheckAttemptBytes({
+    id: record.id,
+    command: record.command,
+    status: record.status,
+    output,
+  }))) throw new Error('configured check result bytes are not canonical');
+  return { ...(record as unknown as ConfiguredCheckAttemptResult), output };
 }
 
-function publicOutcome(outcome: RunTerminalOutcome): Exclude<RunIssueResult, { status: 'not-eligible' }> {
-  if (outcome.status === 'internal-error') return { status: 'internal-error', evidencePath: outcome.evidencePath };
-  return structuredClone(outcome);
-}
-
-function requireRouteExecution(value: RouteExecutionV1 | undefined): RouteExecutionV1 {
-  if (!value) throw new Error('route execution is missing');
-  return structuredClone(value);
-}
-
-function sameRouteExecution(left: RouteExecutionV1 | undefined, right: RouteExecutionV1): boolean {
-  return left !== undefined && canonicalJson(left) === canonicalJson(right);
-}
-
-function sameStrings(left: string[], right: string[]): boolean {
-  const a = [...left].sort();
-  const b = [...right].sort();
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function blockedLabelPolicy(config: AgentAutoConfig): {
-  auto: string;
-  running: string;
-  blocked: string;
-  review: string;
-  waitingHuman: string;
-} {
-  return {
-    auto: config.github.labels.auto.name,
-    running: config.github.labels.running.name,
-    blocked: config.github.labels.blocked.name,
-    review: config.github.labels.review.name,
-    waitingHuman: config.github.labels.waitingHuman.name,
-  };
-}
-
-function blockedLabelProjection(
-  labels: string[],
-  config: AgentAutoConfig,
-): { status: 'settled'; expected: string[] } | { status: 'transition' | 'diverged' } {
-  const policy = blockedLabelPolicy(config);
-  const present = new Set(labels);
-  if (present.has(policy.review) || present.has(policy.waitingHuman)) return { status: 'diverged' };
-  const auto = present.has(policy.auto);
-  const running = present.has(policy.running);
-  const blocked = present.has(policy.blocked);
-  if (running || (auto && !blocked)) return { status: 'transition' };
-  if (blocked) return { status: 'settled', expected: auto ? [policy.auto, policy.blocked].sort() : [policy.blocked] };
-  return { status: 'settled', expected: [] };
-}
-
-function sameCheckPolicy(checks: RunRecordV1['checks'], policy: Record<string, string>): boolean {
+function sameCheckPolicy(checks: RunRecord['checks'], policy: Record<string, string>): boolean {
   const expected = Object.entries(policy).sort(([left], [right]) => left.localeCompare(right));
   const actual = checks.map((check) => [check.id, check.command] as const)
     .sort(([left], [right]) => left.localeCompare(right));
@@ -4070,11 +4069,11 @@ function sameFreshness(
     && left.worktreeIdentity === right.worktreeIdentity;
 }
 
-function expectedImplementationHead(record: RunRecordV1): string {
+function expectedImplementationHead(record: RunRecord): string {
   return record.reviewFeedback?.activeBatch?.priorPublishedHeadSha ?? record.baseSha;
 }
 
-function pendingCandidateBoundary(record: RunRecordV1): CandidateBoundaryV2 | undefined {
+function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | undefined {
   if (record.lifecycle !== 'implementing') return undefined;
   const feedback = record.reviewFeedback;
   if (feedback?.activeBatch && feedback.repairRound >= 1 && feedback.repairRound <= 3) {

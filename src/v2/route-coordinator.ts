@@ -1,4 +1,4 @@
-import { canonicalJson } from './containment.js';
+import { canonicalJson, sha256 } from './containment.js';
 import {
   validateAmbiguityReviewArtifact,
   type AmbiguityReviewRefV1,
@@ -38,7 +38,11 @@ export type RouteCoordinatorResult =
 export interface RouteCoordinatorState {
   read(): Promise<RouteExecutionV1>;
   compareAndSwap(expected: RouteExecutionV1, next: RouteExecutionV1): Promise<boolean>;
-  complete(expected: RouteExecutionV1, next: RouteExecutionV1, receipt: RouteReceiptV1): Promise<boolean>;
+  prepareAttempt(operationId: 'triage' | 'ambiguity-review', sourceId: string): Promise<string>;
+  launchAttempt(attemptId: string, pid: number, processGroupId: number): Promise<void>;
+  adopt(expected: RouteExecutionV1, next: RouteExecutionV1, resultSha256: string): Promise<boolean>;
+  clearAttempt(): Promise<void>;
+  complete(expected: RouteExecutionV1, next: RouteExecutionV1, receipt: RouteReceiptV1, resultSha256: string): Promise<boolean>;
   cancel(expected: RouteExecutionV1): Promise<boolean>;
 }
 
@@ -52,7 +56,6 @@ export interface RouteReceiptInput {
 export interface RouteCoordinatorDependencies {
   state: RouteCoordinatorState;
   operation: ContainedReportOperation;
-  createAttemptId(): string;
   now(): string;
   createReceipt(input: RouteReceiptInput): RouteReceiptV1;
 }
@@ -79,7 +82,6 @@ export function initialRouteExecution(): RouteExecutionV1 {
   return {
     version: 1,
     phase: 'triage-ready',
-    previousAttemptId: null,
     triageRepairs: 0,
     triageTransportRetries: 0,
     ambiguityTransportRetries: 0,
@@ -107,12 +109,6 @@ export class RouteCoordinator {
         });
       case 'candidate-ready':
         return this.launchReview(input, execution);
-      case 'triage-in-flight':
-        return this.recoverTriage(execution, null);
-      case 'repair-in-flight':
-        return this.recoverTriage(execution, execution.repairInput);
-      case 'review-in-flight':
-        return this.recoverReview(execution);
       case 'route-complete':
         return blocked('safety', 'route-coordinator-already-complete', ['Routed state must dispatch without rerunning routing.']);
     }
@@ -123,18 +119,10 @@ export class RouteCoordinator {
     ready: Extract<RouteExecutionV1, { phase: 'triage-ready' | 'malformed-repair-ready' | 'candidate-repair-ready' }>,
     repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
   ): Promise<RouteCoordinatorResult> {
-    const attemptId = this.dependencies.createAttemptId();
-    if (ready.phase === 'triage-ready' && attemptId === ready.previousAttemptId) {
-      return blocked('safety', 'triage-attempt-not-fresh', ['A recovered triage launch must use a fresh attempt ID.']);
-    }
-    const inFlight = {
-      ...budgets(ready),
-      phase: repairInput === null ? 'triage-in-flight' : 'repair-in-flight',
-      attemptId,
-      startedAt: this.dependencies.now(),
-      ...(repairInput === null ? {} : { repairInput }),
-    } as Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>;
-    if (!await this.dependencies.state.compareAndSwap(ready, inFlight)) return stateConflict();
+    const attemptId = await this.dependencies.state.prepareAttempt(
+      'triage',
+      repairInput === null ? 'initial' : `${repairInput.kind}:${ready.triageRepairs}`,
+    );
 
     const result = await this.dependencies.operation.run({
       operation: 'triage',
@@ -144,28 +132,30 @@ export class RouteCoordinator {
       workflowGeneration: input.workflowGeneration,
       promptFacts: triagePromptFacts(input.promptFacts, repairInput),
       signal: input.signal,
+      onLaunched: ({ pid, processGroupId }) => this.dependencies.state.launchAttempt(attemptId, pid, processGroupId),
     });
-    return this.adoptTriage(input, inFlight, repairInput, result);
+    return this.adoptTriage(input, ready, attemptId, repairInput, result);
   }
 
   private async adoptTriage(
     input: RouteCoordinatorInput,
-    inFlight: Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>,
+    ready: Extract<RouteExecutionV1, { phase: 'triage-ready' | 'malformed-repair-ready' | 'candidate-repair-ready' }>,
+    attemptId: string,
     repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
     result: ContainedReportOperationResult,
   ): Promise<RouteCoordinatorResult> {
-    if (result.status === 'cancelled') return this.cancel(inFlight);
+    if (result.status === 'cancelled') return this.cancel(ready);
     if (result.status === 'blocked') return blocked(result.kind, result.code, []);
-    if (result.status === 'retryable') return this.retryTriage(inFlight, repairInput, result.code);
+    if (result.status === 'retryable') return this.retryTriage(ready, repairInput, result.code);
     if (result.status === 'safe-halt') return result;
-    if (result.attemptId !== inFlight.attemptId) return attemptMismatch(inFlight.attemptId, result.attemptId);
-    if (result.status === 'invalid') return this.invalidTriage(inFlight, repairInput, result.findings);
+    if (result.attemptId !== attemptId) return attemptMismatch(attemptId, result.attemptId);
+    if (result.status === 'invalid') return this.invalidTriage(ready, repairInput, result.findings, result.repairInput?.originalReportSha256);
 
     let artifact: TriageRouteV1;
     try {
       artifact = validateTriageRoute(result.validatedPayload);
     } catch (error) {
-      return this.invalidTriage(inFlight, repairInput, [finding(error)]);
+      return this.invalidTriage(ready, repairInput, [finding(error)]);
     }
     if (artifact.status === 'blocked') {
       return blocked(artifact.blocker.kind, artifact.blocker.code, artifact.blocker.evidence);
@@ -178,18 +168,19 @@ export class RouteCoordinator {
 
     const triage: RouteArtifactRefV1 = {
       operation: 'triage',
-      attemptId: inFlight.attemptId,
+      attemptId,
       artifactSha256: result.artifactSha256,
       generationHash: input.workflowGeneration.generationHash,
     };
     if (artifact.status === 'awaiting-user') {
       const candidateReady: RouteExecutionV1 = {
-        ...budgets(inFlight), phase: 'candidate-ready', candidate: artifact, triage,
+        ...budgets(ready), phase: 'candidate-ready', candidate: artifact, triage,
       };
-      if (!await this.dependencies.state.compareAndSwap(inFlight, candidateReady)) return stateConflict();
+      if (!await this.dependencies.state.adopt(ready, candidateReady, result.artifactSha256)) return stateConflict();
+      await this.dependencies.state.clearAttempt();
       return this.launchReview(input, candidateReady);
     }
-    return this.complete(inFlight, artifact, triage, null);
+    return this.complete(ready, artifact, triage, null, ready, result.artifactSha256);
   }
 
   private async launchReview(
@@ -199,19 +190,13 @@ export class RouteCoordinator {
     if (ready.candidateReviews === 1) {
       return blocked('exhausted', 'candidate-reviews-exhausted', [ready.triage.artifactSha256]);
     }
-    const attemptId = this.dependencies.createAttemptId();
+    const attemptId = await this.dependencies.state.prepareAttempt(
+      'ambiguity-review',
+      `${ready.triage.artifactSha256}:${ready.candidateReviews}`,
+    );
     if (attemptId === ready.triage.attemptId) {
       return blocked('safety', 'ambiguity-review-attempt-not-fresh', ['Triage and review attempt IDs must be distinct.']);
     }
-    const inFlight: RouteExecutionV1 = {
-      ...budgets(ready),
-      phase: 'review-in-flight',
-      attemptId,
-      startedAt: this.dependencies.now(),
-      candidate: ready.candidate,
-      triage: ready.triage,
-    };
-    if (!await this.dependencies.state.compareAndSwap(ready, inFlight)) return stateConflict();
     const result = await this.dependencies.operation.run({
       operation: 'ambiguity-review',
       attemptId,
@@ -220,20 +205,22 @@ export class RouteCoordinator {
       workflowGeneration: input.workflowGeneration,
       promptFacts: reviewPromptFacts(input.promptFacts, ready),
       signal: input.signal,
+      onLaunched: ({ pid, processGroupId }) => this.dependencies.state.launchAttempt(attemptId, pid, processGroupId),
     });
-    return this.adoptReview(input, inFlight, result);
+    return this.adoptReview(input, ready, attemptId, result);
   }
 
   private async adoptReview(
     input: RouteCoordinatorInput,
-    inFlight: Extract<RouteExecutionV1, { phase: 'review-in-flight' }>,
+    ready: Extract<RouteExecutionV1, { phase: 'candidate-ready' }>,
+    attemptId: string,
     result: ContainedReportOperationResult,
   ): Promise<RouteCoordinatorResult> {
-    if (result.status === 'cancelled') return this.cancel(inFlight);
+    if (result.status === 'cancelled') return this.cancel(ready);
     if (result.status === 'blocked') return blocked(result.kind, result.code, []);
-    if (result.status === 'retryable') return this.retryReview(inFlight, result.code);
+    if (result.status === 'retryable') return this.retryReview(ready, result.code);
     if (result.status === 'safe-halt') return result;
-    if (result.attemptId !== inFlight.attemptId) return attemptMismatch(inFlight.attemptId, result.attemptId);
+    if (result.attemptId !== attemptId) return attemptMismatch(attemptId, result.attemptId);
     if (result.status === 'invalid') {
       return blocked('safety', 'ambiguity-review-artifact-invalid', result.findings);
     }
@@ -244,126 +231,103 @@ export class RouteCoordinator {
     } catch (error) {
       return blocked('safety', 'ambiguity-review-artifact-invalid', [finding(error)]);
     }
-    if (review.candidateSha256 !== inFlight.triage.artifactSha256) {
+    if (review.candidateSha256 !== ready.triage.artifactSha256) {
       return blocked('safety', 'ambiguity-review-candidate-mismatch', [
-        `Expected ${inFlight.triage.artifactSha256} but review echoed ${review.candidateSha256}.`,
+        `Expected ${ready.triage.artifactSha256} but review echoed ${review.candidateSha256}.`,
       ]);
     }
     if (review.verdict === 'blocked') {
       const consumed: RouteExecutionV1 = {
-        ...budgets(inFlight),
+        ...budgets(ready),
         phase: 'candidate-ready',
-        candidate: inFlight.candidate,
-        triage: inFlight.triage,
+        candidate: ready.candidate,
+        triage: ready.triage,
         candidateReviews: 1,
       };
-      if (!await this.dependencies.state.compareAndSwap(inFlight, consumed)) return stateConflict();
+      if (!await this.dependencies.state.adopt(ready, consumed, result.artifactSha256)) return stateConflict();
+      await this.dependencies.state.clearAttempt();
       return blocked('safety', 'ambiguity-review-blocked', nonEmptyFindings(review.findings, 'Ambiguity review blocked.'));
     }
     const reviewRef: AmbiguityReviewRefV1 = {
       operation: 'ambiguity-review',
-      attemptId: inFlight.attemptId,
+      attemptId,
       candidateSha256: review.candidateSha256,
       artifactSha256: result.artifactSha256,
       verdict: review.verdict,
       generationHash: input.workflowGeneration.generationHash,
     };
     if (review.verdict === 'rejected') {
-      if (inFlight.triageRepairs === 1 || inFlight.candidateReviews === 1) {
+      if (ready.triageRepairs === 1 || ready.candidateReviews === 1) {
         return blocked('exhausted', 'waiting-candidate-repair-exhausted', review.findings);
       }
       const findings = nonEmptyFindings(review.findings, 'Ambiguity review rejected the waiting candidate.');
       const repairReady: RouteExecutionV1 = {
-        ...budgets(inFlight),
+        ...budgets(ready),
         phase: 'candidate-repair-ready',
-        candidate: inFlight.candidate,
-        triage: inFlight.triage,
+        candidate: ready.candidate,
+        triage: ready.triage,
         review: reviewRef,
         findings,
         triageRepairs: 1,
         candidateReviews: 1,
       };
-      if (!await this.dependencies.state.compareAndSwap(inFlight, repairReady)) return stateConflict();
+      if (!await this.dependencies.state.adopt(ready, repairReady, result.artifactSha256)) return stateConflict();
+      await this.dependencies.state.clearAttempt();
       return { status: 'repairable', code: 'waiting-candidate-rejected', findings };
     }
-    const reviewed = { ...inFlight, candidateReviews: 1 as const };
-    return this.complete(inFlight, inFlight.candidate, inFlight.triage, reviewRef, reviewed);
+    const reviewed = { ...ready, candidateReviews: 1 as const };
+    return this.complete(ready, ready.candidate, ready.triage, reviewRef, reviewed, result.artifactSha256);
   }
 
   private async invalidTriage(
-    inFlight: Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>,
+    ready: Extract<RouteExecutionV1, { phase: 'triage-ready' | 'malformed-repair-ready' | 'candidate-repair-ready' }>,
     repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
     findings: string[],
+    resultSha256 = sha256(canonicalJson(findings)),
   ): Promise<RouteCoordinatorResult> {
     findings = nonEmptyFindings(findings, 'Triage artifact validation failed.');
-    if (repairInput !== null || inFlight.triageRepairs === 1) {
+    if (repairInput !== null || ready.triageRepairs === 1) {
       return blocked('exhausted', 'triage-repair-exhausted', findings);
     }
     const repairReady: RouteExecutionV1 = {
-      ...budgets(inFlight), phase: 'malformed-repair-ready', findings, triageRepairs: 1,
+      ...budgets(ready), phase: 'malformed-repair-ready', findings, triageRepairs: 1,
     };
-    if (!await this.dependencies.state.compareAndSwap(inFlight, repairReady)) return stateConflict();
+    if (!await this.dependencies.state.adopt(ready, repairReady, resultSha256)) return stateConflict();
+    await this.dependencies.state.clearAttempt();
     return { status: 'repairable', code: 'triage-artifact-invalid', findings };
   }
 
   private async retryTriage(
-    inFlight: Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>,
+    ready: Extract<RouteExecutionV1, { phase: 'triage-ready' | 'malformed-repair-ready' | 'candidate-repair-ready' }>,
     repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
     code: string,
   ): Promise<RouteCoordinatorResult> {
-    if (inFlight.triageTransportRetries === 1) {
+    if (ready.triageTransportRetries === 1) {
       return blocked('exhausted', 'triage-transport-retries-exhausted', [code]);
     }
-    const ready = triageReadyAfterFailure(inFlight, repairInput, 1);
-    if (!await this.dependencies.state.compareAndSwap(inFlight, ready)) return stateConflict();
+    const next = triageReadyAfterFailure(ready, repairInput, 1);
+    if (!await this.dependencies.state.adopt(ready, next, sha256(canonicalJson({ code })))) return stateConflict();
+    await this.dependencies.state.clearAttempt();
     return { status: 'retryable', owner: 'triage', code };
   }
 
   private async retryReview(
-    inFlight: Extract<RouteExecutionV1, { phase: 'review-in-flight' }>,
+    current: Extract<RouteExecutionV1, { phase: 'candidate-ready' }>,
     code: string,
   ): Promise<RouteCoordinatorResult> {
-    if (inFlight.ambiguityTransportRetries === 1) {
+    if (current.ambiguityTransportRetries === 1) {
       return blocked('exhausted', 'ambiguity-review-transport-retries-exhausted', [code]);
     }
     const ready: RouteExecutionV1 = {
-      ...budgets(inFlight),
+      ...budgets(current),
       phase: 'candidate-ready',
-      candidate: inFlight.candidate,
-      triage: inFlight.triage,
+      candidate: current.candidate,
+      triage: current.triage,
       ambiguityTransportRetries: 1,
     };
-    if (!await this.dependencies.state.compareAndSwap(inFlight, ready)) return stateConflict();
+    if (!await this.dependencies.state.adopt(current, ready, sha256(canonicalJson({ code })))) return stateConflict();
+    await this.dependencies.state.clearAttempt();
     return { status: 'retryable', owner: 'ambiguity-review', code };
-  }
-
-  private async recoverTriage(
-    inFlight: Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>,
-    repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
-  ): Promise<RouteCoordinatorResult> {
-    if (inFlight.triageTransportRetries === 1) {
-      return blocked('exhausted', 'triage-transport-retries-exhausted', [inFlight.attemptId]);
-    }
-    const ready = triageReadyAfterFailure(inFlight, repairInput, 1);
-    if (!await this.dependencies.state.compareAndSwap(inFlight, ready)) return stateConflict();
-    return { status: 'retryable', owner: 'triage', code: 'abandoned-triage-attempt' };
-  }
-
-  private async recoverReview(
-    inFlight: Extract<RouteExecutionV1, { phase: 'review-in-flight' }>,
-  ): Promise<RouteCoordinatorResult> {
-    if (inFlight.ambiguityTransportRetries === 1) {
-      return blocked('exhausted', 'ambiguity-review-transport-retries-exhausted', [inFlight.attemptId]);
-    }
-    const ready: RouteExecutionV1 = {
-      ...budgets(inFlight),
-      phase: 'candidate-ready',
-      candidate: inFlight.candidate,
-      triage: inFlight.triage,
-      ambiguityTransportRetries: 1,
-    };
-    if (!await this.dependencies.state.compareAndSwap(inFlight, ready)) return stateConflict();
-    return { status: 'retryable', owner: 'ambiguity-review', code: 'abandoned-ambiguity-review-attempt' };
   }
 
   private async complete(
@@ -371,7 +335,8 @@ export class RouteCoordinator {
     artifact: TriageRouteV1,
     triage: RouteArtifactRefV1,
     review: AmbiguityReviewRefV1 | null,
-    budgetSource: RouteExecutionV1 = expected,
+    budgetSource: RouteExecutionV1,
+    resultSha256: string,
   ): Promise<RouteCoordinatorResult> {
     let receipt: RouteReceiptV1;
     try {
@@ -380,7 +345,8 @@ export class RouteCoordinator {
       return blocked('safety', 'route-receipt-creation-failed', [finding(error)]);
     }
     const complete: RouteExecutionV1 = { ...budgets(budgetSource), phase: 'route-complete', triage, review };
-    if (!await this.dependencies.state.complete(expected, complete, receipt)) return stateConflict();
+    if (!await this.dependencies.state.complete(expected, complete, receipt, resultSha256)) return stateConflict();
+    await this.dependencies.state.clearAttempt();
     return artifact.status === 'awaiting-user'
       ? { status: 'awaiting-user', receipt }
       : { status: 'succeeded', receipt };
@@ -393,16 +359,16 @@ export class RouteCoordinator {
 }
 
 function triageReadyAfterFailure(
-  inFlight: Extract<RouteExecutionV1, { phase: 'triage-in-flight' | 'repair-in-flight' }>,
+  current: Extract<RouteExecutionV1, { phase: 'triage-ready' | 'malformed-repair-ready' | 'candidate-repair-ready' }>,
   repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 | null,
   retries: 1,
 ): RouteExecutionV1 {
   if (repairInput?.kind === 'malformed') {
-    return { ...budgets(inFlight), phase: 'malformed-repair-ready', findings: repairInput.findings, triageTransportRetries: retries };
+    return { ...budgets(current), phase: 'malformed-repair-ready', findings: repairInput.findings, triageTransportRetries: retries };
   }
   if (repairInput?.kind === 'rejected-candidate') {
     return {
-      ...budgets(inFlight),
+      ...budgets(current),
       phase: 'candidate-repair-ready',
       candidate: repairInput.candidate,
       triage: repairInput.triage,
@@ -412,9 +378,8 @@ function triageReadyAfterFailure(
     };
   }
   return {
-    ...budgets(inFlight),
+    ...budgets(current),
     phase: 'triage-ready',
-    previousAttemptId: inFlight.attemptId,
     triageTransportRetries: retries,
   };
 }

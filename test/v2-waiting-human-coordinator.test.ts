@@ -15,7 +15,7 @@ import { WaitingHumanCoordinator, type WaitingHumanState } from '../src/v2/waiti
 
 test('WaitingHumanCoordinator publishes one bound question then reconciles exact waiting labels', async () => {
   const issues = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const result = await coordinator.run(contextFixture(), state, new AbortController().signal);
   assert.equal(result.status, 'awaiting-answer');
@@ -28,22 +28,22 @@ test('WaitingHumanCoordinator publishes one bound question then reconciles exact
   assert.equal(issues.updatedIssues.length, 1);
 });
 
-test('WaitingHumanCoordinator recovers comment and label intents without duplicate effects', async () => {
+test('WaitingHumanCoordinator resumes semantic phases without duplicate effects', async () => {
   const issues = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
 
-  state.stopAfterCas = 'question-comment-intent';
+  state.stopAfterCas = 'question-ready';
   await assert.rejects(coordinator.run(context, state, new AbortController().signal), /injected crash/u);
   state.stopAfterCas = undefined;
   assert.equal((await coordinator.run(context, state, new AbortController().signal)).status, 'awaiting-answer');
   assert.equal(issues.postedComments.length, 1);
 
   const issuesAfterComment = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const stateAfterComment = memoryState();
+  const stateAfterComment = memoryState(undefined, issuesAfterComment);
   const coordinatorAfterComment = coordinatorFixture(issuesAfterComment);
-  stateAfterComment.stopAfterCas = 'wait-labels-intent';
+  stateAfterComment.stopAfterCas = 'question-published';
   await assert.rejects(coordinatorAfterComment.run(context, stateAfterComment, new AbortController().signal), /injected crash/u);
   stateAfterComment.stopAfterCas = undefined;
   assert.equal((await coordinatorAfterComment.run(context, stateAfterComment, new AbortController().signal)).status, 'awaiting-answer');
@@ -64,8 +64,9 @@ test('WaitingHumanCoordinator safety-blocks duplicate marker observations', asyn
     createdAt: '2026-07-17T11:30:00.000Z', updatedAt: '2026-07-17T11:30:00.000Z',
     author: { login: 'runner', id: '1' }, authorAssociation: 'MEMBER',
   }));
-  const result = await coordinatorFixture(new InMemoryGitHubIssueAdapter([issue])).run(
-    context, memoryState(), new AbortController().signal,
+  const issues = new InMemoryGitHubIssueAdapter([issue]);
+  const result = await coordinatorFixture(issues).run(
+    context, memoryState(undefined, issues), new AbortController().signal,
   );
   assert.deepEqual(result, {
     status: 'blocked', kind: 'safety', resumable: false, code: 'question-comment-conflict', evidence: ['101', '102'],
@@ -74,7 +75,7 @@ test('WaitingHumanCoordinator safety-blocks duplicate marker observations', asyn
 
 test('WaitingHumanCoordinator freezes one current WRITE+ answer and reaches resume-ready once', async () => {
   const issues = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal);
@@ -109,7 +110,7 @@ test('WaitingHumanCoordinator rejects old, edited, missing-prefix, empty, and as
   }
 
   const issues = new AdversarialAnswerAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<
@@ -142,7 +143,7 @@ test('WaitingHumanCoordinator re-observes after post and safety-blocks a concurr
     }
   }
   const issues = new DuplicatePostAdapter([issueFixture()]);
-  const result = await coordinatorFixture(issues).run(contextFixture(), memoryState(), new AbortController().signal);
+  const result = await coordinatorFixture(issues).run(contextFixture(), memoryState(undefined, issues), new AbortController().signal);
   assert.equal(result.status, 'blocked');
   assert.equal((result as Extract<typeof result, { status: 'blocked' }>).code, 'question-comment-conflict');
   assert.equal(issues.updatedIssues.length, 0);
@@ -152,14 +153,15 @@ test('WaitingHumanCoordinator types observation failure as retryable and cancels
   class FailingReadAdapter extends InMemoryGitHubIssueAdapter {
     override async listAllComments(): Promise<GitHubIssueComment[]> { throw new Error('transport'); }
   }
-  const failed = await coordinatorFixture(new FailingReadAdapter([issueFixture()]))
-    .run(contextFixture(), memoryState(), new AbortController().signal);
+  const failedIssues = new FailingReadAdapter([issueFixture()]);
+  const failed = await coordinatorFixture(failedIssues)
+    .run(contextFixture(), memoryState(undefined, failedIssues), new AbortController().signal);
   assert.deepEqual(failed, { status: 'retryable', owner: 'github-effect', code: 'question-comment-observation-failed' });
 
   const manualIssue = issueFixture();
   manualIssue.labels.push({ name: 'agent:manual' });
   const manual = new InMemoryGitHubIssueAdapter([manualIssue]);
-  assert.equal((await coordinatorFixture(manual).run(contextFixture(), memoryState(), new AbortController().signal)).status, 'cancelled');
+  assert.equal((await coordinatorFixture(manual).run(contextFixture(), memoryState(undefined, manual), new AbortController().signal)).status, 'cancelled');
   assert.equal(manual.updatedIssues.length, 0);
 });
 
@@ -168,7 +170,7 @@ test('WaitingHumanCoordinator safety-blocks malformed permission responses', asy
     override async getRepositoryPermission(): Promise<never> { throw new GitHubPermissionSafetyError('malformed'); }
   }
   const issues = new InvalidPermissionAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const waiting = await coordinator.run(contextFixture(), state, new AbortController().signal) as Extract<Awaited<ReturnType<WaitingHumanCoordinator['run']>>, { status: 'awaiting-answer' }>;
   await issues.postComment(12, `Answer ${waiting.questionId}: Choose A`);
@@ -179,7 +181,7 @@ test('WaitingHumanCoordinator safety-blocks malformed permission responses', asy
 
 test('WaitingHumanCoordinator publishes exactly one generation-two conflict question', async () => {
   const issues = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<Awaited<ReturnType<WaitingHumanCoordinator['run']>>, { status: 'awaiting-answer' }>;
@@ -194,7 +196,7 @@ test('WaitingHumanCoordinator publishes exactly one generation-two conflict ques
 
 test('a second approved awaiting-user route publishes the only generation-two product question', async () => {
   const issues = new InMemoryGitHubIssueAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<
@@ -208,7 +210,6 @@ test('a second approved awaiting-user route publishes the only generation-two pr
     version: 1,
     clarificationAttempts: ready.clarificationAttempts,
     permissionRetries: ready.permissionRetries,
-    effectRetries: structuredClone(ready.effectRetries),
     history: [{
       routeReceipt: structuredClone(context.receipt),
       question: structuredClone(ready.questionReceipt.question),
@@ -234,12 +235,12 @@ test('final permission revalidation consumes the same durable one-retry budget',
     calls = 0;
     override async getRepositoryPermission(_login: string, userId: string) {
       this.calls += 1;
-      if (this.calls >= 3) throw new GitHubPermissionRetryableError('temporary');
+      if (this.calls >= 2) throw new GitHubPermissionRetryableError('temporary');
       return { permission: 'write' as const, checkedAt: '2026-07-17T12:00:02.000Z', userId };
     }
   }
   const issues = new FinalRetryAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<
@@ -263,7 +264,7 @@ test('revocation label reconciliation cancels conflicting ownership and bounds u
   const issue = issueFixture();
   issue.labels.push({ name: 'agent:review' });
   const conflicting = new RevocationAdapter([issue]);
-  const state = memoryState(revocationState(contextFixture()));
+  const state = memoryState(revocationState(contextFixture()), conflicting);
   assert.equal((await coordinatorFixture(conflicting).run(contextFixture(), state, new AbortController().signal)).status, 'cancelled');
   assert.equal(conflicting.updatedIssues.length, 0);
 
@@ -271,12 +272,10 @@ test('revocation label reconciliation cancels conflicting ownership and bounds u
     override async updateIssue(): Promise<never> { throw new Error('unknown delivery'); }
   }
   const unknown = new UnknownRevocationAdapter([issueFixture()]);
-  const retryState = memoryState(revocationState(contextFixture()));
+  const retryState = memoryState(revocationState(contextFixture()), unknown);
   assert.equal((await coordinatorFixture(unknown).run(contextFixture(), retryState, new AbortController().signal)).status, 'retryable');
-  assert.equal((await retryState.read())?.effectRetries.revokeLabels, 1);
-  assert.deepEqual(await coordinatorFixture(unknown).run(contextFixture(), retryState, new AbortController().signal), {
-    status: 'blocked', kind: 'external', resumable: true, code: 'revoke-labels-exhausted', evidence: [],
-  });
+  assert.equal((await retryState.read())?.phase, 'answer-frozen');
+  assert.equal((await coordinatorFixture(unknown).run(contextFixture(), retryState, new AbortController().signal)).status, 'retryable');
 });
 
 test('permission retry exhaustion is independent and performs no label or model work', async () => {
@@ -284,7 +283,7 @@ test('permission retry exhaustion is independent and performs no label or model 
     override async getRepositoryPermission(): Promise<never> { throw new GitHubPermissionRetryableError('temporary'); }
   }
   const issues = new RetryPermissionAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<Awaited<ReturnType<WaitingHumanCoordinator['run']>>, { status: 'awaiting-answer' }>;
@@ -292,7 +291,6 @@ test('permission retry exhaustion is independent and performs no label or model 
   assert.equal((await coordinator.run(context, state, new AbortController().signal)).status, 'retryable');
   const afterRetry = await state.read();
   assert.equal(afterRetry?.permissionRetries, 1);
-  assert.deepEqual(afterRetry?.effectRetries, { questionComment: 0, waitLabels: 0, resumeLabels: 0, revokeLabels: 0 });
   assert.equal(afterRetry?.clarificationAttempts, 0);
   const exhausted = await coordinator.run(context, state, new AbortController().signal);
   assert.deepEqual(exhausted, {
@@ -313,7 +311,7 @@ test('permission revocation after resume labels reconciles to auto plus blocked 
     }
   }
   const issues = new RevokedPermissionAdapter([issueFixture()]);
-  const state = memoryState();
+  const state = memoryState(undefined, issues);
   const coordinator = coordinatorFixture(issues);
   const context = contextFixture();
   const waiting = await coordinator.run(context, state, new AbortController().signal) as Extract<Awaited<ReturnType<WaitingHumanCoordinator['run']>>, { status: 'awaiting-answer' }>;
@@ -322,7 +320,7 @@ test('permission revocation after resume labels reconciles to auto plus blocked 
   assert.equal(blocked.status, 'blocked');
   assert.equal((blocked as Extract<typeof blocked, { status: 'blocked' }>).code, 'answer-permission-revoked');
   assert.deepEqual(await issues.getLabels(12), ['agent:auto', 'agent:blocked']);
-  assert.equal((await state.read())?.phase, 'revoke-labels-intent');
+  assert.equal((await state.read())?.phase, 'answer-frozen');
 });
 
 function coordinatorFixture(issues: InMemoryGitHubIssueAdapter): WaitingHumanCoordinator {
@@ -335,7 +333,10 @@ function coordinatorFixture(issues: InMemoryGitHubIssueAdapter): WaitingHumanCoo
   });
 }
 
-function memoryState(initial?: WaitingHumanExecutionV1): WaitingHumanState & { stopAfterCas?: WaitingHumanExecutionV1['phase'] } {
+function memoryState(
+  initial?: WaitingHumanExecutionV1,
+  issues?: InMemoryGitHubIssueAdapter,
+): WaitingHumanState & { stopAfterCas?: WaitingHumanExecutionV1['phase'] } {
   let current: WaitingHumanExecutionV1 | undefined = structuredClone(initial);
   const state: WaitingHumanState & { stopAfterCas?: WaitingHumanExecutionV1['phase'] } = {
     read: async () => structuredClone(current),
@@ -345,11 +346,40 @@ function memoryState(initial?: WaitingHumanExecutionV1): WaitingHumanState & { s
       if (state.stopAfterCas === next.phase) throw new Error('injected crash');
       return true;
     },
+    publishQuestion: async ({ issueNumber, marker, body }) => {
+      if (!issues) throw new Error('issue adapter is missing');
+      try {
+        let matches = (await issues.listAllComments(issueNumber)).filter((comment) => comment.body.includes(marker));
+        if (matches.length > 1 || matches.some((comment) => comment.body !== body)) return { status: 'conflict', evidence: matches.map((comment) => comment.id) };
+        if (matches.length === 0) await issues.postComment(issueNumber, body);
+        matches = (await issues.listAllComments(issueNumber)).filter((comment) => comment.body.includes(marker));
+        return matches.length === 1 && matches[0]!.body === body
+          ? { status: 'settled' }
+          : { status: 'conflict', evidence: matches.map((comment) => comment.id) };
+      } catch { return { status: 'retryable', code: 'question-comment-observation-failed' }; }
+    },
+    projectLabels: async ({ issueNumber, expected, kind }) => {
+      if (!issues) throw new Error('issue adapter is missing');
+      try {
+        let issue = await issues.getIssue(issueNumber);
+        if (!issue || issue.state !== 'OPEN') return { status: 'cancelled' };
+        const current = issue.labels.map((label) => label.name);
+        if (!current.includes('agent:auto') || current.includes('agent:review') || current.includes('agent:manual')
+          || (kind !== 'waiting-revoke-labels' && current.includes('agent:blocked'))) return { status: 'cancelled' };
+        if (JSON.stringify([...current].sort()) !== JSON.stringify([...expected].sort())) {
+          await issues.updateIssue(issueNumber, { addLabels: expected, removeLabels: current.filter((label) => !expected.includes(label)) });
+          issue = await issues.getIssue(issueNumber);
+        }
+        return issue && JSON.stringify(issue.labels.map((label) => label.name).sort()) === JSON.stringify([...expected].sort())
+          ? { status: 'settled' }
+          : { status: 'retryable', code: `${kind}-observation-failed` };
+      } catch { return { status: 'retryable', code: `${kind}-unknown` }; }
+    },
   };
   return state;
 }
 
-function revocationState(context: RoutedRunContext): Extract<WaitingHumanExecutionV1, { phase: 'revoke-labels-intent' }> {
+function revocationState(context: RoutedRunContext): Extract<WaitingHumanExecutionV1, { phase: 'answer-frozen' }> {
   const question = createWaitingQuestion({
     runId: context.runId, generation: 1, routeDecisionSha256: context.receipt.decisionSha256,
     workflowGenerationHash: context.workflowGeneration.generationHash, priorQuestionSha256: null, conflictHashes: [],
@@ -365,11 +395,10 @@ function revocationState(context: RoutedRunContext): Extract<WaitingHumanExecuti
   };
   return {
     version: 1, clarificationAttempts: 0, permissionRetries: 0,
-    effectRetries: { questionComment: 0, waitLabels: 0, resumeLabels: 0, revokeLabels: 0 }, history: [],
-    phase: 'revoke-labels-intent',
+    history: [],
+    phase: 'answer-frozen',
     questionReceipt: { question, commentId: '101', commentUrl: 'https://example.invalid/comments/101', authorId: '1', author: 'runner', createdAt: '2026-07-17T12:00:00.000Z', observedAt: '2026-07-17T12:00:00.000Z' },
     answerReceipt: answer,
-    reason: 'permission-revoked',
   };
 }
 

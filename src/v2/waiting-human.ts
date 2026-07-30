@@ -75,20 +75,15 @@ interface WaitingBudgetsV1 {
   version: 1;
   clarificationAttempts: 0 | 1;
   permissionRetries: 0 | 1;
-  effectRetries: { questionComment: 0 | 1; waitLabels: 0 | 1; resumeLabels: 0 | 1; revokeLabels: 0 | 1 };
   history: WaitingHistoryEntryV1[];
 }
 
 export type WaitingHumanExecutionV1 = WaitingBudgetsV1 & (
   | { phase: 'question-ready'; question: WaitingQuestionV1 }
-  | { phase: 'question-comment-intent'; question: WaitingQuestionV1 }
   | { phase: 'question-published'; questionReceipt: WaitingQuestionReceiptV1 }
-  | { phase: 'wait-labels-intent'; questionReceipt: WaitingQuestionReceiptV1 }
   | { phase: 'awaiting-answer'; questionReceipt: WaitingQuestionReceiptV1 }
   | { phase: 'answer-frozen'; questionReceipt: WaitingQuestionReceiptV1; answerReceipt: TrustedAnswerReceiptV1 }
-  | { phase: 'resume-labels-intent'; questionReceipt: WaitingQuestionReceiptV1; answerReceipt: TrustedAnswerReceiptV1 }
   | { phase: 'resume-ready'; questionReceipt: WaitingQuestionReceiptV1; answerReceipt: TrustedAnswerReceiptV1 }
-  | { phase: 'revoke-labels-intent'; questionReceipt: WaitingQuestionReceiptV1; answerReceipt: TrustedAnswerReceiptV1; reason: 'permission-revoked' }
   | { phase: 'resumed'; trustedAnswer: TrustedAnswerReceiptV1 }
   | { phase: 'history-only'; terminalOutcome:
       | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted' }
@@ -285,27 +280,19 @@ export function validateTrustedAnswerReceipt(value: unknown, question?: WaitingQ
 
 export function validateWaitingHumanExecution(value: unknown, context: WaitingExecutionContext): WaitingHumanExecutionV1 {
   assertRecord(value, 'waiting execution');
-  const common = ['version', 'clarificationAttempts', 'permissionRetries', 'effectRetries', 'history', 'phase'];
+  const common = ['version', 'clarificationAttempts', 'permissionRetries', 'history', 'phase'];
   const phaseKeys: Record<string, string[]> = {
     'question-ready': ['question'],
-    'question-comment-intent': ['question'],
     'question-published': ['questionReceipt'],
-    'wait-labels-intent': ['questionReceipt'],
     'awaiting-answer': ['questionReceipt'],
     'answer-frozen': ['questionReceipt', 'answerReceipt'],
-    'resume-labels-intent': ['questionReceipt', 'answerReceipt'],
     'resume-ready': ['questionReceipt', 'answerReceipt'],
-    'revoke-labels-intent': ['questionReceipt', 'answerReceipt', 'reason'],
     resumed: ['trustedAnswer'],
     'history-only': ['terminalOutcome'],
   };
   if (typeof value.phase !== 'string' || !phaseKeys[value.phase]) throw new Error('waiting execution phase is invalid');
   assertExactObject(value, [...common, ...phaseKeys[value.phase]!], 'waiting execution');
   if (value.version !== 1 || !isBit(value.clarificationAttempts) || !isBit(value.permissionRetries)) throw new Error('waiting execution budgets are invalid');
-  assertExactObject(value.effectRetries, ['questionComment', 'waitLabels', 'resumeLabels', 'revokeLabels'], 'waiting execution.effectRetries');
-  for (const name of ['questionComment', 'waitLabels', 'resumeLabels', 'revokeLabels'] as const) {
-    if (!isBit(value.effectRetries[name])) throw new Error(`waiting execution.effectRetries.${name} is invalid`);
-  }
   if (!Array.isArray(value.history) || value.history.length > 2) throw new Error('waiting execution history is invalid');
   const history = value.history.map((entry, index) => validateHistoryEntry(entry, context, index));
   for (let index = 1; index < history.length; index += 1) {
@@ -329,7 +316,6 @@ export function validateWaitingHumanExecution(value: unknown, context: WaitingEx
       const answerReceipt = validateTrustedAnswerReceipt(value.answerReceipt, question);
       validateAnswerAfterQuestion(questionReceipt, answerReceipt);
     }
-    if (value.phase === 'revoke-labels-intent' && value.reason !== 'permission-revoked') throw new Error('waiting execution revocation reason is invalid');
   } else if (value.phase === 'resumed') {
     if (!['triaging', 'routed', 'implementing', 'spec-authoring', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt'].includes(context.lifecycle)) {
       throw new Error('resumed waiting execution lifecycle is invalid');

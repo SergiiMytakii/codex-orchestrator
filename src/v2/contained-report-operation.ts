@@ -16,7 +16,6 @@ import type {
   WorkflowGenerationReceipt,
   WorkflowOperationPolicy,
 } from './workflow-assets.js';
-import type { RunRecordV1 } from './run-store.js';
 
 const MAX_STRING_LENGTH = 16 * 1024;
 const POLICY_KEYS = [
@@ -45,7 +44,7 @@ export type ContainedReportOperationResult =
   | { status: 'retryable'; code: string }
   | {
     status: 'safe-halt';
-    process: Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
+    process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot };
     waitForAbsence(): Promise<void>;
   }
   | { status: 'cancelled' }
@@ -55,7 +54,13 @@ export interface ContainedReportOperation {
   run(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult>;
 }
 
-export type ReportOnlyWorktreeSnapshot = NonNullable<RunRecordV1['process']>['baseline'];
+export interface ReportOnlyWorktreeSnapshot {
+  headSha: string;
+  indexTreeSha: string;
+  trackedContentSha256: string;
+  untrackedContentSha256: string;
+  worktreeIdentity: string;
+}
 
 export interface PreparedContainedReportAttempt {
   operation: ContainedReportOperationId;
