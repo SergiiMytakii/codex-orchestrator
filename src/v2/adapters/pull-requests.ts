@@ -8,6 +8,7 @@ export interface GitHubPullRequest {
 
 export interface GitHubPullRequestDetails extends GitHubPullRequest {
   nodeId: string;
+  headSha?: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   title: string;
   body: string;
@@ -164,6 +165,7 @@ export class InMemoryGitHubPullRequestAdapter implements GitHubPullRequestAdapte
         title: this.createdPullRequests[pullRequest.number - 1]?.title ?? '',
         body: this.createdPullRequests[pullRequest.number - 1]?.body ?? '',
         authorAssociation: 'MEMBER',
+        headSha: this.reviewTargets.get(pullRequest.number)?.headRefOid,
       }));
   }
 

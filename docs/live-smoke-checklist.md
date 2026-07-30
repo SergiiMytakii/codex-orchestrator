@@ -25,8 +25,11 @@ Its scenarios are intentionally bound to these current owner behaviors:
 - `discovery-matrix`: an unlabeled issue is ineligible and creates no branch or
   PR.
 - `commit-policy`: an agent-authored commit is rejected and never published.
-- `incomplete-progress-rework`: one interrupted transport attempt resumes once
-  and reaches review-ready without opening a new implementation cycle.
+- `infrastructure-recovery`: one pre-output infrastructure failure yields the
+  current bounded run with its canonical invocation fence and consumes no
+  semantic budget. The next tick proves quiescence and only clears ownership; a
+  later tick reaches review-ready with one replacement and no durable retry
+  counter.
 - `report-repair`: one invalid report is repaired as report-only work and then
   reaches review-ready.
 - `diagnostics`: `doctor` and `status` inspect without changing target state,
@@ -39,6 +42,13 @@ Its scenarios are intentionally bound to these current owner behaviors:
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
+- `proof-invocation-recovery`: two isolated scratch issues terminate a daemon by
+  its exact child PID after a real proof worker reaches durable launched
+  ownership. The first preserves the report and proves exact adoption. The
+  second deterministically discards the first attempt-owned output, proves a
+  clear-only tick after positive process absence, then launches exactly one
+  replacement. Both paths prove one recovery observation, no semantic-budget
+  spend, one publication effect, and strict owned-process cleanup.
 - `quality-gates`: the fifth failed configured-check closure exhausts the run
   without publication.
 

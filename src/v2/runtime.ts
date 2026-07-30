@@ -1,8 +1,8 @@
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
@@ -10,12 +10,16 @@ import { GitWorktreeManager } from './adapters/worktree.js';
 import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
-import type { ReviewFeedbackImplementationInvocationV1 } from './review-feedback.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, CandidateProofInspectionError, ProofQuiescenceError, ProofReportRecoveryError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IosProofInputsV1, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
-import { InjectedContainedReportOperation } from './contained-report-operation.js';
+import {
+  InjectedContainedMutableOperation,
+  InjectedContainedReportOperation,
+  type DurableMutableInvocationState,
+  type MutableWorktreeOperationId,
+} from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
@@ -781,278 +785,182 @@ async function publishArtifactCreateOnly(root: SafeArtifactRoot, destination: st
 
 export class ContainedImplementationAgent {
   constructor(private readonly dependencies: {
-    config: () => AgentAutoConfig;
-    orchestratorHome: string;
-    parentCodexHome: string;
-    safePath: string;
-    bootId: string;
-    git: RunIssueGit;
-    process?: CodexProcess;
-    createAttemptId?: () => string;
-    now?: () => string;
+    config: () => AgentAutoConfig; orchestratorHome: string; parentCodexHome: string; safePath: string; bootId: string;
+    git: RunIssueGit; process?: CodexProcess; createAttemptId?: () => string; now?: () => string;
   }) {}
-
   async run(input: {
-    operation: 'qualification-repair' | 'implementation';
-    runId: string;
-    worktreePath: string;
-    issue: IssueSnapshot;
-    frozenCriteria: FrozenCriterion[];
-    cycle: number;
-    reworkFindings: string[];
-    repairOnly: boolean;
+    operation: MutableWorktreeOperationId; runId: string; worktreePath: string; issue: IssueSnapshot;
+    frozenCriteria: FrozenCriterion[]; cycle: number; reworkFindings: string[]; repairOnly: boolean;
     workflowGeneration: WorkflowGenerationReceipt;
     reviewFeedbackRound?: number;
     reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
-    onPrepared?: (input: {
-      attemptId: string; reportPath: string; preparedAt: string;
-      baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'>;
-    }) => Promise<void>;
-    onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
-    signal: AbortSignal;
+    phaseFacts?: string[];
+    invocationState: DurableMutableInvocationState; beforeLaunch?: () => Promise<void>; signal: AbortSignal;
   }): Promise<ImplementationAgentResult> {
     const config = this.dependencies.config();
     const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
-    const attemptId = (this.dependencies.createAttemptId ?? randomUUID)();
-    const attempt = await prepareContainedAttempt({
-      orchestratorHome: this.dependencies.orchestratorHome,
-      canonicalRepository,
-      runId: input.runId,
-      attemptId,
-      operationId: input.operation,
-      workflowGeneration: input.workflowGeneration,
-      bootId: this.dependencies.bootId,
+    const promptFacts = implementationPromptFacts(input);
+    const operation = this.operation(config, canonicalRepository, promptFacts);
+    const result = await operation.run({
+      operation: input.operation, runId: input.runId, worktreePath: input.worktreePath,
+      workflowGeneration: input.workflowGeneration, promptFacts, signal: input.signal,
+      context: { repairOnly: input.repairOnly, reworkFindings: [...input.reworkFindings] },
+      invocationState: input.invocationState, beforeLaunch: input.beforeLaunch,
     });
-    const baseline = await this.dependencies.git.snapshot(input.worktreePath);
-    await input.onPrepared?.({
-      attemptId,
-      reportPath: attempt.reportPath,
-      preparedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-      baseline,
-    });
-    try {
-      const result = await (this.dependencies.process ?? new CodexProcess()).run({
-        codexPath: config.codex.command,
-        cwd: input.worktreePath,
-        schemaPath: attempt.schemaPath,
-        reportPath: attempt.reportPath,
-        toolHome: attempt.toolHome,
-        tmpDir: attempt.tmpDir,
-        safePath: this.dependencies.safePath,
-        parentCodexHome: this.dependencies.parentCodexHome,
-        parentEnv: process.env,
-        prompt: [
-          `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
-          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          ...(input.operation === 'qualification-repair'
-            ? [
-              `Pre-implementation qualification repair for issue #${input.issue.number}: ${input.issue.title}`,
-              'Do not implement the issue acceptance criteria yet. Repair only the reported scoped-check failures so the existing worktree qualifies for implementation.',
-              'You may modify the product files required by those failures. Return changedFiles as the complete cumulative worktree change set.',
-            ]
-            : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
-          `Implementation cycle: ${input.cycle}.`,
-          ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
-          ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
-          ...(input.operation === 'implementation'
-            ? [`Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`]
-            : []),
-          ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
-          ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
-          'Do not commit, push, publish, or print credentials or local auth paths.',
-        ].join('\n'),
-        timeoutMs: config.codex.timeoutMs,
-        idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
-        executionProfile: attempt.profile,
-        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
-          attemptId, pid, processGroupId, launchedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-        }) } : {}),
-      }, input.signal);
-      if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
-        return { kind: 'transport-failed', resumable: true };
-      }
-      if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
-      return {
-        kind: 'completed',
-        attemptId,
-        report: decodeAgentReportForValidation(result.report.bytes),
-      };
-    } catch (error) {
-      if (!(error instanceof ProcessQuiescenceError)) return { kind: 'internal-error' };
-      return {
-        kind: 'safe-halt',
-        process: {
-          pid: error.pid,
-          processGroupId: error.processGroupId,
-          startedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
-          baseline: { ...baseline },
-        },
-        waitForAbsence: () => waitForProcessGroupAbsent(error.processGroupId),
-      };
-    }
+    if (result.status === 'completed') return { kind: 'completed', attemptId: result.attemptId,
+      report: decodeAgentReportForValidation(result.reportBytes) };
+    if (result.status === 'cancelled') return { kind: 'cancelled' };
+    if (result.status === 'retryable') return { kind: 'transport-failed', resumable: true, code: result.code };
+    if (result.status === 'safe-halt') return { kind: 'safe-halt', code: result.code };
+    return result.kind === 'external'
+      ? { kind: 'transport-failed', resumable: true, code: result.code }
+      : { kind: 'safe-halt', code: result.code };
   }
+  async settle(input: {
+    operation: MutableWorktreeOperationId; runId: string; worktreePath: string; issue: IssueSnapshot;
+    frozenCriteria: FrozenCriterion[]; cycle: number; reworkFindings: string[]; repairOnly: boolean;
+    workflowGeneration: WorkflowGenerationReceipt;
+    reviewFeedbackRound?: number;
+    reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+    phaseFacts?: string[];
+    invocationState: DurableMutableInvocationState; signal: AbortSignal;
+  }): Promise<{ kind: 'settled' } | { kind: 'safe-halt'; code: string }> {
+    const config = this.dependencies.config();
+    const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
+    const promptFacts = implementationPromptFacts(input);
+    const result = await this.operation(config, canonicalRepository, promptFacts).settle({
+      operation: input.operation, runId: input.runId, worktreePath: input.worktreePath,
+      workflowGeneration: input.workflowGeneration, promptFacts, signal: input.signal,
+      context: { repairOnly: input.repairOnly, reworkFindings: [...input.reworkFindings] },
+      invocationState: input.invocationState,
+    });
+    return result.status === 'settled' ? { kind: 'settled' } : { kind: 'safe-halt', code: result.code };
+  }
+  private operation(config: AgentAutoConfig, canonicalRepository: string, promptFacts: string[]): InjectedContainedMutableOperation {
+    return new InjectedContainedMutableOperation({
+      host: hostname(), bootId: this.dependencies.bootId,
+      now: this.dependencies.now ?? (() => new Date().toISOString()),
+      createAttemptId: this.dependencies.createAttemptId ?? randomUUID,
+      prepare: async ({ operation: worker, attemptId, runId, workflowGeneration }) => ({
+        operation: worker, generationHash: workflowGeneration.generationHash,
+        ...await prepareContainedAttempt({
+          orchestratorHome: this.dependencies.orchestratorHome, canonicalRepository, runId, attemptId,
+          operationId: worker, workflowGeneration, bootId: this.dependencies.bootId,
+        }),
+      }),
+      snapshot: (worktreePath) => this.dependencies.git.snapshot(worktreePath),
+      readReport: async (path) => readRegularFile(path).then((bytes) => ({ status: 'available' as const, bytes }))
+        .catch((error) => isErrorCode(error, 'ENOENT') ? { status: 'absent' as const } : { status: 'unknown' as const }),
+      processStartIdentity: readProcessStartIdentity,
+      inspectProcess: inspectReportProcess,
+      launch: async ({ attempt, worktreePath, signal, onSpawned }) => {
+        try {
+          const result = await (this.dependencies.process ?? new CodexProcess()).run({
+            codexPath: config.codex.command, cwd: worktreePath, schemaPath: attempt.schemaPath!,
+            reportPath: attempt.reportPath, toolHome: attempt.toolHome!, tmpDir: attempt.tmpDir!,
+            safePath: this.dependencies.safePath, parentCodexHome: this.dependencies.parentCodexHome,
+            parentEnv: process.env,
+            prompt: [
+              `Package profile instructions: ${attempt.profile!.developerInstructions}`,
+              `Follow the exact operation at ${attempt.operationPath}.`,
+              `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+              ...promptFacts,
+            ].join('\n'),
+            timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
+            operationPolicy: attempt.policy, executionProfile: attempt.profile!, onSpawned,
+          }, signal);
+          if (result.kind === 'cancelled') return { status: 'cancelled' as const };
+          if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind))
+            return { status: 'retryable' as const, code: `mutable-operation-${result.kind}` };
+          if (result.kind !== 'completed' || result.report.kind !== 'available')
+            return { status: 'retryable' as const, code: 'mutable-operation-report-unavailable' };
+          return { status: 'completed' as const, reportBytes: result.report.bytes };
+        } catch (error) {
+          return error instanceof ProcessQuiescenceError
+            ? { status: 'safe-halt' as const }
+            : { status: 'retryable' as const, code: 'mutable-operation-launch-failed' };
+        }
+      },
+    });
+  }
+}
 
-  async recover(input: {
-    runId: string;
-    canonicalRepository: string;
-    invocation: ReviewFeedbackImplementationInvocationV1;
-  }): Promise<Extract<ImplementationAgentResult, { kind: 'completed' }> | undefined> {
-    const expected = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(input.canonicalRepository),
-      'runs',
-      input.runId,
-      'attempts',
-      input.invocation.attemptId,
-      'report.json',
-    );
-    if (resolve(input.invocation.reportPath) !== expected) {
-      throw new Error('review feedback implementation report path is not attempt-owned');
-    }
-    let bytes: Buffer;
-    try {
-      bytes = await readRegularFile(expected);
-    } catch (error) {
-      if (isErrorCode(error, 'ENOENT')) return undefined;
-      throw error;
-    }
-    return {
-      kind: 'completed',
-      attemptId: input.invocation.attemptId,
-      report: decodeAgentReportForValidation(bytes),
-    };
-  }
+function implementationPromptFacts(input: {
+  operation: MutableWorktreeOperationId; issue: IssueSnapshot; frozenCriteria: FrozenCriterion[]; cycle: number;
+  reworkFindings: string[]; repairOnly: boolean; reviewFeedbackRound?: number;
+  reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+  phaseFacts?: string[];
+}): string[] {
+  const task = input.operation === 'qualification-repair' ? [
+    `Pre-implementation qualification repair for issue #${input.issue.number}: ${input.issue.title}`,
+    'Do not implement the issue acceptance criteria yet. Repair only the reported scoped-check failures so the existing worktree qualifies for implementation.',
+    'You may modify the product files required by those failures. Return changedFiles as the complete cumulative worktree change set.',
+  ] : [`Implement issue #${input.issue.number}: ${input.issue.title}`];
+  return [...task,
+    `Implementation cycle: ${input.cycle}.`,
+    ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
+    ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
+    ...(input.operation !== 'qualification-repair' ? [`Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`] : []),
+    ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
+    ...(input.phaseFacts?.length ? [`Phase-owned invocation correlation: ${canonicalJson(input.phaseFacts)}`] : []),
+    ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
+    'Do not commit, push, publish, or print credentials or local auth paths.',
+  ];
 }
 
 export class ContainedProofAgent implements ProofAgent<import('./checked-change.js').CheckedChangePayload> {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfig;
-    orchestratorHome: string;
-    parentCodexHome: string;
-    safePath: string;
     targetRoot: string;
-    bootId: string;
-    androidAdbPath: string;
-    iosXcrunPath: string;
-    processExecutor: ProcessExecutor;
-    process?: CodexProcess;
-    createAttemptId?: () => string;
+    operation: InjectedContainedReportOperation;
   }) {}
 
   async run(input: Parameters<ProofAgent['run']>[0]): ReturnType<ProofAgent['run']> {
     if (!input.workflowGeneration) throw new Error('proof workflow generation is required');
+    if (!input.iosProofInputs) throw new Error('runner-owned iOS proof inputs are required');
     const config = this.dependencies.config();
-    const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
     const issueWorktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
     const worktreePath = input.worktreePath ? resolve(input.worktreePath) : issueWorktreePath;
-    const attempt = await prepareContainedAttempt({
-      orchestratorHome: this.dependencies.orchestratorHome,
-      canonicalRepository,
-      runId: input.runId,
-      attemptId: input.attemptId ?? (this.dependencies.createAttemptId ?? randomUUID)(),
-      operationId: 'acceptance-proof',
-      workflowGeneration: input.workflowGeneration,
-      bootId: this.dependencies.bootId,
-    });
     const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
-    const snapshotRoot = dirname(attempt.sourceSkillPath ?? attempt.operationPath);
-    const iosLeaseRoot = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(canonicalRepository),
-      'leases',
-    );
-    const iosLeaseArtifact = join(artifactRoot, input.proofId, 'ios-lease.json');
-    const iosTooling = await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
-    try {
-      try {
-        const recoveredReport = await readRegularFile(attempt.reportPath);
-        const recoveredInventory = await artifactInventory(artifactRoot, config.proof.artifactDir);
-        const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
-        return {
-          kind: 'report',
-          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']),
-          proofPhaseChangedFiles: [...recoveredInventory.keys()].filter((path) => !runnerPrepared.has(path)).sort(),
-        };
-      } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) throw error;
-      }
-      if (input.recoverOnly) throw new ProofReportRecoveryError();
-      const result = await (this.dependencies.process ?? new CodexProcess()).run({
-        codexPath: config.codex.command,
-        cwd: worktreePath,
-        schemaPath: attempt.schemaPath,
-        reportPath: attempt.reportPath,
-        toolHome: attempt.toolHome,
-        tmpDir: attempt.tmpDir,
-        safePath: this.dependencies.safePath,
-        parentCodexHome: this.dependencies.parentCodexHome,
-        parentEnv: process.env,
-        prompt: [
-          `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
-          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Independently prove issue #${input.issue.number}.`,
-          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
-          `Checked change digest: ${input.checkedChangeSha256}.`,
-          `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
-          `Configured check receipts: ${canonicalJson(input.checks)}.`,
-          `Write evidence only below ${config.proof.artifactDir}.`,
-          'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
-          'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
-          ...(config.proof.android ? [
-            `Runner-owned Android artifact paths: ${canonicalJson(input.runnerPreparedArtifactPaths)}.`,
-            `Runner-owned Android preparation warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
-            'The trusted Runner owns emulator, build, adb, lease, capture, and cleanup actions. Do not invoke adb, emulator, Flutter run, or an Android lease helper.',
-            'Inspect Runner artifacts when present. If preparation warnings are present, continue with all available non-visual evidence and preserve the warning as a residual risk; Android infrastructure failure alone must not block delivery.',
-          ] : [
-            'Runner-owned Android proof is not configured for this repository. Do not invoke adb, emulator, Flutter run, or an Android lease helper; return a typed tool blocker for Android criteria.',
-          ]),
-          'When a frozen criterion has an iOS surface, follow references/ios.md from the exact acceptance-proof skill snapshot.',
-          `iOS lease helper: ${join(snapshotRoot, 'tools', 'ios-lease.mjs')}.`,
-          `iOS lease root: ${iosLeaseRoot}.`,
-          `iOS lease artifact: ${iosLeaseArtifact}.`,
-          `iOS lease proof ID: ${input.proofId}.`,
-          `iOS lease owner PID: ${process.pid}.`,
-          `iOS xcrun path: ${this.dependencies.iosXcrunPath}.`,
-          ...(iosTooling ? [
-            `iOS runtime ID: ${iosTooling.runtimeId}.`,
-            `iOS device type ID: ${iosTooling.deviceTypeId}.`,
-          ] : ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.']),
-          ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
-          'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
-        ].join('\n'),
-        timeoutMs: config.codex.timeoutMs,
-        idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
-        executionProfile: attempt.profile,
-        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
-          pid, processGroupId, launchedAt: new Date().toISOString(),
-        }) } : {}),
-      }, input.signal);
-      if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
-        return { kind: 'transport-failed', resumable: true };
-      }
-      if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
-      const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
-      return {
-        kind: 'report',
-        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']),
-        proofPhaseChangedFiles: changedArtifactPaths(before, after),
-      };
-    } catch (error) {
-      if (error instanceof ProcessQuiescenceError) {
-        throw new ProofQuiescenceError(error.pid, error.processGroupId, () => waitForProcessGroupAbsent(error.processGroupId));
-      }
-      if (error instanceof ProofReportRecoveryError) throw error;
-      return { kind: 'internal-error' };
+    if (!input.invocationState) return { kind: 'internal-error' };
+    if (input.repairOnly && await input.invocationState.read() === undefined
+      && !artifactInventoryMatches(before, input.repairArtifactSha256)) {
+      return { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' };
     }
+    const result = await this.dependencies.operation.run({
+      operation: 'acceptance-proof', runId: input.runId, worktreePath,
+      workflowGeneration: input.workflowGeneration, signal: input.signal, invocationState: input.invocationState,
+      beforeLaunch: input.beforeLaunch,
+      promptFacts: [
+        `Proof ID: ${input.proofId}. Issue: ${canonicalJson(input.issue)}.`,
+        `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}.`,
+        `Checked change: ${input.checkedChangeSha256}; files: ${canonicalJson(input.changedFiles)}; checks: ${canonicalJson(input.checks)}.`,
+        `Runner artifacts: ${canonicalJson(input.runnerPreparedArtifactPaths)}; hashes: ${canonicalJson(input.runnerPreparedArtifactSha256)}; warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
+        `Runner-owned immutable iOS proof inputs: ${canonicalJson(input.iosProofInputs)}.`,
+        ...(input.iosProofInputs.runtimeId === null || input.iosProofInputs.deviceTypeId === null
+          ? ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.'] : []),
+        `Report repair: ${canonicalJson({ repairOnly: input.repairOnly, findings: input.repairFindings })}.`,
+        ...(input.repairOnly ? [`Immutable pre-repair artifact inventory: ${canonicalJson(input.repairArtifactSha256)}.`] : []),
+      ],
+    });
+    if (result.status === 'cancelled') return { kind: 'cancelled' };
+    if (result.status !== 'completed') {
+      if (input.repairOnly && await input.invocationState.read() === undefined
+        && !artifactInventoryMatches(await artifactInventory(artifactRoot, config.proof.artifactDir), input.repairArtifactSha256)) {
+        return { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' };
+      }
+      return { kind: 'deferred', code: result.code };
+    }
+    const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
+    const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
+    const changed = before.size === 0
+      ? [...after.keys()].filter((path) => !runnerPrepared.has(path)).sort()
+      : changedArtifactPaths(before, after);
+    return {
+      kind: 'report', report: decodeAgentReportForValidation(result.reportBytes, ['visualEvidence', 'blocker']),
+      proofPhaseChangedFiles: changed, proofPhaseArtifactSha256: Object.fromEntries([...after.entries()].sort()),
+    };
   }
 }
 
@@ -1090,9 +998,7 @@ export function createV2Runtime(input: {
   createWorkflowGeneration: () => Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
   issues: GitHubIssueAdapter;
   pullRequests: GitHubPullRequestAdapter;
-  implementationAgent?: {
-    run(input: Parameters<NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent']['run']>[0]): Promise<ImplementationAgentResult>;
-  };
+  implementationAgent?: NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent'];
   proofAgent?: ProofAgent<import('./checked-change.js').CheckedChangePayload>;
   parentCodexHome?: string;
   safePath?: string;
@@ -1152,13 +1058,6 @@ export function createV2Runtime(input: {
     git,
     now,
   });
-  const proofAgent = input.proofAgent ?? new ContainedProofAgent({
-    ...containedDependencies(),
-    targetRoot,
-    androidAdbPath,
-    iosXcrunPath,
-    processExecutor: commandExecutor,
-  });
   const androidProofController = new RunnerAndroidProofController({
     adbPath: androidAdbPath,
     emulatorPath: androidEmulatorPath,
@@ -1166,6 +1065,10 @@ export function createV2Runtime(input: {
     now: () => new Date(now()),
   });
   const reportOperation = new InjectedContainedReportOperation({
+    host: hostname(),
+    bootId: input.bootId,
+    now,
+    createAttemptId: input.createAttemptId ?? randomUUID,
     prepare: async ({ operation, attemptId, runId, workflowGeneration }) => ({
       operation,
       generationHash: workflowGeneration.generationHash,
@@ -1179,29 +1082,43 @@ export function createV2Runtime(input: {
         bootId: input.bootId,
       }),
     }),
-    snapshot: (worktreePath) => git.snapshot(worktreePath),
-    launch: async ({ attempt, worktreePath, promptFacts, signal, onLaunched }) => {
+    snapshot: (worktreePath, operation) => operation === 'acceptance-proof' && proofFreshnessGit.snapshotIgnoringUntrackedRoot
+      ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, requireConfig(currentConfig).proof.artifactDir)
+      : git.snapshot(worktreePath),
+    readReport: async (path) => readRegularFile(path).then((bytes) => ({ status: 'available' as const, bytes }))
+      .catch((error) => isErrorCode(error, 'ENOENT') ? { status: 'absent' as const } : { status: 'unknown' as const }),
+    settleAttempt: async (attempt) => attempt.tmpDir
+      ? rm(join(dirname(attempt.tmpDir), 'read-view'), { recursive: true, force: true })
+      : Promise.reject(new Error('report operation attempt temporary directory is missing')),
+    processStartIdentity: readProcessStartIdentity,
+    inspectProcess: inspectReportProcess,
+    launch: async ({ operation, attempt, worktreePath, promptFacts, signal, onSpawned }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
       }
-      let readView: string;
-      try {
-        readView = await materializeReportReadView({
-          worktreePath,
-          destination: join(dirname(attempt.tmpDir), 'read-view'),
-          deniedPaths: config.deny.readPaths,
-        });
-      } catch {
-        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
+      let readView: string | undefined;
+      if (operation !== 'spec-author' && operation !== 'acceptance-proof') {
+        try {
+          readView = await materializeReportReadView({
+            worktreePath,
+            destination: join(dirname(attempt.tmpDir), 'read-view'),
+            deniedPaths: config.deny.readPaths,
+          });
+        } catch {
+          return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
+        }
       }
+      const revisionPath = operation === 'spec-author'
+        ? join(dirname(attempt.reportPath), `revision-${promptFacts[0]}.md`)
+        : undefined;
       let result;
       let cleanupAfterSafeHalt = false;
       try {
         result = await containedProcess.run({
         codexPath: config.codex.command,
-        cwd: readView,
+        cwd: operation === 'spec-author' ? dirname(attempt.reportPath) : operation === 'acceptance-proof' ? worktreePath : readView!,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
         toolHome: attempt.toolHome,
@@ -1209,7 +1126,21 @@ export function createV2Runtime(input: {
         safePath: requireRuntimeString(input.safePath, 'safePath'),
         parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
         parentEnv: process.env,
-        prompt: [
+        prompt: operation === 'spec-author' ? [
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+          `Runner-provided facts: ${canonicalJson(promptFacts)}`,
+          `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
+          'Do not modify the product worktree, prior revisions, external state, or any .env file.',
+        ].join('\n') : operation === 'acceptance-proof' ? [
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+          `Runner-provided proof facts:\n${promptFacts.join('\n')}`,
+          `Write evidence only below ${config.proof.artifactDir}. CheckedChange is the sole authority for completed checks.`,
+          'Do not modify product files, commit, push, publish, use network or MCP tools, or print credentials or local auth paths.',
+        ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
@@ -1221,25 +1152,16 @@ export function createV2Runtime(input: {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
-        ...(onLaunched ? { onSpawned: onLaunched } : {}),
+        onSpawned,
         }, signal);
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
           cleanupAfterSafeHalt = true;
-          return {
-            status: 'safe-halt' as const,
-            pid: error.pid,
-            processGroupId: error.processGroupId,
-            startedAt: now(),
-            waitForAbsence: async () => {
-              await waitForProcessGroupAbsent(error.processGroupId);
-              await rm(readView, { recursive: true, force: true });
-            },
-          };
+          return { status: 'safe-halt' as const };
         }
         throw error;
       } finally {
-        if (!cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
+        if (readView && !cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
       }
       if (result.kind === 'cancelled') return { status: 'cancelled' as const };
       if (result.kind === 'launch-gate-failed') {
@@ -1254,157 +1176,92 @@ export function createV2Runtime(input: {
       return { status: 'completed' as const, reportBytes: result.report.bytes };
     },
   });
+  const proofAgent = input.proofAgent ?? new ContainedProofAgent({
+    config: () => requireConfig(currentConfig), targetRoot, operation: reportOperation,
+  });
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
-    createAttemptId: input.createAttemptId ?? randomUUID,
   });
-  const createAttemptId = input.createAttemptId ?? randomUUID;
   const specOperation: SpecDeliveryOperation = {
-    author: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.authorSessionId ?? randomUUID();
-      let attempt;
+    author: async ({ context, state, mode, authorSessionId: sessionId, signal, invocationState }) => {
+      let completedAttemptId: string | undefined;
       try {
-        attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-author', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        const revisionPath = join(dirname(attempt.reportPath), `revision-${state.revisions.length + 1}.md`);
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
-        const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
-          codexPath: config.codex.command, cwd: dirname(attempt.reportPath), schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
-            `The immutable workflow root is ${attempt.workflowRoot}.`,
-            `Author mode: ${mode}. Issue authority: ${canonicalJson(context.issue)}.`,
-            `Frozen criteria: ${canonicalJson(context.frozenCriteria)}.`,
+        const result = await reportOperation.run({
+          operation: 'spec-author', runId: context.runId, worktreePath: context.worktreePath,
+          workflowGeneration: context.workflowGeneration, signal, invocationState,
+          promptFacts: [
+            String(state.revisions.length + 1),
+            `Author session ID: ${sessionId}. Author mode: ${mode}.`,
+            `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
             `Prior revisions and review state: ${canonicalJson({ revisions: state.revisions, review: state.review })}.`,
-            `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
-            'Do not modify the product worktree, prior revisions, external state, or any .env file.',
-          ].join('\n'),
-        }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
-        const report = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
+          ],
+        });
+        if (result.status === 'cancelled') return { status: 'cancelled' };
+        if (result.status === 'retryable' || result.status === 'safe-halt') return { status: 'retryable', code: result.code };
+        if (result.status === 'blocked') return { status: 'blocked', kind: result.kind, code: result.code };
+        completedAttemptId = result.attemptId;
+        const invocation = await invocationState.read();
+        if (!invocation || invocation.operation !== 'spec-author' || invocation.attemptId !== result.attemptId) {
+          return { status: 'blocked', kind: 'safety', code: 'spec-author-invocation-correlation-missing' };
+        }
+        const revisionPath = join(dirname(invocation.reportPath), `revision-${state.revisions.length + 1}.md`);
+        const report = decodeAgentReportForValidation(result.reportBytes) as Record<string, unknown>;
+        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) {
+          return { status: 'invalid', code: 'spec-author-report-invalid', attemptId: result.attemptId };
+        }
         const content = await readRegularFile(revisionPath);
-        if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        if (report.specSha256 !== sha256(content)) return { status: 'invalid', code: 'spec-author-report-invalid', attemptId: result.attemptId };
         const previous = state.revisions.at(-1) ?? null;
         return { status: 'completed', value: createSpecRevision({
           revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
           evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-          author: { attemptId, sessionId }, previousRevision: previous,
+          author: { attemptId: result.attemptId, sessionId }, previousRevision: previous,
         }) };
       } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-author-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-author-process-absence-unconfirmed' }; }
-        }
-        return { status: 'retryable', code: 'spec-author-report-invalid' };
+        return completedAttemptId
+          ? { status: 'invalid', code: 'spec-author-report-invalid', attemptId: completedAttemptId }
+          : { status: 'retryable', code: 'spec-author-report-invalid' };
       }
     },
-    review: async ({ context, state, mode, signal, onPrepared, onLaunched }) => {
-      const attemptId = createAttemptId();
-      const sessionId = state.review.reviewer?.sessionId ?? randomUUID();
+    review: async ({ context, state, mode, reviewerSessionId: sessionId, signal, invocationState }) => {
+      let completedAttemptId: string | undefined;
       try {
-        const attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-review', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
-        const config = requireConfig(currentConfig);
-        const result = await containedProcess.run({
-          codexPath: config.codex.command, cwd: context.worktreePath, schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
+        const result = await reportOperation.run({
+          operation: 'spec-review', runId: context.runId, worktreePath: context.worktreePath,
+          workflowGeneration: context.workflowGeneration, signal, invocationState,
+          forbiddenAttemptIds: state.revisions.map((revision) => revision.author.attemptId),
+          promptFacts: [
             `Reviewer session ID: ${sessionId}. Review mode: ${mode}.`,
             `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
             `Immutable spec delivery state: ${canonicalJson(state)}.`,
-            'Return only the package spec-review report. Do not edit files or external state.',
-          ].join('\n'),
-        }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
-        const raw = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
+          ],
+        });
+        if (result.status === 'cancelled') return { status: 'cancelled' };
+        if (result.status === 'retryable' || result.status === 'safe-halt') return { status: 'retryable', code: result.code };
+        if (result.status === 'blocked') return { status: 'blocked', kind: result.kind, code: result.code };
+        completedAttemptId = result.attemptId;
+        const raw = decodeAgentReportForValidation(result.reportBytes) as Record<string, unknown>;
         if (raw.mode !== mode || raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
           || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts) || !Array.isArray(raw.acceptedRisks)
           || typeof raw.coverageInvalidated !== 'boolean'
-          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'retryable', code: 'spec-review-report-invalid' };
+          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'invalid', code: 'spec-review-report-invalid', attemptId: result.attemptId };
         const target = state.revisions.at(-1)!;
         const defects = validateCodeReviewDefects(raw.defects, target.revision);
         const report: SpecReviewReportV1 = {
           version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256, mode,
-          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId, sessionId },
+          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId: result.attemptId, sessionId },
           coverage: raw.coverage as string[], defects,
           affectedDefectIds: raw.affectedDefectIds as string[],
           affectedContracts: raw.affectedContracts as string[],
           closureRequestSha256: mode === 'closure' ? state.review.closureRequestSha256 : null,
           acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
         };
-        return { status: 'completed', value: report, reportSha256: sha256(result.report.bytes) };
-      } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-review-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-review-process-absence-unconfirmed' }; }
-        }
-        return { status: 'retryable', code: 'spec-review-report-invalid' };
+        return { status: 'completed', value: report, reportSha256: result.reportSha256 };
+      } catch {
+        return completedAttemptId
+          ? { status: 'invalid', code: 'spec-review-report-invalid', attemptId: completedAttemptId }
+          : { status: 'retryable', code: 'spec-review-report-invalid' };
       }
-    },
-    recover: async ({ context, state, signal }) => {
-      const invocation = state.invocation;
-      if (!invocation || signal.aborted) return signal.aborted ? { status: 'cancelled' } : { status: 'blocked', kind: 'safety', code: 'spec-recovery-invocation-missing' };
-      if (invocation.status === 'launched') {
-        try { await waitForProcessGroupAbsent(invocation.processGroupId!); }
-        catch { return { status: 'blocked', kind: 'safety', code: 'spec-process-absence-unconfirmed' }; }
-      }
-      if (!invocation.reportPath) return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` };
-      let reportBytes: Buffer;
-      try { reportBytes = await readRegularFile(invocation.reportPath); }
-      catch { return { status: 'retryable', code: `spec-${invocation.purpose}-transport-recovery` }; }
-      if (invocation.purpose === 'author') {
-        if (!invocation.revisionPath) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        try {
-          const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-          const content = await readRegularFile(invocation.revisionPath);
-          if (raw.status !== 'ready' || raw.specPath !== invocation.revisionPath || raw.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
-          return { status: 'completed', value: createSpecRevision({
-            revision: state.revisions.length + 1, path: invocation.revisionPath, content: content.toString('utf8'),
-            evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-            author: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, previousRevision: state.revisions.at(-1) ?? null,
-          }) };
-        } catch { return { status: 'retryable', code: 'spec-author-report-invalid' }; }
-      }
-      try {
-        const raw = decodeAgentReportForValidation(reportBytes) as Record<string, unknown>;
-        if (raw.mode !== invocation.mode || raw.reviewerSessionId !== invocation.sessionId || !Array.isArray(raw.coverage)
-          || !Array.isArray(raw.defects) || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts)
-          || typeof raw.coverageInvalidated !== 'boolean' || !['approved','needs-work','rejected'].includes(raw.verdict as string)) {
-          return { status: 'retryable', code: 'spec-review-report-invalid' };
-        }
-        const defects = validateCodeReviewDefects(raw.defects, invocation.targetRevision);
-        return { status: 'completed', reportSha256: sha256(reportBytes), value: {
-          version: 1, targetRevision: invocation.targetRevision, targetSha256: invocation.targetSha256!,
-          mode: invocation.mode as 'full'|'closure', verdict: raw.verdict as SpecReviewReportV1['verdict'],
-          reviewer: { attemptId: invocation.attemptId, sessionId: invocation.sessionId }, coverage: raw.coverage as string[], defects,
-          affectedDefectIds: raw.affectedDefectIds as string[], affectedContracts: raw.affectedContracts as string[],
-          closureRequestSha256: invocation.closureRequestSha256, acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
-        } };
-      } catch { return { status: 'retryable', code: 'spec-review-report-invalid' }; }
     },
   };
 
@@ -1417,7 +1274,20 @@ export function createV2Runtime(input: {
       codex: { ...parsed.codex, command: await resolveRuntimeCodex(parsed.codex.command) },
     };
     const path = join(targetRoot, config.runner.stateDir, 'v2', 'run-state.json');
-    if (!runRecords) runRecords = new FileRunRecordWriter(path);
+    if (!runRecords) {
+      const processStartIdentity = await readProcessStartIdentity(process.pid);
+      if (!processStartIdentity) throw new Error('run-store owner process identity is unavailable');
+      runRecords = new FileRunRecordWriter(path, {
+        host: hostname(), bootId: input.bootId, pid: process.pid, processStartIdentity,
+        inspectProcessIdentity: async (pid) => {
+          const identity = await readProcessStartIdentity(pid);
+          if (identity) return { processStartIdentity: identity };
+          try { process.kill(pid, 0); return 'unknown'; }
+          catch (error) { return isErrorCode(error, 'ESRCH') ? 'absent' : 'unknown'; }
+        },
+        exclusiveRepositoryOwnership: true,
+      });
+    }
     currentConfig = config;
     return { bytes, config };
   };
@@ -1441,7 +1311,18 @@ export function createV2Runtime(input: {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
       const repoKey = sha256(checked.payload.canonicalRepository);
-      const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'));
+      const ownerProcessIdentity = await readProcessStartIdentity(process.pid);
+      if (!ownerProcessIdentity) throw new Error('proof-store owner process identity is unavailable');
+      const proofRecords = new FileProofRecordWriter(join(orchestratorHome, 'v2', repoKey, 'proofs'), {
+        host: hostname(), bootId: input.bootId, pid: process.pid, processStartIdentity: ownerProcessIdentity,
+        inspectProcessIdentity: async (pid) => {
+          const identity = await readProcessStartIdentity(pid);
+          if (identity) return { processStartIdentity: identity };
+          try { process.kill(pid, 0); return 'unknown'; }
+          catch (error) { return isErrorCode(error, 'ESRCH') ? 'absent' : 'unknown'; }
+        },
+        exclusiveRepositoryOwnership: true,
+      });
       const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
       const worktreePath = proofInput.executionLease?.path ?? issueWorktreePath;
       const androidLease = new FileAndroidLeaseVerifier({
@@ -1487,7 +1368,6 @@ export function createV2Runtime(input: {
         androidLease,
         iosLease,
         proofArtifactDir: config.proof.artifactDir,
-        createAttemptId: input.createAttemptId ?? randomUUID,
         now,
         signal: controller.signal,
       });
@@ -1500,11 +1380,21 @@ export function createV2Runtime(input: {
       const runnerPreparedArtifactSha256: Record<string, string> = {};
       const runnerPreparationWarnings: string[] = [];
       let preparationAttempted = false;
+      if (!proofInput.workflowGeneration) throw new Error('proof workflow generation is required');
+      const iosTooling = await discoverIosTooling(commandExecutor, iosXcrunPath);
+      const iosProofInputs: IosProofInputsV1 = {
+        helperPath: join(proofInput.workflowGeneration.generationRoot, 'skills', 'acceptance-proof', 'tools', 'ios-lease.mjs'),
+        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
+        leaseArtifactPath: resolve(worktreePath, config.proof.artifactDir, proofInput.proofId, 'ios-lease.json'),
+        proofId: proofInput.proofId, ownerPid: process.pid, xcrunPath: iosXcrunPath,
+        runtimeId: iosTooling?.runtimeId ?? null, deviceTypeId: iosTooling?.deviceTypeId ?? null,
+      };
       const result = await acceptanceProof.proveChange({
         ...proofInput,
         runnerPreparedArtifactPaths,
         runnerPreparedArtifactSha256,
         runnerPreparationWarnings,
+        iosProofInputs,
         beforeAgentLaunch: async () => {
           await proofInput.beforeAgentLaunch?.();
           if (!androidRelevant || preparationAttempted) return;
@@ -1606,13 +1496,12 @@ export function createV2Runtime(input: {
         if (matches.length > 1) throw new Error('multiple open pull requests match publication intent');
         const match = matches[0];
         if (!match) return undefined;
-        const reviewTarget = await input.pullRequests.getReviewTarget(match.number);
         return {
           url: match.url,
           body: match.body,
           number: match.number,
           nodeId: match.nodeId,
-          ...(reviewTarget ? { headSha: reviewTarget.headRefOid } : {}),
+          ...(match.headSha ? { headSha: match.headSha } : {}),
         };
       },
       createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
@@ -1629,7 +1518,6 @@ export function createV2Runtime(input: {
       run: ({ state, ...routeInput }) => new RouteCoordinator({
         state,
         operation: reportOperation,
-        createAttemptId: input.createAttemptId ?? randomUUID,
         now,
         createReceipt: ({ artifact, triage, review, decidedAt }) => {
           if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
@@ -1650,7 +1538,9 @@ export function createV2Runtime(input: {
     },
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
-      specRequired: (context, state, signal) => new SpecCoordinator({ state, operation: specOperation }).run(context, signal),
+      specRequired: (context, state, signal) => new SpecCoordinator({
+        state, operation: specOperation, createAuthorSessionId: randomUUID, createReviewerSessionId: randomUUID,
+      }).run(context, signal),
       awaitingUser: async (context, state, signal) => {
         const config = requireConfig(currentConfig);
         return new WaitingHumanCoordinator({
@@ -2067,6 +1957,10 @@ function changedArtifactPaths(before: Map<string, string>, after: Map<string, st
     .sort();
 }
 
+function artifactInventoryMatches(actual: Map<string, string>, expected?: Record<string, string>): boolean {
+  return canonicalJson(Object.fromEntries([...actual.entries()].sort())) === canonicalJson(expected ?? null);
+}
+
 async function fingerprintRepositoryPath(root: string, relativePath: string): Promise<unknown> {
   const segments = relativePath.split('/');
   let current = root;
@@ -2111,6 +2005,43 @@ async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> 
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
   }
+}
+
+async function readProcessStartIdentity(pid: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (platform() === 'linux') {
+    try {
+      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = text.lastIndexOf(') ');
+      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
+      return fields[19] ? `linux:${fields[19]}` : undefined;
+    } catch { return undefined; }
+  }
+  return await new Promise((resolveIdentity) => {
+    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
+      const value = error ? '' : stdout.trim().replace(/\s+/gu, ' ');
+      resolveIdentity(value ? `${platform()}:${value}` : undefined);
+    });
+  });
+}
+
+async function inspectReportProcess(invocation: {
+  pid: number | null; processGroupId: number | null; processStartIdentity: string | null;
+}) {
+  const processStartIdentity = await readProcessStartIdentity(invocation.pid!);
+  let processGroupAlive: boolean | 'unknown';
+  try { process.kill(-invocation.processGroupId!, 0); processGroupAlive = true; }
+  catch (error) {
+    if (isErrorCode(error, 'ESRCH')) processGroupAlive = false;
+    else if (isErrorCode(error, 'EPERM')) processGroupAlive = true;
+    else processGroupAlive = 'unknown';
+  }
+  if (!processStartIdentity) {
+    return processGroupAlive === false
+      ? { status: 'absent' as const, processGroupAlive: false as const }
+      : { status: 'unknown' as const };
+  }
+  return { status: 'present' as const, processStartIdentity, processGroupAlive };
 }
 
 export async function materializeReportReadView(input: {

@@ -84,25 +84,52 @@ async function executeProductionDaemon(
 ): Promise<number> {
   const config = await readTargetConfig(intent.targetRoot);
   const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
+  return executeDaemonLoop(intent, write, {
+    discover: () => issues.listOpenIssuesWithAnyLabel([
+      config.github.labels.auto.name,
+      config.github.labels.review.name,
+    ]),
+    executeRun: executeProductionRun,
+    delay: (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)),
+    pollIntervalMilliseconds: config.runner.pollIntervalSeconds * 1_000,
+  });
+}
+
+export async function executeDaemonLoop(
+  intent: DaemonIntent,
+  write: (text: string) => void,
+  dependencies: {
+    discover(): Promise<GitHubIssue[]>;
+    executeRun(input: RunIntent): Promise<RunIssueResult>;
+    delay(milliseconds: number): Promise<void>;
+    pollIntervalMilliseconds: number;
+  },
+): Promise<number> {
   let exitCode = 0;
   const lastResults = new Map<number, string>();
   do {
-    const discovered = await issues.listOpenIssuesWithAnyLabel([
-      config.github.labels.auto.name,
-      config.github.labels.review.name,
-    ]);
-    const candidates = intent.issueNumber === undefined
-      ? discovered
-      : discovered.filter((issue) => issue.number === intent.issueNumber);
-    exitCode = Math.max(exitCode, await executeDaemonCandidates({
-      targetRoot: intent.targetRoot,
-      candidates,
-      executeRun: executeProductionRun,
-      write,
-      lastResults,
-    }));
+    let discovered: GitHubIssue[] | undefined;
+    try {
+      discovered = await dependencies.discover();
+    } catch (error) {
+      exitCode = Math.max(exitCode, 70);
+      try { write(`daemon discovery failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+      catch { /* output failure cannot terminate the daemon */ }
+    }
+    if (discovered) {
+      const candidates = intent.issueNumber === undefined
+        ? discovered
+        : discovered.filter((issue) => issue.number === intent.issueNumber);
+      exitCode = Math.max(exitCode, await executeDaemonCandidates({
+        targetRoot: intent.targetRoot,
+        candidates,
+        executeRun: dependencies.executeRun,
+        write,
+        lastResults,
+      }));
+    }
     if (intent.once) return exitCode;
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, config.runner.pollIntervalSeconds * 1_000));
+    await dependencies.delay(dependencies.pollIntervalMilliseconds);
   } while (true);
 }
 
@@ -117,12 +144,24 @@ export async function executeDaemonCandidates(input: {
   const candidates = [...new Map(input.candidates.map((issue) => [issue.number, issue])).values()]
     .sort((left, right) => left.number - right.number);
   for (const issue of candidates) {
-    const result = await input.executeRun({ targetRoot: input.targetRoot, issueNumber: issue.number });
-    const rendered = renderRunResultJson(result);
-    const previous = input.lastResults.get(issue.number);
-    if (previous !== rendered) input.write(rendered);
-    input.lastResults.set(issue.number, rendered);
+    let result: RunIssueResult;
+    try {
+      result = await input.executeRun({ targetRoot: input.targetRoot, issueNumber: issue.number });
+    } catch (error) {
+      exitCode = Math.max(exitCode, 70);
+      try { input.write(`daemon issue ${issue.number} failed: ${error instanceof Error ? error.message : String(error)}\n`); }
+      catch { /* output failure cannot stop later frozen candidates */ }
+      continue;
+    }
     exitCode = Math.max(exitCode, runIssueExitCode(result));
+    try {
+      const rendered = renderRunResultJson(result);
+      const previous = input.lastResults.get(issue.number);
+      if (previous !== rendered) input.write(rendered);
+      input.lastResults.set(issue.number, rendered);
+    } catch {
+      exitCode = Math.max(exitCode, 70);
+    }
   }
   return exitCode;
 }

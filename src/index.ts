@@ -1,4 +1,4 @@
-export { AcceptanceProof, ProofQuiescenceError } from './v2/acceptance-proof.js';
+export { AcceptanceProof } from './v2/acceptance-proof.js';
 export type { FrozenCriterion, IssueSnapshot, ProveChangeResult, ProofAgent, ProofAgentResult } from './v2/acceptance-proof.js';
 export { createCheckedChangeCapabilities, checkedChangeFreshnessMatches, checkedChangePayloadSha256 } from './v2/checked-change.js';
 export type {

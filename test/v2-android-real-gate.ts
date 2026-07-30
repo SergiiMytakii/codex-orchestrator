@@ -116,7 +116,6 @@ const proof = new AcceptanceProof({
   inspectArtifact: async (relativePath) => ({ modifiedAt: (await stat(resolve(root, relativePath))).mtime.toISOString() }),
   androidLease: new FileAndroidLeaseVerifier({ leaseRoot: required(args['lease-root']), worktreeRoot: root }),
   proofArtifactDir: proofRoot,
-  createAttemptId: () => 'android-real-attempt',
   now: () => startedAt,
 });
 const result = await proof.proveChange({ proofId, issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });

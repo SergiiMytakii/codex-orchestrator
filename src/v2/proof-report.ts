@@ -100,7 +100,7 @@ export interface ProofReceipt {
   localEvidenceId: string;
 }
 
-export function validateProofReport(value: unknown): ProofReportV1 {
+export function validateProofReport(value: unknown, trustedCheckIds: string[] = []): ProofReportV1 {
   assertRecord(value, 'proof report');
   const commonKeys = ['version', 'status', 'decision', 'criteria', 'checks', 'artifacts', 'findings', 'residualRisks'];
   const visualReport = value.status !== 'external-block' && isRecord(value.decision) && value.decision.mode === 'visual';
@@ -114,7 +114,7 @@ export function validateProofReport(value: unknown): ProofReportV1 {
   if (value.version !== 1) throw new Error('proof report.version must be 1');
   validateDecision(value.decision);
   validateCriteria(value.criteria, value.status);
-  validateChecks(value.checks, value.status);
+  if (!Array.isArray(value.checks) || value.checks.length !== 0) throw new Error('proof report cannot claim runner-owned checks');
   validateArtifacts(value.artifacts);
   assertStringArray(value.findings, 'proof report.findings');
   assertStringArray(value.residualRisks, 'proof report.residualRisks');
@@ -149,7 +149,7 @@ export function validateProofReport(value: unknown): ProofReportV1 {
   }
 
   const evidenceIds = new Set<string>([
-    ...(value.checks as ProofReportV1['checks']).map((check) => check.id),
+    ...trustedCheckIds,
     ...(value.artifacts as ProofReportV1['artifacts']).map((artifact) => artifact.id),
   ]);
   for (const criterion of criteria) {
@@ -169,12 +169,13 @@ export function createProofReceipt(input: {
   summary: string;
   localEvidenceId: string;
   report: ProofReportV1;
+  trustedCheckIds?: string[];
 }): ProofReceipt {
   assertBoundedString(input.proofId, 'proofId', MAX_STRING_LENGTH, true);
   assertSha256(input.bindingSha256, 'bindingSha256');
   assertBoundedString(input.summary, 'summary', MAX_SUMMARY_LENGTH, true);
   assertBoundedString(input.localEvidenceId, 'localEvidenceId', MAX_STRING_LENGTH, true);
-  const report = validateProofReport(input.report);
+  const report = validateProofReport(input.report, input.trustedCheckIds);
   return {
     proofId: input.proofId,
     bindingSha256: input.bindingSha256,
@@ -216,7 +217,7 @@ function proofReportGenerationBranch(passed: boolean): Record<string, unknown> {
         type: 'array', minItems: 1, maxItems: MAX_ARRAY_LENGTH,
         items: criterionSchema(passed, SURFACES),
       },
-      checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: checkSchema(passed) },
+      checks: { type: 'array', maxItems: 0, items: { type: 'string' } },
       artifacts: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: artifactSchema() },
       visualEvidence: {
         anyOf: [
@@ -318,23 +319,6 @@ function criterionSchema(passed: boolean, surfaces: readonly typeof SURFACES[num
         items: boundedStringSchema(MAX_STRING_LENGTH),
       },
       analysis: boundedStringSchema(MAX_SUMMARY_LENGTH),
-    },
-  };
-}
-
-function checkSchema(passed: boolean): Record<string, unknown> {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['id', 'command', 'status', 'summary', 'outputSha256'],
-    properties: {
-      id: boundedStringSchema(MAX_STRING_LENGTH),
-      command: boundedStringSchema(MAX_STRING_LENGTH),
-      status: passed
-        ? { type: 'string', enum: ['passed', 'unchanged-failure'] }
-        : { type: 'string', enum: ['passed', 'failed', 'unchanged-failure'] },
-      summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
-      outputSha256: sha256Schema(),
     },
   };
 }
@@ -523,23 +507,6 @@ function validateCriteria(value: unknown, reportStatus: unknown): asserts value 
     ids.push(criterion.id);
   }
   assertUnique(ids, 'proof report.criteria ids');
-}
-
-function validateChecks(value: unknown, reportStatus: unknown): asserts value is ProofReportV1['checks'] {
-  if (!Array.isArray(value) || value.length > MAX_ARRAY_LENGTH) throw new Error('proof report.checks must contain at most 256 entries');
-  const ids: string[] = [];
-  for (const [index, check] of value.entries()) {
-    const field = `proof report.checks[${index}]`;
-    assertExactObject(check, ['id', 'command', 'status', 'summary', 'outputSha256'], field);
-    assertBoundedString(check.id, `${field}.id`, MAX_STRING_LENGTH, true);
-    assertBoundedString(check.command, `${field}.command`, MAX_STRING_LENGTH, true);
-    if (!['passed', 'failed', 'unchanged-failure'].includes(check.status as string)) throw new Error(`${field}.status is invalid`);
-    if (reportStatus === 'passed' && check.status === 'failed') throw new Error('passed proof forbids task-introduced failed checks');
-    assertBoundedString(check.summary, `${field}.summary`, MAX_SUMMARY_LENGTH, true);
-    assertSha256(check.outputSha256, `${field}.outputSha256`);
-    ids.push(check.id);
-  }
-  assertUnique(ids, 'proof report.check ids');
 }
 
 function validateArtifacts(value: unknown): asserts value is ProofReportV1['artifacts'] {

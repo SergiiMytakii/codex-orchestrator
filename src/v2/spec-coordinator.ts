@@ -1,40 +1,37 @@
 import {
   acceptSpecReview, acceptSpecRevision, createInitialSpecDelivery, freezeApprovedSpec,
-  launchSpecInvocation, prepareSpecInvocation, recoverMalformedSpecReport, recoverSpecInvocation,
+  recoverMalformedSpecReport, reserveSpecAuthorSession, reserveSpecReviewerSession,
   type FrozenSpecReceiptV1, type SpecDeliveryV1,
   type SpecReviewReportV1, type SpecRevisionV1,
 } from './spec-delivery.js';
 import type { RoutedRunContext } from './route-continuations.js';
+import type { DurableReportInvocationState } from './contained-report-operation.js';
 
 export interface SpecDeliveryState {
   read(): Promise<SpecDeliveryV1 | undefined>;
   compareAndSwap(expected: SpecDeliveryV1 | undefined, next: SpecDeliveryV1): Promise<boolean>;
+  authorInvocation(authorSessionId: string): DurableReportInvocationState;
+  reviewInvocation(reviewerSessionId: string): DurableReportInvocationState;
+  settleAuthor(expected: SpecDeliveryV1, next: SpecDeliveryV1, attemptId: string): Promise<boolean>;
+  settleReview(expected: SpecDeliveryV1, next: SpecDeliveryV1, attemptId: string): Promise<boolean>;
 }
 
 export type SpecOperationResult<T> =
   | { status: 'completed'; value: T; reportSha256?: string }
+  | { status: 'invalid'; code: string; attemptId: string }
   | { status: 'retryable'; code: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string }
   | { status: 'cancelled' };
 
 export interface SpecDeliveryOperation {
   author(input: {
-    context: RoutedRunContext;
-    state: SpecDeliveryV1;
-    mode: 'author' | 'repair';
-    signal: AbortSignal;
-    onPrepared(actor: { attemptId: string; sessionId: string; reportPath?: string; revisionPath?: string }): Promise<void>;
-    onLaunched(actor: { attemptId: string; sessionId: string; pid: number; processGroupId: number }): Promise<void>;
+    context: RoutedRunContext; state: SpecDeliveryV1; mode: 'author' | 'repair'; authorSessionId: string;
+    signal: AbortSignal; invocationState: DurableReportInvocationState;
   }): Promise<SpecOperationResult<SpecRevisionV1>>;
   review(input: {
-    context: RoutedRunContext;
-    state: SpecDeliveryV1;
-    mode: 'full' | 'closure';
-    signal: AbortSignal;
-    onPrepared(actor: { attemptId: string; sessionId: string; reportPath?: string }): Promise<void>;
-    onLaunched(actor: { attemptId: string; sessionId: string; pid: number; processGroupId: number }): Promise<void>;
+    context: RoutedRunContext; state: SpecDeliveryV1; mode: 'full' | 'closure'; reviewerSessionId: string;
+    signal: AbortSignal; invocationState: DurableReportInvocationState;
   }): Promise<SpecOperationResult<SpecReviewReportV1>>;
-  recover(input: { context: RoutedRunContext; state: SpecDeliveryV1; signal: AbortSignal }): Promise<SpecOperationResult<SpecRevisionV1 | SpecReviewReportV1>>;
 }
 
 export type SpecCoordinatorResult =
@@ -43,8 +40,13 @@ export type SpecCoordinatorResult =
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string; evidence: string[] }
   | { status: 'cancelled' };
 
+type InvalidSettlement =
+  | { status: 'continued'; state: SpecDeliveryV1 }
+  | { status: 'returned'; result: SpecCoordinatorResult };
+
 export class SpecCoordinator {
-  constructor(private readonly dependencies: { state: SpecDeliveryState; operation: SpecDeliveryOperation }) {}
+  constructor(private readonly dependencies: { state: SpecDeliveryState; operation: SpecDeliveryOperation;
+    createAuthorSessionId(): string; createReviewerSessionId(): string }) {}
 
   async run(context: RoutedRunContext, signal: AbortSignal): Promise<SpecCoordinatorResult> {
     const observed = await this.dependencies.state.read();
@@ -69,47 +71,77 @@ export class SpecCoordinator {
         current = frozen;
         continue;
       }
-      const author: boolean = current.invocation ? current.invocation.purpose === 'author' : current.stage === 'authoring' || current.stage === 'author-repair';
-      const mode = current.invocation?.mode ?? (author ? (current.stage === 'authoring' ? 'author' : 'repair') : (current.stage === 'review-full' ? 'full' : 'closure'));
+      const author = current.stage === 'authoring' || current.stage === 'author-repair';
+      const mode = author ? (current.stage === 'authoring' ? 'author' : 'repair')
+        : (current.stage === 'review-full' ? 'full' : 'closure');
       let active = current;
-      const onPrepared = async (actor: { attemptId: string; sessionId: string; reportPath?: string; revisionPath?: string }) => {
-        const next = prepareSpecInvocation(active, { purpose: author ? 'author' : 'review', mode, ...actor });
-        if (!await this.dependencies.state.compareAndSwap(active, next)) throw new Error('spec prepared state conflict');
-        active = next;
-      };
-      const onLaunched = async (actor: { attemptId: string; sessionId: string; pid: number; processGroupId: number }) => {
-        if (active.invocation?.attemptId !== actor.attemptId || active.invocation.sessionId !== actor.sessionId) throw new Error('spec launch actor mismatch');
-        const next = launchSpecInvocation(active, actor);
-        if (!await this.dependencies.state.compareAndSwap(active, next)) throw new Error('spec launched state conflict');
-        active = next;
-      };
-      const result = current.invocation
-        ? await this.dependencies.operation.recover({ context, state: current, signal })
-        : author
-          ? await this.dependencies.operation.author({ context, state: current, mode: mode as 'author'|'repair', signal, onPrepared, onLaunched })
-          : await this.dependencies.operation.review({ context, state: current, mode: mode as 'full'|'closure', signal, onPrepared, onLaunched });
+      const authorSessionId = author ? current.authorSessionId ?? this.dependencies.createAuthorSessionId() : undefined;
+      const reviewerSessionId = author ? undefined : current.review.reviewerSessionId ?? this.dependencies.createReviewerSessionId();
+      const reviewState = author ? undefined : reserveSpecReviewerSession(current, reviewerSessionId!);
+      const authorState = author ? reserveSpecAuthorSession(current, authorSessionId!) : undefined;
+      const result = author
+          ? await this.dependencies.operation.author({ context, state: authorState!, mode: mode as 'author'|'repair', authorSessionId: authorSessionId!,
+            signal, invocationState: this.dependencies.state.authorInvocation(authorSessionId!) })
+          : await this.dependencies.operation.review({ context, state: reviewState!, mode: mode as 'full'|'closure', reviewerSessionId: reviewerSessionId!,
+            signal, invocationState: this.dependencies.state.reviewInvocation(reviewerSessionId!) });
       if (result.status === 'retryable') {
-        try {
-          const owner = author ? 'author' : 'review';
-          const recovered = result.code.includes('report-invalid')
-            ? recoverMalformedSpecReport(active, owner)
-            : recoverSpecInvocation(active, { attemptId: active.invocation!.attemptId, processGroupAbsent: true });
-          if (!await this.dependencies.state.compareAndSwap(active, recovered)) return { status: 'retryable', code: 'spec-recovery-state-conflict' };
-          current = recovered;
-          continue;
-        } catch {
-          const exhausted: SpecDeliveryV1 = { ...structuredClone(active), stage: 'exhausted' };
-          delete exhausted.invocation;
-          if (!await this.dependencies.state.compareAndSwap(active, exhausted)) return { status: 'retryable', code: 'spec-exhaustion-state-conflict' };
-          return { status: 'blocked', kind: 'exhausted', code: 'spec-retry-budget-exhausted', evidence: [] };
-        }
+        return result;
+      }
+      if (result.status === 'invalid') {
+        const settlement = await this.settleInvalid(author ? 'author' : 'review', result.attemptId);
+        if (settlement.status === 'returned') return settlement.result;
+        current = settlement.state;
+        continue;
       }
       if (result.status !== 'completed') return result.status === 'blocked' ? { ...result, evidence: [] } : result;
-      const next: SpecDeliveryV1 = author
-        ? acceptSpecRevision(active, result.value as SpecRevisionV1)
-        : acceptSpecReview(active, result.value as SpecReviewReportV1, result.reportSha256 ?? '0'.repeat(64));
-      if (!await this.dependencies.state.compareAndSwap(active, next)) return { status: 'retryable', code: 'spec-result-state-conflict' };
+      const refreshed = await this.dependencies.state.read();
+      if (!refreshed) return { status: 'retryable', code: 'spec-state-missing' };
+      active = refreshed;
+      const attemptId = author
+        ? (result.value as SpecRevisionV1).author.attemptId
+        : (result.value as SpecReviewReportV1).reviewer.attemptId;
+      let next: SpecDeliveryV1;
+      try {
+        next = author
+          ? acceptSpecRevision(active, result.value as SpecRevisionV1)
+          : acceptSpecReview(active, result.value as SpecReviewReportV1, result.reportSha256 ?? '0'.repeat(64));
+      } catch {
+        const settlement = await this.settleInvalid(author ? 'author' : 'review', attemptId);
+        if (settlement.status === 'returned') return settlement.result;
+        current = settlement.state;
+        continue;
+      }
+      let saved: boolean;
+      try {
+        saved = author
+          ? await this.dependencies.state.settleAuthor(active, next, attemptId)
+          : await this.dependencies.state.settleReview(active, next, attemptId);
+      } catch { return { status: 'retryable', code: 'spec-result-state-conflict' }; }
+      if (!saved) return { status: 'retryable', code: 'spec-result-state-conflict' };
       current = next;
     }
+  }
+
+  private async settleInvalid(owner: 'author' | 'review', attemptId: string): Promise<InvalidSettlement> {
+    const active = await this.dependencies.state.read();
+    if (!active) return { status: 'returned', result: { status: 'retryable', code: 'spec-state-missing' } };
+    let next: SpecDeliveryV1;
+    let exhausted = false;
+    try { next = recoverMalformedSpecReport(active, owner); }
+    catch { next = { ...structuredClone(active), stage: 'exhausted' }; exhausted = true; }
+    let settled: boolean;
+    try {
+      settled = owner === 'author'
+        ? await this.dependencies.state.settleAuthor(active, next, attemptId)
+        : await this.dependencies.state.settleReview(active, next, attemptId);
+    } catch {
+      return { status: 'returned', result: { status: 'retryable', code: exhausted
+        ? 'spec-exhaustion-state-conflict' : 'spec-recovery-state-conflict' } };
+    }
+    if (!settled) return { status: 'returned', result: { status: 'retryable', code: exhausted
+      ? 'spec-exhaustion-state-conflict' : 'spec-recovery-state-conflict' } };
+    return exhausted
+      ? { status: 'returned', result: { status: 'blocked', kind: 'exhausted', code: 'spec-retry-budget-exhausted', evidence: [] } }
+      : { status: 'continued', state: next };
   }
 }

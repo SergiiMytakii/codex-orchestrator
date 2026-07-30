@@ -1,7 +1,10 @@
 import type { ProofReceipt } from './proof-report.js';
-import { join } from 'node:path';
+import { validateDurableReportInvocation, type DurableReportInvocationV1 } from './contained-report-operation.js';
+import { join, posix } from 'node:path';
 
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
+import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
+import { canonicalJson, sha256 } from './containment.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TERMINAL_STATUSES = [
@@ -13,7 +16,12 @@ const TERMINAL_STATUSES = [
   'internal-error',
 ] as const;
 
-export type ProofStatus = 'prepared' | 'running' | typeof TERMINAL_STATUSES[number];
+export type ProofStatus = 'active' | typeof TERMINAL_STATUSES[number];
+
+export interface ProofIosInputsV1 {
+  helperPath: string; leaseRoot: string; leaseArtifactPath: string; proofId: string;
+  ownerPid: number; xcrunPath: string; runtimeId: string | null; deviceTypeId: string | null;
+}
 
 export interface ProofStateV1 {
   schema: 'codex-orchestrator.acceptance-proof-state';
@@ -22,12 +30,11 @@ export interface ProofStateV1 {
   proofId: string;
   bindingSha256: string;
   status: ProofStatus;
-  attempts: Array<{
-    attemptId: string;
-    purpose: 'proof' | 'transport-retry' | 'report-repair';
-    status: 'prepared' | 'running' | 'terminal';
-    reportSha256?: string;
-  }>;
+  reportRepairs: 0 | 1;
+  repairFindings: string[];
+  repairArtifactSha256?: Record<string, string>;
+  iosProofInputs?: ProofIosInputsV1;
+  invocation?: DurableReportInvocationV1;
   receipt?: ProofReceipt;
   startedAt: string;
   updatedAt: string;
@@ -81,7 +88,22 @@ export class FileProofRecordWriter implements ProofRecordWriter {
   ) {}
 
   async read(proofId: string): Promise<ProofStateV1 | undefined> {
-    return this.file(proofId).read();
+    const file = this.file(proofId);
+    try { return await file.read(); }
+    catch (error) {
+      return file.withExclusiveUnparsedRaw(async (priorBytes) => {
+        if (!priorBytes) return { result: undefined };
+        let raw: unknown;
+        try { raw = JSON.parse(priorBytes.toString('utf8')); } catch { throw error; }
+        try { return { result: validateProofState(raw) }; } catch {}
+        const migrated = canonicalizeLegacyProofState(raw, proofId, priorBytes);
+        if (!migrated) throw error;
+        const backupPath = `${file.path}.pre-canonical-proof-v1.g${migrated.sourceGeneration}-${sha256(priorBytes).slice(0, 16)}`;
+        await writeDurableAtomicFile(backupPath, priorBytes);
+        const canonical = validateProofState(migrated.state(backupPath));
+        return { result: canonical, replacementBytes: Buffer.from(`${canonicalJson(canonical)}\n`) };
+      });
+    }
   }
 
   async compareAndSwap(
@@ -115,8 +137,12 @@ export function validateProofState(value: unknown): ProofStateV1 {
     'proofId',
     'bindingSha256',
     'status',
-    'attempts',
-    ...(hasReceipt(value) ? ['receipt'] : []),
+    'reportRepairs',
+    'repairFindings',
+    ...(hasOwn(value, 'repairArtifactSha256') ? ['repairArtifactSha256'] : []),
+    ...(hasOwn(value, 'iosProofInputs') ? ['iosProofInputs'] : []),
+    ...(hasOwn(value, 'invocation') ? ['invocation'] : []),
+    ...(hasOwn(value, 'receipt') ? ['receipt'] : []),
     'startedAt',
     'updatedAt',
   ], 'proof state');
@@ -126,37 +152,36 @@ export function validateProofState(value: unknown): ProofStateV1 {
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) throw new Error('proof state generation is invalid');
   assertNonEmptyString(value.proofId, 'proof state.proofId');
   assertSha256(value.bindingSha256, 'proof state.bindingSha256');
-  if (!['prepared', 'running', ...TERMINAL_STATUSES].includes(value.status as ProofStatus)) throw new Error('proof state status is invalid');
-  if (!Array.isArray(value.attempts) || value.attempts.length === 0 || value.attempts.length > 256) {
-    throw new Error('proof state attempts are invalid');
+  if (!['active', ...TERMINAL_STATUSES].includes(value.status as ProofStatus)) throw new Error('proof state status is invalid');
+  if (value.reportRepairs !== 0 && value.reportRepairs !== 1) throw new Error('proof report repair budget is invalid');
+  if (!Array.isArray(value.repairFindings) || value.repairFindings.length > 256
+    || value.repairFindings.some((finding) => typeof finding !== 'string' || finding.length === 0 || finding.length > 16 * 1024)) {
+    throw new Error('proof repair findings are invalid');
   }
-  const attemptIds = new Set<string>();
-  const purposeCounts = new Map<string, number>();
-  for (const [index, attempt] of value.attempts.entries()) {
-    const keys = hasReportSha(attempt) ? ['attemptId', 'purpose', 'status', 'reportSha256'] : ['attemptId', 'purpose', 'status'];
-    assertExactObject(attempt, keys, `proof state.attempts[${index}]`);
-    assertNonEmptyString(attempt.attemptId, `proof state.attempts[${index}].attemptId`);
-    if (!['proof', 'transport-retry', 'report-repair'].includes(attempt.purpose as string)) throw new Error('proof attempt purpose is invalid');
-    const purpose = attempt.purpose as 'proof' | 'transport-retry' | 'report-repair';
-    if (!['prepared', 'running', 'terminal'].includes(attempt.status as string)) throw new Error('proof attempt status is invalid');
-    if (hasReportSha(attempt)) assertSha256(attempt.reportSha256, 'proof attempt reportSha256');
-    if (attemptIds.has(attempt.attemptId)) throw new Error('proof attempt IDs must be unique');
-    attemptIds.add(attempt.attemptId);
-    purposeCounts.set(purpose, (purposeCounts.get(purpose) ?? 0) + 1);
-    if (index === 0 && purpose !== 'proof') throw new Error('first proof attempt purpose is invalid');
-    if (index > 0 && purpose === 'proof') throw new Error('proof purpose cannot repeat');
-    if (index < value.attempts.length - 1 && attempt.status !== 'terminal') throw new Error('prior proof attempts must be terminal');
-  }
-  if ((purposeCounts.get('transport-retry') ?? 0) > 1 || (purposeCounts.get('report-repair') ?? 0) > 1) {
-    throw new Error('proof retry budget is exceeded');
+  if ((value.reportRepairs === 1) !== hasOwn(value, 'repairArtifactSha256')) throw new Error('proof repair artifact ownership is invalid');
+  if (hasOwn(value, 'repairArtifactSha256')) validateProofArtifactInventory(value.repairArtifactSha256);
+  if (hasOwn(value, 'iosProofInputs')) validateProofIosInputs(value.iosProofInputs, value.proofId as string);
+  if (hasOwn(value, 'invocation')) {
+    const invocation = validateDurableReportInvocation(value.invocation);
+    if (invocation.operation !== 'acceptance-proof') throw new Error('proof invocation operation is invalid');
   }
   const terminal = TERMINAL_STATUSES.includes(value.status as typeof TERMINAL_STATUSES[number]);
-  if (terminal !== hasReceipt(value)) throw new Error('proof terminal state and receipt must appear together');
-  if (hasReceipt(value)) validateReceipt(value.receipt);
+  if (terminal !== hasOwn(value, 'receipt') || (terminal && hasOwn(value, 'invocation'))) throw new Error('proof terminal ownership is invalid');
+  if (hasOwn(value, 'receipt')) validateReceipt(value.receipt);
   assertIsoTimestamp(value.startedAt);
   assertIsoTimestamp(value.updatedAt);
   if (Date.parse(value.updatedAt as string) < Date.parse(value.startedAt as string)) throw new Error('proof state timestamps are reversed');
   return value as unknown as ProofStateV1;
+}
+
+export function validateProofIosInputs(value: unknown, proofId: string): asserts value is ProofIosInputsV1 {
+  assertExactObject(value, ['helperPath', 'leaseRoot', 'leaseArtifactPath', 'proofId', 'ownerPid', 'xcrunPath', 'runtimeId', 'deviceTypeId'], 'iOS proof inputs');
+  for (const path of [value.helperPath, value.leaseRoot, value.leaseArtifactPath, value.xcrunPath]) {
+    if (typeof path !== 'string' || !path.startsWith('/') || path.includes('\\') || posix.normalize(path) !== path) throw new Error('iOS proof path is invalid');
+  }
+  if (value.proofId !== proofId || !Number.isSafeInteger(value.ownerPid) || (value.ownerPid as number) <= 0) throw new Error('iOS proof owner identity is invalid');
+  if (value.runtimeId !== null && (typeof value.runtimeId !== 'string' || !value.runtimeId.startsWith('com.apple.CoreSimulator.SimRuntime.'))) throw new Error('iOS proof runtime ID is invalid');
+  if (value.deviceTypeId !== null && (typeof value.deviceTypeId !== 'string' || !value.deviceTypeId.startsWith('com.apple.CoreSimulator.SimDeviceType.'))) throw new Error('iOS proof device type ID is invalid');
 }
 
 function validateReceipt(value: unknown): asserts value is ProofReceipt {
@@ -177,13 +202,88 @@ function validateReceipt(value: unknown): asserts value is ProofReceipt {
   }
 }
 
-function hasReceipt(value: unknown): value is Record<string, unknown> & { receipt: unknown } {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.hasOwn(value, 'receipt');
+function hasOwn<K extends string>(value: unknown, key: K): value is Record<K, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.hasOwn(value, key);
 }
 
-function hasReportSha(value: unknown): value is Record<string, unknown> & { reportSha256: unknown } {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.hasOwn(value, 'reportSha256');
+export function validateProofArtifactInventory(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.keys(value).length > 256) {
+    throw new Error('proof repair artifact inventory is invalid');
+  }
+  for (const [path, digest] of Object.entries(value)) {
+    if (!path || path.startsWith('/') || path.includes('\\') || path.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
+      throw new Error('proof repair artifact path is invalid');
+    }
+    assertSha256(digest, 'proof repair artifact digest');
+  }
+  return Object.fromEntries(Object.entries(value).sort()) as Record<string, string>;
 }
+
+function canonicalizeLegacyProofState(value: unknown, proofId: string, sourceBytes: Buffer): {
+  sourceGeneration: number; state(backupPath: string): ProofStateV1;
+} | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, any>;
+  if (raw.schema !== 'codex-orchestrator.acceptance-proof-state' || raw.version !== 1) return undefined;
+  const sourceGeneration = Number.isSafeInteger(raw.generation) && raw.generation > 0 ? raw.generation : 1;
+  const bindingSha256 = typeof raw.bindingSha256 === 'string' && SHA256_PATTERN.test(raw.bindingSha256)
+    ? raw.bindingSha256 : sha256(sourceBytes);
+  const startedAt = validTimestamp(raw.startedAt) ? raw.startedAt : '1970-01-01T00:00:00.000Z';
+  const updatedAt = validTimestamp(raw.updatedAt) && Date.parse(raw.updatedAt) >= Date.parse(startedAt) ? raw.updatedAt : startedAt;
+  const common = {
+    schema: 'codex-orchestrator.acceptance-proof-state' as const, version: 1 as const,
+    generation: sourceGeneration + 1, proofId, bindingSha256, reportRepairs: 0 as const,
+    repairFindings: [], startedAt, updatedAt,
+  };
+  if (decodeExactLegacyProof(raw, proofId)?.launchable) return {
+    sourceGeneration, state: () => ({ ...common, status: 'active' }),
+  };
+  return {
+    sourceGeneration,
+    state: (backupPath) => ({
+      ...common, status: 'internal-error',
+      receipt: {
+        proofId, bindingSha256, summary: 'Proof state migration blocked: launched attempt identity unavailable.',
+        publishableEvidence: [], localEvidenceId: `proof-state-migration-safety:${backupPath}`,
+      },
+    }),
+  };
+}
+
+function decodeExactLegacyProof(raw: Record<string, any>, proofId: string): { launchable: boolean } | undefined {
+  try {
+    const terminal = TERMINAL_STATUSES.includes(raw.status);
+    assertExactObject(raw, ['schema', 'version', 'generation', 'proofId', 'bindingSha256', 'status', 'attempts',
+      ...(Object.hasOwn(raw, 'receipt') ? ['receipt'] : []), 'startedAt', 'updatedAt'], 'legacy proof state');
+    const legacy = raw as any;
+    if (!Number.isSafeInteger(legacy.generation) || legacy.generation <= 0 || legacy.proofId !== proofId
+      || !['prepared', 'running', ...TERMINAL_STATUSES].includes(legacy.status)) return undefined;
+    assertSha256(legacy.bindingSha256, 'legacy proof binding');
+    assertIsoTimestamp(legacy.startedAt); assertIsoTimestamp(legacy.updatedAt);
+    if (Date.parse(legacy.updatedAt) < Date.parse(legacy.startedAt) || terminal !== Object.hasOwn(legacy, 'receipt')) return undefined;
+    if (terminal) validateReceipt(legacy.receipt);
+    if (!Array.isArray(legacy.attempts) || legacy.attempts.length === 0 || legacy.attempts.length > 256) return undefined;
+    const ids = new Set<string>(); const budgets = new Map<string, number>();
+    for (const [index, candidate] of legacy.attempts.entries()) {
+      const attempt = candidate as any;
+      assertExactObject(attempt, ['attemptId', 'purpose', 'status', ...(Object.hasOwn(attempt, 'reportSha256') ? ['reportSha256'] : [])], 'legacy proof attempt');
+      const decoded = attempt as any;
+      assertNonEmptyString(decoded.attemptId, 'legacy proof attempt ID');
+      if (ids.has(decoded.attemptId) || !['proof', 'transport-retry', 'report-repair'].includes(decoded.purpose)
+        || !['prepared', 'running', 'terminal'].includes(decoded.status) || (index === 0) !== (decoded.purpose === 'proof')
+        || (index < legacy.attempts.length - 1 && decoded.status !== 'terminal')) return undefined;
+      if (Object.hasOwn(decoded, 'reportSha256')) assertSha256(decoded.reportSha256, 'legacy proof report hash');
+      ids.add(decoded.attemptId); budgets.set(decoded.purpose, (budgets.get(decoded.purpose) ?? 0) + 1);
+    }
+    if ((budgets.get('transport-retry') ?? 0) > 1 || (budgets.get('report-repair') ?? 0) > 1) return undefined;
+    const only = legacy.attempts[0];
+    return { launchable: legacy.status === 'prepared' && legacy.attempts.length === 1
+      && only.purpose === 'proof' && only.status === 'prepared' && !Object.hasOwn(only, 'reportSha256') };
+  } catch { return undefined; }
+}
+
+function validTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
 
 function assertExactObject(value: unknown, keys: string[], field: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} must be an object`);

@@ -1,11 +1,5 @@
 # Runner architecture and execution model
 
-> **Human-maintainer document.** Agents must not read or use this file as
-> routine context or implementation authority. An agent may access it only
-> when a human explicitly asks to edit or audit this file. For agent work, use
-> `AGENTS.md`, `CONTEXT.md`, relevant ADRs, and current code, configuration, and
-> tests.
-
 This document describes the current package runtime as implemented under `src/v2/`. It is the technical companion to the user-oriented README: the README explains how to operate the package; this document explains ownership, state transitions, worker contracts, validation, recovery, and publication.
 
 ## 1. System boundary
@@ -39,12 +33,7 @@ The trusted Runner owns every action that can authorize work, change durable orc
 - commits, pushes, draft pull requests, labels, and issue comments;
 - browser/mobile proof policy and device leases.
 
-Codex processes are operation-scoped workers for routing and ambiguity review,
-specification, qualification repair, implementation, independent review, and
-acceptance proof. `internal-workflow/manifest.json` is the complete current
-operation inventory. A worker receives a dedicated tool home, a restricted
-environment, a safe `PATH`, bounded prompt facts, a report schema, and only the
-files appropriate to its operation.
+Codex processes are operation-scoped workers. The current internal workflow defines seven operations: `triage`, `ambiguity-review`, `spec-author`, `spec-review`, `implementation`, `code-review`, and `acceptance-proof`. A worker receives a dedicated tool home, a restricted environment, a safe `PATH`, bounded prompt facts, a report schema, and only the files appropriate to its operation.
 
 Workers do not receive GitHub, SSH, npm, or cloud publication credentials. They cannot turn a proposed shell command into Runner authority and cannot directly push, create a pull request, alter issue labels, or publish comments.
 
@@ -64,7 +53,7 @@ The config contains:
 - `deny.readPaths`: repository-relative or canonical absolute paths protected from workers;
 - `deny.commands`: canonical absolute command paths excluded from worker authority.
 
-Default setup writes these runtime paths into the config:
+Default setup creates:
 
 ```text
 .codex-orchestrator/config.json
@@ -73,10 +62,7 @@ Default setup writes these runtime paths into the config:
 .codex-orchestrator/v2/proofs/
 ```
 
-The three runtime directories are placed in a managed `.gitignore` block and
-are created lazily by the runtime, not by setup. Setup adds `npm test` and
-`npm run typecheck` to `checks` only when matching scripts exist in the target
-`package.json`.
+The three runtime directories are placed in a managed `.gitignore` block. Setup adds `npm test` and `npm run typecheck` to `checks` only when matching scripts exist in the target `package.json`.
 
 `setup`, `doctor`, and `status` use the same strict parser. Setup can create or verify the current policy and optionally prepare labels; doctor/status are read-only. Older or unrelated config shapes are not execution authority and are rejected instead of loading a compatibility runtime.
 
@@ -87,7 +73,7 @@ are created lazily by the runtime, not by setup. Setup adds `npm test` and
 The generated inventory binds each operation to:
 
 - an operation ID and profile;
-- its optional primary skill and dependency skills;
+- its primary and dependency skills;
 - shared routing resources;
 - an exact file closure;
 - input/output schemas and wrapper resources;
@@ -134,7 +120,9 @@ After claim and worktree creation, the Runner invokes `triage` against the froze
 
 The route report records inspected evidence, explicit assumptions, and route-specific details. The Runner hashes the report and persists a route receipt bound to the workflow generation.
 
-A malformed triage report has one report repair budget. A clean transport failure has one separate transport retry. These retries do not become implementation cycles.
+A malformed triage report consumes the route-owned report-repair budget. Infrastructure failures before a recoverable report do not consume that semantic budget and are deferred to a later Runner tick; routing does not own a transport retry counter.
+
+`triage`, `ambiguity-review`, `spec-author`, `spec-review`, and `code-review` share one canonical durable report invocation mechanism. It durably binds the exact attempt, immutable workflow generation, an opaque hash of the phase-owned prompt facts, report path, worktree baseline, and host/boot/PID/process-start/process-group fence. Report-only operations run against an attempt-owned read view; `spec-author` instead receives only its attempt-owned target-state directory and may create the correlated immutable revision there. Recovery observes the exact attempt-owned report before considering relaunch, distinguishes a positively absent report from an uncertain read, and adopts output only after process and process-group absence are positive. Prompt-fact drift, uncertain report reads, or uncertain process identity retain the fence and fail closed. Attempt-owned read views are removed before adoption or abandonment; cleanup failure is infrastructure deferral and does not consume a phase semantic budget.
 
 An `awaiting-user` proposal is privileged because it pauses autonomous work. It must describe at least two materially different observable product outcomes and prove that repository authority does not select between them. A separate `ambiguity-review` worker receives the candidate and either approves or rejects it. Only one candidate review is allowed. A rejected candidate can use the single triage repair path; an approved candidate becomes the durable route receipt.
 
@@ -166,7 +154,7 @@ Complexity, cross-cutting behavior, or insufficient executable detail makes dire
 4. The same reviewer session performs closure review against the affected defects.
 5. Only an approved revision with resolved blockers is frozen.
 
-Prepared and launched invocation records are persisted before and after process launch. Recovery proves process-group absence before replacing an uncertain invocation. Malformed reports and transport retries are bounded; exhaustion becomes a typed blocker rather than an unbounded author/reviewer loop.
+Both `spec-author` and `spec-review` use the canonical invocation mechanism above. The specification state owns author and reviewer sessions, reviewer independence, revision and target/Closure correlation, malformed-report repair, defect ledger, repair-cycle budget, provenance, and terminal mapping. Each phase session is persisted atomically with canonical prepare, so restart reconstructs byte-identical prompt facts and adopts the exact attempt-owned report and revision before any relaunch. Infrastructure failure before recoverable output consumes no semantic budget; recovered malformed author or review output consumes the existing matching report-repair budget exactly once.
 
 The terminal result for this route is `spec-frozen` with an immutable `FrozenSpecReceipt`. The current runtime does not silently continue from a newly authored specification into implementation. That boundary keeps specification approval separately auditable.
 
@@ -195,10 +183,7 @@ After the trusted claim exists, `agent:auto` is the durable authorization.
 otherwise authorized run. Explicit blocked, review, or waiting-human states do
 prevent ordinary execution.
 
-Qualification repair and implementation are the mutable phases: they run in the
-issue worktree and may change its Git-trackable contents. An `implementation`
-worker receives the current cycle and any findings from prior review, checks, or
-proof. It must return a structured implementation report. The Runner then:
+An `implementation` worker receives the current cycle and any findings from prior review, checks, or proof. It must return a structured implementation report. The Runner then:
 
 - verifies that denied paths did not change;
 - validates the exact report schema;
@@ -209,78 +194,42 @@ proof. It must return a structured implementation report. The Runner then:
 - inventories tracked, staged, unstaged, untracked, and denied-path state;
 - requires the reported changed-file list to equal the observed change set.
 
-A clean implementation transport failure receives one separate retry only if the complete Git freshness baseline is unchanged. Any unexplained mutation converts that retry into a safety block.
+Qualification repair, implementation/rework, and trusted review-feedback implementation share one canonical mutable-worktree invocation mechanism. It durably owns attempt identity, prepared/launched/adopted state, host/boot/PID/process-start/process-group fencing, the launch baseline, the exact attempt-owned report, and the adopted result snapshot. Recovery performs one bounded observation per Runner tick and adopts the exact report and worktree result before any relaunch. A positively absent report and positively absent process/group permit abandonment only when the worktree still equals the launch baseline; uncertain ownership, report reads, or effects retain the fence and yield issue-locally without publication.
 
-After accepting the report, the Runner captures and pins the complete candidate
-described in the next section. A separate `code-review` worker runs in a fresh
-detached materialization of that candidate. Its target fingerprint binds the
-candidate, changed files, route decision, workflow generation, cycle, and frozen
-criteria. Full review covers at least acceptance criteria, correctness, and test
-quality; cleanup is a lens within this final review.
+Each caller supplies an opaque correlation over its authoritative prompt facts. Qualification keeps scoped failures and denied-path correlation; implementation keeps claim/issue/head, frozen criteria, cycle, mutable provenance, and candidate binding; review feedback keeps its trusted batch, source authorization, round, and target. Correlation drift never adopts stale output or authorizes a replacement launch. Infrastructure failure before recoverable output consumes no semantic budget. Once an adopted output is classified as malformed, rejected, or needing work, the owning phase clears the invocation and spends exactly its existing semantic budget in the same state transition, so replay cannot spend twice.
+
+Before configured checks, a separate `code-review` worker reviews a fingerprint of the complete implementation target. The fingerprint binds Git freshness, changed files, route decision, workflow generation, cycle, and frozen criteria. Full review covers at least acceptance criteria, correctness, and test quality; cleanup is a lens within this final review.
 
 Review maintains an append-preserving defect ledger. If review returns `needs-work`, open defects become implementation findings and consume the next implementation cycle. After repair, the same reviewer session performs closure review only for affected defects while preserving unrelated and previously accepted findings. Approved review requires every blocker or execution risk to be verified or explicitly superseded.
 
 Coverage text is descriptive, not an identity contract: Closure may paraphrase or omit it. Stable defect and repair-finding IDs, target revision, target fingerprint, and Closure hash carry correlation. Each target revision receives up to four report-only format repairs. Starting a new Closure revision resets that local budget. An eligible legacy terminal malformed-review report can resume only when its evidence ID proves that cause, its per-revision budget remains, and issue authorization, trusted claim, worktree identity, head, changed files, and target fingerprint still match. Current exhausted revisions remain terminal and replay without new effects.
 
-Review invocation intent, candidate execution lease, process IDs, report hashes,
-transport retries, report repairs, target revisions, and target fingerprints are
-durable. A crash after launch cannot cause a replacement review until process
-absence is proven or the exact report is recovered. A mutated or missing
-materialization is a safety failure. A `needs-work` result releases the current
-candidate before mutable repair begins; the repaired cycle must be captured and
-reviewed as a new candidate.
+Canonical review invocation identity, process fencing, prompt correlation, and attempt-owned report recovery are durable. Direct-review state separately owns report repairs, target revisions, target fingerprints, reviewer independence, defect meaning, and terminal mapping; it has no review transport retry counter. A crash after launch cannot cause a replacement review until process and process-group absence are proven and its read view is settled. Review target or authoritative prompt-fact drift is a safety failure.
 
-## 8. Issue-scoped checks, immutable candidates, and `CheckedChange`
+The run-store performs one bounded canonicalization for active states written by the replaced route/direct-review/spec-author/spec-review lifecycle owners. Safely convertible ready/completed or prepared/no-effect states are rewritten once with the removed fields absent and exact source bytes backed up. An old launched or otherwise ambiguous owner that lacks PID-reuse-resistant process identity is converted to an issue-local non-resumable safety outcome; it is never silently deleted or relaunched. Canonical validators remain exact and do not retain a legacy reader or dual-write path.
+
+## 8. Issue-scoped checks and `CheckedChange`
 
 For a new direct run, the Runner resolves its finite check policy from the frozen issue body. A command-only `Verification:` or `## Verification:` section replaces repository-wide checks with deterministic `issue-verification-NNN` entries. Scoped entries are limited to `npm [--prefix <repository-relative-path>] test ...` and `npm [--prefix <repository-relative-path>] run <script> ...`; the Runner parses them to argv and executes them without a shell. Interpreter eval, package-exec, nested-shell, shell-composition, malformed, duplicate, mixed-validity, and ambiguous sections fail closed before any check runs. The triage worker's free-text verification output is never command authority. `config.checks` is used only when the frozen issue has no Verification section.
 
-Before issue implementation starts, the Runner executes the resolved policy as a
-qualification gate. Each qualification attempt captures its own candidate and
-runs every command in a separate detached materialization. If any command fails,
-the Runner releases that candidate and launches the sealed
-`qualification-repair` operation in the mutable issue worktree. The repair sees
-the scoped failures but not the issue acceptance criteria. The complete policy
-is then recaptured and rerun. Qualification repairs have their own maximum of
-five launched attempts and do not consume the issue implementation-cycle
-budget. Their cumulative files remain in the issue worktree and are included in
-the later implementation report, review, final checks, proof, and PR.
+Before the issue implementation starts, the Runner executes the resolved policy as a qualification gate. If any command fails, a separate sealed qualification-repair operation receives the scoped failures but not the issue acceptance criteria, and may repair the files needed to make the policy green. The Runner reruns the complete policy after each adopted repair. Qualification repairs have their own bounded semantic repair budget and do not consume the issue's implementation-cycle budget. Their cumulative files remain in the worktree and are included in the later implementation report, independent review, final checks, proof, and PR.
 
-A qualification process that cannot start returns a resumable transport outcome without consuming either budget. Once launched, its existing prepared/launched receipt reserves one repair attempt; restart proves process absence and recovers its report, or requires an unchanged launch baseline before retrying. A dirty resumed worktree does not skip qualification. The main implementation cycle advances only after its own launch is durably recorded. Timeout and cancellation retain ownership until the complete process group is proven absent. Unprovable process-group quiescence or an unreported changed worktree fails closed. Invalid scoped policy remains a resumable no-effect outcome so a package-side policy correction can continue the existing run instead of replaying a terminal failure.
+A qualification process that cannot start returns a resumable transport outcome without consuming either budget. Launch does not reserve or spend a semantic repair. Restart reconstructs the persisted scoped failures and correlation, observes the canonical invocation, and either adopts its exact report/result or retains the fence. The main implementation cycle likewise advances only for phase-owned semantic rework, never for transport. Timeout and cancellation retain ownership until the complete process group is proven absent; an unreported changed worktree remains fenced without relaunch. Invalid scoped policy remains a resumable no-effect outcome so a package-side policy correction can continue the existing run instead of replaying a terminal failure.
 
-Once qualification is green, issue implementation starts. After each accepted
-implementation or review-feedback repair report, the Runner captures the issue
-worktree twice through a private index initialized from expected HEAD. Tracked
-edits, deletions, mode changes, symlinks, and non-ignored untracked files enter
-the candidate. Ignored untracked files and untracked files below
-`proof.artifactDir` do not; tracked files below that directory remain ordinary
-candidate content. The two captures must have the same HEAD, tree, canonical
-path set, and worktree identity. The shared index is not an authority for this
-capture.
+Once qualification is green, the issue implementation starts. After independent review clears, the Runner executes the same policy against the complete change. Every final check must pass; a nonzero result becomes a durable task-owned repair finding and starts another implementation cycle if the five-cycle budget remains. There is no output-hash attribution and no `unchanged-failure` success state. Passed final results are reused on a safe resume, while any new repair cycle clears stale final-check and proof bindings.
 
-The stable tree is pinned by a synthetic single-parent commit under
-`refs/codex-orchestrator/candidates/<runId>/<bindingId>`. The binding records the
-expected HEAD, candidate commit and tree, canonical changed files, candidate
-ref, and source-worktree identity. The implementation report's `changedFiles`
-must exactly equal the candidate's canonical paths.
+Once no task-owned check failure remains, the Runner captures the reviewed bytes
+twice with a private index initialized from expected HEAD. Tracked deletions,
+mode changes, symlinks, and non-ignored untracked files enter the candidate;
+ignored untracked files and only the configured untracked proof root do not. The
+two trees and canonical path sets must match. The shared index is unchanged.
 
-Direct review, every qualification or final check, and Acceptance Proof each run
-in a fresh detached linked worktree at the pinned candidate commit. Before a
-child process starts, the Runner persists a prepared execution lease; launch is
-gated on persisting its PID and process-group ownership. A result is accepted
-only when the materialization still has the exact detached HEAD and tree and no
-non-proof diff. Missing, dirty, or branch-owning materializations fail closed.
-At run entry, state-driven reconciliation preserves exact active refs and
-executions, reconstructs a pin whose boundary was durable before a crash, and
-removes only unowned candidate refs or execution worktrees.
-
-After independent review clears, the Runner executes the resolved check policy
-against the same implementation candidate. Every final check must pass. A
-failure becomes a durable task-owned repair finding and starts another
-implementation cycle if the five-cycle budget remains. There is no output-hash
-attribution and no `unchanged-failure` success state. Passed final receipts bind
-the candidate tree and check-policy hash and are reusable only for that exact
-binding; a new repair cycle releases the candidate and clears stale check and
-proof receipts.
+The stable tree is pinned by a synthetic single-parent commit under a
+package-owned candidate ref. Direct review, each qualification/final check, and
+Acceptance Proof run in a fresh detached worktree at that commit. A durable lease
+records preparation and, before child execution proceeds, PID/process-group
+ownership. Results are accepted only after HEAD, tree, and non-proof changes are
+still exact.
 
 Legacy `CheckedChange` V1 keeps its original mutable snapshot semantics. New
 runs mint V2 with:
@@ -292,25 +241,31 @@ runs mint V2 with:
 - passed check records and check-policy hash;
 - package and proof schema versions.
 
-V2 freshness compares candidate binding, candidate tree, and check policy, so
-unrelated shared-index edits cannot invalidate or authorize the proof input.
+V2 freshness compares candidate binding/tree and check policy, so unrelated
+shared-index edits cannot invalidate or authorize the proof input.
 
 ## 9. Acceptance Proof
 
-Acceptance Proof is independent from both implementation and code review. The
-`acceptance-proof` worker receives the frozen issue criteria and a nominal
-checked-change capability. For CheckedChange V2, the Runner binds the proof
-invocation to the exact candidate execution lease; the worker runs from that
-leased detached materialization. It may write only below its proof-owned
-artifact root.
+Acceptance Proof is independent from both implementation and code review. The `acceptance-proof` worker receives the frozen issue criteria and a nominal checked-change capability. It runs in a separate contained process and may write only below its proof-owned artifact root.
 
-All proof artifacts are hash-validated in the materialization. Only publishable
-evidence from a passed proof is copied back to the issue worktree through
-create-only, symlink-safe writes; local-only evidence remains in the disposable
-materialization. An existing destination is accepted only when it is a regular
-file with the expected hash. Product bytes remain immutable. The same candidate
-tree then becomes the durable commit intent and the observed publication commit
-tree.
+Its proof record embeds the canonical durable invocation fence: exact attempt,
+workflow generation, prompt facts, host/boot/PID/process-start/PGID identity,
+report path, and proof-safe worktree baseline. Restart performs one report and
+process observation per tick, adopts only the exact attempt-owned report and
+hash-bound artifacts, and never relaunches while ownership is live or unknown.
+Infrastructure uncertainty spends no proof repair budget. Runner-classified
+malformed output spends the single existing report-repair bit exactly once and
+binds the complete pre-repair artifact inventory so report-only repair cannot
+modify or manufacture evidence. Immutable runner-owned iOS helper, lease,
+owner, xcrun, runtime, and device-type facts are part of the same invocation
+correlation and proof binding.
+Proof Reports cannot claim completed checks; only the nominal `CheckedChange`
+receipts can satisfy check evidence references.
+
+For V2, proof runs against its own candidate materialization. Publishable
+artifacts are hash-validated and copied back idempotently without following
+symlinks; product bytes remain immutable. The same candidate tree then becomes
+the durable commit intent and the observed publication commit tree.
 
 The Runner validates:
 
@@ -330,61 +285,39 @@ Local command output and static-inspection evidence may contain machine paths be
 
 Browser proof validates current workflow evidence rather than accepting an isolated screenshot. For a configured Android surface, the trusted Runner durably reserves preparation before starting the configured AVD on an unused port with a clean ephemeral data directory. The lease records both PID and process-start identity so replay cleanup never kills a foreign emulator after port reuse, and ownership is rechecked throughout boot, install, navigation, and capture. The Runner removes any prior APK target, executes only a bounded, cancellable, process-group-owned `flutter build apk` recipe, snapshots the fresh no-symlink result outside the worker-writable tree, and installs only that exact digest-bound snapshot. It launches the application, retries exact accessibility-label navigation within configured bounds, and captures proof-bound screenshot, validated UI hierarchy, PID-scoped log, and lease. The contained proof worker can inspect immutable-digest-bound worktree artifacts but cannot invoke `adb`, the emulator, Flutter, or an Android lease helper. Terminal or exceptional proof settlement performs replay-safe lease cleanup, stops only the same Runner-created process, and removes only its validated temporary data directory. Existing physical devices, user emulators, IDE sessions, and Flutter processes are observed but never taken over. Android infrastructure or startup failure is recorded as an unfinished-UI-proof warning and does not alone block delivery; successful Android proof remains strict and cannot be claimed without the complete validated artifact set.
 
-For iOS, the Runner supplies an immutable helper path, lease root, proof ID,
-owner PID, `xcrun` path, and discovered runtime/device-type IDs. The proof worker
-may create and drive only the new Simulator returned by that helper, using its
-literal UDID. The lease and artifact must bind the proof, bundle, process, and
-Runner-created device. Terminal settlement verifies ownership before shutting
-down and deleting only that Simulator. Missing tooling or ambiguous existing
-Simulator/IDE ownership is a typed tool blocker, not permission to reuse a
-user-owned runtime.
-
-`needs-rework` findings return to the same implementation loop and consume another cycle. External, safety, malformed, quiescence, or exhausted outcomes are mapped to typed run results. Only `passed` proof produces a proof receipt and permits publication.
+`needs-rework` findings return to the same implementation loop and consume another cycle. External, safety, malformed, quiescence, or exhausted outcomes are mapped to typed run results. A passed receipt is persisted before candidate cleanup and remains monotonic while cleanup's existing effect/postcondition settlement retries; publication remains forbidden until cleanup is proven settled.
 
 ## 10. Runner-owned publication
 
-Workers never publish. After proof passes, the Runner performs publication in
-this order:
+Workers never publish. After proof passes, the Runner performs publication in this order:
 
-1. Revalidate issue authorization and recapture the mutable issue worktree.
-2. Require the recaptured binding and tree to equal the reviewed and proved candidate; drift opens another bounded repair cycle.
-3. Persist commit intent bound to parent SHA, candidate tree, message, and candidate ref.
-4. Create or observe one single-parent commit from the pinned tree and compare-and-swap the issue branch from its expected parent.
-5. Normalize the shared index, require no residual non-proof worktree diff, persist push intent, and release the candidate pin only after the commit is durably represented by later recovery state.
-6. Push and verify the exact remote branch SHA.
-7. Persist pull-request intent and find or create the marker-bound draft PR.
-8. Verify the PR head, base, marker, and repository identity.
-9. Persist and publish the final issue comment, then replace labels with the exact review-ready set.
-10. Write local terminal evidence and persist `review-ready` with the PR URL.
+1. Revalidate issue authorization.
+2. Persist commit intent bound to parent SHA, tree SHA, and message.
+3. Create or reconcile the single implementation commit.
+4. Persist push intent and verify the remote branch SHA.
+5. Persist pull-request intent and find or create the marker-bound draft PR.
+6. Verify the PR head, base, marker, and repository identity.
+7. Persist and publish the final issue comment.
+8. Replace running labels with the exact review-ready label set.
+9. Write local terminal evidence and persist `review-ready` with the PR URL.
 
-Every step checks its postcondition before proceeding. A conflicting local or
-remote branch, duplicate marker, unexpected PR, changed tree, revoked
-authorization, or ambiguous effect is never treated as implicit success. After
-a candidate-bound commit intent exists, an unknown branch CAS becomes a
-non-resumable transport result with the intent and pin retained for
-observation; an unchanged parent produces a resumable transport result without
-inventing an effect; revoked authority or branch/content divergence produces a
-local non-resumable safety terminal with the exact intent and pin retained. The
-Runner does not publish a misleading GitHub status for those retained-evidence
-terminals.
+Every step checks its postcondition before proceeding. A conflicting remote branch, duplicate marker, unexpected PR, changed tree, revoked authorization, or ambiguous effect becomes a safety or transport result; it is never treated as implicit success.
 
 ### Post-PR review continuation
 
 A successful direct run persists review-feedback state inside the same atomic
-run record. The nested review-feedback contract migrates from version 1 to
-version 2 independently of the outer run-state V3 contract. The first
-observation of a migrated `review-ready` run baselines already-present eligible
-source IDs without launching a worker or changing GitHub, so an upgrade cannot
-retrospectively execute old feedback.
+run record. Version 1 state remains readable; the next compare-and-swap emits
+version 2. The first observation of a migrated `review-ready` run baselines
+already-present eligible source IDs without launching a worker or changing
+GitHub, so an upgrade cannot retrospectively execute old feedback.
 
 The daemon discovers both `agent:auto` and `agent:review`, deduplicates issue
 numbers, and sends every candidate through `RunIssue.runIssue`. Unchanged
 `review-ready` output is suppressed only in daemon memory; durable run state
 remains authoritative. One-shot diagnostics and live smoke may additionally
 constrain daemon execution to one discovered issue with `--once --issue`; the
-ordinary long-running daemon always processes the complete discovered set. An
-idle review-feedback V2 record observes one coherent PR snapshot bounded by
-equal identity/head reads around all GraphQL thread and REST review pages.
+ordinary long-running daemon always processes the complete discovered set. A V2 idle run observes one coherent PR snapshot bounded
+by equal identity/head reads around all GraphQL thread and REST review pages.
 Eligible inputs are:
 
 - the non-empty root of an unresolved, non-outdated inline thread bound to the
@@ -417,34 +350,18 @@ reduction from the exact run-owned running or review label set to
 `agent:auto` + `agent:blocked`. This cleanup remains allowed when the claim was
 just removed, because it cannot launch work or publish product state.
 
-Update publication captures and pins the repaired feedback candidate and has
-separate durable commit, push, PR-summary, and final-label intents. Local HEAD
-and the remote branch must begin at the persisted published head; the new commit
-must be its single parent-child successor with the candidate tree. Unknown
-delivery is adopted only when the exact parent, tree, message, branch, and
-resulting SHA match. No reset, rebase, amend, or force push exists. Success
-posts one `review-feedback:<batch>` PR summary, returns the same issue and PR to
+Update publication has separate durable commit, push, PR-summary, and final-label
+intents. Local HEAD and the remote branch must begin at the persisted published
+head; the new commit must be its single parent-child successor. Unknown delivery
+is adopted only when the exact parent, tree, message, branch, and resulting SHA
+match. No reset, rebase, amend, or force push exists. Success posts one
+`review-feedback:<batch>` PR summary, returns the same issue and PR to
 `agent:review`/`review-ready`, and records the new published head. GitHub review
 threads are never auto-resolved.
 
 ## 11. Durable state and crash recovery
 
-The durable run file is stored beneath the configured state directory. New
-state is schema V3. Each run record contains identity, lifecycle, cycle budgets,
-frozen issue data, workflow pin, route state, waiting-human history, spec/review
-and review-feedback state, qualification state, candidate binding and execution
-lease, checks, proof bindings, publication intent, and terminal outcome.
-
-State V1 remains readable through normalization to V2. The first transition to
-V3 stores the exact pre-V3 raw bytes—V1 or V2—and their generation/hash in an
-adjacent `pre-candidate-v3` backup and metadata record before the V3 CAS. The
-reader normalizes a raw V1 backup to V2 semantics. Rollback is an explicit store
-operation, never an automatic runtime choice. It is allowed only while no
-candidate process remains and before the durable `publicationEffectPossible`
-watermark. The watermark is set idempotently before the first V3-owned GitHub or
-branch effect and may therefore predate candidate publication, for example at
-claim comment or label delivery. Once it is true, downgrade is permanently
-forbidden even if a later observation shows that no remote effect occurred.
+The durable run file is stored beneath the configured state directory. Each run record contains identity, lifecycle, cycle budgets, frozen issue data, workflow pin, route state, waiting-human history, spec/review and review-feedback state, process records, checks, proof bindings, publication intent, and terminal outcome.
 
 State updates use generation-based compare-and-swap. Atomic files use write, flush, rename, and directory synchronization where supported. Locks and leases include fencing plus process and boot identity.
 
@@ -458,13 +375,6 @@ If the process exits after the effect but before confirmation, the next invocati
 
 Prepared worker invocations can be abandoned without launch. Launched invocations require positive process-group absence before replacement. If quiescence cannot be proven, the run enters `safe-halt` or a non-resumable transport/safety outcome. Unknown process state is never permission to relaunch against the same worktree.
 
-Candidate refs and detached execution worktrees are reconciled from durable
-state before issue work begins. Exact active owners are preserved; reconstructible
-pre-CAS pins may be recreated from their durable boundary; unowned refs and
-materializations are removed only after identity checks. A terminal safety
-record may intentionally retain a candidate and commit intent when deleting it
-would destroy the only evidence for an uncertain branch effect.
-
 An existing nonterminal issue run is resumed only when its canonical repository, branch, worktree path, base SHA, workflow generation, authorization, and lifecycle invariants still match. Terminal outcomes are replayed without re-executing the workflow, except that a direct `review-ready` checkpoint may perform the bounded trusted-feedback observation described above.
 
 ## 12. Result and failure model
@@ -472,10 +382,6 @@ An existing nonterminal issue run is resumed only when its canonical repository,
 The CLI prints exact JSON envelopes. Run results include:
 
 - `review-ready`: direct delivery completed and the draft PR is verified;
-- `route-ready`: compatibility result accepted by the public CLI contract for a
-  `spec-required` or `awaiting-user` handoff; the current production `RunIssue`
-  continues those routes and normally returns `spec-frozen` or `awaiting-user`
-  instead;
 - `spec-frozen`: the specification route completed with an immutable receipt;
 - `awaiting-user`: a durable question is waiting for an authorized answer;
 - `not-eligible`: the issue was never claimed because public eligibility failed;
@@ -489,8 +395,7 @@ The CLI prints exact JSON envelopes. Run results include:
 
 Exit codes are grouped for automation:
 
-- `0`: successful or intentionally paused progress such as `review-ready`,
-  `route-ready`, `spec-frozen`, `awaiting-user`, or `requeued`;
+- `0`: successful or intentionally paused progress such as `review-ready`, `spec-frozen`, `awaiting-user`, or `requeued`;
 - `20`: blocked policy outcome;
 - `21`: not eligible;
 - `70`: transport or internal failure;
@@ -511,10 +416,6 @@ npm pack --dry-run --json
 
 The build deletes `dist` before TypeScript compilation so removed modules cannot survive in tests or the tarball. `prepack` verifies the committed workflow and rebuilds from a clean output directory.
 
-`npm run smoke:live` packs and installs the exact package bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation through real model-backed operations, browser evidence, and a safety-negative path. The supplemental `authoritative-candidate-publication` scenario injects a stale shared-index entry and proves that run-state V3, CheckedChange V2 candidate-bound checks, the exact published tree, pin release, and immutable execution cleanup all converge on final worktree bytes. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
+`npm run smoke:live` packs and installs the exact package bytes into a temporary consumer and mutates only the configured scratch GitHub repository. The default `core-release` profile proves package installation through real model-backed operations, browser evidence, and a safety-negative path. The supplemental `authoritative-candidate-publication` scenario injects a stale shared-index entry and proves that V3 candidate-bound checks, the exact published tree, pin release, and immutable execution cleanup all converge on final worktree bytes. Cleanup verifies that run-owned issues, PRs, branches, labels, worktrees, and temporary directories are absent.
 
 Live smoke is not a normal local test and must run only with explicit authorization. Release publication is owned by the GitHub release workflow after the release commit reaches `main`.
-
-Review this document when the public command/result contract, configuration
-schema, workflow operation inventory, run-state or CheckedChange version,
-candidate/publication boundary, proof capability, or recovery policy changes.

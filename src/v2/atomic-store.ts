@@ -16,7 +16,11 @@ export type AtomicStoreFaultPoint =
 
 export interface AtomicStateFileOptions {
   host?: string;
+  bootId?: string;
   pid?: number;
+  processStartIdentity?: string;
+  inspectProcessIdentity?: (pid: number) => Promise<'absent' | 'unknown' | { processStartIdentity: string }>;
+  exclusiveRepositoryOwnership?: boolean;
   now?: () => string;
   createToken?: () => string;
   isProcessAlive?: (pid: number) => boolean;
@@ -85,10 +89,12 @@ export async function acquireExclusiveJsonFileLock<T>(input: {
 }
 
 interface LockRecordV1 {
-  version: 1;
+  version: 2;
   token: string;
   host: string;
+  bootId: string;
   pid: number;
+  processStartIdentity: string;
   acquiredAt: string;
 }
 
@@ -100,12 +106,17 @@ export class AtomicStateFile<T extends { generation: number }> {
     private readonly parse: (value: unknown) => T,
     options: AtomicStateFileOptions = {},
   ) {
+    const isProcessAlive = options.isProcessAlive ?? processIsAlive;
     this.options = {
       host: options.host ?? hostname(),
+      bootId: options.bootId ?? 'unavailable',
       pid: options.pid ?? process.pid,
+      processStartIdentity: options.processStartIdentity ?? 'unavailable',
+      inspectProcessIdentity: options.inspectProcessIdentity ?? (async (pid) => isProcessAlive(pid) ? { processStartIdentity: 'unavailable' } : 'unknown'),
+      exclusiveRepositoryOwnership: options.exclusiveRepositoryOwnership ?? false,
       now: options.now ?? (() => new Date().toISOString()),
       createToken: options.createToken ?? randomUUID,
-      isProcessAlive: options.isProcessAlive ?? processIsAlive,
+      isProcessAlive,
       lockWaitMs: options.lockWaitMs ?? 5_000,
       pollMs: options.pollMs ?? 25,
       maxBytes: options.maxBytes ?? MAX_STATE_BYTES,
@@ -122,11 +133,8 @@ export class AtomicStateFile<T extends { generation: number }> {
     return this.compareAndSwapWithRaw(expectedGeneration, next, async () => undefined);
   }
 
-  async compareAndSwapWithRaw(
-    expectedGeneration: number,
-    next: T,
-    beforePublish: (priorBytes: Buffer | undefined) => Promise<void>,
-  ): Promise<T> {
+  async compareAndSwapWithRaw(expectedGeneration: number, next: T,
+    beforePublish: (priorBytes: Buffer | undefined) => Promise<void>): Promise<T> {
     if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) throw new Error('expected generation is invalid');
     const validated = this.parse(structuredClone(next));
     if (validated.generation !== expectedGeneration + 1) throw new Error('next generation is invalid');
@@ -149,15 +157,20 @@ export class AtomicStateFile<T extends { generation: number }> {
   }
 
   async withExclusiveRaw<R>(operation: (priorBytes: Buffer | undefined, prior: T | undefined) => Promise<{
-    result: R;
-    replacementBytes?: Buffer;
-  }>): Promise<R> {
+    result: R; replacementBytes?: Buffer }>): Promise<R> {
+    return this.withExclusiveUnparsedRaw(async (priorBytes) => {
+      const prior = priorBytes === undefined ? undefined : parseBytes(priorBytes, this.parse);
+      return operation(priorBytes, prior ? structuredClone(prior) : undefined);
+    });
+  }
+
+  async withExclusiveUnparsedRaw<R>(operation: (priorBytes: Buffer | undefined) => Promise<{
+    result: R; replacementBytes?: Buffer }>): Promise<R> {
     await ensureDirectDirectoryPath(dirname(this.path));
     const release = await acquireAdjacentLock(`${this.path}.lock`, this.options);
     try {
       const priorBytes = await readOptionalRegularFile(this.path, this.options.maxBytes);
-      const prior = priorBytes === undefined ? undefined : parseBytes(priorBytes, this.parse);
-      const outcome = await operation(priorBytes ? Buffer.from(priorBytes) : undefined, prior ? structuredClone(prior) : undefined);
+      const outcome = await operation(priorBytes ? Buffer.from(priorBytes) : undefined);
       if (outcome.replacementBytes) {
         if (outcome.replacementBytes.length > this.options.maxBytes) throw new Error('state exceeds maximum size');
         parseBytes(outcome.replacementBytes, this.parse);
@@ -207,10 +220,12 @@ async function acquireAdjacentLock(
 ): Promise<() => Promise<void>> {
   const token = options.createToken();
   const record: LockRecordV1 = {
-    version: 1,
+    version: 2,
     token,
     host: options.host,
+    bootId: options.bootId,
     pid: options.pid,
+    processStartIdentity: options.processStartIdentity,
     acquiredAt: options.now(),
   };
   validateLockRecord(record);
@@ -229,8 +244,17 @@ async function acquireAdjacentLock(
     } catch (error) {
       if (!isErrorCode(error, 'EEXIST')) throw error;
       const owner = await readLockRecord(path);
-      if (owner.host !== options.host) throw new Error('state lock is owned by a foreign host');
-      if (!options.isProcessAlive(owner.pid)) throw new Error('state lock has a stale or ambiguous owner');
+      if (owner.host !== options.host || owner.bootId !== options.bootId) throw new Error('state lock is owned by a foreign host or boot');
+      const identity = await options.inspectProcessIdentity(owner.pid);
+      const live = typeof identity === 'object' && identity.processStartIdentity === owner.processStartIdentity;
+      if (!live) {
+        if (identity === 'unknown' || !options.exclusiveRepositoryOwnership) throw new Error('state lock has a stale or ambiguous owner');
+        const observed = await readLockRecord(path);
+        if (observed.token !== owner.token) continue;
+        await unlink(path);
+        await syncDirectory(dirname(path));
+        continue;
+      }
       if (Date.now() - startedAt >= options.lockWaitMs) throw new Error('state lock wait timed out');
       await delay(options.pollMs);
     }
@@ -263,10 +287,12 @@ async function readLockRecord(path: string): Promise<LockRecordV1> {
 }
 
 function validateLockRecord(value: unknown): LockRecordV1 {
-  assertExactObject(value, ['version', 'token', 'host', 'pid', 'acquiredAt'], 'state lock');
-  if (value.version !== 1) throw new Error('state lock version is invalid');
+  assertExactObject(value, ['version', 'token', 'host', 'bootId', 'pid', 'processStartIdentity', 'acquiredAt'], 'state lock');
+  if (value.version !== 2) throw new Error('state lock version is invalid');
   assertNonEmptyString(value.token, 'state lock token');
   assertNonEmptyString(value.host, 'state lock host');
+  assertNonEmptyString(value.bootId, 'state lock boot ID');
+  assertNonEmptyString(value.processStartIdentity, 'state lock process identity');
   if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) throw new Error('state lock pid is invalid');
   if (typeof value.acquiredAt !== 'string' || Number.isNaN(Date.parse(value.acquiredAt)) || new Date(value.acquiredAt).toISOString() !== value.acquiredAt) {
     throw new Error('state lock acquiredAt is invalid');

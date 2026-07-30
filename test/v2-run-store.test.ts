@@ -6,7 +6,12 @@ import { test } from 'node:test';
 
 import { FileProofRecordWriter } from '../src/v2/proof-store.js';
 import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
+import { acceptSpecRevision, createInitialSpecDelivery, createSpecRevision, reserveSpecAuthorSession } from '../src/v2/spec-delivery.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
+import {
+  activateReviewFeedback, bootstrapReviewFeedback, createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap,
+  hashReviewFeedbackSnapshot, hashReviewFeedbackText,
+} from '../src/v2/review-feedback.js';
 import {
   createWaitingQuestion,
   hashNormalizedAnswer,
@@ -102,6 +107,132 @@ test('V2 to V3 cutover preserves exact raw backup and rollback closes permanentl
   }), /forbidden/u);
 });
 
+test('one-shot report lifecycle migration rewrites safe route, direct-review, spec-review, and prepared spec-author states without legacy fields', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const route = legacySafeRouteRecord(uuid(21), 121);
+  const direct = legacySafeDirectRecord(uuid(22), 122);
+  const spec = legacySafeSpecRecord(uuid(23), 123);
+  const author = legacySpecAuthorRecord(uuid(24), 124, 'prepared');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [route, direct, spec, author],
+  }, null, 2)}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 8);
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), legacyBytes);
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', 'previousAttemptId', 'invocation']) {
+    assert.equal(persisted.includes(`"${removed}"`), false, removed);
+  }
+  assert.equal('transportRetries' in (migrated.runs[1]!.directReview!.review as any), false);
+  assert.equal('transportRetries' in (migrated.runs[2]!.specDelivery!.budgets.review as any), false);
+  assert.equal('transportRetries' in (migrated.runs[3]!.specDelivery!.budgets.author as any), false);
+  assert.equal(migrated.runs[0]?.routeExecution?.phase, 'route-complete');
+  assert.equal(migrated.runs[1]?.directReview?.stage, 'review-full');
+  assert.equal(migrated.runs[2]?.specDelivery?.stage, 'review-full');
+  assert.equal(migrated.runs[3]?.specDelivery?.stage, 'authoring');
+  assert.equal(migrated.runs[3]?.specDelivery?.authorSessionId, 'author-session-1');
+});
+
+test('one-shot report lifecycle migration fail-closes launched legacy owners without relaunch authority', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const route = legacyLaunchedRouteRecord(uuid(31), 131);
+  const direct = legacyLaunchedDirectRecord(uuid(32), 132);
+  const spec = legacyLaunchedSpecRecord(uuid(33), 133);
+  const author = legacySpecAuthorRecord(uuid(34), 134, 'launched');
+  const proof = reidentify(record(), uuid(35), 135);
+  proof.lifecycle = 'safe-halt';
+  proof.process = legacyReportProcess('proof');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec, author, proof],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 12);
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), legacyBytes);
+  for (const run of migrated.runs) {
+    assert.equal(run.lifecycle, 'blocked');
+    assert.deepEqual(run.terminalOutcome && {
+      status: run.terminalOutcome.status,
+      kind: run.terminalOutcome.status === 'blocked' ? run.terminalOutcome.kind : undefined,
+      resumable: run.terminalOutcome.status === 'blocked' ? run.terminalOutcome.resumable : undefined,
+    }, { status: 'blocked', kind: 'safety', resumable: false });
+    assert.match(run.outcomeEvidenceId ?? '', /report-lifecycle-migration/u);
+    assert.equal('process' in run, false);
+    assert.equal(run.reportInvocation, undefined);
+  }
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-author"', '"purpose":"spec-review"', '"purpose":"proof"', '"invocation"']) {
+    assert.equal(persisted.includes(removed), false, removed);
+  }
+});
+
+test('later spec-author migration keeps a source-identified backup when the prior report backup already exists', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const priorBackup = Buffer.from('{"prior":"report-lifecycle-source"}\n');
+  await writeFile(`${path}.pre-report-lifecycle-v1`, priorBackup);
+  const prepared = legacySpecAuthorRecord(uuid(35), 135, 'prepared');
+  const launched = legacySpecAuthorRecord(uuid(36), 136, 'launched');
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 13, runs: [prepared, launched],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.deepEqual(await readFile(`${path}.pre-report-lifecycle-v1`), priorBackup);
+  const backups = (await readdir(root)).filter((name) => name.startsWith('run-state.json.pre-report-lifecycle-v1.g13-'));
+  assert.equal(backups.length, 1);
+  assert.deepEqual(await readFile(join(root, backups[0]!)), legacyBytes);
+  assert.equal(migrated.runs[0]?.lifecycle, 'spec-authoring');
+  assert.equal(migrated.runs[0]?.specDelivery?.authorSessionId, 'author-session-1');
+  assert.equal(migrated.runs[1]?.lifecycle, 'blocked');
+  assert.deepEqual(migrated.runs[1]?.terminalOutcome && {
+    status: migrated.runs[1].terminalOutcome.status,
+    kind: migrated.runs[1].terminalOutcome.status === 'blocked' ? migrated.runs[1].terminalOutcome.kind : undefined,
+    resumable: migrated.runs[1].terminalOutcome.status === 'blocked' ? migrated.runs[1].terminalOutcome.resumable : undefined,
+  }, { status: 'blocked', kind: 'safety', resumable: false });
+});
+
+test('one-shot mutable lifecycle migration rewrites prepared owners and fail-closes launched owners with a raw backup', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const qualification = legacySafeDirectRecord(uuid(41), 141);
+  qualification.transportRetries = 1;
+  qualification.checkQualification = {
+    version: 1, checkPolicySha256: 'a'.repeat(64), repairAttempts: 0, checks: [],
+    implementationStarted: false, deniedPathsBaseline: 'b'.repeat(64), repairInvocation: legacyMutableInvocation('prepared'),
+  };
+  const feedback = legacySafeDirectRecord(uuid(42), 142);
+  feedback.reviewFeedback = activateReviewFeedback(
+    bootstrapReviewFeedback(createReviewFeedbackBootstrap(), feedback.baseSha, []),
+    feedbackBatch(feedback),
+  );
+  feedback.reviewFeedback.phase = 'repairing';
+  feedback.reviewFeedback.implementationInvocation = legacyMutableInvocation('prepared');
+  const launched = legacySafeDirectRecord(uuid(43), 143);
+  launched.process = { ...legacyReportProcess('code-review'), purpose: 'implementation' };
+  const legacyBytes = Buffer.from(`${JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 15, runs: [qualification, feedback, launched],
+  })}\n`);
+  await writeFile(path, legacyBytes);
+
+  const migrated = await new FileRunRecordWriter(path, deterministicAtomicOptions()).read();
+  assert.equal(migrated.generation, 16);
+  assert.deepEqual(await readFile(`${path}.pre-mutable-lifecycle-v1`), legacyBytes);
+  assert.equal(migrated.runs[0]?.lifecycle, 'implementing');
+  assert.equal(migrated.runs[1]?.lifecycle, 'implementing');
+  assert.equal(migrated.runs[2]?.lifecycle, 'blocked');
+  const persisted = await readFile(path, 'utf8');
+  for (const removed of ['transportRetries', 'implementationStarted', 'repairInvocation', 'deniedPathsBaseline', 'implementationInvocation', '"purpose":"implementation"']) {
+    assert.equal(persisted.includes(removed), false, removed);
+  }
+});
+
 test('candidate rollback holds the state lock and cannot overwrite an interleaved CAS', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
@@ -150,14 +281,13 @@ test('run state rejects malformed and lifecycle-inconsistent records', async () 
   await assert.rejects(writer.read(), /terminalOutcome|review-ready/u);
 });
 
-test('run state accepts bounded recovery counters and rejects values beyond the autonomous budgets', async () => {
+test('run state accepts bounded semantic budgets and rejects values beyond them', async () => {
   const root = await temporaryRoot();
   const writer = new FileRunRecordWriter(join(root, 'run-state.json'), deterministicAtomicOptions());
   const recoverable = {
     ...record(),
     cycle: 5,
     reportRepairs: 1,
-    transportRetries: 1,
     issueSnapshot: {
       number: 42,
       title: 'Implement behavior',
@@ -180,44 +310,13 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
   for (const invalid of [
     { ...recoverable, cycle: 6 },
     { ...recoverable, reportRepairs: 2 },
-    { ...recoverable, transportRetries: 2 },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification, repairAttempts: 6 } },
     { ...recoverable, checkQualification: { ...recoverable.checkQualification!, checks: [{ ...recoverable.checkQualification!.checks[0], status: 'unchanged-failure' }] } },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, implementationStarted: true, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
-    {
-      ...recoverable,
-      checkQualification: {
-        ...recoverable.checkQualification!, repairAttempts: 0, deniedPathsBaseline: 'c'.repeat(64),
-        repairInvocation: qualificationInvocation('launched'),
-      },
-    },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecordV1])), /cycle|Repairs|repairAttempts|status/u);
   }
 });
-
-function qualificationInvocation(phase: 'prepared' | 'launched') {
-  return {
-    phase,
-    attemptId: 'qualification-attempt-1',
-    reportPath: '/tmp/qualification-attempt-1/report.json',
-    preparedAt: '2026-07-16T12:00:00.000Z',
-    baseline: {
-      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
-      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
-    },
-    pid: phase === 'launched' ? 123 : null,
-    processGroupId: phase === 'launched' ? 123 : null,
-    launchedAt: phase === 'launched' ? '2026-07-16T12:00:01.000Z' : null,
-  } as const;
-}
 
 test('run state round-trips the durable blocked-label publication intent exactly', async () => {
   const root = await temporaryRoot();
@@ -276,12 +375,10 @@ test('run store persists exact triaging and routed state', async () => {
   const budgets = {
     version: 1 as const,
     triageRepairs: 0 as const,
-    triageTransportRetries: 0 as const,
-    ambiguityTransportRetries: 0 as const,
     candidateReviews: 0 as const,
   };
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const, previousAttemptId: null } };
+  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const } };
   const routed = { ...record(), lifecycle: 'routed' as const, routeExecution: { ...budgets, phase: 'route-complete' as const, triage: triageRef, review: null }, routeReceipt: receipt };
   await writer.compareAndSwap(0, body([triaging]));
   const second = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -358,8 +455,8 @@ test('resumed waiting history is retained through ordinary non-waiting delivery 
       delete run.routeExecution;
       delete run.routeReceipt;
       run.routeExecution = {
-        version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
-        candidateReviews: 0, phase: 'triage-ready', previousAttemptId: null,
+        version: 1, triageRepairs: 0,
+        candidateReviews: 0, phase: 'triage-ready',
       };
     }
     const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
@@ -443,6 +540,30 @@ test('file lock blocks stale, foreign, malformed, and live owners without reclai
   }
 });
 
+test('atomic state lock reclaims only a positively dead fenced owner under exclusive repository ownership', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const lock = { version: 2, token: 'dead', host: 'host-a', bootId: 'boot-a', pid: 999,
+    processStartIdentity: 'old-start', acquiredAt: timestamp() };
+  await writeFile(`${path}.lock`, `${JSON.stringify(lock)}\n`);
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions({
+    exclusiveRepositoryOwnership: true,
+    inspectProcessIdentity: async () => 'absent',
+  }));
+  assert.equal((await writer.compareAndSwap(0, body([record()]))).generation, 1);
+
+  for (const inspection of ['unknown', { processStartIdentity: 'old-start' }] as const) {
+    const blockedPath = join(await temporaryRoot(), 'run-state.json');
+    await writeFile(`${blockedPath}.lock`, `${JSON.stringify(lock)}\n`);
+    const blocked = new FileRunRecordWriter(blockedPath, deterministicAtomicOptions({
+      exclusiveRepositoryOwnership: true,
+      inspectProcessIdentity: async () => inspection,
+      lockWaitMs: 5,
+    }));
+    await assert.rejects(blocked.compareAndSwap(0, body([record()])), /lock/u);
+  }
+});
+
 test('lock release is token-safe', async () => {
   const root = await temporaryRoot();
   const path = join(root, 'run-state.json');
@@ -468,12 +589,15 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     version: 1,
     proofId: 'proof-1',
     bindingSha256: 'a'.repeat(64),
-    status: 'prepared',
-    attempts: [{ attemptId: 'attempt-1', purpose: 'proof', status: 'prepared' }],
+    status: 'active', reportRepairs: 0, repairFindings: [],
+    iosProofInputs: { helperPath: '/immutable/ios-lease.mjs', leaseRoot: '/leases',
+      leaseArtifactPath: '/candidate/proof-1/ios-lease.json', proofId: 'proof-1', ownerPid: 4242,
+      xcrunPath: '/usr/bin/xcrun', runtimeId: null, deviceTypeId: null },
     startedAt: timestamp(),
     updatedAt: timestamp(),
   });
   assert.equal(state.generation, 1);
+  assert.equal((await writer.read('proof-1'))?.iosProofInputs?.ownerPid, 4242);
   assert.equal('lifecycle' in state, false);
 
   await assert.rejects(writer.compareAndSwap('proof-2', 'b'.repeat(64), 0, {
@@ -489,6 +613,79 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
   } as never), /keys/u);
 });
 
+test('proof writer one-shot migrates only unlaunched standalone proof state with a source-identified raw backup', async () => {
+  const root = await temporaryRoot();
+  const proofDir = join(root, 'proof-prepared');
+  const path = join(proofDir, 'state.json');
+  await mkdir(proofDir, { recursive: true });
+  const legacyBytes = Buffer.from(`${JSON.stringify(legacyProofState('proof-prepared', 'prepared'), null, 2)}\n`);
+  await writeFile(path, legacyBytes);
+  await writeFile(`${path}.pre-canonical-proof-v1`, 'prior unrelated backup\n');
+
+  const writer = new FileProofRecordWriter(root, deterministicAtomicOptions());
+  const migrated = await writer.read('proof-prepared');
+  assert.equal(migrated?.status, 'active');
+  assert.equal(migrated?.reportRepairs, 0);
+  assert.equal(migrated?.generation, 8);
+  const names = await readdir(proofDir);
+  const backup = names.find((name) => name.startsWith('state.json.pre-canonical-proof-v1.g7-'));
+  assert.ok(backup);
+  assert.deepEqual(await readFile(join(proofDir, backup)), legacyBytes);
+  const canonicalBytes = await readFile(path, 'utf8');
+  assert.equal(canonicalBytes.includes('attempts'), false);
+  assert.deepEqual(await writer.read('proof-prepared'), migrated);
+  assert.equal((await readdir(proofDir)).filter((name) => name.startsWith('state.json.pre-canonical-proof-v1.g7-')).length, 1);
+});
+
+test('proof writer fail-closes launched or ambiguous standalone proof state without resumable launch authority', async () => {
+  for (const phase of ['running', 'ambiguous'] as const) {
+    const root = await temporaryRoot();
+    const proofId = `proof-${phase}`;
+    const proofDir = join(root, proofId);
+    const path = join(proofDir, 'state.json');
+    await mkdir(proofDir, { recursive: true });
+    const legacy = legacyProofState(proofId, phase === 'running' ? 'running' : 'prepared');
+    if (phase === 'ambiguous') legacy.attempts[0].status = 'running';
+    const legacyBytes = Buffer.from(`${JSON.stringify(legacy)}\n`);
+    await writeFile(path, legacyBytes);
+
+    const migrated = await new FileProofRecordWriter(root, deterministicAtomicOptions()).read(proofId);
+    assert.equal(migrated?.status, 'internal-error', phase);
+    assert.equal(migrated?.invocation, undefined, phase);
+    assert.match(migrated?.receipt?.summary ?? '', /migration.*identity unavailable/iu, phase);
+    assert.match(migrated?.receipt?.localEvidenceId ?? '', /proof-state-migration-safety/u, phase);
+    assert.deepEqual(await readFile((migrated?.receipt?.localEvidenceId ?? '').replace('proof-state-migration-safety:', '')), legacyBytes);
+  }
+});
+
+test('proof migration decoder fail-closes every malformed prepared source instead of granting launch authority', async () => {
+  const cases: Array<[string, (legacy: any) => void]> = [
+    ['prepared receipt', (legacy) => { legacy.receipt = proofMigrationReceipt(legacy.proofId); }],
+    ['unknown effect', (legacy) => { legacy.effect = { invoked: true }; }],
+    ['duplicate attempt', (legacy) => { legacy.attempts.unshift({ ...legacy.attempts[0], status: 'terminal' }); }],
+    ['bad purpose', (legacy) => { legacy.attempts[0].purpose = 'publication'; }],
+    ['retry budget', (legacy) => {
+      legacy.attempts = [
+        { attemptId: 'proof', purpose: 'proof', status: 'terminal' },
+        { attemptId: 'retry-1', purpose: 'transport-retry', status: 'terminal' },
+        { attemptId: 'retry-2', purpose: 'transport-retry', status: 'prepared' },
+      ];
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const root = await temporaryRoot();
+    const proofId = `proof-${name.replaceAll(' ', '-')}`;
+    const proofDir = join(root, proofId);
+    await mkdir(proofDir, { recursive: true });
+    const legacy = legacyProofState(proofId, 'prepared');
+    mutate(legacy);
+    await writeFile(join(proofDir, 'state.json'), `${JSON.stringify(legacy)}\n`);
+    const migrated = await new FileProofRecordWriter(root, deterministicAtomicOptions()).read(proofId);
+    assert.equal(migrated?.status, 'internal-error', name);
+    assert.match(migrated?.receipt?.localEvidenceId ?? '', /proof-state-migration-safety/u, name);
+  }
+});
+
 test('state publication rejects symlinked parent directories before writing outside', async () => {
   const root = await temporaryRoot();
   const outside = await temporaryRoot();
@@ -500,6 +697,156 @@ test('state publication rejects symlinked parent directories before writing outs
 
 function body(runs: RunRecordV1[]): RunStateBodyV1 {
   return { schema: 'codex-orchestrator.agent-auto-state', version: 2, runs };
+}
+
+function legacyProofState(proofId: string, status: 'prepared' | 'running'): any {
+  return {
+    schema: 'codex-orchestrator.acceptance-proof-state', version: 1, generation: 7,
+    proofId, bindingSha256: 'a'.repeat(64), status,
+    attempts: [{ attemptId: 'legacy-attempt', purpose: 'proof', status }],
+    startedAt: timestamp(), updatedAt: timestamp(),
+  };
+}
+
+function proofMigrationReceipt(proofId: string): any {
+  return {
+    proofId, bindingSha256: 'a'.repeat(64), summary: 'Legacy receipt.', publishableEvidence: [], localEvidenceId: 'legacy',
+  };
+}
+
+function legacySafeRouteRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(directRoutedRecord(), runId, issueNumber);
+  run.routeExecution = {
+    ...run.routeExecution,
+    triageTransportRetries: 1,
+    ambiguityTransportRetries: 0,
+  };
+  return run;
+}
+
+function legacySafeDirectRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(directRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'implementing';
+  run.directReview = createInitialDirectReview({
+    targetFingerprint: '7'.repeat(64), codeReviewerSessionId: 'review-session-1',
+  });
+  run.directReview.review.transportRetries = 1;
+  return run;
+}
+
+function legacySafeSpecRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(specRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'spec-authoring';
+  const initial = createInitialSpecDelivery({
+    issueNumber, runId, workflowGenerationSha256: run.workflowGeneration.generationHash,
+  });
+  run.specDelivery = acceptSpecRevision(reserveSpecAuthorSession(initial, 'author-session-1'), createSpecRevision({
+    revision: 1, path: '/state/spec.md', content: '# Spec\n',
+    evidence: [{ path: `issue:${issueNumber}`, sha256: 'c'.repeat(64), description: 'Issue authority' }],
+    author: { attemptId: 'author-attempt-1', sessionId: 'author-session-1' }, previousRevision: null,
+  }));
+  run.specDelivery.budgets.review.transportRetries = 1;
+  delete run.specDelivery.review.reviewerSessionId;
+  return run;
+}
+
+function legacySpecAuthorRecord(runId: string, issueNumber: number, status: 'prepared' | 'launched'): any {
+  const run = reidentify(specRoutedRecord(), runId, issueNumber);
+  run.lifecycle = 'spec-authoring';
+  run.specDelivery = createInitialSpecDelivery({
+    issueNumber, runId, workflowGenerationSha256: run.workflowGeneration.generationHash,
+  });
+  run.specDelivery.budgets.author.transportRetries = 1;
+  run.specDelivery.invocation = {
+    purpose: 'author', mode: 'author', attemptId: 'author-attempt-1', sessionId: 'author-session-1',
+    targetRevision: 1, targetSha256: null, closureRequestSha256: null, status,
+    pid: status === 'launched' ? 41 : null, processGroupId: status === 'launched' ? 41 : null,
+    reportPath: '/state/attempt/report.json', revisionPath: '/state/attempt/revision-1.md',
+  };
+  if (status === 'launched') run.process = legacyReportProcess('spec-author');
+  return run;
+}
+
+function legacyLaunchedRouteRecord(runId: string, issueNumber: number): any {
+  const run = reidentify(record(), runId, issueNumber);
+  run.lifecycle = 'triaging';
+  run.routeExecution = {
+    version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+    candidateReviews: 0, phase: 'triage-in-flight', attemptId: 'triage-attempt-1', startedAt: timestamp(),
+  };
+  run.process = legacyReportProcess('route');
+  return run;
+}
+
+function legacyLaunchedDirectRecord(runId: string, issueNumber: number): any {
+  const run = legacySafeDirectRecord(runId, issueNumber);
+  run.directReview.invocation = {
+    attemptId: 'review-attempt-1', operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1',
+    targetRevision: 1, targetFingerprint: run.directReview.targetFingerprint, closureRequestSha256: null,
+    status: 'launched', pid: 51, processGroupId: 51,
+  };
+  run.process = legacyReportProcess('code-review');
+  return run;
+}
+
+function legacyLaunchedSpecRecord(runId: string, issueNumber: number): any {
+  const run = legacySafeSpecRecord(runId, issueNumber);
+  const target = run.specDelivery.revisions.at(-1);
+  run.specDelivery.invocation = {
+    purpose: 'review', mode: 'full', attemptId: 'spec-review-attempt-1', sessionId: 'spec-review-session-1',
+    targetRevision: target.revision, targetSha256: target.revisionSha256, closureRequestSha256: null,
+    status: 'launched', pid: 61, processGroupId: 61, reportPath: '/attempts/spec-review/report.json', revisionPath: null,
+  };
+  run.process = legacyReportProcess('spec-review');
+  return run;
+}
+
+function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-author' | 'spec-review' | 'proof') {
+  return {
+    pid: 51, processGroupId: 51, startedAt: timestamp(), purpose,
+    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'proof' ? 'proving' : purpose === 'spec-review' || purpose === 'spec-author' ? 'spec-authoring' : 'implementing',
+    resumeReviewStage: purpose === 'code-review' ? 'review-full' : null,
+    baseline: {
+      headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+      untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'legacy-worktree',
+    },
+  };
+}
+
+function legacyMutableInvocation(phase: 'prepared' | 'launched') {
+  return {
+    phase, attemptId: 'mutable-attempt-1', reportPath: '/tmp/mutable-attempt-1/report.json', preparedAt: timestamp(),
+    baseline: {
+      headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+      untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'legacy-worktree',
+    },
+    pid: phase === 'launched' ? 71 : null, processGroupId: phase === 'launched' ? 71 : null,
+    launchedAt: phase === 'launched' ? timestamp() : null,
+  };
+}
+
+function feedbackBatch(run: any) {
+  return createFrozenReviewFeedbackBatch({
+    runId: run.runId, canonicalRepository: run.canonicalRepository,
+    pullRequest: { nodeId: 'PR_1', number: 1, headSha: run.baseSha, headRefName: run.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${run.runId}:pr -->` },
+    priorPublishedHeadSha: run.baseSha,
+    sources: [{
+      sourceId: 'pr-thread:T_1', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_r1',
+      path: 'feature.txt', line: 1, body: 'Repair it.', bodySha256: hashReviewFeedbackText('Repair it.'),
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'T_1' }), threadState: { isResolved: false, isOutdated: false },
+      commitSha: run.baseSha, sourceCreatedAt: timestamp(), sourceUpdatedAt: timestamp(),
+      author: { login: 'writer', userId: '42' }, permission: { permission: 'write', userId: '42', checkedAt: timestamp() },
+    }], frozenAt: timestamp(),
+  });
+}
+
+function reidentify(run: RunRecordV1, runId: string, issueNumber: number): any {
+  return {
+    ...structuredClone(run), runId, issueNumber, branchName: `codex/issue-${issueNumber}`,
+    worktreePath: `/tmp/worktrees/${issueNumber}`,
+    issueSnapshot: { ...run.issueSnapshot, number: issueNumber },
+  };
 }
 
 function reviewReadyRecord(): RunRecordV1 {
@@ -527,7 +874,6 @@ function record(): RunRecordV1 {
     lifecycle: 'claimed',
     cycle: 1,
     reportRepairs: 0,
-    transportRetries: 0,
     issueSnapshot: {
       number: 42,
       title: 'Implement behavior',
@@ -574,7 +920,7 @@ function waitingRecord(phase: 'awaiting-answer' | 'resumed' | 'history-only'): R
     ...record(),
     lifecycle: 'waiting-human',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 1, phase: 'route-complete', triage: routeReceipt.triage, review: routeReceipt.review,
     },
     routeReceipt,
@@ -640,7 +986,7 @@ function directRoutedRecord(): RunRecordV1 {
     ...base,
     lifecycle: 'routed',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 0, phase: 'route-complete', triage, review: null,
     },
     routeReceipt,
@@ -672,7 +1018,7 @@ function specRoutedRecord(): RunRecordV1 {
     ...base,
     lifecycle: 'routed',
     routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, ambiguityTransportRetries: 0,
+      version: 1, triageRepairs: 0,
       candidateReviews: 0, phase: 'route-complete', triage, review: null,
     },
     routeReceipt,
@@ -723,10 +1069,18 @@ function deterministicAtomicOptions(overrides: {
   afterFault?: () => Promise<void>;
   processAlive?: (pid: number) => boolean;
   lockWaitMs?: number;
+  exclusiveRepositoryOwnership?: boolean;
+  inspectProcessIdentity?: (pid: number) => Promise<'absent' | 'unknown' | { processStartIdentity: string }>;
 } = {}) {
   return {
     host: 'host-a',
+    bootId: 'boot-a',
     pid: 123,
+    processStartIdentity: 'start-123',
+    inspectProcessIdentity: overrides.inspectProcessIdentity ?? (async (pid: number) => overrides.processAlive?.(pid)
+      ? { processStartIdentity: `start-${pid}` }
+      : 'unknown' as const),
+    exclusiveRepositoryOwnership: overrides.exclusiveRepositoryOwnership ?? false,
     now: () => timestamp(),
     createToken: () => overrides.token ?? 'token-a',
     isProcessAlive: overrides.processAlive ?? (() => false),

@@ -110,7 +110,6 @@ async function runAcceptanceFixture(lease?: IosLeaseVerifier) {
     inspectArtifact: async () => ({ modifiedAt: '2026-07-17T00:00:01.000Z' }),
     iosLease: lease,
     proofArtifactDir: 'proofs/proof-ios',
-    createAttemptId: () => 'ios-attempt-1',
     now: () => '2026-07-17T00:00:00.000Z',
   });
   const issue: IssueSnapshot = {

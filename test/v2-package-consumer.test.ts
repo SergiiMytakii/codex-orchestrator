@@ -112,7 +112,7 @@ const legacyFreshness = async (legacyPayload: CheckedChangePayloadV1): Promise<C
 const legacyProof = new AcceptanceProof({
   checkedChangeReader: {} as never, proofRecords: {} as never, proofAgent: legacyAgent,
   inspectFreshness: legacyFreshness, readArtifact: async () => ({} as never),
-  proofArtifactDir: '.proof', createAttemptId: () => 'attempt', now: () => new Date(0).toISOString(),
+  proofArtifactDir: '.proof', now: () => new Date(0).toISOString(),
 });
 void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void legacyProof;
 `);

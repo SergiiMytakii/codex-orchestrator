@@ -452,6 +452,7 @@ function normalizeDetailedPullRequest(input: unknown): GitHubPullRequestDetails 
       : 'MERGED',
     isDraft: booleanField(record, 'draft'),
     headRefName: stringField(head, 'ref'),
+    headSha: stringField(head, 'sha'),
     baseRefName: stringField(base, 'ref'),
     title: stringField(record, 'title'),
     body: nullableStringField(record, 'body'),
