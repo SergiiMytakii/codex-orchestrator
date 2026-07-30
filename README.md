@@ -243,4 +243,4 @@ local skill checkout.
 
 `npm run smoke:live` packs the current package and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
-For the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model, see [docs/deep-dive.md](docs/deep-dive.md). For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).
+Human maintainers can find the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model in [docs/deep-dive.md](docs/deep-dive.md). That guide is not agent context. For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).

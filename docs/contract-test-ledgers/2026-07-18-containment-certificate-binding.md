@@ -1,5 +1,12 @@
 # Containment Certificate Runtime Binding
 
+Status: superseded historical ledger.
+
+> Runtime certification was removed on 2026-07-28. This file preserves the
+> tests and release evidence for the former certificate gate; its green rows do
+> not describe a current runtime requirement. The active replacement contract
+> is [Runtime Containment Without Certification](2026-07-28-runtime-containment-without-certification.md).
+
 ## Contract Test Ledger
 
 | Invariant | Risk It Prevents | First Test / Proof | Status |
