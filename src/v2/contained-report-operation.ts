@@ -5,11 +5,7 @@ import {
   validateCodeReviewReport,
   type CodeReviewValidationContext,
 } from './code-review-report.js';
-import {
-  hashAmbiguityReviewArtifact,
-  hashTriageArtifact,
-  validateAmbiguityReviewArtifact,
-} from './route-decision.js';
+import { hashTriageArtifact } from './route-decision.js';
 import { validateTriageRoute } from './triage-route.js';
 import type {
   WorkflowExecutionProfile,
@@ -23,7 +19,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review';
+export type ContainedReportOperationId = 'triage' | 'code-review';
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
@@ -225,9 +221,6 @@ function validateCompletedReport(
     if (operation === 'triage') {
       validatedPayload = validateTriageRoute(decoded);
       artifactSha256 = hashTriageArtifact(validatedPayload);
-    } else if (operation === 'ambiguity-review') {
-      validatedPayload = validateAmbiguityReviewArtifact(decoded);
-      artifactSha256 = hashAmbiguityReviewArtifact(validatedPayload);
     } else {
       const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
       validatedPayload = reviewReport;

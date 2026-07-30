@@ -1,8 +1,8 @@
 import { canonicalJson, sha256 } from './containment.js';
 import {
-  acceptSpecReview, acceptSpecRevision, createInitialSpecDelivery, freezeApprovedSpec,
+  acceptSpecReview, acceptSpecRevision, createInitialSpecDelivery, freezeApprovedSpec, freezeSpecQuestion,
   consumeSpecTransportRetry, recoverMalformedSpecReport,
-  type FrozenSpecReceiptV1, type SpecDeliveryV1,
+  type FrozenSpecQuestionReceiptV1, type FrozenSpecReceiptV1, type SpecDecisionGapV1, type SpecDeliveryV1,
   type SpecReviewReportV1, type SpecRevisionV1,
 } from './spec-delivery.js';
 import type { RoutedRunContext } from './route-continuations.js';
@@ -18,6 +18,7 @@ export interface SpecDeliveryState {
 
 export type SpecOperationResult<T> =
   | { status: 'completed'; value: T; attemptResultSha256: string; reportSha256?: string }
+  | { status: 'decision-required'; value: SpecRevisionV1; decisionGaps: SpecDecisionGapV1[]; question: string; attemptResultSha256: string }
   | { status: 'retryable'; code: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string }
   | { status: 'cancelled' };
@@ -47,6 +48,7 @@ export interface SpecDeliveryOperation {
 
 export type SpecCoordinatorResult =
   | { status: 'completed'; receipt: FrozenSpecReceiptV1 }
+  | { status: 'decision-required'; receipt: FrozenSpecQuestionReceiptV1 }
   | { status: 'retryable'; code: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string; evidence: string[] }
   | { status: 'cancelled' };
@@ -68,6 +70,7 @@ export class SpecCoordinator {
     while (true) {
       if (signal.aborted) return { status: 'cancelled' };
       if (current.stage === 'frozen') return { status: 'completed', receipt: current.frozen! };
+      if (current.stage === 'question') return { status: 'decision-required', receipt: current.question! };
       if (current.stage === 'rejected' || current.stage === 'exhausted') {
         return { status: 'blocked', kind: current.stage === 'rejected' ? 'safety' : 'exhausted', code: `spec-${current.stage}`, evidence: [] };
       }
@@ -77,8 +80,8 @@ export class SpecCoordinator {
         current = frozen;
         continue;
       }
-      const author = current.stage === 'authoring' || current.stage === 'author-repair';
-      const mode = author ? (current.stage === 'authoring' ? 'author' : 'repair') : (current.stage === 'review-full' ? 'full' : 'closure');
+      const author = current.stage === 'authoring' || current.stage === 'author-repair' || current.stage === 'answer-authoring';
+      const mode = author ? (current.stage === 'author-repair' ? 'repair' : 'author') : (current.stage === 'review-full' ? 'full' : 'closure');
       const attempt = await this.dependencies.state.prepareAttempt(
         author ? 'spec-author' : 'spec-review',
         `${mode}:${current.revisions.length + 1}:${current.budgets.repairCycles}`,
@@ -113,6 +116,12 @@ export class SpecCoordinator {
           await this.dependencies.state.clearAttempt();
           return { status: 'blocked', kind: 'exhausted', code: 'spec-retry-budget-exhausted', evidence: [] };
         }
+      }
+      if (result.status === 'decision-required') {
+        const next = freezeSpecQuestion(current, result.value, result.decisionGaps, result.question);
+        if (!await this.dependencies.state.adopt(current, next, result.attemptResultSha256)) return { status: 'retryable', code: 'spec-question-state-conflict' };
+        await this.dependencies.state.clearAttempt();
+        return { status: 'decision-required', receipt: next.question! };
       }
       if (result.status !== 'completed') return result.status === 'blocked' ? { ...result, evidence: [] } : result;
       const next: SpecDeliveryV1 = author

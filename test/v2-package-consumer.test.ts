@@ -67,7 +67,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
       'acceptance-proof', 'atomic-store', 'candidate', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
       'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
       'proof-report', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
-      'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'waiting-human', 'waiting-human-coordinator', 'workflow-assets',
+      'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'workflow-assets',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
     }

@@ -57,6 +57,7 @@ test('CheckedChange V2 binds every receipt and changed path to one candidate whi
     issueNumber: 1,
     cycle: 1,
     baseSha: 'a'.repeat(40),
+    deliveryAuthoritySha256: 'd'.repeat(64),
     binding,
     changedFiles: ['src/a.ts'],
     checks: [{

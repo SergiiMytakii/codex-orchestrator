@@ -31,7 +31,6 @@ import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import { SpecCoordinator } from '../src/v2/spec-coordinator.js';
 import { createSpecRevision } from '../src/v2/spec-delivery.js';
-import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
 import { mkdtemp } from './mission-test-temp.js';
@@ -124,7 +123,7 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
     worktreePath: root,
     expectedHeadSha,
     runId: '00000000-0000-4000-8000-000000000001',
-    boundary: { kind: 'implementation-cycle', cycle: 1 },
+    boundary: { kind: 'implementation-cycle', cycle: 1, authoritySha256: 'a'.repeat(64) },
     artifactDir: '.codex-orchestrator/proofs',
   });
   assert.equal(captured.kind, 'ok', JSON.stringify(captured));
@@ -145,7 +144,7 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
     activeCandidateRefs: [],
     pendingCandidates: [{
       runId: '00000000-0000-4000-8000-000000000001', worktreePath: root, expectedHeadSha,
-      boundary: { kind: 'implementation-cycle', cycle: 1 }, artifactDir: '.codex-orchestrator/proofs',
+      boundary: { kind: 'implementation-cycle', cycle: 1, authoritySha256: 'a'.repeat(64) }, artifactDir: '.codex-orchestrator/proofs',
     }],
     activeMaterializations: [],
   }), { kind: 'ok', value: undefined });
@@ -256,61 +255,53 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
   assert.deepEqual(await adapter.candidateV2.inspectPin(binding), { kind: 'ok', value: 'missing' });
 });
 
-test('initial and persisted waiting routes use one durable continuation without implementation', async () => {
-  const fixture = await runFixture({ route: 'awaiting-user', agentWrites: false });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'awaiting-user', JSON.stringify(fixture.events));
-  assert.equal(fixture.events.includes('agent'), false);
-  const state = await fixture.store.read();
-  assert.equal(state.runs[0]?.lifecycle, 'waiting-human');
-  assert.equal(state.runs[0]?.waitingHuman?.phase, 'awaiting-answer');
-  const effects = fixture.events.length;
-  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(replay, first);
-  assert.equal(fixture.events.slice(effects).includes('agent'), false);
-});
-
-test('spec-required route freezes independently reviewed authority without product implementation', async () => {
-  const fixture = await runFixture({ route: 'spec-required', agentWrites: false });
+test('spec-required route freezes independently reviewed authority and implements it in the same run', async () => {
+  const fixture = await runFixture({ route: 'spec-required' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'spec-frozen', JSON.stringify(fixture.events));
-  assert.equal(fixture.events.includes('agent'), false);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, state: await fixture.store.read() }));
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
   assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
   const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.lifecycle, 'spec-authoring');
+  assert.equal(run.lifecycle, 'review-ready');
   assert.equal(run.specDelivery?.stage, 'frozen');
-  assert.equal(run.specDelivery?.frozen?.receiptSha256, result.status === 'spec-frozen' ? result.receipt.receiptSha256 : '');
+  assert.equal(run.deliveryAuthority?.kind, 'spec');
+  assert.equal(run.deliveryAuthority?.sourceSha256, run.specDelivery?.frozen?.receiptSha256);
+  assert.equal(run.cycle, 1);
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(replay, result);
   assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
 });
 
-test('trusted waiting answer reroutes the same run before implementation and retains terminal history', async () => {
-  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'direct'], trustedAnswerOnReplay: true });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
-  const before = fixture.events.length;
+test('trusted product answer advances the frozen spec without retriage or a waiting lifecycle', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen', JSON.stringify(first));
+  if (first.status !== 'spec-frozen' || !('questionId' in first.receipt)) return;
+  assert.equal((await fixture.store.read()).runs[0]?.specDelivery?.stage, 'question');
+  assert.equal(fixture.events.includes('agent'), false);
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const triageCount = fixture.events.filter((event) => event === 'route:triage').length;
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify(fixture.events.slice(before)));
-  const resumedEvents = fixture.events.slice(before);
-  assert.equal(resumedEvents.filter((event) => event === 'route:triage').length, 1);
-  assert.ok(resumedEvents.indexOf('route:triage') < resumedEvents.indexOf('agent'));
-  const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.runId, '00000000-0000-4000-8000-000000000001');
-  assert.equal(run.waitingHuman?.phase, 'history-only');
-  assert.equal(run.waitingHuman?.history.length, 1);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events }));
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, triageCount);
+  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-review:')), ['spec-review:full']);
 });
 
-test('a second approved awaiting-user route re-enters waiting-human in the same run', async () => {
-  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'awaiting-user'], trustedAnswerOnReplay: true, agentWrites: false });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
-  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(second.status, 'awaiting-user', JSON.stringify(fixture.events));
-  const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.lifecycle, 'waiting-human');
-  assert.equal(run.waitingHuman?.phase, 'awaiting-answer');
-  assert.equal(run.waitingHuman?.history.length, 1);
-  assert.equal('questionReceipt' in run.waitingHuman! ? run.waitingHuman.questionReceipt.question.generation : undefined, 2);
-  assert.equal(fixture.events.includes('agent'), false);
+test('edited product answer remains spec-frozen and launches no delivery work', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'edited-answer', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:01.000Z',
+  });
+  const before = fixture.events.length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'spec-frozen');
+  assert.equal(fixture.events.slice(before).some((event) => event === 'agent' || event.startsWith('spec-review:')), false);
 });
 
 test('known live owner contention requeues before labels or state', async () => {
@@ -866,10 +857,6 @@ test('not eligible and revoked authorization start no implementation or publicat
   const ineligible = await runFixture({ initialLabels: [] });
   assert.equal((await ineligible.runner.runIssue({ targetRoot: ineligible.targetRoot, issueNumber: 42 })).status, 'not-eligible');
   assert.equal(ineligible.events.includes('agent'), false);
-
-  const orphanWaiting = await runFixture({ initialLabels: ['agent:auto', 'agent:waiting-human'] });
-  assert.equal((await orphanWaiting.runner.runIssue({ targetRoot: orphanWaiting.targetRoot, issueNumber: 42 })).status, 'not-eligible');
-  assert.equal(orphanWaiting.events.some((event) => event.startsWith('effect:claim')), false);
 
   const revoked = await runFixture({ revokeAtAuthorization: 1 });
   const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
@@ -1854,9 +1841,9 @@ interface FixtureOptions {
   rawRunStateBytes?: Buffer;
   stateInspections?: RunStateInspection[];
   ownerContention?: boolean;
-  route?: 'direct' | 'awaiting-user' | 'spec-required';
-  routeSequence?: Array<'direct' | 'awaiting-user' | 'spec-required'>;
-  trustedAnswerOnReplay?: boolean;
+  route?: 'direct' | 'spec-required';
+  routeSequence?: Array<'direct' | 'spec-required'>;
+  specQuestionOnce?: boolean;
   initialLabels?: string[];
   blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
@@ -1895,6 +1882,8 @@ interface FixtureOptions {
     authorAssociation: string;
     createdAt?: string;
     updatedAt?: string;
+    author?: string;
+    authorId?: string;
   }>;
   expectedTriageComment?: string;
   revokeDuringRoute?: boolean;
@@ -1971,6 +1960,8 @@ async function runFixture(options: FixtureOptions = {}) {
     authorAssociation: string;
     createdAt?: string;
     updatedAt?: string;
+    author?: string;
+    authorId?: string;
   }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
@@ -2028,7 +2019,7 @@ async function runFixture(options: FixtureOptions = {}) {
           blockedTransitionMutated = true;
           labels = [...options.blockedTransitionLabels];
         }
-        if (labels.includes(policy.review) || labels.includes(policy.waitingHuman)) return;
+        if (labels.includes(policy.review)) return;
         if (!labels.some((label) => label === policy.auto || label === policy.running || label === policy.blocked)) return;
         labels = labels.filter((label) => label !== policy.running);
         if (!labels.includes(policy.blocked)) labels.push(policy.blocked);
@@ -2058,6 +2049,7 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         if (claim && options.issueBodyAfterClaim) issue.body = options.issueBodyAfterClaim;
       },
+      getRepositoryPermission: async (_login, expectedUserId) => ({ permission: 'write', checkedAt: '2026-07-30T00:00:01.000Z', userId: expectedUserId }),
     },
     pullRequests: {
       findOpen: async () => pullRequest,
@@ -2084,30 +2076,17 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         const expected = await state.read();
         const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
-        const awaiting = route === 'awaiting-user';
-        const artifact = awaiting ? {
-          version: 1 as const, status: 'awaiting-user' as const,
-          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
-          direct: null, specRequired: null,
-          awaitingUser: {
-            outcomes: [
-              { id: 'a', title: 'A', behaviorDelta: 'Use A.', evidence: ['Issue is ambiguous.'] },
-              { id: 'b', title: 'B', behaviorDelta: 'Use B.', evidence: ['Issue is ambiguous.'] },
-            ],
-            absenceOfAuthorizedChoiceEvidence: ['No authorized answer.'], recommendation: 'Choose A.', question: 'A or B?',
-          },
-          blocker: null,
-        } : route === 'spec-required' ? {
+        const artifact = route === 'spec-required' ? {
           version: 1 as const, status: 'spec-required' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
           direct: null,
           specRequired: { summary: 'Spec fixture.', complexityReasons: ['Durable review authority.'], specMode: 'standard' as const, reviewFocus: ['independence'] },
-          awaitingUser: null, blocker: null,
+          blocker: null,
         } : {
           version: 1 as const, status: 'direct' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
           direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
-          specRequired: null, awaitingUser: null, blocker: null,
+          specRequired: null, blocker: null,
         };
         const triage = {
           operation: 'triage' as const,
@@ -2115,10 +2094,7 @@ async function runFixture(options: FixtureOptions = {}) {
           artifactSha256: hashTriageArtifact(artifact),
           generationHash: workflowGeneration.generationHash,
         };
-        const review = awaiting ? {
-          operation: 'ambiguity-review' as const, attemptId: 'review-fixture', candidateSha256: triage.artifactSha256,
-          artifactSha256: '9'.repeat(64), verdict: 'approved' as const, generationHash: workflowGeneration.generationHash,
-        } : null;
+        const review = null;
         const receipt: RouteReceiptV1 = {
           version: 1,
           route,
@@ -2134,11 +2110,8 @@ async function runFixture(options: FixtureOptions = {}) {
           version: expected.version,
           triageRepairs: expected.triageRepairs,
           triageTransportRetries: expected.triageTransportRetries,
-          ambiguityTransportRetries: expected.ambiguityTransportRetries,
-          candidateReviews: awaiting ? 1 as const : expected.candidateReviews,
           phase: 'route-complete' as const,
           triage,
-          review,
         };
         assert.equal(await state.complete(expected, completed, receipt, triage.artifactSha256), true);
         if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
@@ -2181,11 +2154,17 @@ async function runFixture(options: FixtureOptions = {}) {
             const sessionId = delivery.authorSessionId ?? 'author-session';
             await onPrepared({ attemptId, sessionId });
             await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
-            return { status: 'completed', attemptResultSha256: 'c'.repeat(64), value: createSpecRevision({
-              revision: delivery.revisions.length + 1, path: '/state/spec.md', content: '# Frozen spec\n',
+            const revision = createSpecRevision({
+              revision: delivery.revisions.length + 1, path: `/state/spec-${delivery.revisions.length + 1}.md`, content: '# Frozen spec\n',
               evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
               author: { attemptId, sessionId }, previousRevision: delivery.revisions.at(-1) ?? null,
-            }) };
+            });
+            if (options.specQuestionOnce && delivery.stage === 'authoring') return {
+              status: 'decision-required', attemptResultSha256: 'c'.repeat(64), value: revision,
+              decisionGaps: [{ id: 'pricing', summary: 'Choose pricing behavior.', evidence: ['issue:42'] }],
+              question: 'Which pricing behavior?',
+            };
+            return { status: 'completed', attemptResultSha256: 'c'.repeat(64), value: revision };
           },
           review: async ({ attemptId, state: delivery, mode, onPrepared, onLaunched }) => {
             events.push(`spec-review:${mode}`);
@@ -2204,62 +2183,6 @@ async function runFixture(options: FixtureOptions = {}) {
           },
         },
       }).run(context, signal),
-      awaitingUser: async (context, state) => {
-        const current = await state.read();
-        if (current?.phase === 'awaiting-answer') {
-          if (options.trustedAnswerOnReplay) {
-            const normalizedAnswer = 'Choose A';
-            const answer = {
-              version: 1 as const, questionId: current.questionReceipt.question.questionId,
-              questionSha256: current.questionReceipt.question.questionSha256,
-              commentId: '102', commentUrl: 'https://example.invalid/comments/102', authorId: '2', author: 'maintainer',
-              permission: 'write' as const, permissionCheckedAt: '2026-07-16T12:03:00.000Z',
-              commentCreatedAt: '2026-07-16T12:02:00.000Z', commentUpdatedAt: '2026-07-16T12:02:00.000Z',
-              observedAt: '2026-07-16T12:03:00.000Z', normalizedAnswer,
-              normalizedSha256: hashNormalizedAnswer(normalizedAnswer), duplicateCommentIds: [],
-            };
-            const next = { ...current, phase: 'resume-ready' as const, answerReceipt: answer };
-            assert.equal(await state.compareAndSwap(current, next), true);
-            return { status: 'resume-ready' as const, answer };
-          }
-          return { status: 'awaiting-answer', questionId: current.questionReceipt.question.questionId, answerPrefix: current.questionReceipt.question.answerPrefix };
-        }
-        if (current?.phase === 'resumed') {
-          const prior = current.history[0]!.question;
-          const question = createWaitingQuestion({
-            runId: context.runId, generation: 2, routeDecisionSha256: context.receipt.decisionSha256,
-            workflowGenerationHash: context.workflowGeneration.generationHash,
-            priorQuestionSha256: prior.questionSha256, conflictHashes: [],
-            recommendation: 'Choose A.', question: 'A or B?',
-          });
-          const next = {
-            version: 1 as const, clarificationAttempts: 1 as const, permissionRetries: current.permissionRetries,
-            history: structuredClone(current.history),
-            phase: 'awaiting-answer' as const,
-            questionReceipt: {
-              question, commentId: '103', commentUrl: 'https://example.invalid/comments/103', authorId: '1', author: 'runner',
-              createdAt: '2026-07-16T12:04:00.000Z', observedAt: '2026-07-16T12:04:00.000Z',
-            },
-          };
-          assert.equal(await state.compareAndSwap(current, next), true);
-          return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
-        }
-        const question = createWaitingQuestion({
-          runId: context.runId, generation: 1, routeDecisionSha256: context.receipt.decisionSha256,
-          workflowGenerationHash: context.workflowGeneration.generationHash, priorQuestionSha256: null, conflictHashes: [],
-          recommendation: 'Choose A.', question: 'A or B?',
-        });
-        const next = {
-          version: 1 as const, clarificationAttempts: 0 as const, permissionRetries: 0 as const,
-          history: [], phase: 'awaiting-answer' as const,
-          questionReceipt: {
-            question, commentId: '101', commentUrl: 'https://example.invalid/comments/101', authorId: '1', author: 'runner',
-            createdAt: '2026-07-16T12:01:00.000Z', observedAt: '2026-07-16T12:01:00.000Z',
-          },
-        };
-        assert.equal(await state.compareAndSwap(undefined, next), true);
-        return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
-      },
     },
     implementationAgent: {
       run: async ({ operation, attemptId, worktreePath: path, reworkFindings, onPrepared, onLaunched }) => {
@@ -2441,7 +2364,7 @@ async function runFixture(options: FixtureOptions = {}) {
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath, events, evidence, store: rawStore };
+  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath, events, evidence, store: rawStore, comments };
 }
 
 function workflowGeneration(packageVersion: string, seed: string) {
@@ -2592,7 +2515,6 @@ function configFixture(): AgentAutoConfig {
         running: label('agent:running'),
         blocked: label('agent:blocked'),
         review: label('agent:review'),
-        waitingHuman: label('agent:waiting-human'),
       },
     },
     runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60, maxCycles: 5 },

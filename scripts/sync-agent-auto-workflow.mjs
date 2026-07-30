@@ -9,7 +9,6 @@ const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
 const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v2\0';
 const PRODUCTION_OPERATION_BINDINGS = {
   'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'proof_agent'],
-  'ambiguity-review': [null, [], 'schemas/ambiguity-review-v1.json', 'reviewer_deep'],
   'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'reviewer_standard'],
   implementation: ['agent-auto', ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],
   'qualification-repair': [null, ['code-debugger', 'diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],

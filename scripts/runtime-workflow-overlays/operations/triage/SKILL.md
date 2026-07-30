@@ -8,5 +8,5 @@ the packaged [Triage skill](../../skills/triage/SKILL.md) only for evidence
 discipline; its labels and tracker mutations are outside this operation.
 
 Return exactly one package route in `schemas/triage-route-v1.json`: direct,
-spec-required, awaiting-user for material product ambiguity, or a typed
-blocker. Technical implementation choices never require awaiting-user.
+spec-required, or a typed blocker. Product decision gaps belong to the
+spec-author operation; technical implementation choices never stop triage.

@@ -18,17 +18,7 @@ const workflowGeneration = {
 };
 const directRoute: TriageRouteV1 = {
   version: 1, status: 'direct', inspectedEvidence: [{ kind: 'issue', location: '#1', summary: 'approved' }], assumptions: [],
-  direct: { summary: 'small', behaviors: ['works'], verification: ['test'] }, specRequired: null, awaitingUser: null, blocker: null,
-};
-const waitingRoute: TriageRouteV1 = {
-  ...directRoute, status: 'awaiting-user', direct: null,
-  awaitingUser: {
-    outcomes: [
-      { id: 'a', title: 'A', behaviorDelta: 'Keep A', evidence: ['absent'] },
-      { id: 'b', title: 'B', behaviorDelta: 'Keep B', evidence: ['absent'] },
-    ],
-    absenceOfAuthorizedChoiceEvidence: ['issue and code do not choose'], recommendation: 'A', question: 'A or B?',
-  },
+  direct: { summary: 'small', behaviors: ['works'], verification: ['test'] }, specRequired: null, blocker: null,
 };
 
 test('route workers use one external attempt owner while route state keeps semantic budgets and refs only', async () => {
@@ -43,22 +33,6 @@ test('route workers use one external attempt owner while route state keeps seman
   assert.equal(JSON.stringify(fixture.state.execution).includes('in-flight'), false);
 });
 
-test('awaiting-user candidate and independent review retain semantic result refs', async () => {
-  const candidateSha = hash('candidate');
-  const fixture = makeFixture([
-    { status: 'completed', validatedPayload: waitingRoute, artifactSha256: candidateSha },
-    { status: 'completed', validatedPayload: {
-      version: 1, candidateSha256: candidateSha, verdict: 'approved', evidenceReviewed: ['issue'], findings: [], recommendation: 'ask',
-    }, artifactSha256: hash('review') },
-  ]);
-  const result = await fixture.run();
-  assert.equal(result.status, 'awaiting-user');
-  assert.equal(fixture.state.execution.phase, 'route-complete');
-  if (fixture.state.execution.phase !== 'route-complete') return;
-  assert.notEqual(fixture.state.execution.triage.attemptId, fixture.state.execution.review?.attemptId);
-  assert.equal(fixture.state.execution.candidateReviews, 1);
-});
-
 test('malformed triage consumes one semantic repair budget without persisting invocation identity', async () => {
   const fixture = makeFixture([
     { status: 'invalid', findings: ['missing direct payload'], repairInput: { originalReportSha256: hash('bad'), originalReportBytes: Buffer.from('bad') } },
@@ -68,7 +42,7 @@ test('malformed triage consumes one semantic repair budget without persisting in
   assert.equal(first.status, 'repairable');
   assert.deepEqual(fixture.state.execution, {
     version: 1, phase: 'malformed-repair-ready', findings: ['missing direct payload'],
-    triageRepairs: 1, triageTransportRetries: 0, ambiguityTransportRetries: 0, candidateReviews: 0,
+    triageRepairs: 1, triageTransportRetries: 0,
   });
   const second = await fixture.run();
   assert.equal(second.status, 'succeeded');
@@ -88,8 +62,8 @@ function makeFixture(queue: Array<any>) {
   };
   const coordinator = new RouteCoordinator({
     state, operation, now: () => '2026-07-30T00:00:00.000Z',
-    createReceipt: ({ artifact, triage, review, decidedAt }) => ({
-      version: 1, route: artifact.status as RouteReceiptV1['route'], triage, review, artifact,
+    createReceipt: ({ artifact, triage, decidedAt }) => ({
+      version: 1, route: artifact.status as RouteReceiptV1['route'], triage, review: null, artifact,
       decisionSha256: hash(`receipt:${artifact.status}`), decidedAt, assumptions: artifact.assumptions,
     }),
   });
@@ -110,7 +84,7 @@ class MemoryRouteState implements RouteCoordinatorState {
     if (!same(this.execution, expected)) return false;
     this.execution = structuredClone(next); return true;
   }
-  async prepareAttempt(operationId: 'triage' | 'ambiguity-review', sourceId: string) {
+  async prepareAttempt(operationId: 'triage', sourceId: string) {
     const id = `${operationId}:${sourceId}:attempt-${++this.attempt}`; this.prepared.push(id); return id;
   }
   async launchAttempt(attemptId: string) { this.launched.push(attemptId); }

@@ -89,7 +89,12 @@ function input(overrides: Partial<ImplementationReviewerInput> = {}): Implementa
     attemptId: 'review-attempt-1', runId: 'run-1', worktreePath: '/worktree', operation: 'code-review', mode: 'full',
     reviewerSessionId: 'review-session-1', implementationAttemptId: 'implementation-attempt-1', targetRevision: 1,
     targetFingerprint: fingerprint, closureRequestSha256: null, issue: { number: 1, title: 'Issue' },
-    frozenCriteria: ['works'], routeReceipt: { route: 'direct' }, defects: [], affectedDefectIds: [],
+    frozenCriteria: ['works'], routeReceipt: { route: 'direct' },
+    deliveryAuthority: {
+      version: 1, kind: 'direct', routeDecisionSha256: 'a'.repeat(64),
+      sourceSha256: 'a'.repeat(64), authoritySha256: 'b'.repeat(64),
+    },
+    defects: [], affectedDefectIds: [],
     fixedRepairFindings: [],
     reviewFocus: ['correctness'], workflowGeneration, repairOnly: false, originalReportSha256: null,
     validationDiagnostic: null, originalReportBytes: null, signal: new AbortController().signal,

@@ -3,7 +3,6 @@ import type { AgentAutoConfig } from './config.js';
 import { canonicalJson } from './containment.js';
 import type { RunRecord, RunStateInspection, RunTerminalOutcome } from './run-store.js';
 import type { RouteExecutionV1 } from './route-decision.js';
-import type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1 } from './waiting-human.js';
 
 interface IssueObservation {
   number: number;
@@ -113,55 +112,10 @@ export function claimComment(runId: string, issueNumber: number, branchName: str
   return `<!-- codex-orchestrator:run:${runId}:claim -->\ncodex-orchestrator claimed #${issueNumber} for branch ${branchName}`;
 }
 
-export function waitingAnswer(waiting: WaitingHumanExecutionV1): TrustedAnswerReceiptV1 | null {
-  if ('answerReceipt' in waiting) return structuredClone(waiting.answerReceipt);
-  if (waiting.phase === 'resumed') return structuredClone(waiting.trustedAnswer);
-  return null;
-}
-
-export function archiveWaiting(
-  record: RunRecord,
-  answer: TrustedAnswerReceiptV1 | null,
-  terminal: Pick<Extract<WaitingHumanExecutionV1, { phase: 'resumed' }>, 'phase' | 'trustedAnswer'>
-    | Pick<Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>, 'phase' | 'terminalOutcome'>,
-): WaitingHumanExecutionV1 {
-  const waiting = record.waitingHuman;
-  const routeReceipt = record.routeReceipt;
-  if (!waiting || !routeReceipt) throw new Error('waiting archive requires active route evidence');
-  const question = 'question' in waiting ? waiting.question : 'questionReceipt' in waiting ? waiting.questionReceipt.question : undefined;
-  if (!question) throw new Error('waiting archive requires current question');
-  const questionReceipt = 'questionReceipt' in waiting ? waiting.questionReceipt : null;
-  const entry = {
-    routeReceipt: structuredClone(routeReceipt), question: structuredClone(question),
-    questionReceipt: questionReceipt ? structuredClone(questionReceipt) : null,
-    answerReceipt: answer ? structuredClone(answer) : null, conflictHashes: [...question.conflictHashes],
-  };
-  const history = [...waiting.history];
-  if (history.at(-1)?.question.questionSha256 === question.questionSha256) {
-    if (canonicalJson(history.at(-1)) !== canonicalJson(entry)) throw new Error('waiting archive evidence mismatch');
-  } else history.push(entry);
-  return {
-    version: 1, clarificationAttempts: waiting.clarificationAttempts, permissionRetries: waiting.permissionRetries,
-    history, ...terminal,
-  } as WaitingHumanExecutionV1;
-}
-
-export function terminalWaiting(
-  waiting: WaitingHumanExecutionV1,
-  terminalOutcome: Extract<WaitingHumanExecutionV1, { phase: 'history-only' }>['terminalOutcome'],
-): WaitingHumanExecutionV1 {
-  if (waiting.phase !== 'resumed' && waiting.phase !== 'history-only') throw new Error('terminal waiting projection requires archived history');
-  return {
-    version: 1, clarificationAttempts: waiting.clarificationAttempts, permissionRetries: waiting.permissionRetries,
-    history: structuredClone(waiting.history), phase: 'history-only', terminalOutcome,
-  };
-}
-
 export function blockedLabelPolicy(config: AgentAutoConfig) {
   return {
     auto: config.github.labels.auto.name, running: config.github.labels.running.name,
     blocked: config.github.labels.blocked.name, review: config.github.labels.review.name,
-    waitingHuman: config.github.labels.waitingHuman.name,
   };
 }
 
@@ -170,7 +124,7 @@ export function blockedLabelProjection(
 ): { status: 'settled'; expected: string[] } | { status: 'transition' | 'diverged' } {
   const policy = blockedLabelPolicy(config);
   const present = new Set(labels);
-  if (present.has(policy.review) || present.has(policy.waitingHuman)) return { status: 'diverged' };
+  if (present.has(policy.review)) return { status: 'diverged' };
   const auto = present.has(policy.auto);
   const running = present.has(policy.running);
   const blocked = present.has(policy.blocked);

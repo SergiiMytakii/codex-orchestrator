@@ -43,7 +43,7 @@ test('workflow V2 exposes current operation dependencies and keeps evals out of 
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
   assert.deepEqual(Object.keys(loaded.manifest.operations).sort(), [
-    'acceptance-proof', 'ambiguity-review', 'code-review', 'implementation', 'qualification-repair', 'spec-author', 'spec-review', 'triage',
+    'acceptance-proof', 'code-review', 'implementation', 'qualification-repair', 'spec-author', 'spec-review', 'triage',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
     'code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd',

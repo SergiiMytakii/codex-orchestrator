@@ -10,7 +10,7 @@ Add the configured `agent:auto` label to an open issue, then run the orchestrato
 
 - **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, issue-scoped verification checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
 - **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; the Runner freezes the approved revision and returns `spec-frozen`. Implementation is intentionally a separate follow-up run or workflow.
-- **Human decision required:** the repository does not contain enough authority to choose between materially different product outcomes. The package posts one precise question, applies `agent:waiting-human`, and resumes the same run after an authorized repository writer answers with the requested prefix.
+- **Human decision required:** an independently authored spec found a real product gap. The package returns `spec-frozen`, posts one revision-bound question, and resumes the same Run at the next spec revision after a trusted answer.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
@@ -57,7 +57,7 @@ Now create or choose a clear GitHub Issue, include acceptance criteria when poss
 npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
-The command prints one JSON result. A successful direct delivery returns `review-ready` with the draft PR URL. A complex issue may instead return `spec-frozen`; a genuine product decision returns `awaiting-user` with the answer prefix to use in the issue comment.
+The command prints one JSON result. Direct and approved spec-first delivery return `review-ready` with the draft PR URL. A genuine product decision returns `spec-frozen` with the exact revision, immutable gaps, question marker, answer prefix, and evidence path.
 
 ## Main commands
 
@@ -158,7 +158,6 @@ The default labels are:
 | --- | --- |
 | `agent:auto` | The issue is authorized for orchestration. |
 | `agent:running` | A Runner has claimed the issue. |
-| `agent:waiting-human` | One approved product question is waiting for an authorized answer. |
 | `agent:blocked` | The run stopped on an external, safety, or exhausted-budget blocker. |
 | `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 
@@ -167,8 +166,7 @@ Important command results:
 | Result | What to do |
 | --- | --- |
 | `review-ready` | Open the returned draft PR URL and review the change; later trusted unresolved feedback may resume the same run and PR. |
-| `spec-frozen` | Use the returned frozen specification receipt as the authority for a later implementation workflow. |
-| `awaiting-user` | Reply to the issue using the returned answer prefix. Re-run the command or let the daemon pick it up. |
+| `spec-frozen` | Reply to the revision-bound issue question using its answer prefix. Re-run the command or let the daemon continue the same Run; an approved spec otherwise proceeds automatically. |
 | `not-eligible` | Check that the issue is open, has only the appropriate authorization label, and has no existing open PR for its branch. |
 | `requeued` | Another known Runner owns the repository; retry later. |
 | `blocked` | Read `kind`, `resumable`, and `evidencePath`; fix the external condition only when the evidence says it is safe to resume. |

@@ -24,7 +24,6 @@ const EXPECTED_OPERATION_BINDINGS: Record<string, {
   sourceSkill: string | null; dependencySkills: string[]; outputSchema: string; profile: string;
 }> = {
   'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'proof_agent' },
-  'ambiguity-review': { sourceSkill: null, dependencySkills: [], outputSchema: 'schemas/ambiguity-review-v1.json', profile: 'reviewer_deep' },
   'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json', profile: 'reviewer_standard' },
   implementation: {
     sourceSkill: 'agent-auto', dependencySkills: ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'],

@@ -4,7 +4,6 @@ export const RUN_ISSUE_STATUSES = [
   'review-ready',
   'route-ready',
   'spec-frozen',
-  'awaiting-user',
   'not-eligible',
   'blocked',
   'transport-failed',
@@ -22,7 +21,6 @@ export function runIssueExitCode(result: RunIssueResult): 0 | 20 | 21 | 70 | 130
     case 'review-ready': return 0;
     case 'route-ready': return 0;
     case 'spec-frozen': return 0;
-    case 'awaiting-user': return 0;
     case 'blocked': return 20;
     case 'state-schema-unsupported': return 20;
     case 'requeued': return 0;

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, containsCredentialEvidence } from './containment.js';
 import type { ContainedReportOperation, ContainedReportOperationResult, ReportOnlyWorktreeSnapshot } from './contained-report-operation.js';
 import type { CodeReviewDefectV1, CodeReviewReportV1, ReviewMode, ReviewOperation } from './code-review-report.js';
+import type { DeliveryAuthorityV1 } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -32,6 +33,7 @@ export interface ImplementationReviewerInput {
   issue: unknown;
   frozenCriteria: unknown[];
   routeReceipt: unknown;
+  deliveryAuthority: DeliveryAuthorityV1;
   defects: CodeReviewDefectV1[];
   affectedDefectIds: string[];
   fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
@@ -119,7 +121,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     version: 1, operation: input.operation, mode: input.mode, reviewerSessionId: input.reviewerSessionId,
     targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint,
     closureRequestSha256: input.closureRequestSha256, issue: input.issue, frozenCriteria: input.frozenCriteria,
-    routeReceipt: input.routeReceipt, defects: input.defects,
+    routeReceipt: input.routeReceipt, deliveryAuthority: input.deliveryAuthority, defects: input.defects,
     affectedDefectIds: sortedUnique(input.affectedDefectIds, 'affected defect IDs'),
     fixedRepairFindings: input.fixedRepairFindings.map((finding) => ({
       id: finding.id,

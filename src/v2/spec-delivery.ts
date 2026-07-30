@@ -55,13 +55,39 @@ export interface FrozenSpecReceiptV1 {
   reviewerSessionId: string;
   receiptSha256: string;
 }
+export interface SpecDecisionGapV1 { id: string; summary: string; evidence: string[] }
+export interface FrozenSpecQuestionReceiptV1 {
+  version: 1;
+  revisionSha256: string;
+  decisionGaps: SpecDecisionGapV1[];
+  questionId: string;
+  question: string;
+  answerPrefix: string;
+  marker: string;
+  evidencePath: string;
+  questionSha256: string;
+}
+export interface TrustedSpecAnswerV1 {
+  accepted: boolean;
+  questionSha256: string;
+  commentId: string;
+  authorId: string;
+  author: string;
+  answerPrefix: string;
+  normalizedAnswer: string;
+  normalizedSha256: string;
+  permissionCheckedAt: string;
+  commentCreatedAt: string;
+  commentUpdatedAt: string;
+}
 export interface SpecDeliveryV1 {
   version: 1;
   issueNumber: number;
   runId: string;
   workflowGenerationSha256: string;
-  stage: 'authoring' | 'review-full' | 'author-repair' | 'review-closure' | 'approved' | 'frozen' | 'rejected' | 'exhausted';
+  stage: 'authoring' | 'answer-authoring' | 'question' | 'review-full' | 'author-repair' | 'review-closure' | 'approved' | 'frozen' | 'rejected' | 'exhausted';
   revisions: SpecRevisionV1[];
+  acceptedAnswers: TrustedSpecAnswerV1[];
   authorSessionId: string | null;
   review: {
     reviewer: SpecActorV1 | null;
@@ -80,6 +106,8 @@ export interface SpecDeliveryV1 {
     repairCycles: 0 | 1;
   };
   frozen?: FrozenSpecReceiptV1;
+  question?: FrozenSpecQuestionReceiptV1;
+  trustedAnswer?: TrustedSpecAnswerV1;
 }
 
 export function createInitialSpecDelivery(input: {
@@ -87,7 +115,7 @@ export function createInitialSpecDelivery(input: {
 }): SpecDeliveryV1 {
   positive(input.issueNumber, 'issue number'); text(input.runId, 'run ID'); hash(input.workflowGenerationSha256, 'workflow generation hash');
   return {
-    version: 1, ...input, stage: 'authoring', revisions: [], authorSessionId: null,
+    version: 1, ...input, stage: 'authoring', revisions: [], acceptedAnswers: [], authorSessionId: null,
     review: { reviewer: null, mode: null, coverage: [], defects: [], affectedDefectIds: [], affectedContracts: [], closureRequestSha256: null, acceptedRisks: [], acceptedReportSha256: null },
     budgets: { author: { reportRepairs: 0, transportRetries: 0 }, review: { reportRepairs: 0, transportRetries: 0 }, repairCycles: 0 },
   };
@@ -119,14 +147,14 @@ export function validateSpecRevision(value: unknown, previous: SpecRevisionV1 | 
   if (!Array.isArray(value.evidence) || value.evidence.length === 0) throw new Error('spec revision evidence is invalid');
   for (const evidence of value.evidence) { exact(evidence, ['path','sha256','description'], 'spec evidence'); text(evidence.path, 'evidence path'); hash(evidence.sha256, 'evidence hash'); text(evidence.description, 'evidence description'); }
   if (value.previousRevisionSha256 !== (previous?.revisionSha256 ?? null)) throw new Error('spec revision chain is invalid');
-  if (previous && (value.revision !== previous.revision + 1 || value.path !== previous.path)) throw new Error('spec revision chain is not append-only');
+  if (previous && (value.revision !== previous.revision + 1 || value.path === previous.path)) throw new Error('spec revision chain is not append-only');
   if (!previous && value.revision !== 1) throw new Error('first spec revision number is invalid');
   if (value.revisionSha256 !== hashSpecRevision(value as SpecRevisionV1)) throw new Error('spec revision hash is invalid');
   return structuredClone(value as unknown as SpecRevisionV1);
 }
 
 export function acceptSpecRevision(state: SpecDeliveryV1, revision: SpecRevisionV1): SpecDeliveryV1 {
-  if (state.stage !== 'authoring' && state.stage !== 'author-repair') throw new Error('spec is not ready for an author result');
+  if (!['authoring', 'author-repair', 'answer-authoring'].includes(state.stage)) throw new Error('spec is not ready for an author result');
   actor(revision.author, 'spec revision author');
   if (state.authorSessionId && state.authorSessionId !== revision.author.sessionId) throw new Error('spec author session changed');
   const previous = state.revisions.at(-1) ?? null;
@@ -136,11 +164,41 @@ export function acceptSpecRevision(state: SpecDeliveryV1, revision: SpecRevision
       ? { ...defect, status: 'fixed' as const, statusTargetRevision: validated.revision } : structuredClone(defect))
     : state.review.defects;
   const next: SpecDeliveryV1 = {
-    ...structuredClone(state), stage: state.stage === 'authoring' ? 'review-full' : 'review-closure',
+    ...structuredClone(state), stage: state.stage === 'author-repair' ? 'review-closure' : 'review-full',
     revisions: [...state.revisions, validated], authorSessionId: revision.author.sessionId,
     review: { ...structuredClone(state.review), defects },
   };
+  if (state.stage === 'answer-authoring' && state.trustedAnswer?.accepted) next.acceptedAnswers.push(structuredClone(state.trustedAnswer));
+  delete next.question;
+  delete next.trustedAnswer;
   if (next.stage === 'review-closure') next.review.closureRequestSha256 = hashSpecClosureRequest(next);
+  return validateSpecDelivery(next);
+}
+
+export function freezeSpecQuestion(state: SpecDeliveryV1, revision: SpecRevisionV1, gaps: SpecDecisionGapV1[], question: string): SpecDeliveryV1 {
+  if (!['authoring', 'answer-authoring'].includes(state.stage)) throw new Error('spec is not ready for a product question');
+  if (!Array.isArray(gaps) || gaps.length === 0 || gaps.some((gap) => !gap.id || !gap.summary || !Array.isArray(gap.evidence) || gap.evidence.length === 0)) {
+    throw new Error('spec decision gaps are invalid');
+  }
+  const validated = validateSpecRevision(revision, state.revisions.at(-1) ?? null);
+  const questionId = `q-${validated.revisionSha256.slice(0, 20)}`;
+  const answerPrefix = `Answer ${questionId}:`;
+  const marker = `<!-- codex-orchestrator:spec-question:${questionId} -->`;
+  const base = {
+    version: 1 as const, revisionSha256: validated.revisionSha256, decisionGaps: structuredClone(gaps),
+    questionId, question, answerPrefix, marker, evidencePath: validated.path,
+  };
+  const receipt = { ...base, questionSha256: digest(`codex-orchestrator-spec-question-v1\0${canonicalJson(base)}`) };
+  const next = { ...structuredClone(state), stage: 'question' as const, revisions: [...state.revisions, validated], question: receipt };
+  delete next.trustedAnswer;
+  return validateSpecDelivery(next);
+}
+
+export function acceptTrustedSpecAnswer(state: SpecDeliveryV1, answer: TrustedSpecAnswerV1): SpecDeliveryV1 {
+  if (state.stage !== 'question' || !state.question || answer.questionSha256 !== state.question.questionSha256) {
+    throw new Error('trusted spec answer correlation mismatch');
+  }
+  const next = { ...structuredClone(state), stage: 'answer-authoring' as const, trustedAnswer: structuredClone(answer) };
   return validateSpecDelivery(next);
 }
 
@@ -249,14 +307,16 @@ export function validateFrozenSpecReceipt(value: unknown, state: SpecDeliveryV1)
 }
 
 export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
-  const optional = ['frozen'].filter((key) => own(value, key));
-  exact(value, ['version','issueNumber','runId','workflowGenerationSha256','stage','revisions','authorSessionId','review','budgets',...optional], 'spec delivery');
+  const optional = ['frozen', 'question', 'trustedAnswer'].filter((key) => own(value, key));
+  exact(value, ['version','issueNumber','runId','workflowGenerationSha256','stage','revisions','acceptedAnswers','authorSessionId','review','budgets',...optional], 'spec delivery');
   if (value.version !== 1) throw new Error('spec delivery version is invalid');
   positive(value.issueNumber, 'issue number'); text(value.runId, 'run ID'); hash(value.workflowGenerationSha256, 'workflow generation hash');
-  if (!['authoring','review-full','author-repair','review-closure','approved','frozen','rejected','exhausted'].includes(value.stage as string)) throw new Error('spec delivery stage is invalid');
+  if (!['authoring','answer-authoring','question','review-full','author-repair','review-closure','approved','frozen','rejected','exhausted'].includes(value.stage as string)) throw new Error('spec delivery stage is invalid');
   if (!Array.isArray(value.revisions)) throw new Error('spec revisions are invalid');
   let previous: SpecRevisionV1 | null = null;
   for (const revision of value.revisions) previous = validateSpecRevision(revision, previous);
+  if (!Array.isArray(value.acceptedAnswers)) throw new Error('accepted spec answers are invalid');
+  for (const answer of value.acceptedAnswers) validateTrustedSpecAnswer(answer);
   exact(value.budgets, ['author','review','repairCycles'], 'spec budgets');
   for (const owner of ['author','review'] as const) { exact(value.budgets[owner], ['reportRepairs','transportRetries'], `${owner} budget`); for (const key of ['reportRepairs','transportRetries'] as const) if (![0,1].includes(value.budgets[owner][key])) throw new Error('spec budget is invalid'); }
   if (![0,1].includes(value.budgets.repairCycles)) throw new Error('spec repair cycle budget is invalid');
@@ -264,10 +324,42 @@ export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
   const stage = value.stage as SpecDeliveryV1['stage'];
   if (stage === 'authoring' && value.revisions.length !== 0) throw new Error('authoring stage has revisions');
   if (stage !== 'authoring' && value.revisions.length === 0) throw new Error('spec stage requires a revision');
+  if (stage === 'question' || stage === 'answer-authoring') validateSpecQuestion(value.question, value.revisions.at(-1) as SpecRevisionV1);
+  else if (own(value, 'question')) throw new Error('non-question spec has question evidence');
+  if (stage === 'answer-authoring') validateTrustedSpecAnswer(value.trustedAnswer, value.question);
+  else if (own(value, 'trustedAnswer')) throw new Error('non-answering spec has trusted answer');
   if (stage === 'approved' && (!value.review.reviewer || !value.review.acceptedReportSha256)) throw new Error('approved spec is missing review authority');
   if (stage === 'frozen') validateFrozenSpecReceipt(value.frozen, value as unknown as SpecDeliveryV1);
   else if (own(value, 'frozen')) throw new Error('non-frozen spec has a frozen receipt');
   return structuredClone(value as unknown as SpecDeliveryV1);
+}
+
+function validateSpecQuestion(value: unknown, revision: SpecRevisionV1): void {
+  exact(value, ['version','revisionSha256','decisionGaps','questionId','question','answerPrefix','marker','evidencePath','questionSha256'], 'spec question');
+  if (value.version !== 1 || value.revisionSha256 !== revision.revisionSha256 || value.evidencePath !== revision.path) throw new Error('spec question revision binding is invalid');
+  text(value.questionId, 'spec question ID'); text(value.question, 'spec question'); text(value.answerPrefix, 'spec answer prefix'); text(value.marker, 'spec question marker');
+  if (!Array.isArray(value.decisionGaps) || value.decisionGaps.length === 0) throw new Error('spec decision gaps are invalid');
+  for (const gap of value.decisionGaps) {
+    exact(gap, ['id','summary','evidence'], 'spec decision gap'); text(gap.id, 'spec gap ID'); text(gap.summary, 'spec gap summary');
+    if (!Array.isArray(gap.evidence) || gap.evidence.length === 0) throw new Error('spec gap evidence is invalid');
+    for (const item of gap.evidence) text(item, 'spec gap evidence');
+  }
+  const expectedId = `q-${revision.revisionSha256.slice(0, 20)}`;
+  if (value.questionId !== expectedId || value.answerPrefix !== `Answer ${expectedId}:`
+    || value.marker !== `<!-- codex-orchestrator:spec-question:${expectedId} -->`) throw new Error('spec question identity is invalid');
+  const { questionSha256, ...base } = value as FrozenSpecQuestionReceiptV1;
+  if (questionSha256 !== digest(`codex-orchestrator-spec-question-v1\0${canonicalJson(base)}`)) throw new Error('spec question hash is invalid');
+}
+
+function validateTrustedSpecAnswer(value: unknown, question?: unknown): void {
+  exact(value, ['accepted','questionSha256','commentId','authorId','author','answerPrefix','normalizedAnswer','normalizedSha256','permissionCheckedAt','commentCreatedAt','commentUpdatedAt'], 'trusted spec answer');
+  if (typeof value.accepted !== 'boolean') throw new Error('trusted spec answer acceptance is invalid');
+  text(value.commentId, 'answer comment ID'); text(value.authorId, 'answer author ID'); text(value.author, 'answer author'); text(value.answerPrefix, 'answer prefix'); text(value.normalizedAnswer, 'answer'); text(value.permissionCheckedAt, 'permission checked at'); text(value.commentCreatedAt, 'answer created at'); text(value.commentUpdatedAt, 'answer updated at');
+  if (value.accepted && value.commentCreatedAt !== value.commentUpdatedAt) throw new Error('accepted spec answer was edited');
+  hash(value.normalizedSha256, 'normalized answer hash');
+  if (value.normalizedSha256 !== digest(value.normalizedAnswer as string)) throw new Error('normalized answer hash mismatch');
+  if (question && (value.questionSha256 !== (question as FrozenSpecQuestionReceiptV1).questionSha256
+    || value.answerPrefix !== (question as FrozenSpecQuestionReceiptV1).answerPrefix)) throw new Error('trusted spec answer question mismatch');
 }
 
 function validateClosure(state: SpecDeliveryV1, report: SpecReviewReportV1): void {

@@ -10,7 +10,7 @@ import {
   type RouteReceiptV1,
 } from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
-import { validateWaitingHumanExecution, type WaitingHumanExecutionV1 } from './waiting-human.js';
+import { validateDeliveryAuthority, type DeliveryAuthorityV1 } from './delivery-authority.js';
 import { constants } from 'node:fs';
 import { posix } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
@@ -30,7 +30,6 @@ export type Lifecycle =
   | 'claimed'
   | 'triaging'
   | 'routed'
-  | 'waiting-human'
   | 'spec-authoring'
   | 'implementing'
   | 'reworking'
@@ -48,8 +47,7 @@ type EffectIdentity = { effectId: string };
 
 export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
-  | { kind: 'claim-comment' | 'handoff-comment' | 'waiting-question-comment'; issueNumber: number; marker: string; bodySha256: string }
-  | { kind: 'waiting-wait-labels' | 'waiting-resume-labels' | 'waiting-revoke-labels'; issueNumber: number; expected: string[] }
+  | { kind: 'claim-comment' | 'handoff-comment' | 'spec-question-comment'; issueNumber: number; marker: string; bodySha256: string }
   | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
@@ -146,7 +144,7 @@ export interface RunRecord {
   workflowGeneration: WorkflowGenerationReceipt;
   routeExecution?: RouteExecutionV1;
   routeReceipt?: RouteReceiptV1;
-  waitingHuman?: WaitingHumanExecutionV1;
+  deliveryAuthority?: DeliveryAuthorityV1;
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
   reviewFeedback?: ReviewFeedbackExecutionV1;
@@ -313,7 +311,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'terminalOutcome',
     'routeExecution',
     'routeReceipt',
-    'waitingHuman',
+    'deliveryAuthority',
     'directReview',
     'specDelivery',
     'reviewFeedback',
@@ -353,6 +351,18 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   const routeGenerationHash = workflowGeneration.generationHash;
   if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
   if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
+  if (hasOwn(value, 'deliveryAuthority')) {
+    if (!hasOwn(value, 'routeReceipt')) throw new Error(`${field}.deliveryAuthority requires route receipt`);
+    validateDeliveryAuthority(
+      value.deliveryAuthority,
+      value.routeReceipt as RouteReceiptV1,
+      hasOwn(value, 'specDelivery') ? value.specDelivery as SpecDeliveryV1 : undefined,
+    );
+  }
+  if (['implementing', 'reworking', 'checking', 'proving', 'publishing', 'review-ready'].includes(value.lifecycle as string)
+    && hasOwn(value, 'routeReceipt') && !hasOwn(value, 'deliveryAuthority')) {
+    throw new Error(`${field}.deliveryAuthority is required for delivery progression`);
+  }
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   validateChecks(value.checks, `${field}.checks`);
   if (hasOwn(value, 'activeAttempt')) {
@@ -366,19 +376,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'pendingEffect')) validatePendingEffect(value.pendingEffect, `${field}.pendingEffect`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
-  if (hasOwn(value, 'waitingHuman')) {
-    if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
-    validateWaitingHumanExecution(value.waitingHuman, {
-      runId: value.runId,
-      lifecycle: value.lifecycle,
-      workflowGenerationHash: routeGenerationHash,
-      routeReceipt: hasOwn(value, 'routeReceipt') ? value.routeReceipt as RouteReceiptV1 : undefined,
-      terminalOutcome: hasOwn(value, 'terminalOutcome') ? value.terminalOutcome as RunTerminalOutcome : undefined,
-    });
-  }
   if (hasOwn(value, 'directReview')) {
-    if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'direct') {
-      throw new Error(`${field}.directReview requires a direct route`);
+    if (!hasOwn(value, 'routeReceipt') || !['direct', 'spec-required'].includes((value.routeReceipt as RouteReceiptV1).route)) {
+      throw new Error(`${field}.directReview requires a delivery authority route`);
     }
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
@@ -393,6 +393,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     if (spec.issueNumber !== value.issueNumber || spec.runId !== value.runId
       || spec.workflowGenerationSha256 !== routeGenerationHash) {
       throw new Error(`${field}.specDelivery identity binding is invalid`);
+    }
+    if (value.lifecycle === 'implementing' && spec.stage !== 'frozen') {
+      throw new Error(`${field}.specDelivery must be frozen before implementation`);
     }
   }
   if (hasOwn(value, 'reviewFeedback')) {
@@ -452,7 +455,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain pending effect`);
   }
-  if (value.lifecycle === 'waiting-human' && !hasOwn(value, 'waitingHuman')) throw new Error(`${field} waiting-human lifecycle requires waitingHuman execution`);
   validateRouteStateInvariant({
     lifecycle: value.lifecycle,
     routeExecution: value.routeExecution,
@@ -573,7 +575,7 @@ function validatePendingEffect(value: unknown, field: string): void {
   const kind = (value as { kind?: unknown }).kind;
   const identity = ['effectId', 'kind'];
   if (kind === 'claim-labels' || kind === 'final-labels'
-    || kind === 'waiting-wait-labels' || kind === 'waiting-resume-labels' || kind === 'waiting-revoke-labels') {
+    ) {
     assertExactObject(value, [...identity, 'issueNumber', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
@@ -591,7 +593,7 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertExactObject(value, [...identity, 'owner', 'repo', 'head', 'base', 'issueNumber', 'marker'], field);
     for (const key of ['owner', 'repo', 'head', 'base', 'marker'] as const) assertNonEmptyString(value[key], `${field}.${key}`);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-  } else if (kind === 'claim-comment' || kind === 'handoff-comment' || kind === 'waiting-question-comment') {
+  } else if (kind === 'claim-comment' || kind === 'handoff-comment' || kind === 'spec-question-comment') {
     assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
@@ -815,7 +817,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'waiting-human', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }

@@ -56,26 +56,6 @@
         "externalWrite": false
       }
     },
-    "ambiguity-review": {
-      "entry": "operations/ambiguity-review/SKILL.md",
-      "sourceSkill": null,
-      "dependencySkills": [],
-      "resources": ["docs/agents/confidence-rubric.md"],
-      "outputSchema": "schemas/ambiguity-review-v1.json",
-      "profile": "reviewer_deep",
-      "policy": {
-        "sandboxMode": "read-only",
-        "cwdClass": "worktree",
-        "worktreeAccess": "read-only",
-        "writableRootClasses": [],
-        "runnerPostcondition": "report-only",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
     "code-review": {
       "entry": "operations/code-review/SKILL.md",
       "sourceSkill": "code-review",

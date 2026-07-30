@@ -302,7 +302,6 @@ function androidConfigFixture(): AgentAutoConfig {
         running: { name: 'agent:running', color: '000001', description: 'running' },
         blocked: { name: 'agent:blocked', color: '000002', description: 'blocked' },
         review: { name: 'agent:review', color: '000003', description: 'review' },
-        waitingHuman: { name: 'agent:waiting-human', color: '000004', description: 'waiting' },
       },
     },
     runner: {

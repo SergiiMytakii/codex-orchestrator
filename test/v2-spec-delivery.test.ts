@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { sha256 } from '../src/v2/containment.js';
 
 import {
   acceptSpecReview,
@@ -8,6 +9,8 @@ import {
   consumeSpecTransportRetry,
   createInitialSpecDelivery,
   createSpecRevision,
+  freezeSpecQuestion,
+  acceptTrustedSpecAnswer,
   freezeApprovedSpec,
   validateSpecDelivery,
   type SpecDeliveryV1,
@@ -46,6 +49,30 @@ test('report and transport budgets remain separate semantic counters', () => {
   const transport = consumeSpecTransportRetry(report, 'author');
   assert.deepEqual(transport.budgets.author, { reportRepairs: 1, transportRetries: 1 });
   assert.throws(() => consumeSpecTransportRetry(transport, 'author'), /exhausted/u);
+});
+
+test('product decision remains inside spec state and resumes at the next immutable revision', () => {
+  const initial = createInitialSpecDelivery({ issueNumber: 1, runId: 'run-1', workflowGenerationSha256: workflowHash });
+  const revision = createSpecRevision({
+    revision: 1, path: 'docs/spec.md', content: '# Partial spec\n', previousRevision: null,
+    evidence: [{ path: 'issue:1', sha256: 'c'.repeat(64), description: 'intent' }],
+    author: { attemptId: 'author-attempt', sessionId: 'author-session' },
+  });
+  const waiting = freezeSpecQuestion(initial, revision, [{ id: 'pricing', summary: 'Choose pricing behavior.', evidence: ['issue:1'] }], 'Which pricing behavior?');
+  assert.equal(waiting.stage, 'question');
+  assert.equal(waiting.question?.revisionSha256, revision.revisionSha256);
+  assert.match(waiting.question?.answerPrefix ?? '', /^Answer q-/u);
+  const answering = acceptTrustedSpecAnswer(waiting, {
+    accepted: true, questionSha256: waiting.question!.questionSha256, commentId: '1', authorId: '2', author: 'owner', answerPrefix: waiting.question!.answerPrefix,
+    normalizedAnswer: 'Use fixed pricing', normalizedSha256: sha256('Use fixed pricing'), permissionCheckedAt: '2026-07-30T00:00:00.000Z',
+    commentCreatedAt: '2026-07-30T00:00:00.000Z', commentUpdatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  assert.equal(answering.stage, 'answer-authoring');
+  const nextRevision = createSpecRevision({
+    revision: 2, path: 'docs/spec-2.md', content: '# Complete spec\n', previousRevision: revision,
+    evidence: revision.evidence, author: { attemptId: 'author-attempt-2', sessionId: 'author-session' },
+  });
+  assert.equal(acceptSpecRevision(answering, nextRevision).stage, 'review-full');
 });
 
 test('coordinator prepares, launches, adopts, and cleans one external active attempt', async () => {

@@ -14,10 +14,10 @@ import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command
 import { RunnerAndroidProofController } from './android-proof-runner.js';
 import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
+import type { DeliveryAuthorityV1 } from './delivery-authority.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
-import { WaitingHumanCoordinator } from './waiting-human-coordinator.js';
 import {
   canonicalJson,
   parseJsonWithoutDuplicateKeys,
@@ -793,6 +793,7 @@ export class ContainedImplementationAgent {
     worktreePath: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
+    deliveryAuthority: DeliveryAuthorityV1;
     cycle: number;
     reworkFindings: string[];
     repairOnly: boolean;
@@ -857,7 +858,10 @@ export class ContainedImplementationAgent {
           ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
           ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
           ...(input.operation === 'implementation'
-            ? [`Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`]
+            ? [
+              `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
+              `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
+            ]
             : []),
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
@@ -1260,15 +1264,25 @@ export function createV2Runtime(input: {
         if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
         if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
         const report = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (report.status !== 'ready' || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
+        if (!['ready', 'decision-required'].includes(report.status as string) || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
         const content = await readRegularFile(revisionPath);
         if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
         const previous = state.revisions.at(-1) ?? null;
-        return { status: 'completed', attemptResultSha256: sha256(result.report.bytes), value: createSpecRevision({
+        const revision = createSpecRevision({
           revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
           evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
           author: { attemptId, sessionId }, previousRevision: previous,
-        }) };
+        });
+        if (report.status === 'decision-required') {
+          if (!Array.isArray(report.decisionGaps) || report.decisionGaps.length === 0 || typeof report.question !== 'string' || report.question.length === 0) {
+            return { status: 'retryable', code: 'spec-author-report-invalid' };
+          }
+          return {
+            status: 'decision-required', value: revision, decisionGaps: report.decisionGaps as Array<{ id: string; summary: string; evidence: string[] }>,
+            question: report.question, attemptResultSha256: sha256(result.report.bytes),
+          };
+        }
+        return { status: 'completed', attemptResultSha256: sha256(result.report.bytes), value: revision };
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
           try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-author-process-quiescence' }; }
@@ -1495,6 +1509,8 @@ export function createV2Runtime(input: {
             id: comment.id,
             body: comment.body,
             authorAssociation: comment.authorAssociation,
+            author: comment.author.login,
+            authorId: comment.author.id,
             createdAt: comment.createdAt,
             updatedAt: comment.updatedAt,
           })),
@@ -1507,9 +1523,10 @@ export function createV2Runtime(input: {
           removeLabels: current.filter((label) => !labels.includes(label)),
         });
       },
+      getRepositoryPermission: (login, expectedUserId) => input.issues.getRepositoryPermission(login, expectedUserId),
       transitionToBlocked: async (issueNumber, labels) => {
         const current = await input.issues.getLabels(issueNumber);
-        if (current.includes(labels.review) || current.includes(labels.waitingHuman)) return;
+        if (current.includes(labels.review)) return;
         const hasRunnerStatus = current.some((label) => (
           label === labels.auto || label === labels.running || label === labels.blocked
         ));
@@ -1552,13 +1569,13 @@ export function createV2Runtime(input: {
         state,
         operation: reportOperation,
         now,
-        createReceipt: ({ artifact, triage, review, decidedAt }) => {
+        createReceipt: ({ artifact, triage, decidedAt }) => {
           if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
           const receipt: RouteReceiptV1 = {
             version: 1,
             route: artifact.status,
             triage,
-            review,
+            review: null,
             artifact,
             decisionSha256: '',
             decidedAt,
@@ -1572,20 +1589,6 @@ export function createV2Runtime(input: {
     routeContinuations: {
       direct: async () => ({ status: 'completed' }),
       specRequired: (context, state, signal) => new SpecCoordinator({ state, operation: specOperation }).run(context, signal),
-      awaitingUser: async (context, state, signal) => {
-        const config = requireConfig(currentConfig);
-        return new WaitingHumanCoordinator({
-          issues: input.issues,
-          labels: {
-            auto: config.github.labels.auto.name,
-            running: config.github.labels.running.name,
-            blocked: config.github.labels.blocked.name,
-            review: config.github.labels.review.name,
-            waitingHuman: config.github.labels.waitingHuman.name,
-          },
-          now,
-        }).run(context, state, signal);
-      },
     },
     implementationAgent,
     implementationReviewer,
@@ -1964,7 +1967,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'qualification-repair' | 'acceptance-proof' | 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
+  operationId: 'implementation' | 'qualification-repair' | 'acceptance-proof' | 'triage' | 'code-review' | 'spec-author' | 'spec-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -1987,7 +1990,7 @@ async function prepareContainedAttempt(input: {
     operation: input.operationId,
     bootId: input.bootId,
   });
-  const reportOnly = input.operationId === 'triage' || input.operationId === 'ambiguity-review'
+  const reportOnly = input.operationId === 'triage'
     || input.operationId === 'code-review' || input.operationId === 'spec-review';
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'

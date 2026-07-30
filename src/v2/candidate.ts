@@ -19,8 +19,8 @@ export interface CandidateBindingV2 {
 
 export type CandidateBoundaryV2 =
   | { kind: 'qualification'; repairAttempt: 0 | 1 | 2 | 3 | 4 | 5 }
-  | { kind: 'implementation-cycle'; cycle: 1 | 2 | 3 | 4 | 5 }
-  | { kind: 'review-feedback'; batchId: string; repairRound: 1 | 2 | 3 };
+  | { kind: 'implementation-cycle'; cycle: 1 | 2 | 3 | 4 | 5; authoritySha256: string }
+  | { kind: 'review-feedback'; batchId: string; repairRound: 1 | 2 | 3; authoritySha256: string };
 
 export interface CandidateMaterializationV2 {
   version: 2;
@@ -161,8 +161,10 @@ function validateCandidateBoundary(value: CandidateBoundaryV2): void {
     if (!Number.isInteger(value.repairAttempt) || value.repairAttempt < 0 || value.repairAttempt > 5) throw new Error('candidate qualification boundary is invalid');
   } else if (value.kind === 'implementation-cycle') {
     if (!Number.isInteger(value.cycle) || value.cycle < 1 || value.cycle > 5) throw new Error('candidate implementation boundary is invalid');
+    assertSha256(value.authoritySha256, 'candidate delivery authority');
   } else if (value.kind === 'review-feedback') {
     assertSha256(value.batchId, 'candidate review feedback batch ID');
+    assertSha256(value.authoritySha256, 'candidate delivery authority');
     if (!Number.isInteger(value.repairRound) || value.repairRound < 1 || value.repairRound > 3) throw new Error('candidate review feedback boundary is invalid');
   } else {
     throw new Error('candidate boundary is invalid');

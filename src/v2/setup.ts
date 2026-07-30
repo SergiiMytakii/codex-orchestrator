@@ -327,7 +327,6 @@ async function defaultConfig(
         running: { name: 'agent:running', color: 'fbca04', description: 'Agent is running.' },
         blocked: { name: 'agent:blocked', color: 'd93f0b', description: 'Agent needs help.' },
         review: { name: 'agent:review', color: '0e8a16', description: 'Ready for review.' },
-        waitingHuman: { name: 'agent:waiting-human', color: '5319e7', description: 'Waiting for an authorized product answer.' },
       },
     },
     runner: {

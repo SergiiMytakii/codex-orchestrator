@@ -18,7 +18,6 @@ function validConfig(): AgentAutoConfig {
         running: { name: 'agent:running', color: 'fbca04', description: 'Agent is running.' },
         blocked: { name: 'agent:blocked', color: 'd93f0b', description: 'Agent needs help.' },
         review: { name: 'agent:review', color: '0e8a16', description: 'Ready for review.' },
-        waitingHuman: { name: 'agent:waiting-human', color: '5319e7', description: 'Waiting for an authorized product answer.' },
       },
     },
     runner: {
@@ -55,7 +54,6 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
     'review-ready',
     'route-ready',
     'spec-frozen',
-    'awaiting-user',
     'not-eligible',
     'blocked',
     'transport-failed',
@@ -69,7 +67,6 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
     'agent:running',
     'agent:blocked',
     'agent:review',
-    'agent:waiting-human',
   ]);
 });
 
@@ -94,13 +91,6 @@ test('V2 rejects invalid integers, non-canonical paths, commands, and empty poli
     { ...validConfig(), deny: { ...validConfig().deny, commands: ['git'] } },
     { ...validConfig(), checks: { '': 'npm test' } },
     { ...validConfig(), checks: { test: '' } },
-    {
-      ...validConfig(),
-      github: {
-        ...validConfig().github,
-        labels: { ...validConfig().github.labels, waitingHuman: { ...validConfig().github.labels.waitingHuman, name: 'agent:auto' } },
-      },
-    },
   ];
 
   for (const value of rejected) assert.throws(() => parseAgentAutoConfig(value));
@@ -152,7 +142,6 @@ test('CLI JSON and exit mapping are total over every public runIssue outcome', (
       path: '/state/spec.md', contentSha256: 'b'.repeat(64), revisionSha256: 'c'.repeat(64),
       reviewReportSha256: 'd'.repeat(64), reviewerSessionId: 'reviewer', receiptSha256: 'e'.repeat(64),
     }, evidencePath: 'evidence/spec.json' }, exit: 0 },
-    { result: { status: 'awaiting-user', questionId: 'q-00000000000000000000', answerPrefix: 'Answer q-00000000000000000000:', evidencePath: 'evidence/wait.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
     { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },

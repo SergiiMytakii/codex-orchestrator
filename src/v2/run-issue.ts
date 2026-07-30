@@ -51,13 +51,10 @@ import {
 } from './route-coordinator.js';
 import type { RoutedContinuationRegistry } from './route-continuations.js';
 import type { SpecCoordinatorResult, SpecDeliveryState } from './spec-coordinator.js';
-import type { FrozenSpecReceiptV1 } from './spec-delivery.js';
-import type { WaitingHumanState } from './waiting-human-coordinator.js';
-import type { TrustedAnswerReceiptV1, WaitingHumanExecutionV1 } from './waiting-human.js';
+import { acceptTrustedSpecAnswer, type FrozenSpecQuestionReceiptV1, type FrozenSpecReceiptV1, type TrustedSpecAnswerV1 } from './spec-delivery.js';
 import {
   downstreamLifecycleForRoute,
   validateRouteTransition,
-  validateTrustedAnswerResumeTransition,
   type RouteExecutionV1,
 } from './route-decision.js';
 import type {
@@ -84,8 +81,8 @@ import {
 } from './review-feedback.js';
 import type { CandidateGitV2 } from './candidate.js';
 import type { CandidateBindingV2, CandidateBoundaryV2, CandidateMaterializationV2 } from './candidate.js';
+import { createDirectDeliveryAuthority, createSpecDeliveryAuthority, type DeliveryAuthorityV1 } from './delivery-authority.js';
 import {
-  archiveWaiting,
   blockedLabelPolicy,
   blockedLabelProjection,
   claimComment,
@@ -106,16 +103,13 @@ import {
   sameRouteExecution,
   sameStrings,
   semanticChangesMatch,
-  terminalWaiting,
-  waitingAnswer,
 } from './run-state-projections.js';
 
 export type RunIssueResult =
   | { status: 'state-schema-unsupported' }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
-  | { status: 'route-ready'; route: 'spec-required' | 'awaiting-user'; evidencePath: string }
-  | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1; evidencePath: string }
-  | { status: 'awaiting-user'; questionId: string; answerPrefix: string; evidencePath: string }
+  | { status: 'route-ready'; route: 'spec-required'; evidencePath: string }
+  | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1 | FrozenSpecQuestionReceiptV1; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
@@ -135,6 +129,8 @@ export interface RunIssueSnapshot {
     id?: string;
     body: string;
     authorAssociation: string;
+    author?: string;
+    authorId?: string;
     createdAt?: string;
     updatedAt?: string;
   }>;
@@ -180,9 +176,9 @@ export interface RunIssueDependencies {
       running: string;
       blocked: string;
       review: string;
-      waitingHuman: string;
     }): Promise<void>;
     postComment(issueNumber: number, body: string): Promise<void>;
+    getRepositoryPermission?(login: string, expectedUserId: string): Promise<{ permission: 'none' | 'read' | 'write' | 'admin'; checkedAt: string; userId: string }>;
   };
   pullRequests: {
     findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string; body: string; number?: number; nodeId?: string; headSha?: string } | undefined>;
@@ -200,6 +196,7 @@ export interface RunIssueDependencies {
       worktreePath: string;
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
+      deliveryAuthority: DeliveryAuthorityV1;
       cycle: number;
       reworkFindings: string[];
       repairOnly: boolean;
@@ -364,8 +361,7 @@ export class RunIssue {
     const labels = new Set(observation.labels);
     if (!labels.has(config.github.labels.auto.name)
       || labels.has(config.github.labels.blocked.name)
-      || labels.has(config.github.labels.review.name)
-      || labels.has(config.github.labels.waitingHuman.name)) {
+      || labels.has(config.github.labels.review.name)) {
       return { result: await this.publicationDiverged(active, 'claim-labels-diverged') };
     }
     if (!active.record.pendingEffect) {
@@ -405,7 +401,10 @@ export class RunIssue {
           worktreePath,
           expectedHeadSha: candidateBinding.expectedHeadSha,
           runId,
-          boundary: { kind: 'implementation-cycle', cycle: active.record.cycle },
+          boundary: {
+            kind: 'implementation-cycle', cycle: active.record.cycle,
+            authoritySha256: active.record.deliveryAuthority!.authoritySha256,
+          },
           artifactDir: config.proof.artifactDir,
         });
         if (recaptured.kind === 'failed') return this.mapCandidateFailure(active, recaptured.code);
@@ -611,7 +610,6 @@ export class RunIssue {
           }, commitSha, [],
         ),
       } : {}),
-      ...(active.record.waitingHuman ? { waitingHuman: terminalWaiting(active.record.waitingHuman, { status: 'review-ready' }) } : {}),
     });
   }
 
@@ -654,6 +652,7 @@ export class RunIssue {
           boundary: {
             kind: 'review-feedback', batchId: batch.batchId,
             repairRound: feedback.repairRound as 1 | 2 | 3,
+            authoritySha256: active.record.deliveryAuthority!.authoritySha256,
           },
           artifactDir: config.proof.artifactDir,
         });
@@ -1270,16 +1269,11 @@ export class RunIssue {
               ? await this.updateExistingPullRequest(active, config, input.issueNumber)
               : await this.publish(active, config, issueSnapshot, input.issueNumber);
           }
-          if (active.record.lifecycle === 'waiting-human') {
-            const waiting = await this.continueWaitingHuman(active);
-            if ('result' in waiting) return waiting.result;
-            active = waiting.active;
-            issueSnapshot = structuredClone(active.record.issueSnapshot);
-            frozenCriteria = structuredClone(active.record.frozenCriteria);
-          }
           if (active.record.lifecycle === 'spec-authoring') {
             if (!await this.authorized(active, config)) return await this.revoked(active);
-            return await this.continueSpecRequired(active);
+            const spec = await this.continueSpecRequired(active);
+            if ('result' in spec) return spec.result;
+            active = spec.active;
           }
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
@@ -1384,15 +1378,16 @@ export class RunIssue {
             kind: 'review-feedback' as const,
             batchId: active.record.reviewFeedback.activeBatch.batchId,
             repairRound: active.record.reviewFeedback.repairRound as 1 | 2 | 3,
+            authoritySha256: active.record.deliveryAuthority!.authoritySha256,
           }
-          : { kind: 'implementation-cycle' as const, cycle: active.record.cycle };
+          : { kind: 'implementation-cycle' as const, cycle: active.record.cycle, authoritySha256: active.record.deliveryAuthority!.authoritySha256 };
         const captured = await this.ensureCandidateBinding(active, config, recoveryBoundary);
         if ('status' in captured) return captured;
         active = captured.active;
         const binding = active.record.candidateBinding!;
         const candidateTargetFingerprint = directReviewCandidateTargetFingerprint({
           binding,
-          routeDecisionSha256: active.record.routeReceipt!.decisionSha256,
+          routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
           workflowGenerationHash: active.record.workflowGeneration.generationHash,
           cycle: active.record.cycle,
           frozenCriteria,
@@ -1469,6 +1464,7 @@ export class RunIssue {
         worktreePath,
         issue: publicIssueSnapshot(issueSnapshot),
         frozenCriteria,
+        deliveryAuthority: active.record.deliveryAuthority!,
         cycle: active.record.cycle,
         reworkFindings: active.record.reworkFindings,
         repairOnly: false,
@@ -1527,6 +1523,7 @@ export class RunIssue {
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
           frozenCriteria,
+          deliveryAuthority: active.record.deliveryAuthority!,
           cycle: active.record.cycle,
           reworkFindings: ['The previous implementation report did not match the generated schema.'],
           repairOnly: true,
@@ -1581,6 +1578,7 @@ export class RunIssue {
           worktreePath,
           issue: publicIssueSnapshot(issueSnapshot),
           frozenCriteria,
+          deliveryAuthority: active.record.deliveryAuthority!,
           cycle: active.record.cycle,
           reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
           repairOnly: true,
@@ -1622,14 +1620,15 @@ export class RunIssue {
         active = await this.clearAttempt(active);
       }
 
-      if (active.record.routeReceipt?.route === 'direct') {
+      if (active.record.routeReceipt?.route === 'direct' || active.record.routeReceipt?.route === 'spec-required') {
         const boundary = active.record.reviewFeedback?.activeBatch
           ? {
             kind: 'review-feedback' as const,
             batchId: active.record.reviewFeedback.activeBatch.batchId,
             repairRound: active.record.reviewFeedback.repairRound as 1 | 2 | 3,
+            authoritySha256: active.record.deliveryAuthority!.authoritySha256,
           }
-          : { kind: 'implementation-cycle' as const, cycle: active.record.cycle };
+          : { kind: 'implementation-cycle' as const, cycle: active.record.cycle, authoritySha256: active.record.deliveryAuthority!.authoritySha256 };
         const captured = await this.ensureCandidateBinding(active, config, boundary);
         if ('status' in captured) return captured;
         active = captured.active;
@@ -1641,7 +1640,7 @@ export class RunIssue {
         }
         const targetFingerprint = directReviewCandidateTargetFingerprint({
           binding,
-          routeDecisionSha256: active.record.routeReceipt!.decisionSha256,
+          routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
           workflowGenerationHash: active.record.workflowGeneration.generationHash,
           cycle: active.record.cycle,
           frozenCriteria,
@@ -1777,6 +1776,7 @@ export class RunIssue {
         issueNumber: input.issueNumber,
         cycle: active.record.cycle,
         baseSha: expectedImplementationHead(active.record),
+        deliveryAuthoritySha256: active.record.deliveryAuthority!.authoritySha256,
         binding: structuredClone(proofBinding),
         changedFiles: [...proofBinding.canonicalChangedFiles],
         checks: active.record.checks.map((check) => ({ ...check, status: 'passed' as const })) as CheckedChangePayloadV2['checks'],
@@ -2055,10 +2055,6 @@ export class RunIssue {
           `frozenCriteria=${canonicalJson(frozenCriteria)}`,
           `canonicalRepository=${active.record.canonicalRepository}`,
           `baseSha=${active.record.baseSha}`,
-          ...(active.record.waitingHuman?.phase === 'resumed' ? [
-            `trustedAnswer=${canonicalJson(active.record.waitingHuman.trustedAnswer)}`,
-            `priorWaitingRoute=${active.record.waitingHuman.history.at(-1)?.routeReceipt.decisionSha256 ?? ''}`,
-          ] : []),
         ],
         signal: this.signal,
       });
@@ -2120,7 +2116,10 @@ export class RunIssue {
       routeReceipt: receipt,
       generationHash: active.record.workflowGeneration.generationHash,
     });
-    if (receipt.route !== 'awaiting-user') active = await this.persist(active, { lifecycle });
+    active = await this.persist(active, {
+      lifecycle,
+      ...(receipt.route === 'direct' ? { deliveryAuthority: createDirectDeliveryAuthority(receipt) } : {}),
+    });
     try {
       if (!await this.authorized(active, config)) {
         return { result: await this.revoked(active) };
@@ -2137,14 +2136,6 @@ export class RunIssue {
       workflowGeneration: structuredClone(active.record.workflowGeneration),
       receipt,
     };
-    if (receipt.route === 'awaiting-user') {
-      const waiting = await this.dependencies.routeContinuations.awaitingUser(
-        context, this.waitingState(() => active, (next) => { active = next; }), this.signal,
-      );
-      const mapped = await this.mapWaitingResult(active, waiting);
-      if ('result' in mapped) return mapped;
-      return this.routeRun(mapped.active, mapped.active.record.issueSnapshot, mapped.active.record.frozenCriteria, worktreePath, config, issueNumber, branchName);
-    }
     const continuation = receipt.route === 'direct'
       ? await this.dependencies.routeContinuations.direct(context)
       : await this.dependencies.routeContinuations.specRequired(context, this.specState(() => active, (next) => { active = next; }), this.signal);
@@ -2159,40 +2150,51 @@ export class RunIssue {
     }
     if (receipt.route !== 'direct') {
       const specContinuation = continuation as SpecCoordinatorResult;
+      if (specContinuation.status === 'decision-required') {
+        return { result: await this.specQuestionResult(active, specContinuation.receipt) };
+      }
       if (specContinuation.status !== 'completed') return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: specContinuation.receipt.receiptSha256 });
-      return { result: { status: 'spec-frozen', receipt: specContinuation.receipt, evidencePath: evidence.path } };
+      const frozen = active.record.specDelivery?.frozen;
+      if (!frozen) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
+      if (!await this.acceptedSpecAnswersRemainTrusted(active)) {
+        return { result: await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
+      }
+      return { active: await this.persist(active, {
+        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(receipt, frozen),
+      }) };
     }
     return { active };
   }
 
-  private async publishWaitingQuestionEffect(
-    active: ActiveRun,
-    input: { issueNumber: number; marker: string; body: string },
-  ): Promise<{ active: ActiveRun; result: Awaited<ReturnType<WaitingHumanState['publishQuestion']>> }> {
-    const expected = { kind: 'waiting-question-comment' as const, issueNumber: input.issueNumber, marker: input.marker, bodySha256: sha256(input.body) };
+  private async specQuestionResult(active: ActiveRun, receipt: FrozenSpecQuestionReceiptV1): Promise<RunIssueResult> {
+    const body = [
+      receipt.marker,
+      `Spec revision: ${receipt.revisionSha256}`,
+      `Decision gaps: ${canonicalJson(receipt.decisionGaps)}`,
+      receipt.question,
+      `Reply with: ${receipt.answerPrefix} <answer>`,
+      `Evidence: ${receipt.evidencePath}`,
+    ].join('\n');
+    const expected = { kind: 'spec-question-comment' as const, issueNumber: active.record.issueNumber, marker: receipt.marker, bodySha256: sha256(body) };
     if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
-    const effect = active.record.pendingEffect;
-    if (effect?.kind !== expected.kind || effect.issueNumber !== expected.issueNumber
-      || effect.marker !== expected.marker || effect.bodySha256 !== expected.bodySha256) {
-      return { active, result: { status: 'conflict', evidence: ['waiting-question-pending-effect-diverged'] } };
+    if (canonicalJson(active.record.pendingEffect) !== canonicalJson(createPendingEffect(expected))) {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
     }
-    let issue = await this.readIssue(input.issueNumber);
-    if (!issue) return { active, result: { status: 'retryable', code: 'question-comment-observation-failed' } };
-    let matches = commentsWithMarker(issue, input.marker);
+    let issue = await this.readIssue(active.record.issueNumber);
+    let matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
     if (matches.length > 1 || matches.some((comment) => sha256(comment.body) !== expected.bodySha256)) {
-      return { active, result: { status: 'conflict', evidence: matches.map((comment) => sha256(comment.body)) } };
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-comment-conflict');
     }
     if (matches.length === 0) {
-      try { await this.dependencies.issues.postComment(input.issueNumber, input.body); }
-      catch { return { active, result: { status: 'retryable', code: 'question-comment-unknown' } }; }
-      issue = await this.readIssue(input.issueNumber);
-      matches = issue ? commentsWithMarker(issue, input.marker) : [];
+      try { await this.dependencies.issues.postComment(active.record.issueNumber, body); }
+      catch { return this.invokedFailure(active, 'spec-question-comment-unknown'); }
+      issue = await this.readIssue(active.record.issueNumber);
+      matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
     }
-    if (matches.length !== 1 || sha256(matches[0]!.body) !== expected.bodySha256) {
-      return { active, result: { status: 'retryable', code: 'question-comment-observation-failed' } };
-    }
-    return { active: await this.confirmEffect(active), result: { status: 'settled' } };
+    if (matches.length !== 1 || sha256(matches[0]!.body) !== expected.bodySha256) return this.invokedFailure(active, 'spec-question-comment-unobserved');
+    active = await this.confirmEffect(active);
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: receipt.questionSha256 });
+    return { status: 'spec-frozen', receipt: structuredClone(receipt), evidencePath: evidence.path };
   }
 
   private async createInitialWorktreeEffect(active: ActiveRun, targetRoot: string): Promise<{ active: ActiveRun } | RunIssueResult> {
@@ -2252,61 +2254,6 @@ export class RunIssue {
     return { active: await this.confirmEffect(active) };
   }
 
-  private async projectWaitingLabelsEffect(
-    active: ActiveRun,
-    input: { kind: 'waiting-wait-labels' | 'waiting-resume-labels' | 'waiting-revoke-labels'; issueNumber: number; expected: string[] },
-  ): Promise<{ active: ActiveRun; result: Awaited<ReturnType<WaitingHumanState['projectLabels']>> }> {
-    let issue = await this.readIssue(input.issueNumber);
-    if (!issue || issue.state !== 'OPEN') return { active, result: { status: 'cancelled' } };
-    const expected = sortedUnique(input.expected);
-    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { ...input, expected } });
-    const effect = active.record.pendingEffect;
-    if (!effect || effect.kind !== input.kind || effect.issueNumber !== input.issueNumber || !sameStrings(effect.expected, expected)) {
-      return { active, result: { status: 'retryable', code: 'waiting-labels-pending-effect-diverged' } };
-    }
-    if (!sameStrings(issue.labels, expected)) {
-      try { await this.dependencies.issues.setLabels(input.issueNumber, expected); }
-      catch { return { active, result: { status: 'retryable', code: `${input.kind}-unknown` } }; }
-      issue = await this.readIssue(input.issueNumber);
-    }
-    if (!issue || issue.state !== 'OPEN' || !sameStrings(issue.labels, expected)) {
-      return { active, result: { status: 'retryable', code: `${input.kind}-observation-failed` } };
-    }
-    return { active: await this.confirmEffect(active), result: { status: 'settled' } };
-  }
-
-  private waitingState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): WaitingHumanState {
-    return {
-      read: async () => structuredClone(readActive().record.waitingHuman),
-      compareAndSwap: async (expected, next) => {
-        const active = readActive();
-        const observed = active.record.waitingHuman;
-        if (observed === undefined || expected === undefined) {
-          if (observed !== expected) return false;
-        } else if (canonicalJson(observed) !== canonicalJson(expected)) return false;
-        const saved = await this.persist(active, {
-          ...(active.record.lifecycle === 'routed'
-            && (expected === undefined || (expected.phase === 'resumed' && next.phase !== 'resumed' && next.phase !== 'history-only'))
-            ? { lifecycle: 'waiting-human' as const }
-            : {}),
-          waitingHuman: structuredClone(next),
-        });
-        writeActive(saved);
-        return true;
-      },
-      publishQuestion: async (input) => {
-        const handled = await this.publishWaitingQuestionEffect(readActive(), input);
-        writeActive(handled.active);
-        return handled.result;
-      },
-      projectLabels: async (input) => {
-        const handled = await this.projectWaitingLabelsEffect(readActive(), input);
-        writeActive(handled.active);
-        return handled.result;
-      },
-    };
-  }
-
   private specState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): SpecDeliveryState {
     return {
       read: async () => structuredClone(readActive().record.specDelivery),
@@ -2347,11 +2294,16 @@ export class RunIssue {
     };
   }
 
-  private async continueSpecRequired(active: ActiveRun): Promise<RunIssueResult> {
+  private async continueSpecRequired(active: ActiveRun): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
     if (!active.record.routeReceipt || active.record.routeReceipt.route !== 'spec-required') {
-      return await this.terminal(active, { status: 'internal-error', code: 'spec-route-missing' });
+      return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-route-missing' }) };
     }
     let current = active;
+    if (current.record.specDelivery?.stage === 'question') {
+      const accepted = await this.observeSpecAnswer(current);
+      if ('result' in accepted) return accepted;
+      current = accepted.active;
+    }
     const context = {
       runId: current.record.runId, issue: structuredClone(current.record.issueSnapshot),
       frozenCriteria: structuredClone(current.record.frozenCriteria), worktreePath: current.record.worktreePath,
@@ -2361,70 +2313,75 @@ export class RunIssue {
       context, this.specState(() => current, (next) => { current = next; }), this.signal,
     );
     if (result.status === 'completed') {
-      const evidence = await this.dependencies.writeEvidence({ runId: current.record.runId, code: 'spec-frozen', summary: result.receipt.receiptSha256 });
-      return { status: 'spec-frozen', receipt: result.receipt, evidencePath: evidence.path };
+      const frozen = current.record.specDelivery?.frozen;
+      if (!frozen) return { result: await this.terminal(current, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
+      if (!await this.acceptedSpecAnswersRemainTrusted(current)) {
+        return { result: await this.terminal(current, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
+      }
+      return { active: await this.persist(current, {
+        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(current.record.routeReceipt!, frozen),
+      }) };
     }
-    if (result.status === 'cancelled') return await this.terminal(current, { status: 'cancelled' });
-    if (result.status === 'retryable') return await this.terminal(current, { status: 'transport-failed', resumable: true }, result.code);
-    return await this.terminal(current, { status: 'blocked', kind: result.kind, resumable: result.kind !== 'exhausted' }, result.code);
+    if (result.status === 'decision-required') return { result: await this.specQuestionResult(current, result.receipt) };
+    if (result.status === 'cancelled') return { result: await this.terminal(current, { status: 'cancelled' }) };
+    if (result.status === 'retryable') return { result: await this.terminal(current, { status: 'transport-failed', resumable: true }, result.code) };
+    return { result: await this.terminal(current, { status: 'blocked', kind: result.kind, resumable: result.kind !== 'exhausted' }, result.code) };
   }
 
-  private async continueWaitingHuman(active: ActiveRun): Promise<{ result: RunIssueResult } | { active: ActiveRun }> {
-    if (!active.record.routeReceipt || !active.record.workflowGeneration) {
-      return { result: await this.terminal(active, { status: 'internal-error', code: 'waiting-route-missing' }) };
+  private async observeSpecAnswer(active: ActiveRun): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    const delivery = active.record.specDelivery!;
+    const question = delivery.question!;
+    const issue = await this.readIssue(active.record.issueNumber);
+    if (!issue) return { result: await this.invokedFailure(active, 'spec-answer-observation-failed') };
+    const questionIndex = issue.comments.findIndex((comment) => comment.body.includes(question.marker));
+    const candidates = questionIndex < 0 ? [] : issue.comments.slice(questionIndex + 1)
+      .filter((comment) => comment.body.startsWith(question.answerPrefix));
+    const trusted: Array<{ comment: typeof candidates[number]; normalized: string; checkedAt: string }> = [];
+    for (const comment of candidates) {
+      if (!comment.id || !comment.author || !comment.authorId || !comment.createdAt || !comment.updatedAt || comment.createdAt !== comment.updatedAt) continue;
+      const normalized = comment.body.slice(question.answerPrefix.length).trim().replace(/\s+/gu, ' ');
+      if (!normalized || !this.dependencies.issues.getRepositoryPermission) continue;
+      let permission;
+      try { permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId); }
+      catch { return { result: await this.invokedFailure(active, 'spec-answer-permission-unverifiable') }; }
+      if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) continue;
+      trusted.push({ comment, normalized, checkedAt: permission.checkedAt });
     }
-    const context = {
-      runId: active.record.runId,
-      issue: structuredClone(active.record.issueSnapshot),
-      frozenCriteria: structuredClone(active.record.frozenCriteria),
-      worktreePath: active.record.worktreePath,
-      workflowGeneration: structuredClone(active.record.workflowGeneration),
-      receipt: structuredClone(active.record.routeReceipt),
+    if (trusted.length === 0) return { result: await this.specQuestionResult(active, question) };
+    const hashes = [...new Set(trusted.map((item) => sha256(item.normalized)))];
+    const selected = trusted[0]!;
+    const normalizedAnswer = hashes.length === 1
+      ? selected.normalized
+      : `Conflicting trusted answers: ${hashes.sort().join(',')}`;
+    const answer: TrustedSpecAnswerV1 = {
+      accepted: hashes.length === 1,
+      questionSha256: question.questionSha256,
+      commentId: hashes.length === 1 ? selected.comment.id! : trusted.map((item) => item.comment.id).sort().join(','),
+      authorId: selected.comment.authorId!, author: selected.comment.author!, answerPrefix: question.answerPrefix, normalizedAnswer,
+      normalizedSha256: sha256(normalizedAnswer), permissionCheckedAt: selected.checkedAt,
+      commentCreatedAt: selected.comment.createdAt!, commentUpdatedAt: selected.comment.updatedAt!,
     };
-    let current = active;
-    const result = await this.dependencies.routeContinuations.awaitingUser(
-      context, this.waitingState(() => current, (next) => { current = next; }), this.signal,
-    );
-    return this.mapWaitingResult(current, result);
+    return { active: await this.persist(active, { specDelivery: acceptTrustedSpecAnswer(delivery, answer) }) };
   }
 
-  private async mapWaitingResult(
-    active: ActiveRun,
-    result: Awaited<ReturnType<RoutedContinuationRegistry['awaitingUser']>>,
-  ): Promise<{ result: RunIssueResult } | { active: ActiveRun }> {
-    if (result.status === 'awaiting-answer') {
-      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'awaiting-user', summary: result.questionId });
-      return { result: { status: 'awaiting-user', questionId: result.questionId, answerPrefix: result.answerPrefix, evidencePath: evidence.path } };
+  private async acceptedSpecAnswersRemainTrusted(active: ActiveRun): Promise<boolean> {
+    const answers = active.record.specDelivery?.acceptedAnswers ?? [];
+    if (answers.length === 0) return true;
+    if (!this.dependencies.issues.getRepositoryPermission) return false;
+    const issue = await this.readIssue(active.record.issueNumber);
+    if (!issue) return false;
+    for (const answer of answers) {
+      const comment = issue.comments.find((item) => item.id === answer.commentId);
+      if (!comment?.author || !comment.authorId || comment.author !== answer.author || comment.authorId !== answer.authorId
+        || comment.createdAt !== answer.commentCreatedAt || comment.updatedAt !== answer.commentUpdatedAt
+        || comment.createdAt !== comment.updatedAt || !comment.body.startsWith(answer.answerPrefix)
+        || comment.body.slice(answer.answerPrefix.length).trim().replace(/\s+/gu, ' ') !== answer.normalizedAnswer) return false;
+      try {
+        const permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId);
+        if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) return false;
+      } catch { return false; }
     }
-    if (result.status === 'retryable') {
-      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: result.code, summary: result.owner });
-      return { result: { status: 'transport-failed', resumable: true, evidencePath: evidence.path } };
-    }
-    if (result.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
-    if (result.status === 'blocked') {
-      return { result: await this.terminal(active, { status: 'blocked', kind: result.kind, resumable: result.resumable }, result.code) };
-    }
-    const waitingHuman = archiveWaiting(active.record, result.answer, {
-      phase: 'resumed', trustedAnswer: structuredClone(result.answer),
-    });
-    const routeExecution = initialRouteExecution();
-    validateTrustedAnswerResumeTransition({
-      lifecycle: active.record.lifecycle,
-      routeExecution: active.record.routeExecution,
-      routeReceipt: active.record.routeReceipt,
-      generationHash: active.record.workflowGeneration.generationHash,
-    }, {
-      lifecycle: 'triaging', routeExecution, routeReceipt: undefined,
-      generationHash: active.record.workflowGeneration.generationHash,
-    }, active.record.waitingHuman!);
-    const resumed = await this.persist(active, {
-      lifecycle: 'triaging',
-      issueSnapshot: structuredClone(active.record.issueSnapshot),
-      routeExecution,
-      routeReceipt: undefined,
-      waitingHuman,
-    });
-    return { active: resumed };
+    return true;
   }
 
   private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }> {
@@ -2437,7 +2394,7 @@ export class RunIssue {
     const labels = new Set(issue.labels);
     if (issue.state !== 'OPEN') return 'Issue is not open.';
     if (!labels.has(config.github.labels.auto.name)) return 'Issue lacks the auto label.';
-    if ([config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name, config.github.labels.waitingHuman.name]
+    if ([config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name]
       .some((label) => labels.has(label))) {
       return 'Issue already has a terminal or running label.';
     }
@@ -2529,8 +2486,7 @@ export class RunIssue {
     const labels = new Set(issue.labels);
     if (!labels.has(config.github.labels.auto.name)
       || labels.has(config.github.labels.blocked.name)
-      || labels.has(config.github.labels.review.name)
-      || labels.has(config.github.labels.waitingHuman.name)) return false;
+      || labels.has(config.github.labels.review.name)) return false;
     return this.hasTrustedClaim(issue, record);
   }
 
@@ -3043,6 +2999,7 @@ export class RunIssue {
     worktreePath: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
+    deliveryAuthority: DeliveryAuthorityV1;
     cycle: number;
     reworkFindings: string[];
     repairOnly: boolean;
@@ -3076,7 +3033,7 @@ export class RunIssue {
     while (true) {
       const directReview = active.record.directReview;
       const routeReceipt = active.record.routeReceipt;
-      if (!directReview || !routeReceipt || routeReceipt.route !== 'direct'
+      if (!directReview || !routeReceipt || !['direct', 'spec-required'].includes(routeReceipt.route)
         || (directReview.stage !== 'review-full' && directReview.stage !== 'review-closure')) {
         return this.terminal(active, { status: 'internal-error', code: 'direct-review-state-invalid' });
       }
@@ -3134,6 +3091,7 @@ export class RunIssue {
         issue,
         frozenCriteria,
         routeReceipt: structuredClone(routeReceipt),
+        deliveryAuthority: structuredClone(active.record.deliveryAuthority!),
         defects: structuredClone(directReview.review.defects),
         affectedDefectIds: [...directReview.review.affectedDefectIds],
         fixedRepairFindings: directReview.repairFindings.filter((finding) => finding.status === 'fixed')
@@ -3401,6 +3359,7 @@ export class RunIssue {
         worktreePath: active.record.worktreePath,
         issue,
         frozenCriteria,
+        deliveryAuthority: active.record.deliveryAuthority!,
         cycle: repairAttempts + 1,
         reworkFindings: failures,
         repairOnly: false,
@@ -3524,7 +3483,7 @@ export class RunIssue {
     const targetFingerprint = binding
       ? directReviewCandidateTargetFingerprint({
         binding,
-        routeDecisionSha256: active.record.routeReceipt.decisionSha256,
+        routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
         workflowGenerationHash: active.record.workflowGeneration.generationHash,
         cycle: active.record.cycle,
         frozenCriteria,
@@ -3532,7 +3491,7 @@ export class RunIssue {
       : directReviewTargetFingerprint({
         snapshot: await this.dependencies.git.snapshot(active.record.worktreePath),
         changedFiles,
-        routeDecisionSha256: active.record.routeReceipt.decisionSha256,
+        routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
         workflowGenerationHash: active.record.workflowGeneration.generationHash,
         cycle: active.record.cycle,
         frozenCriteria,
@@ -3885,27 +3844,6 @@ export class RunIssue {
         ? { status: 'blocked', kind: outcome.kind }
         : { status: outcome.status }, outcome.status === 'internal-error' ? outcome.code : undefined);
     }
-    if (active.record.waitingHuman && (active.record.lifecycle === 'waiting-human' || active.record.waitingHuman.phase === 'resumed')) {
-      if (active.record.waitingHuman.phase === 'resumed') {
-        changes.waitingHuman = {
-          version: 1,
-          clarificationAttempts: active.record.waitingHuman.clarificationAttempts,
-          permissionRetries: active.record.waitingHuman.permissionRetries,
-          history: structuredClone(active.record.waitingHuman.history),
-          phase: 'history-only',
-          terminalOutcome: outcome.status === 'blocked'
-            ? { status: 'blocked', kind: outcome.kind }
-            : { status: outcome.status },
-        } as WaitingHumanExecutionV1;
-      } else if (outcome.status === 'blocked' || outcome.status === 'cancelled') {
-      changes.waitingHuman = archiveWaiting(active.record, waitingAnswer(active.record.waitingHuman), {
-        phase: 'history-only',
-        terminalOutcome: outcome.status === 'cancelled'
-          ? { status: 'cancelled' }
-          : { status: 'blocked', kind: outcome.kind },
-      });
-      }
-    }
     if (active.record.lifecycle === 'triaging' || (active.record.lifecycle === 'safe-halt' && !active.record.routeReceipt)) {
       changes.routeExecution = undefined;
       changes.routeReceipt = undefined;
@@ -3953,7 +3891,7 @@ class PostEffectStateError extends Error {
   }
 }
 function lifecycleForAttempt(operationId: string): RunRecord['lifecycle'] {
-  if (operationId === 'triage' || operationId === 'ambiguity-review') return 'triaging';
+  if (operationId === 'triage') return 'triaging';
   if (operationId === 'configured-check') return 'checking';
   if (operationId === 'acceptance-proof') return 'proving';
   return 'implementing';
@@ -4081,6 +4019,7 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
       kind: 'review-feedback',
       batchId: feedback.activeBatch.batchId,
       repairRound: feedback.repairRound as 1 | 2 | 3,
+      authoritySha256: record.deliveryAuthority!.authoritySha256,
     };
   }
   if (record.checkQualification && record.checkQualification.implementationStarted === false
@@ -4090,7 +4029,7 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
       repairAttempt: record.checkQualification.repairAttempts as 0 | 1 | 2 | 3 | 4 | 5,
     };
   }
-  return { kind: 'implementation-cycle', cycle: record.cycle };
+  return { kind: 'implementation-cycle', cycle: record.cycle, authoritySha256: record.deliveryAuthority!.authoritySha256 };
 }
 
 function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
