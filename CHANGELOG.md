@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.11] - 2026-07-30
+
 ### Added
 - Added V2 candidate-bound `CheckedChange` contracts and optional candidate Git
   capability while preserving existing V1 payload and freshness semantics.
