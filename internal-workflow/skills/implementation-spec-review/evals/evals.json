@@ -39,12 +39,6 @@
       "forbidden": ["approve invented defaults", "reward extra implementation detail as determinism"]
     },
     {
-      "id": "artifact-closure-complexity-guard",
-      "prompt": "A repair for one failure-contract defect adds a service, durable state machine, configuration input, and public DTO. Review the repair in Closure.",
-      "expected": ["verify the supplied defect", "challenge each added mechanism against existing seams", "report scope change without starting a separate simplification review"],
-      "forbidden": ["verify only the old defect ID", "automatically launch a fresh Full"]
-    },
-    {
       "id": "artifact-local-repair-review-budget",
       "prompt": "A consolidated repair changes only wording and one existing validation command while preserving scope, owners, public contracts, and mandatory-lens coverage.",
       "expected": ["use coordinator verification for ordinary findings", "reuse valid Full coverage"],

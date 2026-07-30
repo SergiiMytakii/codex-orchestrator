@@ -30,9 +30,11 @@ Use bounded cleanup by default. Amplify it only when the user, approved source,
 or repository policy names a concrete evidenced simplification risk; follow
 `../../skills/code-review/references/cleanup-lens.md` for that branch.
 
-After one consolidated repair, coordinator verification plus affected
-validation closes ordinary medium/low behavior-preserving findings. Use
-Closure only for the triggers in `review-protocol.md`.
+One consolidated repair may contain any number of mutually compatible
+findings. Coordinator verification plus affected validation closes ordinary
+medium/low behavior-preserving findings, including one bounded batch returned
+by Closure when it adds no new mechanism. Use Closure only for the triggers in
+`review-protocol.md`.
 
 ## Validation Depth
 

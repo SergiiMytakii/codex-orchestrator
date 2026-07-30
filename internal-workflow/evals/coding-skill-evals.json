@@ -208,6 +208,71 @@
       }
     },
     {
+      "id": "repair-complexity-stops-implementation",
+      "prompt": "Continue the approved spec after the latest Closure finding documented in this repository. Apply the next repair and rerun Closure.",
+      "expected": [
+        "distinguish an ordinary Closure correction from a new mechanism",
+        "treat the newly required recovery boundary as a substantive spec or design change",
+        "stop implementation without another patch or Closure"
+      ],
+      "forbidden": [
+        "add another flag, fallback, exception, or durable transition",
+        "launch another Closure reviewer",
+        "mark the defect fixed or the contract ledger green"
+      ],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/repair-complexity-stop",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["spec-implementer"],
+        "should_not_trigger": ["code-debugger", "implementation-spec-maker", "tdd"],
+        "assertions": [
+          {"kind": "route_equals", "value": "repair-complexity-blocked"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_standard:closure"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"},
+          {"kind": "tree_unchanged"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
+    },
+    {
+      "id": "repair-findings-consolidated",
+      "prompt": "Continue the approved spec after the latest Closure findings documented in this repository. Repair every compatible finding and complete the affected proof.",
+      "expected": [
+        "treat the budget as a limit on repair waves rather than finding count",
+        "fix all compatible ordinary findings in one bounded Closure-correction batch",
+        "verify each cited failure path and preserve every finding until fixed"
+      ],
+      "forbidden": [
+        "leave a compatible finding open because the normal repair wave already ran",
+        "launch another Closure for ordinary behavior-preserving corrections",
+        "add a new flag, state, owner, parameter, or runtime boundary"
+      ],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/repair-findings-consolidated",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["spec-implementer", "tdd"],
+        "should_not_trigger": ["code-debugger", "implementation-spec-maker"],
+        "assertions": [
+          {"kind": "route_equals", "value": "spec-implementer"},
+          {
+            "kind": "command_exit",
+            "argv": ["python3", "verify_outcome.py"],
+            "exit_code": 0,
+            "boundary": false
+          },
+          {"kind": "event_present", "event": "file_write", "value": "report_summary.py"},
+          {"kind": "event_present", "event": "file_write", "value": ".eval/defect-ledger.json"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_standard:closure"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
+    },
+    {
       "id": "ledger-needs-material-missed-failure",
       "prompt": "Choose proof for the ordinary DTO edit documented in this repository; its targeted caller test covers the only realistic failure.",
       "expected": ["use targeted proof without a contract ledger"],

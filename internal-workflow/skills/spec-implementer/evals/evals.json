@@ -21,6 +21,26 @@
       "forbidden": ["restart all Full reviewers"]
     },
     {
+      "id": "implementation-repair-complexity-stop",
+      "prompt": "After Full and one consolidated repair, Closure finds that the repair added a public flag, helper, durable transition, and new runtime owner; fixing it would require another Closure.",
+      "expected": ["judge the aggregate repair diff", "stop auto-fix and return the design to spec review", "block as non-converging repair instead of running a second Closure"],
+      "forbidden": ["patch one finding in isolation", "launch a second Closure"]
+    },
+    {
+      "id": "closure-correction-keeps-all-findings",
+      "prompt": "Closure returns three ordinary behavior-preserving findings whose exact fixes stay inside the approved implementation and require no new parameter, state, flag, owner, or runtime boundary.",
+      "expected": [
+        "fix all three findings in one bounded Closure-correction batch",
+        "verify every cited failure path and affected validation",
+        "keep each finding recorded until verified"
+      ],
+      "forbidden": [
+        "drop findings because the normal repair wave already ran",
+        "launch another Closure for the ordinary correction",
+        "add a new mechanism"
+      ]
+    },
+    {
       "id": "resume-live-reviewer",
       "prompt": "Resume after a reviewer poll timed out while the recorded session is still live.",
       "expected": ["reconcile the existing session"],

@@ -56,8 +56,8 @@ approved scope, scope delta, current owners/seams, evidence, review question,
 assigned lenses, and current defect records. Name behavior that already exists
 and the justification for every proposed new endpoint, service, durable state,
 configuration input, schema/public contract, repository, or data owner. For
-Closure also include the repaired sections, affected contracts, and repair
-complexity delta. Do not pass raw parent history or unrelated inventories.
+Closure also include the repaired sections and affected contracts. Do not pass
+raw parent history or unrelated inventories.
 
 ## Topology
 
@@ -71,23 +71,13 @@ Root launches and aggregates reviewers. A reviewer child runs the
 Reuse valid coverage for the same revision and question. Parallel high-profile
 reviewers are one Full review round, not sequential rounds.
 
-After one consolidated repair, coordinator verification is enough for ordinary
-medium/low findings. Use shared-protocol Closure only for critical/high defects,
-protected trust/data/concurrency/shared-contract impact, or invalidated
-mandatory coverage.
-
-The default budget is one Full round, one consolidated repair, and at most one
-Closure round. Closure verifies its supplied defects and runs a bounded
-complexity guard over the repair delta:
-
-1. Did the repair add a new integration boundary or durable mechanism?
-2. Can it be removed or replaced by an existing owner/seam?
-3. Did it change approved scope?
-
-This guard is part of Closure, not a separate simplification review. A further
-targeted Closure is exceptional and requires a newly introduced critical/high
-defect plus materially changed target or evidence; otherwise coordinator
-verification or the shared no-progress/blocked outcome applies.
+One consolidated repair covers all mutually compatible findings; its budget is
+per repair wave, never per finding. Coordinator verification is enough for
+ordinary medium/low findings, including one bounded Closure-correction batch
+that stays inside the approved behavior and adds no new mechanism. Keep every
+other finding open or blocked. Use shared-protocol Closure only for
+critical/high defects, protected trust/data/concurrency/shared-contract impact,
+or invalidated mandatory coverage.
 
 Start a fresh Full only when an authority or approved-contract change
 invalidates existing mandatory coverage by changing the observable claim,

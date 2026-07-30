@@ -133,7 +133,8 @@ Before deep review, decide which lenses apply.
 
 - Always activate the general correctness and spec/standards lenses.
 - Always apply bounded cleanup inside spec/standards; amplify it only for a
-  concrete evidenced Review Focus, never from size or risk labels alone.
+  concrete evidenced Review Focus or when the diff adds a flag, helper, or
+  state branch; never from size or risk labels alone.
 - Add framework lenses when explicit or strongly implied by files/configs.
 - Add targeted recipes when the diff shape matches them.
 - If the user, plan, or implementation spec provides `Review Focus`, treat each listed lens, targeted recipe, invariant, and risk as mandatory. Do not replace it with a generic review; report any focus item that cannot be verified as a verification gap.
@@ -230,6 +231,13 @@ severity, protected-contract, or invalidated-coverage triggers owned by
 `review-protocol.md`. For a scheduled Closure, send the bounded capsule to the
 selected reviewer lineage and return its defect updates.
 
+Treat a repair budget as a limit on waves, never on finding count. Put every
+mutually compatible finding into the same consolidated repair, and retain each
+canonical record until verified or explicitly blocked. When Closure returns
+only ordinary medium/low corrections that stay inside approved behavior and
+add no new mechanism, allow one bounded correction batch with direct
+failure-path checks plus affected validation; do not request another Closure.
+
 ## Evidence Standard
 
 A valid finding explains:
@@ -259,6 +267,12 @@ Automatically fix only when all are true:
 - correct fix is narrow and low-risk
 - fix matches local project patterns
 - verification is available, or the edit is obviously safe and syntax-checkable
+
+Evaluate `narrow and low-risk` against the aggregate repair diff, including all
+new parameters, helpers, branches, states, owners, and runtime boundaries—not
+against one finding in isolation. A new flag, helper, or state branch activates
+the amplified cleanup lens and requires explicit `KEEP | SIMPLIFY | REMOVE`
+decisions before auto-fix.
 
 When auto-fixing:
 

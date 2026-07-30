@@ -41,6 +41,7 @@ Rules:
 - The invariant must be observable through the public interface or the same seam real callers use.
 - The risk must name the concrete bug class, not a vague "edge case".
 - The first test/proof must fail before the fix unless the ledger records why a RED signal is impossible.
+- Do not mark a row `green` until its test reproduces the concrete violating sequence through the production seam used by real callers.
 - `blocked` requires the missing seam, fixture, service, or decision that prevents proof.
 - Keep the ledger current as implementation proceeds; do not backfill it only at the end.
 

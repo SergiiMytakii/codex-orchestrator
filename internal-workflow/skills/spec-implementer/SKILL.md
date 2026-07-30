@@ -91,11 +91,15 @@ Immediately before the first reviewer launch, create only the minimal
 `## Implementation Review State` required by `references/review-loop.md`.
 Reconcile a recorded live session before replacement after interruption.
 
-Repair compatible findings once and rerun affected validation. Coordinator
-verification closes ordinary medium/low behavior-preserving repairs. Use
-Closure only for critical/high, protected trust/data/concurrency/shared-contract
-impact, or invalidated mandatory coverage. Do not restart broad Full review
-unless the repair actually invalidated its coverage.
+Repair all mutually compatible findings in one consolidated wave and rerun
+affected validation; the wave limit never caps finding count. Coordinator
+verification closes ordinary medium/low behavior-preserving repairs, including
+one bounded Closure-correction batch that stays inside the approved behavior
+without adding a new mechanism. Keep incompatible or unresolved findings open
+with a concrete blocker. Use Closure only for critical/high, protected
+trust/data/concurrency/shared-contract impact, or invalidated mandatory
+coverage. Do not restart broad Full review unless the repair actually
+invalidated its coverage.
 
 ## Stop Conditions
 

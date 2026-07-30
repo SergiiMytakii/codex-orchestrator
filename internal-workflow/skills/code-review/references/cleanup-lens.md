@@ -10,9 +10,10 @@ a standalone gate, activation, verdict, or coverage class.
   owners, obsolete paths, workaround branches, dead code, and unjustified
   abstractions.
 - **Amplified:** when mandatory Review Focus names a concrete evidenced
-  simplification risk, inventory every material addition, replacement,
-  compatibility path, and runtime owner related to that risk. Do not amplify
-  from file count, implementation size, or review profile alone.
+  simplification risk, or the diff adds a flag, helper, or state branch,
+  inventory every material addition, replacement, compatibility path, and
+  runtime owner related to that risk. Do not amplify from file count,
+  implementation size, or review profile alone.
 
 ## In Scope
 

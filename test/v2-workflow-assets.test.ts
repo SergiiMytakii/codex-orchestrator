@@ -62,7 +62,7 @@ test('workflow eval execution metadata survives generation', async () => {
   const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...shared.path.split('/')), 'utf8')) as {
     cases: Array<Record<string, any>>;
   };
-  assert.equal(value.cases.length, 20);
+  assert.equal(value.cases.length, 22);
   const approvedSpec = value.cases.find((item) => item.id === 'approved-spec-execution');
   assert.ok(approvedSpec);
   assert.deepEqual(approvedSpec.execution, {
@@ -81,6 +81,42 @@ test('workflow eval execution metadata survives generation', async () => {
       { kind: 'event_present', event: 'file_write', value: 'greeting.py' },
       { kind: 'event_order', before: { event: 'skill_read', value: 'spec-implementer' }, after: { event: 'file_write', value: 'greeting.py' } },
       { kind: 'event_absent', event: 'git_push', value: 'origin' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
+  const repairComplexity = value.cases.find((item) => item.id === 'repair-complexity-stops-implementation');
+  assert.ok(repairComplexity);
+  assert.deepEqual(repairComplexity.execution, {
+    level: 'behavior',
+    fixture: 'behavior/repair-complexity-stop',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer'],
+    should_not_trigger: ['code-debugger', 'implementation-spec-maker', 'tdd'],
+    assertions: [
+      { kind: 'route_equals', value: 'repair-complexity-blocked' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
+      { kind: 'tree_unchanged' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
+  const consolidatedFindings = value.cases.find((item) => item.id === 'repair-findings-consolidated');
+  assert.ok(consolidatedFindings);
+  assert.deepEqual(consolidatedFindings.execution, {
+    level: 'behavior',
+    fixture: 'behavior/repair-findings-consolidated',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer', 'tdd'],
+    should_not_trigger: ['code-debugger', 'implementation-spec-maker'],
+    assertions: [
+      { kind: 'route_equals', value: 'spec-implementer' },
+      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
+      { kind: 'event_present', event: 'file_write', value: 'report_summary.py' },
+      { kind: 'event_present', event: 'file_write', value: '.eval/defect-ledger.json' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
     ],
     ablation_skill: 'spec-implementer',
   });
