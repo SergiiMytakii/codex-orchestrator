@@ -36,7 +36,7 @@ test('author and reviewer results correlate through immutable actors and reviewe
     author: { attemptId: 'author-attempt', sessionId: 'author-session' },
   });
   const reviewReady = acceptSpecRevision(initial, revision);
-  assert.equal(reviewReady.stage, 'review-full');
+  assert.equal(reviewReady.stage, 'review');
   assert.throws(() => acceptSpecReview(reviewReady, reviewReport(revision, 'author-session'), reportHash), /correlation/u);
   const approved = acceptSpecReview(reviewReady, reviewReport(revision, 'review-session'), reportHash);
   assert.equal(approved.stage, 'approved');
@@ -72,7 +72,7 @@ test('product decision remains inside spec state and resumes at the next immutab
     revision: 2, path: 'docs/spec-2.md', content: '# Complete spec\n', previousRevision: revision,
     evidence: revision.evidence, author: { attemptId: 'author-attempt-2', sessionId: 'author-session' },
   });
-  assert.equal(acceptSpecRevision(answering, nextRevision).stage, 'review-full');
+  assert.equal(acceptSpecRevision(answering, nextRevision).stage, 'review');
 });
 
 test('coordinator prepares, launches, adopts, and cleans one external active attempt', async () => {
@@ -126,9 +126,8 @@ class MemorySpecState implements SpecDeliveryState {
 
 function reviewReport(revision: ReturnType<typeof createSpecRevision>, sessionId: string, attemptId = 'review-attempt'): SpecReviewReportV1 {
   return {
-    version: 1, targetRevision: revision.revision, targetSha256: revision.revisionSha256, mode: 'full', verdict: 'approved',
+    version: 1, targetRevision: revision.revision, targetSha256: revision.revisionSha256, verdict: 'approved',
     reviewer: { attemptId, sessionId }, coverage: ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation'],
-    defects: [], affectedDefectIds: [], affectedContracts: [], closureRequestSha256: null,
-    acceptedRisks: [], coverageInvalidated: false,
+    defects: [], acceptedRisks: [],
   };
 }

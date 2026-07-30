@@ -131,12 +131,6 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     },
     frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
     reworkFindings: ['typecheck failed'],
-    checkQualification: {
-      version: 1,
-      checkPolicySha256: 'a'.repeat(64),
-      repairAttempts: 5,
-      checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'failed', outputSha256: 'b'.repeat(64) }],
-    },
   } as unknown as RunRecord;
   assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 5);
 
@@ -144,11 +138,9 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     { ...recoverable, cycle: 6 },
     { ...recoverable, reportRepairs: 2 },
     { ...recoverable, transportRetries: 2 },
-    { ...recoverable, checkQualification: { ...recoverable.checkQualification, repairAttempts: 6 } },
-    { ...recoverable, checkQualification: { ...recoverable.checkQualification!, checks: [{ ...recoverable.checkQualification!.checks[0], status: 'unchanged-failure' }] } },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecord])), /cycle|Repairs|Retries|repairAttempts|status|launches/u);
+    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecord])), /cycle|Repairs|Retries|status|launches/u);
   }
 });
 
@@ -231,7 +223,7 @@ test('run store persists direct review composites and rejects them on non-direct
     ...routed, lifecycle: 'implementing', directReview,
     deliveryAuthority: createDirectDeliveryAuthority(routed.routeReceipt!),
   }]));
-  assert.equal((saved.runs[0] as RunRecord & { directReview: typeof directReview }).directReview.stage, 'review-full');
+  assert.equal((saved.runs[0] as RunRecord & { directReview: typeof directReview }).directReview.stage, 'review');
 
   const invalid = { ...record(), lifecycle: 'implementing' as const, directReview };
   const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());

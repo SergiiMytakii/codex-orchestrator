@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { InMemoryGitHubIssueAdapter } from '../src/v2/adapters/issues.js';
 import { InMemoryGitHubPullRequestAdapter, type GitHubPullRequestReviewTarget } from '../src/v2/adapters/pull-requests.js';
-import { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
+import { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 
 test('freezes only authorized eligible review sources', async () => {
   const pullRequests = pullRequestFixture();
@@ -72,8 +72,8 @@ test('revalidation rejects edited or revoked sources and post-push permits only 
   assert.equal((await service.revalidate({ batch: observed.batch, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
 });
 
-function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: PermissionFixture): ReviewFeedbackCoordinator {
-  return new ReviewFeedbackCoordinator({
+function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: PermissionFixture): ReviewFeedbackObserver {
+  return new ReviewFeedbackObserver({
     pullRequests, issues, now: () => '2026-07-27T10:05:00.000Z',
   });
 }

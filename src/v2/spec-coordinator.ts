@@ -38,7 +38,6 @@ export interface SpecDeliveryOperation {
     attemptId: string;
     context: RoutedRunContext;
     state: SpecDeliveryV1;
-    mode: 'full' | 'closure';
     recoverOnly: boolean;
     signal: AbortSignal;
     onPrepared(actor: { attemptId: string; sessionId: string; reportPath?: string }): Promise<void>;
@@ -81,7 +80,7 @@ export class SpecCoordinator {
         continue;
       }
       const author = current.stage === 'authoring' || current.stage === 'author-repair' || current.stage === 'answer-authoring';
-      const mode = author ? (current.stage === 'author-repair' ? 'repair' : 'author') : (current.stage === 'review-full' ? 'full' : 'closure');
+      const mode = author ? (current.stage === 'author-repair' ? 'repair' : 'author') : 'review';
       const attempt = await this.dependencies.state.prepareAttempt(
         author ? 'spec-author' : 'spec-review',
         `${mode}:${current.revisions.length + 1}:${current.budgets.repairCycles}`,
@@ -99,7 +98,7 @@ export class SpecCoordinator {
       };
       const result = author
         ? await this.dependencies.operation.author({ attemptId, context, state: current, mode: mode as 'author'|'repair', recoverOnly, signal, onPrepared, onLaunched })
-        : await this.dependencies.operation.review({ attemptId, context, state: current, mode: mode as 'full'|'closure', recoverOnly, signal, onPrepared, onLaunched });
+        : await this.dependencies.operation.review({ attemptId, context, state: current, recoverOnly, signal, onPrepared, onLaunched });
       if (result.status === 'retryable') {
         try {
           const owner = author ? 'author' : 'review';

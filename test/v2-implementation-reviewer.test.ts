@@ -12,8 +12,8 @@ const workflowGeneration = {
 };
 const report = {
   version: 1 as const, operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
-  verdict: 'approved' as const, mode: 'full' as const, coverage: ['correctness'], defects: [], residualRisks: [],
-  reviewerSessionId: 'review-session-1', closureRequestSha256: null, repairFindingOutcomes: [],
+  verdict: 'approved' as const, coverage: ['correctness'], defects: [], residualRisks: [],
+  reviewerSessionId: 'review-session-1', repairFindingOutcomes: [],
 };
 
 test('thin reviewer facade binds an independent attempt and delegates durable launch hooks', async () => {
@@ -86,15 +86,15 @@ test('reviewer facade rejects identity reuse before launching an operation', asy
 
 function input(overrides: Partial<ImplementationReviewerInput> = {}): ImplementationReviewerInput {
   return {
-    attemptId: 'review-attempt-1', runId: 'run-1', worktreePath: '/worktree', operation: 'code-review', mode: 'full',
+    attemptId: 'review-attempt-1', runId: 'run-1', worktreePath: '/worktree', operation: 'code-review',
     reviewerSessionId: 'review-session-1', implementationAttemptId: 'implementation-attempt-1', targetRevision: 1,
-    targetFingerprint: fingerprint, closureRequestSha256: null, issue: { number: 1, title: 'Issue' },
+    targetFingerprint: fingerprint, issue: { number: 1, title: 'Issue' },
     frozenCriteria: ['works'], routeReceipt: { route: 'direct' },
     deliveryAuthority: {
       version: 1, kind: 'direct', routeDecisionSha256: 'a'.repeat(64),
       sourceSha256: 'a'.repeat(64), authoritySha256: 'b'.repeat(64),
     },
-    defects: [], affectedDefectIds: [],
+    defects: [],
     fixedRepairFindings: [],
     reviewFocus: ['correctness'], workflowGeneration, repairOnly: false, originalReportSha256: null,
     validationDiagnostic: null, originalReportBytes: null, signal: new AbortController().signal,

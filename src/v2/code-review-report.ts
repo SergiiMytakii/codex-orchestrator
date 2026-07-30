@@ -8,7 +8,6 @@ const MAX_ITEMS = 256;
 const MAX_TEXT = 16 * 1024;
 
 export type ReviewOperation = 'code-review';
-export type ReviewMode = 'full' | 'closure';
 export type ReviewVerdict = 'approved' | 'needs-work' | 'rejected';
 export type ReviewClass = 'blocker' | 'execution-risk' | 'improvement';
 export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
@@ -41,60 +40,19 @@ export interface CodeReviewReportV1 {
   targetRevision: number;
   targetFingerprint: string;
   verdict: ReviewVerdict;
-  mode: ReviewMode;
   coverage: string[];
   defects: CodeReviewDefectV1[];
   residualRisks: string[];
   reviewerSessionId: string;
-  closureRequestSha256: string | null;
   repairFindingOutcomes: RepairFindingOutcomeV1[];
 }
 
 export interface CodeReviewValidationContext {
   operation: ReviewOperation;
-  mode: ReviewMode;
   targetRevision: number;
   targetFingerprint: string;
   reviewerSessionId: string;
-  closureRequestSha256: string | null;
-  fixedRepairFindingIds?: string[];
-}
-
-export interface ClosureRequestInput {
-  operation: ReviewOperation;
-  targetRevision: number;
-  targetFingerprint: string;
-  affectedDefectIds: string[];
-  fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
-  reviewFocus: string[];
-}
-
-export function hashClosureRequest(input: ClosureRequestInput): string {
-  assertOperation(input.operation);
-  assertPositiveInteger(input.targetRevision, 'closure request.targetRevision');
-  assertSha256(input.targetFingerprint, 'closure request.targetFingerprint');
-  const affectedDefectIds = sortedUniqueStrings(input.affectedDefectIds, 'closure request.affectedDefectIds');
-  const reviewFocus = sortedUniqueStrings(input.reviewFocus, 'closure request.reviewFocus');
-  if (!Array.isArray(input.fixedRepairFindings) || input.fixedRepairFindings.length > MAX_ITEMS) {
-    throw new Error('closure request.fixedRepairFindings is invalid');
-  }
-  const fixedRepairFindings = input.fixedRepairFindings.map((finding) => {
-    assertExactObject(finding, ['id', 'affectedContracts'], 'closure request fixed finding');
-    assertText(finding.id, 'closure request fixed finding.id');
-    return {
-      id: finding.id,
-      affectedContracts: sortedUniqueStrings(finding.affectedContracts, 'closure request fixed finding.affectedContracts'),
-    };
-  }).sort((left, right) => left.id.localeCompare(right.id));
-  assertUnique(fixedRepairFindings.map((finding) => finding.id), 'closure request fixed finding IDs');
-  return domainHash('codex-orchestrator-review-closure-v2', canonicalJson({
-    operation: input.operation,
-    targetRevision: input.targetRevision,
-    targetFingerprint: input.targetFingerprint,
-    affectedDefectIds,
-    fixedRepairFindings,
-    reviewFocus,
-  }));
+  previousFindingIds?: string[];
 }
 
 export function hashCodeReviewReport(report: CodeReviewReportV1): string {
@@ -103,36 +61,26 @@ export function hashCodeReviewReport(report: CodeReviewReportV1): string {
 
 export function validateCodeReviewReport(value: unknown, context: CodeReviewValidationContext): CodeReviewReportV1 {
   assertExactObject(value, [
-    'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'mode', 'coverage', 'defects',
-    'residualRisks', 'reviewerSessionId', 'closureRequestSha256', 'repairFindingOutcomes',
+    'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
+    'residualRisks', 'reviewerSessionId', 'repairFindingOutcomes',
   ], 'code review report');
   if (value.version !== 1) throw new Error('code review report.version is invalid');
   assertOperation(value.operation);
   assertPositiveInteger(value.targetRevision, 'code review report.targetRevision');
   assertSha256(value.targetFingerprint, 'code review report.targetFingerprint');
   if (!['approved', 'needs-work', 'rejected'].includes(value.verdict as string)) throw new Error('code review report.verdict is invalid');
-  if (value.mode !== 'full' && value.mode !== 'closure') throw new Error('code review report.mode is invalid');
   const coverage = sortedUniqueStrings(value.coverage, 'code review report.coverage');
   const residualRisks = sortedUniqueStrings(value.residualRisks, 'code review report.residualRisks');
   assertText(value.reviewerSessionId, 'code review report.reviewerSessionId');
-  if (value.closureRequestSha256 !== null) assertSha256(value.closureRequestSha256, 'code review report.closureRequestSha256');
-  if (value.operation !== context.operation || value.mode !== context.mode || value.targetRevision !== context.targetRevision
-    || value.targetFingerprint !== context.targetFingerprint || value.reviewerSessionId !== context.reviewerSessionId
-    || value.closureRequestSha256 !== context.closureRequestSha256) {
+  if (value.operation !== context.operation || value.targetRevision !== context.targetRevision
+    || value.targetFingerprint !== context.targetFingerprint || value.reviewerSessionId !== context.reviewerSessionId) {
     throw new Error('code review report correlation mismatch');
   }
   const defects = validateDefects(value.defects, value.targetRevision as number);
   const repairFindingOutcomes = validateRepairFindingOutcomes(value.repairFindingOutcomes);
-  const expectedFindingIds = [...(context.fixedRepairFindingIds ?? [])].sort();
-  if (context.mode === 'full') {
-    if (value.closureRequestSha256 !== null || repairFindingOutcomes.length !== 0 || expectedFindingIds.length !== 0) {
-      throw new Error('Full review cannot contain Closure correlation');
-    }
-  } else {
-    if (value.closureRequestSha256 === null) throw new Error('Closure review requires correlation hash');
-    const actual = repairFindingOutcomes.map((outcome) => outcome.id).sort();
-    if (!sameStrings(actual, expectedFindingIds)) throw new Error('Closure repair finding outcomes must match request IDs');
-  }
+  const expectedFindingIds = [...(context.previousFindingIds ?? [])].sort();
+  const actualFindingIds = repairFindingOutcomes.map((outcome) => outcome.id).sort();
+  if (!sameStrings(actualFindingIds, expectedFindingIds)) throw new Error('review finding outcomes must match previous finding IDs');
   const unresolved = defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
     && defect.status !== 'verified' && defect.status !== 'superseded');
   if (value.verdict === 'approved' && (unresolved || repairFindingOutcomes.some((outcome) => outcome.status === 'reopened'))) {
@@ -176,8 +124,8 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
   const report = {
     type: 'object', additionalProperties: false,
     required: [
-      'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'mode', 'coverage', 'defects',
-      'residualRisks', 'reviewerSessionId', 'closureRequestSha256', 'repairFindingOutcomes',
+      'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
+      'residualRisks', 'reviewerSessionId', 'repairFindingOutcomes',
     ],
     properties: {
       version: { type: 'integer', const: 1 },
@@ -185,12 +133,10 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
       targetRevision: { type: 'integer', minimum: 1 },
       targetFingerprint: { type: 'string', pattern: '^[0-9a-f]{64}$' },
       verdict: { type: 'string', enum: ['approved', 'needs-work', 'rejected'] },
-      mode: { type: 'string', enum: ['full', 'closure'] },
       coverage: stringList,
       defects: { type: 'array', maxItems: MAX_ITEMS, items: defect },
       residualRisks: stringList,
       reviewerSessionId: text,
-      closureRequestSha256: { anyOf: [{ type: 'string', pattern: '^[0-9a-f]{64}$' }, { type: 'null' }] },
       repairFindingOutcomes: {
         type: 'array', maxItems: MAX_ITEMS,
         items: {

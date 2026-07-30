@@ -136,8 +136,9 @@ same-repository draft PR receives a new unresolved inline thread root or a
 non-empty `CHANGES_REQUESTED` review from a current repository writer or admin,
 the Runner freezes that exact feedback batch and resumes the existing run.
 
-The repair uses the existing implementation and affected Closure flow, then
-reruns the run's resolved check policy and Acceptance Proof against the repaired content. It
+The frozen batch enters the same implementation → complete independent review
+→ checks → proof loop used by initial delivery. Every repair creates a new
+candidate and receives a complete review that accounts for prior finding IDs. It
 has a separate maximum of three feedback rounds and does not consume the
 original five implementation cycles. Publication appends one fast-forward
 commit to the existing branch and PR; divergence blocks without reset, rebase,
@@ -181,12 +182,10 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
 - `checks`: finite fallback commands for issues without a command-only
-  `Verification:` section. Before the issue implementation starts, the Runner
-  requires the resolved scoped policy to pass. A red qualification check starts
-  a separate sealed, bounded repair operation, reruns the policy, and does not
-  consume the issue's implementation-cycle budget. Its launched process is
-  durably recoverable across daemon restarts. Final checks must all pass;
-  failures are never accepted by comparing output hashes.
+  `Verification:` section. They run after each complete independent review.
+  A failed check becomes a bounded finding for the next implementation cycle;
+  there is no qualification operation or separate retry coordinator. Final
+  checks must all pass; failures are never accepted by comparing output hashes.
 - `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
 - `proof.android`: optional Runner-owned Android recipe. It selects `avdName`, creates an ephemeral clean data directory, requires fixed `build apk` arguments, removes any old `apkPath`, snapshots a fresh no-symlink APK outside the worker-writable tree, and binds its digest to the checked change. It installs and launches that exact snapshot, repeatedly verifies emulator process identity, waits up to `navigationTimeoutMs` for each exact `tapText` accessibility label, and captures proof-bound screenshot, hierarchy, PID log, and lease artifacts. Commands are bounded, cancellable, and process-group quiescent; URI query/fragment credentials are rejected. The contained proof worker never receives `adb`, emulator, Flutter, or durable lease authority. Emulator or Android-tool startup failure is retained as an explicit unfinished-UI-proof warning and does not by itself block delivery.
 - `deny.readPaths`: paths the worker must not read or modify.

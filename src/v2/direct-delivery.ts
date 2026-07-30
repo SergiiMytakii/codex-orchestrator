@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { validateCandidateBinding, type CandidateBindingV2 } from './candidate.js';
 
 import { canonicalJson } from './containment.js';
-import { hashClosureRequest, validateCodeReviewDefects, type CodeReviewDefectV1, type CodeReviewReportV1, type ReviewMode } from './code-review-report.js';
+import { validateCodeReviewDefects, type CodeReviewDefectV1, type CodeReviewReportV1 } from './code-review-report.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_ITEMS = 256;
@@ -11,20 +11,17 @@ export const MAX_DIRECT_REVIEW_REPORT_REPAIRS = 4;
 
 export type DirectReviewReportRepairCount = 0 | 1 | 2 | 3 | 4;
 
-export type DirectReviewStage =
-  | 'review-full' | 'review-repair' | 'review-closure';
+export type DirectReviewStage = 'review' | 'review-repair';
 
 export interface ReviewTrackV1 {
   version: 1;
   disposition: 'active' | 'clear';
   profile: 'simple' | 'medium' | 'high';
   reviewerSessionId: string | null;
-  mode: ReviewMode | null;
   reportRepairs: DirectReviewReportRepairCount;
   transportRetries: 0 | 1;
   coverage: string[];
   defects: CodeReviewDefectV1[];
-  affectedDefectIds: string[];
   acceptedReportSha256: string | null;
 }
 
@@ -118,9 +115,7 @@ export function acceptApprovedDirectReview(
   assertSha256(artifactSha256, 'direct review accepted report hash');
   if (state.status !== 'active' || state.stage === null || report.verdict !== 'approved'
     || report.targetRevision !== state.targetRevision || report.targetFingerprint !== state.targetFingerprint
-    || report.operation !== 'code-review' || report.mode !== state.review.mode
-    || report.reviewerSessionId !== state.review.reviewerSessionId
-    || report.closureRequestSha256 !== expectedClosureRequest(state)) {
+    || report.operation !== 'code-review' || report.reviewerSessionId !== state.review.reviewerSessionId) {
     throw new Error('accepted direct review report correlation mismatch');
   }
   const defects = mergeDefectLedger(state, report);
@@ -133,7 +128,6 @@ export function acceptApprovedDirectReview(
     disposition: 'clear',
     coverage: [...report.coverage],
     defects,
-    affectedDefectIds: [],
     acceptedReportSha256: artifactSha256,
   };
   const outcomes = new Map(report.repairFindingOutcomes.map((outcome) => [outcome.id, outcome.status]));
@@ -157,9 +151,7 @@ export function acceptNeedsWorkDirectReview(
   const reopenedFinding = report.repairFindingOutcomes.some((outcome) => outcome.status === 'reopened');
   if (state.status !== 'active' || state.stage === null || report.verdict !== 'needs-work'
     || report.targetRevision !== state.targetRevision || report.targetFingerprint !== state.targetFingerprint
-    || report.operation !== 'code-review' || report.mode !== state.review.mode
-    || report.reviewerSessionId !== state.review.reviewerSessionId
-    || report.closureRequestSha256 !== expectedClosureRequest(state)
+    || report.operation !== 'code-review' || report.reviewerSessionId !== state.review.reviewerSessionId
     || (!report.defects.some((defect) => defect.status === 'open' || defect.status === 'reopened') && !reopenedFinding)) {
     throw new Error('needs-work direct review report correlation mismatch');
   }
@@ -173,7 +165,6 @@ export function acceptNeedsWorkDirectReview(
       disposition: 'active',
       coverage: [...report.coverage],
       defects: mergeDefectLedger(state, report),
-      affectedDefectIds: [],
       acceptedReportSha256: artifactSha256,
     },
     repairFindings: state.repairFindings.map((finding) => {
@@ -185,23 +176,15 @@ export function acceptNeedsWorkDirectReview(
 
 function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): CodeReviewDefectV1[] {
   const current = state.review.defects;
-  if (report.mode === 'full') {
-    if (current.length !== 0) throw new Error('Full review cannot replace an existing defect ledger');
-    return structuredClone(report.defects);
-  }
+  if (current.length === 0) return structuredClone(report.defects);
   const reported = new Map(report.defects.map((defect) => [defect.id, defect]));
-  const affected = new Set(state.review.affectedDefectIds);
   const merged = current.map((existing) => {
     const next = reported.get(existing.id);
-    if (!next) {
-      if (!affected.has(existing.id)) return structuredClone(existing);
-      return { ...structuredClone(existing), status: 'reopened' as const, statusTargetRevision: state.targetRevision, supersededBy: null };
-    }
+    if (!next) throw new Error('full review omitted a previous defect ID');
     reported.delete(existing.id);
-    if (!affected.has(existing.id)) return structuredClone(existing);
-    if (affected.has(existing.id) && existing.status === 'fixed'
+    if (existing.status === 'fixed'
       && !['verified', 'reopened', 'superseded'].includes(next.status)) {
-      throw new Error('Closure defect transition is invalid');
+      throw new Error('full review defect transition is invalid');
     }
     return {
       ...structuredClone(next),
@@ -214,7 +197,7 @@ function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): C
   });
   for (const added of reported.values()) {
     if (added.status !== 'open' || added.introducedTargetRevision !== state.targetRevision
-      || added.statusTargetRevision !== state.targetRevision) throw new Error('Closure introduced defect is invalid');
+      || added.statusTargetRevision !== state.targetRevision) throw new Error('full review introduced defect is invalid');
     merged.push(structuredClone(added));
   }
   return merged.sort((left, right) => left.id.localeCompare(right.id));
@@ -252,13 +235,15 @@ function mergeRepairFindings(current: DirectRepairFindingV1[], incoming: DirectR
   return [...merged.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
-export function prepareDirectReviewClosure(
+export function prepareDirectReview(
   state: DirectReviewV1,
   targetFingerprint: string,
-): { state: DirectReviewV1; closureRequestSha256: string } {
-  assertSha256(targetFingerprint, 'direct review Closure target fingerprint');
+  reviewerSessionId: string,
+): DirectReviewV1 {
+  assertSha256(targetFingerprint, 'direct review target fingerprint');
+  assertText(reviewerSessionId, 'direct review reviewer session ID');
   if (state.status !== 'active' || state.stage !== 'review-repair') {
-    throw new Error('direct review is not ready for Closure');
+    throw new Error('direct review is not ready for another review');
   }
   const targetRevision = state.targetRevision + 1;
   const defects = state.review.defects.map((defect) =>
@@ -269,50 +254,23 @@ export function prepareDirectReviewClosure(
     finding.status === 'open' || finding.status === 'reopened'
       ? { ...structuredClone(finding), status: 'fixed' as const }
       : structuredClone(finding));
-  const affectedIds = [
-    ...defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id),
-    ...repairFindings.filter((finding) => finding.status === 'fixed').map((finding) => finding.id),
-  ].sort();
-  if (affectedIds.length === 0) throw new Error('direct review Closure has no fixed targets');
+  if (![...defects, ...repairFindings].some((item) => item.status === 'fixed')) throw new Error('direct review has no fixed targets');
   const nextState: DirectReviewV1 = {
     ...structuredClone(state),
-    stage: 'review-closure',
+    stage: 'review',
     targetRevision,
     targetFingerprint,
     review: {
       ...structuredClone(state.review),
-      mode: 'closure',
+      reviewerSessionId,
       reportRepairs: 0,
       transportRetries: 0,
       defects,
-      affectedDefectIds: affectedIds,
+      acceptedReportSha256: null,
     },
     repairFindings,
   };
-  const closureRequestSha256 = directReviewClosureRequestSha256(nextState);
-  return {
-    state: nextState,
-    closureRequestSha256,
-  };
-}
-
-export function directReviewClosureRequestSha256(state: DirectReviewV1): string {
-  if (state.status !== 'active' || state.stage !== 'review-closure' || state.review.mode !== 'closure') {
-    throw new Error('direct review state is not a code-review Closure');
-  }
-  return hashClosureRequest({
-    operation: 'code-review',
-    targetRevision: state.targetRevision,
-    targetFingerprint: state.targetFingerprint,
-    affectedDefectIds: state.review.affectedDefectIds,
-    fixedRepairFindings: state.repairFindings.filter((finding) => finding.status === 'fixed')
-      .map((finding) => ({ id: finding.id, affectedContracts: finding.affectedContracts })),
-    reviewFocus: ['acceptance-criteria', 'correctness', 'test-quality'],
-  });
-}
-
-function expectedClosureRequest(state: DirectReviewV1): string | null {
-  return state.stage === 'review-closure' ? directReviewClosureRequestSha256(state) : null;
+  return nextState;
 }
 
 export function projectTerminalDirectReview(
@@ -340,7 +298,7 @@ export function canRecoverTerminalDirectReviewReport(
   options: { allowLegacyMalformed?: boolean } = {},
 ): boolean {
   return state.status === 'terminal' && state.terminalOutcome?.status === 'internal-error'
-    && state.stage !== null && state.stage !== 'review-repair'
+    && state.stage === 'review'
     && state.review.disposition === 'active' && state.review.reportRepairs > 0
     && state.review.reportRepairs < MAX_DIRECT_REVIEW_REPORT_REPAIRS
     && (state.terminalCode === 'direct-review-report-malformed'
@@ -375,10 +333,10 @@ export function createInitialDirectReview(input: {
   return {
     version: 1,
     status: 'active',
-    stage: 'review-full',
+    stage: 'review',
     targetRevision: 1,
     targetFingerprint: input.targetFingerprint,
-    review: activeTrack(input.codeReviewerSessionId, 'full'),
+    review: activeTrack(input.codeReviewerSessionId),
     repairFindings: [],
   };
 }
@@ -469,52 +427,41 @@ function validateStageFields(
   track: ReviewTrackV1,
   findings: DirectRepairFindingV1[],
 ): void {
-  const suffix = stage.split('-').at(-1)!;
-  if (suffix === 'full') {
-    if (track.mode !== 'full' || track.acceptedReportSha256 !== null || track.affectedDefectIds.length !== 0) {
-      throw new Error('Full review stage fields are invalid');
-    }
-  } else if (suffix === 'repair') {
+  if (stage === 'review') {
+    if (track.acceptedReportSha256 !== null) throw new Error('review stage fields are invalid');
+  } else {
     if (track.acceptedReportSha256 === null || (track.defects.every((defect) => defect.status !== 'open' && defect.status !== 'reopened')
       && findings.every((finding) => finding.status !== 'open' && finding.status !== 'reopened'))) {
       throw new Error('review repair stage fields are invalid');
     }
-  } else if (track.mode !== 'closure' || track.acceptedReportSha256 === null || track.affectedDefectIds.length === 0
-    || !track.affectedDefectIds.every((id) => track.defects.some((defect) => defect.id === id && defect.status === 'fixed')
-      || findings.some((finding) => finding.id === id && finding.status === 'fixed'))) {
-    throw new Error('Closure review stage fields are invalid');
   }
 }
 
 function validateTrack(value: unknown, field: string, targetRevision: number): ReviewTrackV1 {
   assertExactObject(value, [
-    'version', 'disposition', 'profile', 'reviewerSessionId', 'mode', 'reportRepairs', 'transportRetries',
-    'coverage', 'defects', 'affectedDefectIds', 'acceptedReportSha256',
+    'version', 'disposition', 'profile', 'reviewerSessionId', 'reportRepairs', 'transportRetries',
+    'coverage', 'defects', 'acceptedReportSha256',
   ], `direct review ${field} track`);
   if (value.version !== 1 || !['active', 'clear'].includes(value.disposition as string)
     || !['simple', 'medium', 'high'].includes(value.profile as string)
     || !isReportRepairCount(value.reportRepairs) || !isBit(value.transportRetries)) throw new Error(`direct review ${field} track is invalid`);
   if (value.reviewerSessionId !== null) assertText(value.reviewerSessionId, `${field} reviewer session ID`);
-  if (value.mode !== null && value.mode !== 'full' && value.mode !== 'closure') throw new Error(`${field} review mode is invalid`);
   const coverage = sortedUniqueStrings(value.coverage, `${field} coverage`);
-  const affectedDefectIds = sortedUniqueStrings(value.affectedDefectIds, `${field} affected defect IDs`);
   const defects = validateCodeReviewDefects(value.defects, targetRevision);
   if (value.acceptedReportSha256 !== null) assertSha256(value.acceptedReportSha256, `${field} accepted report hash`);
-  if (value.disposition === 'active' && (value.reviewerSessionId === null || value.mode === null)) throw new Error(`${field} active track lacks identity`);
-  if (value.disposition === 'clear' && (value.reviewerSessionId === null || value.mode === null || value.acceptedReportSha256 === null
-    || affectedDefectIds.length !== 0 || defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
+  if (value.disposition === 'active' && value.reviewerSessionId === null) throw new Error(`${field} active track lacks identity`);
+  if (value.disposition === 'clear' && (value.reviewerSessionId === null || value.acceptedReportSha256 === null
+    || defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
       && defect.status !== 'verified' && defect.status !== 'superseded'))) throw new Error(`${field} clear track is invalid`);
   return {
     version: 1,
     disposition: value.disposition as ReviewTrackV1['disposition'],
     profile: value.profile as ReviewTrackV1['profile'],
     reviewerSessionId: value.reviewerSessionId as string | null,
-    mode: value.mode as ReviewMode | null,
     reportRepairs: value.reportRepairs as DirectReviewReportRepairCount,
     transportRetries: value.transportRetries as 0 | 1,
     coverage,
     defects,
-    affectedDefectIds,
     acceptedReportSha256: value.acceptedReportSha256 as string | null,
   };
 }
@@ -537,15 +484,15 @@ function validateRepairFindings(value: unknown, targetRevision: number): DirectR
   return findings;
 }
 
-function activeTrack(reviewerSessionId: string, mode: ReviewMode): ReviewTrackV1 {
+function activeTrack(reviewerSessionId: string): ReviewTrackV1 {
   return {
-    version: 1, disposition: 'active', profile: 'high', reviewerSessionId, mode,
-    reportRepairs: 0, transportRetries: 0, coverage: [], defects: [], affectedDefectIds: [], acceptedReportSha256: null,
+    version: 1, disposition: 'active', profile: 'high', reviewerSessionId,
+    reportRepairs: 0, transportRetries: 0, coverage: [], defects: [], acceptedReportSha256: null,
   };
 }
 
 function isStage(value: unknown): value is DirectReviewStage {
-  return ['review-full', 'review-repair', 'review-closure'].includes(value as string);
+  return value === 'review' || value === 'review-repair';
 }
 
 function isBit(value: unknown): value is 0 | 1 { return value === 0 || value === 1; }

@@ -43,12 +43,10 @@ const codeReviewArtifact = {
   targetRevision: 1,
   targetFingerprint: 'd'.repeat(64),
   verdict: 'approved',
-  mode: 'full',
   coverage: ['correctness'],
   defects: [],
   residualRisks: [],
   reviewerSessionId: 'reviewer-session-1',
-  closureRequestSha256: null,
   repairFindingOutcomes: [],
 };
 
@@ -72,9 +70,9 @@ test('implementation reviewer persists prepared and launched identity before acc
   const result = await fixture.operation.run({
     ...input,
     reviewContext: {
-      operation: 'code-review', mode: 'full', targetRevision: 1,
+      operation: 'code-review', targetRevision: 1,
       targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
-      closureRequestSha256: null,
+      previousFindingIds: [],
     },
     onPrepared: async () => { fixture.events.push('persist:prepared'); },
     onLaunched: async ({ pid, processGroupId }) => { fixture.events.push(`persist:launched:${pid}:${processGroupId}`); },
@@ -100,9 +98,9 @@ test('implementation reviewer rejects missing launch persistence and stale corre
   const stale = await staleFixture.operation.run({
     ...runInput('code-review'),
     reviewContext: {
-      operation: 'code-review', mode: 'full', targetRevision: 2,
+      operation: 'code-review', targetRevision: 2,
       targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
-      closureRequestSha256: null,
+      previousFindingIds: [],
     },
     onPrepared: async () => {},
     onLaunched: async () => {},

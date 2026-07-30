@@ -9,7 +9,7 @@ import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { GitWorktreeManager } from './adapters/worktree.js';
 import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
-import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
+import { ReviewFeedbackObserver } from './review-feedback-coordinator.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
 import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
@@ -787,7 +787,7 @@ export class ContainedImplementationAgent {
   }) {}
 
   async run(input: {
-    operation: 'qualification-repair' | 'implementation';
+    operation: 'implementation';
     attemptId: string;
     runId: string;
     worktreePath: string;
@@ -847,22 +847,12 @@ export class ContainedImplementationAgent {
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          ...(input.operation === 'qualification-repair'
-            ? [
-              `Pre-implementation qualification repair for issue #${input.issue.number}: ${input.issue.title}`,
-              'Do not implement the issue acceptance criteria yet. Repair only the reported scoped-check failures so the existing worktree qualifies for implementation.',
-              'You may modify the product files required by those failures. Return changedFiles as the complete cumulative worktree change set.',
-            ]
-            : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
+          `Implement issue #${input.issue.number}: ${input.issue.title}`,
           `Implementation cycle: ${input.cycle}.`,
           ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
           ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
-          ...(input.operation === 'implementation'
-            ? [
-              `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
-              `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
-            ]
-            : []),
+          `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
+          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
           'Do not commit, push, publish, or print credentials or local auth paths.',
@@ -1291,7 +1281,7 @@ export function createV2Runtime(input: {
         return { status: 'retryable', code: 'spec-author-report-invalid' };
       }
     },
-    review: async ({ attemptId, context, state, mode, recoverOnly, signal, onPrepared, onLaunched }) => {
+    review: async ({ attemptId, context, state, recoverOnly, signal, onPrepared, onLaunched }) => {
       const sessionId = state.review.reviewer?.sessionId ?? attemptId;
       try {
         const attempt = await prepareContainedAttempt({
@@ -1312,7 +1302,7 @@ export function createV2Runtime(input: {
           prompt: [
             `Package profile instructions: ${attempt.profile.developerInstructions}`,
             `Follow the exact operation at ${attempt.operationPath}.`,
-            `Reviewer session ID: ${sessionId}. Review mode: ${mode}.`,
+            `Reviewer session ID: ${sessionId}. Perform a complete independent review.`,
             `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
             `Immutable spec delivery state: ${canonicalJson(state)}.`,
             'Return only the package spec-review report. Do not edit files or external state.',
@@ -1322,20 +1312,16 @@ export function createV2Runtime(input: {
         if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
         if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
         const raw = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (raw.mode !== mode || raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
-          || !Array.isArray(raw.affectedDefectIds) || !Array.isArray(raw.affectedContracts) || !Array.isArray(raw.acceptedRisks)
-          || typeof raw.coverageInvalidated !== 'boolean'
+        if (raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
+          || !Array.isArray(raw.acceptedRisks)
           || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'retryable', code: 'spec-review-report-invalid' };
         const target = state.revisions.at(-1)!;
         const defects = validateCodeReviewDefects(raw.defects, target.revision);
         const report: SpecReviewReportV1 = {
-          version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256, mode,
+          version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256,
           verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId, sessionId },
           coverage: raw.coverage as string[], defects,
-          affectedDefectIds: raw.affectedDefectIds as string[],
-          affectedContracts: raw.affectedContracts as string[],
-          closureRequestSha256: mode === 'closure' ? state.review.closureRequestSha256 : null,
-          acceptedRisks: [], coverageInvalidated: raw.coverageInvalidated,
+          acceptedRisks: [],
         };
         return { status: 'completed', value: report, attemptResultSha256: sha256(result.report.bytes), reportSha256: sha256(result.report.bytes) };
       } catch (error) {
@@ -1562,7 +1548,7 @@ export function createV2Runtime(input: {
         return { id: comment.id, body: comment.body };
       },
     },
-    reviewFeedback: new ReviewFeedbackCoordinator({ pullRequests: input.pullRequests, issues: input.issues, now }),
+    reviewFeedback: new ReviewFeedbackObserver({ pullRequests: input.pullRequests, issues: input.issues, now }),
     git,
     routeCoordinator: {
       run: ({ state, ...routeInput }) => new RouteCoordinator({
@@ -1967,7 +1953,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'qualification-repair' | 'acceptance-proof' | 'triage' | 'code-review' | 'spec-author' | 'spec-review';
+  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'code-review' | 'spec-author' | 'spec-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{

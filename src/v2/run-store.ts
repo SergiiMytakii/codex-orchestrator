@@ -18,8 +18,8 @@ import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js'
 import { canonicalJson, sha256 } from './containment.js';
 import { validateCandidateBinding, validateCandidateMaterialization, type CandidateBindingV2, type CandidateMaterializationV2 } from './candidate.js';
 import {
-  validateReviewFeedbackExecution,
-  type ReviewFeedbackExecutionV1,
+  validateReviewFeedbackRunData,
+  type ReviewFeedbackRunDataV1,
 } from './review-feedback.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -147,18 +147,10 @@ export interface RunRecord {
   deliveryAuthority?: DeliveryAuthorityV1;
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
-  reviewFeedback?: ReviewFeedbackExecutionV1;
+  reviewFeedback?: ReviewFeedbackRunDataV1;
   changeBindingVersion?: 2;
   candidateBinding?: CandidateBindingV2;
   candidateMaterialization?: CandidateMaterializationV2;
-  checkQualification?: {
-    version: 1;
-    checkPolicySha256: string;
-    repairAttempts: 0 | 1 | 2 | 3 | 4 | 5;
-    checks: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string } | CandidateCheckReceiptV2>;
-    implementationStarted?: boolean;
-    deniedPathsBaseline?: string;
-  };
   skillHashes: Record<string, string>;
   activeAttempt?: ActiveAttempt;
   checks: Array<
@@ -315,7 +307,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'directReview',
     'specDelivery',
     'reviewFeedback',
-    'checkQualification',
     'changeBindingVersion',
     'candidateBinding',
     'candidateMaterialization',
@@ -399,7 +390,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     }
   }
   if (hasOwn(value, 'reviewFeedback')) {
-    validateReviewFeedbackExecution(value.reviewFeedback);
+    validateReviewFeedbackRunData(value.reviewFeedback);
     validateReviewFeedbackRunInvariant(value as unknown as RunRecord, field);
   }
   if (hasOwn(value, 'changeBindingVersion') && value.changeBindingVersion !== 2) throw new Error(`${field}.changeBindingVersion is invalid`);
@@ -422,7 +413,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       throw new Error(`${field}.pendingEffect candidate binding is invalid`);
     }
   }
-  if (hasOwn(value, 'checkQualification')) validateCheckQualification(value.checkQualification, `${field}.checkQualification`);
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
@@ -504,24 +494,6 @@ function validateChecks(value: unknown, field: string): asserts value is RunReco
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);
   }
-}
-
-function validateCheckQualification(value: unknown, field: string): asserts value is NonNullable<RunRecord['checkQualification']> {
-  const optional = [
-    ...(hasOwn(value, 'implementationStarted') ? ['implementationStarted'] : []),
-    ...(hasOwn(value, 'deniedPathsBaseline') ? ['deniedPathsBaseline'] : []),
-  ];
-  assertExactObject(value, ['version', 'checkPolicySha256', 'repairAttempts', 'checks', ...optional], field);
-  if (value.version !== 1) throw new Error(`${field}.version is invalid`);
-  assertSha256(value.checkPolicySha256, `${field}.checkPolicySha256`);
-  if (!Number.isSafeInteger(value.repairAttempts) || (value.repairAttempts as number) < 0 || (value.repairAttempts as number) > 5) {
-    throw new Error(`${field}.repairAttempts is invalid`);
-  }
-  validateChecks(value.checks, `${field}.checks`);
-  if (hasOwn(value, 'implementationStarted') && typeof value.implementationStarted !== 'boolean') {
-    throw new Error(`${field}.implementationStarted is invalid`);
-  }
-  if (hasOwn(value, 'deniedPathsBaseline')) assertSha256(value.deniedPathsBaseline, `${field}.deniedPathsBaseline`);
 }
 
 function validateIssueSnapshot(value: unknown, field: string): asserts value is PersistedIssueSnapshotV1 {
@@ -783,34 +755,22 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     || batch.priorPublishedHeadSha !== feedback.previousPublishedHeadSha)) {
     throw new Error(`${field}.reviewFeedback active batch identity binding is invalid`);
   }
-  const retainedQuiescentHistory = (feedback.phase === 'idle' || feedback.phase === 'bootstrap-required') && !batch
-    && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
-  if ((feedback.phase === 'bootstrap-required' || feedback.phase === 'idle')
-    && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
-    throw new Error(`${field}.reviewFeedback quiescent phase requires review-ready lifecycle`);
+  const retainedQuiescentHistory = !batch && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
+  if (!batch && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
+    throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }
-  if (['frozen', 'repairing'].includes(feedback.phase) && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
-    throw new Error(`${field}.reviewFeedback active repair phase has invalid lifecycle`);
+  if (batch && !feedback.verifiedReceipt
+    && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    throw new Error(`${field}.reviewFeedback active batch has invalid lifecycle`);
   }
-  if (feedback.phase === 'verified' && run.lifecycle !== 'publishing') {
-    throw new Error(`${field}.reviewFeedback verified phase requires publishing lifecycle`);
-  }
-  if (feedback.phase === 'publishing' && run.lifecycle !== 'publishing') {
-    throw new Error(`${field}.reviewFeedback publishing phase requires publishing lifecycle`);
-  }
-  if (feedback.phase === 'verified' || feedback.phase === 'publishing') {
+  if (feedback.verifiedReceipt) {
+    if (run.lifecycle !== 'publishing') throw new Error(`${field}.reviewFeedback verified batch requires publishing lifecycle`);
     const verified = feedback.verifiedReceipt;
     if (!verified || verified.batchId !== batch?.batchId
       || verified.checkedChangeSha256 !== run.checkedChangeSha256
       || verified.proofId !== run.proofId
       || verified.proofId !== run.proofReceipt?.proofId) {
       throw new Error(`${field}.reviewFeedback verification receipt binding is invalid`);
-    }
-  }
-  if (feedback.phase === 'blocked-safety' || feedback.phase === 'blocked-exhausted') {
-    if (run.lifecycle !== 'blocked' || run.terminalOutcome?.status !== 'blocked' || run.terminalOutcome.resumable
-      || run.terminalOutcome.kind !== (feedback.phase === 'blocked-safety' ? 'safety' : 'exhausted')) {
-      throw new Error(`${field}.reviewFeedback terminal projection mismatch`);
     }
   }
 }

@@ -8,6 +8,13 @@ One trusted Runner owns issue selection, authorization, worktree state, bounded 
 
 Direct `run` and serial `daemon` discovery call the same `runIssue` lifecycle. The initial loop allows at most five implementation cycles, one implementation-report repair, up to four code-review report repairs per target revision, and one separate clean transport retry. A successful direct run may later resume from a frozen trusted PR-feedback batch for at most three separate repair rounds without changing the initial cycle count. Pending-effect intent and exact postcondition reconciliation own effect recovery after interruption.
 
+Initial and trusted post-PR work use one validation loop: implementation,
+complete independent review, configured checks, then Acceptance Proof. Every
+semantic repair creates a new candidate and complete review carrying previous
+finding IDs. Qualification repair, affected-only Closure, and a post-PR phase
+machine do not exist. A frozen feedback batch and monotonic update epoch are Run
+data; publication still settles one `PendingEffect` at a time.
+
 Durable lifecycle state uses the exact schema identifier
 `codex-orchestrator.run-state`. This is a clean cutover with no compatibility
 reader, migration, converter, backup, dual-write, version negotiation, or

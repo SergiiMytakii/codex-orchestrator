@@ -18,7 +18,7 @@ export type {
   CandidateOperationFailureCode,
   CandidateResult,
 } from './v2/candidate.js';
-export { codeReviewReportOutputSchema, hashClosureRequest, hashCodeReviewReport, validateCodeReviewDefects, validateCodeReviewReport } from './v2/code-review-report.js';
+export { codeReviewReportOutputSchema, hashCodeReviewReport, validateCodeReviewDefects, validateCodeReviewReport } from './v2/code-review-report.js';
 export type { CodeReviewDefectV1, CodeReviewReportV1, CodeReviewValidationContext } from './v2/code-review-report.js';
 export { ContainedImplementationReviewer } from './v2/implementation-reviewer.js';
 export type { ImplementationReviewerInput, ImplementationReviewerResult } from './v2/implementation-reviewer.js';
