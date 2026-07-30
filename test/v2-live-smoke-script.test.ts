@@ -30,9 +30,9 @@ async function source(): Promise<string> {
 
 const retainedScenarios = [
   'package-install', 'discovery-matrix', 'commit-policy',
-  'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
+  'infrastructure-recovery', 'report-repair', 'diagnostics', 'browser-proof',
   'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates', 'safety-negative',
+  'proof-invocation-recovery', 'review-feedback-continuation', 'quality-gates', 'safety-negative',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
@@ -49,9 +49,9 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
   assert.deepEqual(
     [...profile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
     [
-      'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
+      'v2-regression', 'discovery-matrix', 'commit-policy', 'infrastructure-recovery',
       'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-      'acceptance-proof-negative', 'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates',
+      'acceptance-proof-negative', 'proof-invocation-recovery', 'review-feedback-continuation', 'quality-gates',
     ],
   );
 });
@@ -61,7 +61,7 @@ test('live smoke omits legacy scenario aliases without distinct V2 behavior', as
   for (const alias of [
     'baseline', 'remote-base-branch', 'scoped-runner-commit', 'run-scoped',
     'loop-policy', 'proof-strategy-non-visual-smoke',
-    'acceptance-proof-positive',
+    'acceptance-proof-positive', 'incomplete-progress-rework', 'proof-interrupted-daemon',
   ]) {
     assert.doesNotMatch(result.stdout, new RegExp(`\\b${alias}\\b`, 'u'));
   }
@@ -201,13 +201,23 @@ test('browser proof fixture uses an HTTP workflow entrypoint accepted by the pro
   assert.match(applyFault, /scenario === 'browser-proof'\) \{\s*discardProofArtifacts\(prompt\);/u);
 });
 
-test('incomplete-progress retry uses a deterministic clean transport failure before the retry', async () => {
+test('infrastructure recovery yields after one failed tick without a durable retry counter or semantic spend', async () => {
   const text = await source();
-  const fixture = text.slice(text.indexOf("scenario === 'incomplete-progress-rework'"), text.indexOf("if (scenario === 'safety-negative')"));
+  const fixture = text.slice(text.indexOf("scenario === 'infrastructure-recovery'"), text.indexOf("if (scenario === 'safety-negative')"));
   assert.match(fixture, /stream disconnected before completion/u);
+  assert.match(text, /scenario === 'infrastructure-recovery'[\s\S]+writeChange\(scenario\)[\s\S]+normalizeImplementationReport/u);
   assert.doesNotMatch(fixture, /setInterval/u);
-  const scenarioRunner = text.slice(text.indexOf('async function runReviewReadyScenario'), text.indexOf('async function runPackageInstallScenario'));
-  assert.doesNotMatch(scenarioRunner, /idleTimeoutMs/u);
+  const scenarioRunner = text.slice(text.indexOf('async function runInfrastructureRecoveryScenario'), text.indexOf('async function runReviewReadyScenario'));
+  assert.match(scenarioRunner, /status: 'transport-failed', resumable: true/u);
+  assert.match(scenarioRunner, /record\.cycle !== 1 \|\| record\.reportRepairs !== 0/u);
+  assert.match(scenarioRunner, /record\.mutableInvocation\?\.phase !== 'launched'/u);
+  assert.match(scenarioRunner, /Object\.hasOwn\(record, 'transportRetries'\)/u);
+  assert.match(scenarioRunner, /assertNoPublication\(context, issue\.number, scenario\)/u);
+  assert.match(scenarioRunner, /runDaemonTick\(context, issue\.number\)/u);
+  assert.match(scenarioRunner, /cleared\.mutableInvocation \|\| cleared\.terminalOutcome/u);
+  assert.match(scenarioRunner, /clearing tick launched a replacement implementation/u);
+  assert.match(scenarioRunner, /runDaemonOnce\(context, issue\.number\)/u);
+  assert.match(scenarioRunner, /implementationCalls\.length !== 1/u);
 });
 
 test('proof rework fault discards transient proof evidence before a minimal needs-rework report', async () => {
@@ -277,6 +287,7 @@ test('daemon continuation requires exclusive scratch-repository candidate owners
   const launched = daemon.slice(daemon.indexOf('async function startDaemonOnce'), daemon.indexOf('async function waitForValue'));
   assert.equal((launched.match(/assertExclusiveDaemonCandidate\(context, issueNumber\)/gu) ?? []).length, 2);
   assert.match(launched, /daemon\.kill\('SIGKILL'\)/u);
+  assert.match(text, /retirePriorDaemonCandidates\(context\)/u);
 });
 
 test('daemon candidate preflight retries a missing owned issue but rejects a foreign candidate immediately', async () => {
@@ -300,7 +311,7 @@ test('daemon candidate preflight retries a missing owned issue but rejects a for
   assert.equal(foreignObservations, 1);
 });
 
-test('scratch daemon proof interruption kills only the daemon after a real durable proof launch and resumes once', async () => {
+test('scratch daemon proof invocation recovery kills only the daemon and adopts or replaces once', async () => {
   const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
     observeProofRecoveryBoundary: (
       reportReady: () => Promise<boolean>, processAbsent: () => Promise<boolean>,
@@ -317,7 +328,10 @@ test('scratch daemon proof interruption kills only the daemon after a real durab
     { attempts: 1, delayMs: 0 }), 'process-absent');
 
   const text = await source();
-  const scenario = text.slice(text.indexOf('async function runInterruptedProofDaemonScenario'), text.indexOf('async function runQualityGatesScenario'));
+  const scenario = text.slice(text.indexOf('async function runProofInvocationRecoveryScenario'), text.indexOf('async function runQualityGatesScenario'));
+  assert.match(scenario, /for \(const recoveryMode of \['report-ready', 'process-absent'\]\)/u);
+  assert.match(scenario, /runProofInvocationRecoveryCase\(context, scenario, recoveryMode\)/u);
+  assert.match(scenario, /slice\(modelCallsBefore\)/u);
   assert.match(scenario, /startDaemonOnce\(context, issue\.number\)/u);
   assert.match(scenario, /invocation\?\.phase === 'launched'/u);
   assert.match(scenario, /daemon\.kill\('SIGKILL'\)/u);
@@ -325,17 +339,21 @@ test('scratch daemon proof interruption kills only the daemon after a real durab
   assert.match(scenario, /observeProofRecoveryBoundary/u);
   assert.match(scenario, /Math\.ceil\(context\.options\.timeoutMs \/ 50\).*delayMs: 50/su);
   assert.match(scenario, /recoveryBoundary === 'report-ready'/u);
+  assert.match(scenario, /recoveryBoundary !== recoveryMode/u);
   assert.match(scenario, /settledProof\.invocation/u);
   assert.match(scenario, /replacement did not reach review-ready/u);
   assert.match(scenario, /attemptId/u);
   assert.equal((scenario.match(/runDaemonTick\(context, issue\.number\)/gu) ?? []).length, 3);
-  assert.match(scenario, /proofCalls\.length !== 1/u);
-  assert.match(scenario, /proofCallsAfterAbsence\.length !== 0/u);
+  assert.match(scenario, /expectedProofCalls = recoveryBoundary === 'report-ready' \? 1 : 2/u);
+  assert.match(scenario, /proofCalls\.length !== expectedProofCalls/u);
+  assert.match(scenario, /proofCallsAfterAbsence\.length !== 1/u);
+  assert.match(scenario, /assertNoPublication\(context, issue\.number, scenario\)/u);
+  assert.match(scenario, /reportRepairs !== 0/u);
   assert.match(scenario, /recoveryObservations\.length !== 1/u);
   assert.match(scenario, /adoptedProof\.status !== 'passed'/u);
   assert.match(scenario, /publicationCount.*!== 1/u);
   const fault = text.slice(text.indexOf('function forward(prompt)'), text.indexOf('launch(1)'));
-  assert.doesNotMatch(fault, /proof-interrupted-daemon/u);
+  assert.doesNotMatch(fault, /proof-invocation-recovery/u);
   const producer = text.slice(text.indexOf('function durableReadinessMarker'), text.indexOf('function normalizeCodeReview'));
   assert.match(producer, /proofReadinessMarkerPath\(reportPath\)/u);
   assert.match(producer, /openSync\(reportPath, 'r'\).*fsyncSync/u);
@@ -343,6 +361,8 @@ test('scratch daemon proof interruption kills only the daemon after a real durab
   assert.match(text, /\$\{proofReadinessMarkerPath\}/u);
   assert.equal((text.match(/return `\$\{reportPath\}\.ready`;/gu) ?? []).length, 1);
   assert.equal((text.match(/if \(!isAbsolute\(reportPath\)\)/gu) ?? []).length, 1);
+  assert.match(text, /CODEX_ORCHESTRATOR_LIVE_SMOKE_PROOF_RECOVERY_MODE/u);
+  assert.match(text, /discardProofOutputOnce/u);
 });
 
 test('interrupted proof cleanup settles exact owned identities on launched and recovery timeouts', async () => {
@@ -408,8 +428,9 @@ test('interrupted proof cleanup settles exact owned identities on launched and r
 test('scenario assertions bind live smoke outcomes to their current owner behavior', async () => {
   const text = await source();
   assert.match(text, /context\.cliPath = installedCliPath/u);
-  assert.match(text, /expected one durable transport retry/u);
+  assert.match(text, /infrastructure failure consumed semantic budget/u);
   assert.match(text, /expected one durable report repair/u);
+  assert.match(text, /report repair did not consume its semantic budget exactly once/u);
   assert.match(text, /expected two publishable responsive screenshots/u);
   assert.match(text, /read-only diagnostics mutated the target/u);
   assert.match(text, /did not exhaust on the fifth configured-check failure/u);
@@ -423,10 +444,10 @@ test('deterministic fixtures normalize proof semantics while interruption preser
   const text = await source();
   const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   for (const scenario of [
-    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
+    'package-install', 'infrastructure-recovery', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
-  assert.doesNotMatch(applyFault, /'proof-interrupted-daemon'/u);
+  assert.doesNotMatch(applyFault, /'proof-invocation-recovery'/u);
   assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
 });
 

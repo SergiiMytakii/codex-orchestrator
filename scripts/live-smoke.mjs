@@ -18,14 +18,14 @@ const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
   ['commit-policy', runCommitPolicyScenario],
-  ['incomplete-progress-rework', runReviewReadyScenario],
+  ['infrastructure-recovery', runInfrastructureRecoveryScenario],
   ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runReviewReadyScenario],
   ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
-  ['proof-interrupted-daemon', runInterruptedProofDaemonScenario],
+  ['proof-invocation-recovery', runProofInvocationRecoveryScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
   ['quality-gates', runQualityGatesScenario],
   ['safety-negative', runSafetyNegativeScenario],
@@ -36,9 +36,9 @@ const scenarioProfiles = new Map([
     'package-install', 'browser-proof', 'safety-negative',
   ]],
   ['v2-regression', [
-    'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
+    'discovery-matrix', 'commit-policy', 'infrastructure-recovery', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates',
+    'acceptance-proof-negative', 'proof-invocation-recovery', 'review-feedback-continuation', 'quality-gates',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
@@ -219,9 +219,54 @@ async function configureTarget(context, overrides = {}) {
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
+async function runInfrastructureRecoveryScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const modelCallsBefore = (await readModelAudit(context)).length;
+  const interrupted = await runIssue(context, issue.number);
+  assertResult(interrupted, { status: 'transport-failed', resumable: true }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.cycle !== 1 || record.reportRepairs !== 0 || record.mutableInvocation?.phase !== 'launched'
+    || Object.hasOwn(record, 'transportRetries')) {
+    throw new Error(`${scenario}: infrastructure failure consumed semantic budget or lost its canonical invocation fence`);
+  }
+  await assertNoPublication(context, issue.number, scenario);
+  const callsAfterFailure = (await readModelAudit(context)).slice(modelCallsBefore);
+  if (callsAfterFailure.some((call) => call.operation === 'implementation')) {
+    throw new Error(`${scenario}: pre-model infrastructure failure was recorded as a model launch`);
+  }
+  const cleared = await runDaemonTick(context, issue.number);
+  if (cleared.cycle !== 1 || cleared.reportRepairs !== 0 || cleared.mutableInvocation || cleared.terminalOutcome
+    || Object.hasOwn(cleared, 'transportRetries')) {
+    throw new Error(`${scenario}: recovery observation did not clear only the quiescent canonical invocation`);
+  }
+  await assertNoPublication(context, issue.number, scenario);
+  const callsAfterClearing = (await readModelAudit(context)).slice(modelCallsBefore);
+  if (callsAfterClearing.some((call) => call.operation === 'implementation')) {
+    throw new Error(`${scenario}: clearing tick launched a replacement implementation`);
+  }
+  const completed = await runDaemonOnce(context, issue.number);
+  if (completed.status !== 'review-ready') {
+    const evidence = await resultEvidenceDiagnostic(context, completed);
+    throw new Error(`${scenario}: replacement ended ${completed.status}/${completed.kind ?? 'none'}/${evidence}`);
+  }
+  const settled = await readRunRecord(context, issue.number);
+  if (settled.cycle !== 1 || settled.reportRepairs !== 0 || settled.mutableInvocation || settled.reportInvocation
+    || Object.hasOwn(settled, 'transportRetries')) {
+    throw new Error(`${scenario}: recovery changed semantic budgets or left canonical invocation ownership unsettled`);
+  }
+  const implementationCalls = (await readModelAudit(context)).slice(modelCallsBefore)
+    .filter((call) => call.operation === 'implementation');
+  if (implementationCalls.length !== 1) {
+    throw new Error(`${scenario}: expected exactly one real implementation launch after bounded recovery`);
+  }
+  await recordPublication(context, issue.number);
+}
+
 async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
+  const modelCallsBefore = (await readModelAudit(context)).length;
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'review-ready' }, scenario);
   const record = await readRunRecord(context, issue.number);
@@ -229,11 +274,15 @@ async function runReviewReadyScenario(context, scenario) {
     throw new Error(`${scenario}: review-ready lacks passed check and proof bindings`);
   }
   if (scenario === 'acceptance-proof-rework') await assertReworkCycle(context, issue.number);
-  if (scenario === 'incomplete-progress-rework' && record.transportRetries !== 1) {
-    throw new Error(`${scenario}: expected one durable transport retry`);
-  }
   if (scenario === 'report-repair' && record.reportRepairs !== 1) {
     throw new Error(`${scenario}: expected one durable report repair`);
+  }
+  if (scenario === 'report-repair') {
+    const implementationCalls = (await readModelAudit(context)).slice(modelCallsBefore)
+      .filter((call) => call.operation === 'implementation');
+    if (implementationCalls.length !== 2 || record.mutableInvocation || record.reportInvocation) {
+      throw new Error(`${scenario}: report repair did not consume its semantic budget exactly once`);
+    }
   }
   if (scenario === 'browser-proof') {
     const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
@@ -303,6 +352,7 @@ async function assertReworkCycle(context, issueNumber) {
 }
 
 async function runReviewFeedbackContinuationScenario(context, scenario) {
+  await retirePriorDaemonCandidates(context);
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const initial = await runIssue(context, issue.number);
@@ -445,9 +495,19 @@ async function runAcceptanceProofNegativeScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runInterruptedProofDaemonScenario(context, scenario) {
+async function runProofInvocationRecoveryScenario(context, scenario) {
+  await retirePriorDaemonCandidates(context);
+  for (const recoveryMode of ['report-ready', 'process-absent']) {
+    const issueNumber = await runProofInvocationRecoveryCase(context, scenario, recoveryMode);
+    if (recoveryMode === 'report-ready') await retireDaemonCandidate(context, issueNumber);
+  }
+}
+
+async function runProofInvocationRecoveryCase(context, scenario, recoveryMode) {
   const owned = { timeoutMs: context.options.timeoutMs };
-  await withInterruptedProofCleanup(owned, async () => {
+  const modelCallsBefore = (await readModelAudit(context)).length;
+  context.proofRecoveryMode = recoveryMode;
+  try { return await withInterruptedProofCleanup(owned, async () => {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const readLaunchedProof = async () => {
@@ -482,6 +542,9 @@ async function runInterruptedProofDaemonScenario(context, scenario) {
     async () => processGroupIsAbsent(launched.invocation.processGroupId),
     { attempts: Math.max(1, Math.ceil(context.options.timeoutMs / 50)), delayMs: 50 },
   );
+  if (recoveryBoundary !== recoveryMode) {
+    throw new Error(`${scenario}: expected ${recoveryMode} recovery boundary, observed ${recoveryBoundary}`);
+  }
   if (recoveryBoundary === 'report-ready') {
     await waitForProcessGroupAbsent(launched.invocation.processGroupId, context.options.timeoutMs);
   }
@@ -491,23 +554,30 @@ async function runInterruptedProofDaemonScenario(context, scenario) {
     completed = await runDaemonTick(context, issue.number);
     if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: one bounded restart did not adopt the exact proof report`);
   } else {
-    const publicationsBeforeAbsenceRecovery = context.createdPullRequests.length;
     await runDaemonTick(context, issue.number);
     const settledProof = await readProofState(context, launched.record.proofId);
     if (settledProof.status !== 'active' || settledProof.invocation) {
       throw new Error(`${scenario}: absent proof attempt was not settled without replacement`);
     }
-    const proofCallsAfterAbsence = (await readModelAudit(context)).filter((call) => call.scenario === scenario && call.operation === 'proof');
-    if (proofCallsAfterAbsence.length !== 0 || context.createdPullRequests.length !== publicationsBeforeAbsenceRecovery) {
+    const proofCallsAfterAbsence = (await readModelAudit(context)).slice(modelCallsBefore)
+      .filter((call) => call.scenario === scenario && call.operation === 'proof');
+    if (proofCallsAfterAbsence.length !== 1) {
       throw new Error(`${scenario}: absence recovery relaunched proof or published in the clearing tick`);
     }
+    await assertNoPublication(context, issue.number, scenario);
     completed = await runDaemonTick(context, issue.number);
     if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: replacement did not reach review-ready`);
   }
   const adoptedProof = await readProofState(context, launched.record.proofId);
-  if (adoptedProof.status !== 'passed' || adoptedProof.invocation) throw new Error(`${scenario}: proof recovery did not settle as passed`);
-  const proofCalls = (await readModelAudit(context)).filter((call) => call.scenario === scenario && call.operation === 'proof');
-  if (proofCalls.length !== 1) throw new Error(`${scenario}: duplicate real proof model launch during adoption`);
+  if (adoptedProof.status !== 'passed' || adoptedProof.invocation || adoptedProof.reportRepairs !== 0) {
+    throw new Error(`${scenario}: proof recovery did not settle as passed or consumed semantic budget`);
+  }
+  const proofCalls = (await readModelAudit(context)).slice(modelCallsBefore)
+    .filter((call) => call.scenario === scenario && call.operation === 'proof');
+  const expectedProofCalls = recoveryBoundary === 'report-ready' ? 1 : 2;
+  if (proofCalls.length !== expectedProofCalls) {
+    throw new Error(`${scenario}: proof recovery did not adopt or replace the real model invocation exactly once`);
+  }
   const recoveryObservations = (await readHarnessAudit(context)).filter((entry) => entry.scenario === scenario
     && entry.event === 'recovery-observation' && entry.attemptId === attemptId);
   if (recoveryObservations.length !== 1) throw new Error(`${scenario}: expected one explicit recovery observation`);
@@ -515,7 +585,28 @@ async function runInterruptedProofDaemonScenario(context, scenario) {
   await recordPublication(context, issue.number);
   const publicationCount = context.createdPullRequests.length - publicationsBefore;
   if (publicationCount !== 1) throw new Error(`${scenario}: expected exactly one publication`);
+  return issue.number;
   });
+  } finally { context.proofRecoveryMode = undefined; }
+}
+
+async function retireDaemonCandidate(context, issueNumber) {
+  await runCommand('gh', [
+    'issue', 'edit', String(issueNumber), '--repo', context.repo, '--remove-label', 'agent:review',
+  ], { timeoutMs: context.options.timeoutMs });
+}
+
+async function retirePriorDaemonCandidates(context) {
+  for (const issueNumber of context.createdIssues) {
+    const labels = JSON.parse((await runCommand('gh', [
+      'issue', 'view', String(issueNumber), '--repo', context.repo, '--json', 'labels',
+    ], { timeoutMs: context.options.timeoutMs })).stdout).labels.map((label) => label.name);
+    for (const label of ['agent:auto', 'agent:review']) {
+      if (labels.includes(label)) await runCommand('gh', [
+        'issue', 'edit', String(issueNumber), '--repo', context.repo, '--remove-label', label,
+      ], { timeoutMs: context.options.timeoutMs });
+    }
+  }
 }
 
 async function runQualityGatesScenario(context, scenario) {
@@ -577,7 +668,9 @@ async function runIssue(context, issueNumber) {
 
 async function runDaemonOnce(context, issueNumber) {
   const record = await runDaemonTick(context, issueNumber);
-  if (!record.terminalOutcome) throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}`);
+  if (!record.terminalOutcome) {
+    throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}; lifecycle=${record.lifecycle}; reportInvocation=${record.reportInvocation?.phase ?? 'none'}; mutableInvocation=${record.mutableInvocation?.phase ?? 'none'}`);
+  }
   return record.terminalOutcome;
 }
 
@@ -764,6 +857,14 @@ async function assertEvidenceCode(context, result, expectedCode) {
   }
 }
 
+async function resultEvidenceDiagnostic(context, result) {
+  if (typeof result.evidencePath !== 'string') return 'missing-evidence';
+  const evidence = JSON.parse(await readFile(join(context.targetRoot, result.evidencePath), 'utf8'));
+  const code = typeof evidence.code === 'string' ? evidence.code : 'missing-code';
+  const summary = typeof evidence.summary === 'string' ? evidence.summary.replaceAll(context.targetRoot, '<target>').slice(0, 240) : 'missing-summary';
+  return `${code}/${summary}`;
+}
+
 async function assertNoPublication(context, issueNumber, scenario) {
   const branch = `codex/issue-${issueNumber}`;
   const pulls = JSON.parse((await runCommand('gh', [
@@ -886,6 +987,7 @@ function liveSmokeEnv(context) {
     ...process.env,
     CODEX_ORCHESTRATOR_HOME: context.orchestratorHome,
     CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: liveSmokeModel,
+    CODEX_ORCHESTRATOR_LIVE_SMOKE_PROOF_RECOVERY_MODE: context.proofRecoveryMode ?? '',
   };
 }
 
@@ -922,6 +1024,7 @@ ${proofReadinessMarkerPath}
 const args = process.argv.slice(2);
 const expectedModel = ${JSON.stringify(liveSmokeModel)};
 const auditPath = ${JSON.stringify(auditPath)};
+const proofRecoveryMode = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_PROOF_RECOVERY_MODE ?? '';
 const administrative = args[0] === '--version' || (args[0] === 'login' && args[1] === 'status');
 if (administrative) { forward(''); }
 else {
@@ -941,7 +1044,7 @@ function forward(prompt) {
     : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
       : prompt.includes('/triage/') ? 'triage'
         : 'implementation';
-  if (scenario === 'incomplete-progress-rework' && operation === 'implementation') {
+  if (scenario === 'infrastructure-recovery' && operation === 'implementation') {
     const marker = gitPath('v2-live-smoke-incomplete');
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'attempted\\n');
@@ -967,7 +1070,7 @@ function forward(prompt) {
           stderrTail: stderr.replaceAll(process.cwd(), '<worktree>'),
         }) + '\\n');
       }
-      const retryProof = operation === 'proof' && scenario !== 'proof-interrupted-daemon' && code !== 0
+      const retryProof = operation === 'proof' && scenario !== 'proof-invocation-recovery' && code !== 0
         && stderr.includes('stream disconnected before completion') && wrapperAttempt < 3;
       if (retryProof) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
@@ -981,7 +1084,8 @@ function forward(prompt) {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
         applyFault(scenario, operation, prompt);
-        if (scenario === 'proof-interrupted-daemon' && operation === 'proof') durableReadinessMarker(reportPath);
+        if (scenario === 'proof-invocation-recovery' && operation === 'proof'
+          && !discardProofOutputOnce(reportPath)) durableReadinessMarker(reportPath);
       }
       process.exitCode = code ?? (signal ? 1 : 0);
     });
@@ -994,6 +1098,15 @@ function durableReadinessMarker(reportPath) {
   const marker = proofReadinessMarkerPath(reportPath);
   writeFileSync(marker, 'ready\\n');
   handle = openSync(marker, 'r'); fsyncSync(handle); closeSync(handle);
+}
+
+function discardProofOutputOnce(reportPath) {
+  if (proofRecoveryMode !== 'process-absent') return false;
+  const marker = gitPath('v2-live-smoke-proof-output-discarded');
+  try { readFileSync(marker); return false; } catch {}
+  writeFileSync(marker, 'discarded\\n');
+  rmSync(reportPath, { force: true });
+  return true;
 }
 
 function normalizeCodeReview(reportPath, prompt) {
@@ -1033,6 +1146,11 @@ function applyFault(scenario, operation, prompt) {
   if (!reportPath) throw new Error('missing report path');
   if (operation === 'implementation' && scenario === 'report-repair' && !prompt.includes('Report repair only')) {
     writeFileSync(reportPath, '{bad json'); return;
+  }
+  if (operation === 'implementation' && scenario === 'infrastructure-recovery') {
+    writeChange(scenario);
+    normalizeImplementationReport(reportPath, 'Infrastructure recovery fixture prepared.');
+    return;
   }
   if (operation === 'implementation' && scenario === 'commit-policy') {
     runGit(['add', '-A']);
@@ -1083,7 +1201,7 @@ function applyFault(scenario, operation, prompt) {
     return;
   }
   if ([
-    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
+    'package-install', 'infrastructure-recovery', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
@@ -1209,7 +1327,7 @@ function writeImplementation(scenario, reportPath, prompt) {
     writeChange(scenario); writeFileSync(reportPath, '{bad json'); return;
   }
   if (!prompt.includes('Report repair only')) {
-    if (scenario === 'incomplete-progress-rework') {
+    if (scenario === 'infrastructure-recovery') {
       const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
       try { readFileSync(marker); } catch {
         writeFileSync(marker, 'attempted\\n');
@@ -1300,6 +1418,12 @@ function writeAgentReport(reportPath, report) {
     ? { ...report, visualEvidence: report.visualEvidence ?? null, blocker: report.blocker ?? null }
     : report;
   writeFileSync(reportPath, JSON.stringify({ report: generated }));
+}
+
+function normalizeImplementationReport(reportPath, summary) {
+  const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
+  writeAgentReport(reportPath, { version: 1, status: 'completed', summary, changedFiles, residualRisks: [] });
 }
 
 function writeChange(scenario) {

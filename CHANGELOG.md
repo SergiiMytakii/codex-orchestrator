@@ -18,15 +18,28 @@ The format is based on Keep a Changelog, and this project follows SemVer.
   detached materializations of one private-index-captured, ref-pinned Git tree.
   Publication creates and observes the exact single-parent commit from that
   tree before push, including restart-safe branch-CAS reconciliation.
+- Recovery across direct, report-only, mutable worker, spec-author, review, and
+  proof operations now uses one canonical attempt-owned invocation lifecycle.
+  Infrastructure failures before recoverable output do not consume semantic
+  budgets, while recovered Runner-classified output consumes its existing
+  phase budget exactly once.
 - Replaced the generic positive-proof live-smoke scenario with an
   `authoritative-candidate-publication` scenario that injects stale shared-index
   content and proves exact candidate-tree publication plus pin/materialization
   cleanup.
+- Updated interrupted-worker live-smoke scenarios to prove bounded
+  infrastructure clearing, delayed replacement launches, no accidental
+  publication, deterministic process-absent output discard, and strict scratch
+  ownership cleanup under the canonical recovery lifecycle.
 
 ### Fixed
 - New issue worktrees now use a freshly fetched configured remote base and are
   created from its immutable pinned SHA. Base fetch failures remain unclaimed
   and safely retryable.
+
+### Removed
+- Removed the superseded operation-specific recovery owners and parallel state
+  machines after each operation migrated to the canonical invocation lifecycle.
 
 ## [2.0.10] - 2026-07-29
 
