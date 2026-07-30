@@ -1,16 +1,14 @@
 import { canonicalJson, sha256 } from './containment.js';
 import { validateTriageRoute, type TriageRouteV1 } from './triage-route.js';
-import type { WaitingHumanExecutionV1 } from './waiting-human.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MAX_STRING_LENGTH = 16 * 1024;
 const MAX_ARRAY_LENGTH = 256;
 
 const TRIAGE_ARTIFACT_DOMAIN = 'codex-orchestrator-triage-artifact-v1';
-const AMBIGUITY_REVIEW_DOMAIN = 'codex-orchestrator-ambiguity-review-v1';
 const ROUTE_DECISION_DOMAIN = 'codex-orchestrator-route-decision-v1';
 
-export type DeliveryRoute = 'direct' | 'spec-required' | 'awaiting-user';
+export type DeliveryRoute = 'direct' | 'spec-required';
 
 export interface RouteArtifactRefV1 {
   operation: 'triage';
@@ -19,29 +17,11 @@ export interface RouteArtifactRefV1 {
   generationHash: string;
 }
 
-export interface AmbiguityReviewRefV1 {
-  operation: 'ambiguity-review';
-  attemptId: string;
-  candidateSha256: string;
-  artifactSha256: string;
-  verdict: 'approved' | 'rejected';
-  generationHash: string;
-}
-
-export interface AmbiguityReviewArtifactV1 {
-  version: 1;
-  candidateSha256: string;
-  verdict: 'approved' | 'rejected' | 'blocked';
-  evidenceReviewed: string[];
-  findings: string[];
-  recommendation: string;
-}
-
 export interface RouteReceiptV1 {
   version: 1;
   route: DeliveryRoute;
   triage: RouteArtifactRefV1;
-  review: AmbiguityReviewRefV1 | null;
+  review: null;
   artifact: TriageRouteV1;
   decisionSha256: string;
   decidedAt: string;
@@ -51,28 +31,15 @@ export interface RouteReceiptV1 {
 export interface RouteBudgetsV1 {
   version: 1;
   triageRepairs: 0 | 1;
-  candidateReviews: 0 | 1;
+  triageTransportRetries: 0 | 1;
 }
 
 export type MalformedRepairInputV1 = { kind: 'malformed'; findings: string[] };
 
-export type CandidateRepairInputV1 = {
-  kind: 'rejected-candidate';
-  candidate: TriageRouteV1;
-  triage: RouteArtifactRefV1;
-  review: AmbiguityReviewRefV1;
-  findings: string[];
-};
-
 export type RouteExecutionV1 = RouteBudgetsV1 & (
   | { phase: 'triage-ready' }
-  | { phase: 'triage-in-flight' }
-  | { phase: 'candidate-ready'; candidate: TriageRouteV1; triage: RouteArtifactRefV1 }
-  | { phase: 'review-in-flight'; candidate: TriageRouteV1; triage: RouteArtifactRefV1 }
   | { phase: 'malformed-repair-ready'; findings: string[] }
-  | { phase: 'candidate-repair-ready'; candidate: TriageRouteV1; triage: RouteArtifactRefV1; review: AmbiguityReviewRefV1; findings: string[] }
-  | { phase: 'repair-in-flight'; repairInput: MalformedRepairInputV1 | CandidateRepairInputV1 }
-  | { phase: 'route-complete'; triage: RouteArtifactRefV1; review: AmbiguityReviewRefV1 | null }
+  | { phase: 'route-complete'; triage: RouteArtifactRefV1 }
 );
 
 export type RouteLifecycle =
@@ -80,7 +47,6 @@ export type RouteLifecycle =
   | 'triaging'
   | 'routed'
   | 'implementing'
-  | 'waiting-human'
   | 'spec-authoring'
   | 'reworking'
   | 'checking'
@@ -93,36 +59,15 @@ export type RouteLifecycle =
   | 'cancelled'
   | 'internal-error';
 
-export type RoutedLifecycle = 'implementing' | 'spec-authoring' | 'waiting-human';
+export type RoutedLifecycle = 'implementing' | 'spec-authoring';
 
 export function hashTriageArtifact(value: unknown): string {
   return hashDomain(TRIAGE_ARTIFACT_DOMAIN, validateTriageRoute(value));
 }
 
-export function hashAmbiguityReviewArtifact(value: unknown): string {
-  return hashDomain(AMBIGUITY_REVIEW_DOMAIN, validateAmbiguityReviewArtifact(value));
-}
-
 export function hashRouteDecision(value: RouteReceiptV1): string {
   const receipt = validateRouteReceiptCore(value, undefined, false);
   return hashDomain(ROUTE_DECISION_DOMAIN, { ...receipt, decisionSha256: '' });
-}
-
-export function validateAmbiguityReviewArtifact(value: unknown): AmbiguityReviewArtifactV1 {
-  assertExactObject(value, [
-    'version', 'candidateSha256', 'verdict', 'evidenceReviewed', 'findings', 'recommendation',
-  ], 'ambiguity review artifact');
-  if (value.version !== 1) throw new Error('ambiguity review artifact.version must be 1');
-  assertSha256(value.candidateSha256, 'ambiguity review artifact.candidateSha256');
-  if (!['approved', 'rejected', 'blocked'].includes(value.verdict as string)) {
-    throw new Error('ambiguity review artifact.verdict is invalid');
-  }
-  assertStringArray(value.evidenceReviewed, 'ambiguity review artifact.evidenceReviewed', 0);
-  assertUnique(value.evidenceReviewed, 'ambiguity review artifact.evidenceReviewed');
-  assertStringArray(value.findings, 'ambiguity review artifact.findings', 0);
-  assertUnique(value.findings, 'ambiguity review artifact.findings');
-  assertString(value.recommendation, 'ambiguity review artifact.recommendation');
-  return value as unknown as AmbiguityReviewArtifactV1;
 }
 
 export function validateRouteArtifactRef(value: unknown, expectedGenerationHash?: string): RouteArtifactRefV1 {
@@ -132,19 +77,6 @@ export function validateRouteArtifactRef(value: unknown, expectedGenerationHash?
   assertSha256(value.artifactSha256, 'route triage ref.artifactSha256');
   assertGeneration(value.generationHash, expectedGenerationHash, 'route triage ref.generationHash');
   return value as unknown as RouteArtifactRefV1;
-}
-
-export function validateAmbiguityReviewRef(value: unknown, expectedGenerationHash?: string): AmbiguityReviewRefV1 {
-  assertExactObject(value, [
-    'operation', 'attemptId', 'candidateSha256', 'artifactSha256', 'verdict', 'generationHash',
-  ], 'ambiguity review ref');
-  if (value.operation !== 'ambiguity-review') throw new Error('ambiguity review ref.operation must be ambiguity-review');
-  assertString(value.attemptId, 'ambiguity review ref.attemptId');
-  assertSha256(value.candidateSha256, 'ambiguity review ref.candidateSha256');
-  assertSha256(value.artifactSha256, 'ambiguity review ref.artifactSha256');
-  if (value.verdict !== 'approved' && value.verdict !== 'rejected') throw new Error('ambiguity review ref.verdict is invalid');
-  assertGeneration(value.generationHash, expectedGenerationHash, 'ambiguity review ref.generationHash');
-  return value as unknown as AmbiguityReviewRefV1;
 }
 
 export function validateRouteReceipt(value: unknown, expectedGenerationHash?: string): RouteReceiptV1 {
@@ -160,7 +92,7 @@ function validateRouteReceiptCore(
     'version', 'route', 'triage', 'review', 'artifact', 'decisionSha256', 'decidedAt', 'assumptions',
   ], 'route receipt');
   if (value.version !== 1) throw new Error('route receipt.version must be 1');
-  if (!['direct', 'spec-required', 'awaiting-user'].includes(value.route as string)) {
+  if (!['direct', 'spec-required'].includes(value.route as string)) {
     throw new Error('route receipt.route is invalid');
   }
   const triage = validateRouteArtifactRef(value.triage, expectedGenerationHash);
@@ -171,18 +103,7 @@ function validateRouteReceiptCore(
   const artifactSha256 = hashTriageArtifact(artifact);
   if (triage.artifactSha256 !== artifactSha256) throw new Error('route receipt artifact hash mismatch');
 
-  let review: AmbiguityReviewRefV1 | null;
-  if (value.review === null) {
-    review = null;
-  } else {
-    review = validateAmbiguityReviewRef(value.review, expectedGenerationHash ?? triage.generationHash);
-    if (review.generationHash !== triage.generationHash) throw new Error('route receipt review generation mismatch');
-  }
-  if (value.route === 'awaiting-user') {
-    if (review === null || review.verdict !== 'approved') throw new Error('awaiting-user route requires an approved review');
-    if (review.candidateSha256 !== triage.artifactSha256) throw new Error('awaiting-user review candidate hash mismatch');
-    if (review.attemptId === triage.attemptId) throw new Error('triage and ambiguity review attempt IDs must be distinct');
-  } else if (review !== null) {
+  if (value.review !== null) {
     throw new Error(`${String(value.route)} route requires review null`);
   }
 
@@ -206,47 +127,16 @@ function validateRouteReceiptCore(
 export function validateRouteExecution(value: unknown, expectedGenerationHash?: string): RouteExecutionV1 {
   assertRecord(value, 'route execution');
   validateBudgets(value);
-  const budgetKeys = [
-    'version', 'triageRepairs', 'candidateReviews',
-  ];
+  const budgetKeys = ['version', 'triageRepairs', 'triageTransportRetries'];
   if (value.phase === 'triage-ready') {
     assertExactObject(value, [...budgetKeys, 'phase'], 'route execution');
-  } else if (value.phase === 'triage-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase'], 'route execution');
-  } else if (value.phase === 'candidate-ready') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'candidate', 'triage'], 'route execution');
-    validateWaitingCandidate(value.candidate, value.triage, expectedGenerationHash);
-    if (value.candidateReviews !== 0) throw new Error('candidate-ready candidateReviews must be 0');
-  } else if (value.phase === 'review-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'candidate', 'triage'], 'route execution');
-    const triage = validateWaitingCandidate(value.candidate, value.triage, expectedGenerationHash);
-    if (value.candidateReviews !== 0) throw new Error('review-in-flight candidateReviews must be 0');
   } else if (value.phase === 'malformed-repair-ready') {
     assertExactObject(value, [...budgetKeys, 'phase', 'findings'], 'route execution');
     validateFindings(value.findings, 'route execution.findings');
     assertRepairConsumed(value);
-  } else if (value.phase === 'candidate-repair-ready') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'candidate', 'triage', 'review', 'findings'], 'route execution');
-    validateRejectedCandidate(value.candidate, value.triage, value.review, value.findings, expectedGenerationHash);
-    assertRejectedRepairBudgets(value);
-  } else if (value.phase === 'repair-in-flight') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'repairInput'], 'route execution');
-    validateRepairInput(value.repairInput, expectedGenerationHash);
-    assertRepairConsumed(value);
-    if ((value.repairInput as Record<string, unknown>).kind === 'rejected-candidate') {
-      if (value.candidateReviews !== 1) throw new Error('rejected-candidate repair requires candidateReviews 1');
-    } else if (value.candidateReviews !== 0) {
-      throw new Error('malformed repair requires candidateReviews 0');
-    }
   } else if (value.phase === 'route-complete') {
-    assertExactObject(value, [...budgetKeys, 'phase', 'triage', 'review'], 'route execution');
-    const triage = validateRouteArtifactRef(value.triage, expectedGenerationHash);
-    if (value.review !== null) {
-      const review = validateAmbiguityReviewRef(value.review, expectedGenerationHash ?? triage.generationHash);
-      validateReviewBinding(triage, review);
-      if (review.verdict !== 'approved') throw new Error('route-complete review must be approved');
-      if (value.candidateReviews !== 1) throw new Error('reviewed route-complete requires candidateReviews 1');
-    }
+    assertExactObject(value, [...budgetKeys, 'phase', 'triage'], 'route execution');
+    validateRouteArtifactRef(value.triage, expectedGenerationHash);
   } else {
     throw new Error('route execution.phase is invalid');
   }
@@ -273,23 +163,21 @@ export function validateRouteStateInvariant(input: {
     if (execution.phase === 'route-complete') throw new Error('triaging route execution cannot be route-complete');
     return;
   }
+  if (input.lifecycle === 'safe-halt' && hasExecution && !hasReceipt) return void validateRouteExecution(input.routeExecution, input.generationHash);
   if (TERMINAL_LIFECYCLES.includes(input.lifecycle) && !hasExecution && !hasReceipt) return;
   if (!hasExecution || !hasReceipt) throw new Error(`${input.lifecycle} route execution and receipt are required as an exact pair`);
   const execution = validateRouteExecution(input.routeExecution, input.generationHash);
   if (execution.phase !== 'route-complete') throw new Error(`${input.lifecycle} route execution must be route-complete`);
   const receipt = validateRouteReceipt(input.routeReceipt, input.generationHash);
   if (canonicalJson(execution.triage) !== canonicalJson(receipt.triage)
-    || canonicalJson(execution.review) !== canonicalJson(receipt.review)) {
+    || receipt.review !== null) {
     throw new Error('route-complete refs must equal route receipt refs');
   }
-  if (input.lifecycle === 'implementing' && receipt.route !== 'direct') {
-    throw new Error('implementing lifecycle requires direct route');
+  if (input.lifecycle === 'implementing' && !['direct', 'spec-required'].includes(receipt.route)) {
+    throw new Error('implementing lifecycle requires delivery authority route');
   }
   if (input.lifecycle === 'spec-authoring' && receipt.route !== 'spec-required') {
     throw new Error('direct route dispatch requires implementing lifecycle');
-  }
-  if (input.lifecycle === 'waiting-human' && receipt.route !== 'awaiting-user') {
-    throw new Error('waiting-human lifecycle requires awaiting-user route');
   }
 }
 
@@ -300,7 +188,7 @@ export function downstreamLifecycleForRoute(
   const receipt = validateRouteReceipt(receiptValue, expectedGenerationHash);
   if (receipt.route === 'direct') return 'implementing';
   if (receipt.route === 'spec-required') return 'spec-authoring';
-  return 'waiting-human';
+  throw new Error('route receipt is not dispatchable');
 }
 
 export function validateRouteTransition(
@@ -332,26 +220,8 @@ export function validateRouteTransition(
   }
 }
 
-export function validateTrustedAnswerResumeTransition(
-  previous: { lifecycle: RouteLifecycle; routeExecution: unknown; routeReceipt: unknown; generationHash: string },
-  next: { lifecycle: RouteLifecycle; routeExecution: unknown; routeReceipt: unknown; generationHash: string },
-  waitingHuman: WaitingHumanExecutionV1,
-): void {
-  validateRouteStateInvariant(previous);
-  validateRouteStateInvariant(next);
-  if (previous.lifecycle !== 'waiting-human' || (previous.routeReceipt as RouteReceiptV1).route !== 'awaiting-user') {
-    throw new Error('trusted answer resume requires waiting-human awaiting-user authority');
-  }
-  if (waitingHuman.phase !== 'resume-ready') throw new Error('trusted answer resume requires resume-ready evidence');
-  if (next.lifecycle !== 'triaging' || next.routeReceipt !== undefined) throw new Error('trusted answer resume must restart triage without a receipt');
-  const execution = validateRouteExecution(next.routeExecution, next.generationHash);
-  if (execution.phase !== 'triage-ready' || execution.triageRepairs !== 0 || execution.candidateReviews !== 0) {
-    throw new Error('trusted answer resume requires initial route execution');
-  }
-}
-
 const ROUTE_LIFECYCLES: RouteLifecycle[] = [
-  'claimed', 'triaging', 'routed', 'implementing', 'waiting-human', 'spec-authoring', 'reworking', 'checking',
+  'claimed', 'triaging', 'routed', 'implementing', 'spec-authoring', 'reworking', 'checking',
   'proving', 'publishing', 'safe-halt', 'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
 ];
 
@@ -361,67 +231,13 @@ const TERMINAL_LIFECYCLES: RouteLifecycle[] = [
 
 function validateBudgets(value: Record<string, unknown>): void {
   if (value.version !== 1) throw new Error('route execution.version must be 1');
-  for (const key of [
-    'triageRepairs', 'candidateReviews',
-  ] as const) {
+  for (const key of ['triageRepairs', 'triageTransportRetries'] as const) {
     if (value[key] !== 0 && value[key] !== 1) throw new Error(`route execution.${key} must be 0 or 1`);
   }
 }
 
-function validateWaitingCandidate(
-  candidateValue: unknown,
-  triageValue: unknown,
-  expectedGenerationHash?: string,
-): RouteArtifactRefV1 {
-  const candidate = validateTriageRoute(candidateValue);
-  if (candidate.status !== 'awaiting-user') throw new Error('route execution candidate must be awaiting-user');
-  const triage = validateRouteArtifactRef(triageValue, expectedGenerationHash);
-  if (triage.artifactSha256 !== hashTriageArtifact(candidate)) throw new Error('route execution candidate artifact hash mismatch');
-  return triage;
-}
-
-function validateRejectedCandidate(
-  candidate: unknown,
-  triageValue: unknown,
-  reviewValue: unknown,
-  findings: unknown,
-  expectedGenerationHash?: string,
-): void {
-  const triage = validateWaitingCandidate(candidate, triageValue, expectedGenerationHash);
-  const review = validateAmbiguityReviewRef(reviewValue, expectedGenerationHash ?? triage.generationHash);
-  validateReviewBinding(triage, review);
-  if (review.verdict !== 'rejected') throw new Error('candidate repair review must be rejected');
-  validateFindings(findings, 'route execution findings');
-}
-
-function validateRepairInput(value: unknown, expectedGenerationHash?: string): void {
-  assertRecord(value, 'route execution.repairInput');
-  if (value.kind === 'malformed') {
-    assertExactObject(value, ['kind', 'findings'], 'route execution.repairInput');
-    validateFindings(value.findings, 'route execution.repairInput.findings');
-    return;
-  }
-  if (value.kind === 'rejected-candidate') {
-    assertExactObject(value, ['kind', 'candidate', 'triage', 'review', 'findings'], 'route execution.repairInput');
-    validateRejectedCandidate(value.candidate, value.triage, value.review, value.findings, expectedGenerationHash);
-    return;
-  }
-  throw new Error('route execution.repairInput.kind is invalid');
-}
-
-function validateReviewBinding(triage: RouteArtifactRefV1, review: AmbiguityReviewRefV1): void {
-  if (review.generationHash !== triage.generationHash) throw new Error('ambiguity review generation mismatch');
-  if (review.candidateSha256 !== triage.artifactSha256) throw new Error('ambiguity review candidate hash mismatch');
-  if (review.attemptId === triage.attemptId) throw new Error('ambiguity review attempt must be distinct from triage attempt');
-}
-
 function assertRepairConsumed(value: Record<string, unknown>): void {
   if (value.triageRepairs !== 1) throw new Error('repair phase requires triageRepairs 1');
-}
-
-function assertRejectedRepairBudgets(value: Record<string, unknown>): void {
-  assertRepairConsumed(value);
-  if (value.candidateReviews !== 1) throw new Error('rejected candidate requires candidateReviews 1');
 }
 
 function validateFindings(value: unknown, field: string): void {

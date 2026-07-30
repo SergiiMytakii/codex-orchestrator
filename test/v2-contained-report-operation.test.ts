@@ -3,359 +3,235 @@ import { test } from 'node:test';
 
 import {
   InjectedContainedReportOperation,
-  InjectedContainedMutableOperation,
-  type ContainedReportOperationId,
-  type DurableMutableInvocationV1,
-  type DurableReportInvocationV1,
-  type MutableWorktreeOperationId,
+  type ContainedReportOperationDependencies,
+  type PreparedContainedReportAttempt,
 } from '../src/v2/contained-report-operation.js';
 import type { WorkflowGenerationReceipt, WorkflowOperationPolicy } from '../src/v2/workflow-assets.js';
 
 const generationHash = 'a'.repeat(64);
 const workflowGeneration: WorkflowGenerationReceipt = {
-  generationHash, manifestSha256: 'b'.repeat(64), packageVersion: '2.0.10',
-  generationRoot: '/sealed/workflow', contentSha256: 'c'.repeat(64),
+  generationHash,
+  manifestSha256: 'b'.repeat(64),
+  packageVersion: '2.0.1',
+  generationRoot: '/sealed/workflow',
+  contentSha256: 'c'.repeat(64),
 };
-const policy: WorkflowOperationPolicy = {
-  sandboxMode: 'read-only', cwdClass: 'worktree', worktreeAccess: 'read-only', writableRootClasses: [],
-  runnerPostcondition: 'report-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+const readOnlyPolicy: WorkflowOperationPolicy = {
+  sandboxMode: 'read-only',
+  cwdClass: 'worktree',
+  worktreeAccess: 'read-only',
+  writableRootClasses: [],
+  runnerPostcondition: 'report-only',
+  network: 'deny',
+  networkHosts: [],
+  mcpTools: [],
+  approvalCeiling: 'never',
+  externalWrite: false,
 };
-const mutablePolicy: WorkflowOperationPolicy = {
-  sandboxMode: 'workspace-write', cwdClass: 'worktree', worktreeAccess: 'write', writableRootClasses: ['worktree'],
-  runnerPostcondition: 'change-set', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+const directArtifact = {
+  version: 1,
+  status: 'direct',
+  inspectedEvidence: [{ kind: 'issue', location: '#1', summary: 'Read the issue.' }],
+  assumptions: [],
+  direct: { summary: 'Small change.', behaviors: ['Change behavior.'], verification: ['Run test.'] },
+  specRequired: null,
+  blocker: null,
 };
-const specAuthorPolicy: WorkflowOperationPolicy = {
-  sandboxMode: 'workspace-write', cwdClass: 'target-state', worktreeAccess: 'write', writableRootClasses: ['target-state'],
-  runnerPostcondition: 'spec-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+const codeReviewArtifact = {
+  version: 1,
+  operation: 'code-review',
+  targetRevision: 1,
+  targetFingerprint: 'd'.repeat(64),
+  verdict: 'approved',
+  coverage: ['correctness'],
+  defects: [],
+  residualRisks: [],
+  reviewerSessionId: 'reviewer-session-1',
+  repairFindingOutcomes: [],
 };
-const proofPolicy: WorkflowOperationPolicy = {
-  sandboxMode: 'workspace-write', cwdClass: 'worktree', worktreeAccess: 'write', writableRootClasses: ['worktree'],
-  runnerPostcondition: 'proof-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
-};
-const operations: ContainedReportOperationId[] = ['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review', 'acceptance-proof'];
 
-for (const operationId of operations) {
-  test(`${operationId} persists prepare and fenced launch before adopting its attempt-owned report`, async () => {
-    const fixture = invocationFixture(operationId, { launch: 'completed' });
-    const result = await fixture.operation.run(fixture.input);
-    assert.equal(result.status, 'completed');
-    assert.equal(result.status === 'completed' && result.attemptId, `attempt-${operationId}`);
-    assert.deepEqual(fixture.phases, ['prepared', 'launched']);
-    assert.equal(fixture.launches, 1);
+test('report-only launcher returns validated triage payload with the exact domain-separated hash', async () => {
+  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact }, null, 2)));
+
+  const result = await fixture.operation.run(runInput('triage'));
+
+  assert.deepEqual(result, {
+    status: 'completed',
+    attemptId: 'attempt-1',
+    validatedPayload: directArtifact,
+    artifactSha256: '5b88bb5dffd931030fe91e2cbe95b0c07cb6fa789b002ad76ac8fd23dc2288fa',
   });
+  assert.deepEqual(fixture.events, ['snapshot', 'prepare:triage', 'launch:triage', 'snapshot']);
+});
+
+test('implementation reviewer persists prepared and launched identity before accepting a correlated report', async () => {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const input = runInput('code-review');
+  const result = await fixture.operation.run({
+    ...input,
+    reviewContext: {
+      operation: 'code-review', targetRevision: 1,
+      targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
+      previousFindingIds: [],
+    },
+    onPrepared: async () => { fixture.events.push('persist:prepared'); },
+    onLaunched: async ({ pid, processGroupId }) => { fixture.events.push(`persist:launched:${pid}:${processGroupId}`); },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') return;
+  assert.deepEqual(result.validatedPayload, codeReviewArtifact);
+  assert.deepEqual(fixture.events, [
+    'snapshot', 'prepare:code-review', 'persist:prepared', 'launch:code-review',
+    'persist:launched:4242:4242', 'snapshot',
+  ]);
+});
+
+test('implementation reviewer rejects missing launch persistence and stale correlation', async () => {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const missingGate = await fixture.operation.run(runInput('code-review'));
+  assert.deepEqual(missingGate, {
+    status: 'blocked', kind: 'safety', code: 'review-operation-launch-gate-missing',
+  });
+
+  const staleFixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const stale = await staleFixture.operation.run({
+    ...runInput('code-review'),
+    reviewContext: {
+      operation: 'code-review', targetRevision: 2,
+      targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
+      previousFindingIds: [],
+    },
+    onPrepared: async () => {},
+    onLaunched: async () => {},
+  });
+  assert.equal(stale.status, 'invalid');
+});
+
+test('invalid payload returns validation findings without retaining raw payload bytes', async () => {
+  const secret = 'raw-secret-that-must-not-survive';
+  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({
+    report: { ...directArtifact, status: secret },
+  })));
+
+  const result = await fixture.operation.run(runInput('triage'));
+
+  assert.equal(result.status, 'invalid');
+  if (result.status !== 'invalid') return;
+  assert.equal(result.attemptId, 'attempt-1');
+  assert.equal(result.findings.length > 0, true);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal('validatedPayload' in result, false);
+});
+
+test('credential-bearing report bytes are rejected before payload adoption', async () => {
+  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({
+    report: directArtifact,
+    access_token: 'credential-material-12345',
+  })));
+  const result = await fixture.operation.run(runInput('triage'));
+  assert.equal(result.status, 'invalid');
+  assert.equal(JSON.stringify(result).includes('credential-material-12345'), false);
+});
+
+test('quiescence uncertainty returns durable process evidence without an unsafe final snapshot', async () => {
+  const baseline = stableSnapshot();
+  const dependencies: ContainedReportOperationDependencies = {
+    snapshot: async () => structuredClone(baseline),
+    prepare: async () => ({ operation: 'triage', generationHash, policy: readOnlyPolicy }),
+    launch: async () => ({
+      status: 'safe-halt',
+      pid: 123,
+      processGroupId: 123,
+      startedAt: '2026-07-17T00:00:00.000Z',
+      waitForAbsence: async () => {},
+    }),
+  };
+  const result = await new InjectedContainedReportOperation(dependencies).run(runInput('triage'));
+  assert.equal(result.status, 'safe-halt');
+  if (result.status !== 'safe-halt') return;
+  assert.deepEqual(result.process.baseline, baseline);
+});
+
+test('launcher blocks authority or generation drift before starting the process', async () => {
+  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact })), {
+    prepared: {
+      operation: 'triage',
+      generationHash: 'd'.repeat(64),
+      policy: { ...readOnlyPolicy, mcpTools: ['github'] },
+    },
+  });
+
+  const result = await fixture.operation.run(runInput('triage'));
+
+  assert.deepEqual(result, {
+    status: 'blocked', kind: 'safety', code: 'report-operation-authority-drift',
+  });
+  assert.deepEqual(fixture.events, ['snapshot', 'prepare:triage', 'snapshot']);
+});
+
+test('launcher blocks a completed report when any before/after worktree fingerprint differs', async () => {
+  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact })), {
+    snapshots: [
+      { ...stableSnapshot() },
+      { ...stableSnapshot(), trackedContentSha256: 'changed' },
+    ],
+  });
+
+  const result = await fixture.operation.run(runInput('triage'));
+
+  assert.deepEqual(result, {
+    status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated',
+  });
+});
+
+function runInput(operation: 'triage' | 'code-review') {
+  return {
+    operation,
+    attemptId: 'attempt-1',
+    runId: 'run-1',
+    worktreePath: '/worktree',
+    workflowGeneration,
+    promptFacts: ['fact'],
+    signal: new AbortController().signal,
+  };
 }
 
-test('restart adopts the exact exited attempt report before any relaunch', async () => {
-  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-  fixture.report = Buffer.from('{"report":{"status":"direct"}}');
-  fixture.observation = { status: 'absent', processGroupAlive: false };
-  const recovered = await fixture.operation.run(fixture.input);
-  assert.equal(recovered.status, 'completed');
-  assert.equal(fixture.launches, 1);
-  assert.equal(fixture.observations, 1);
-});
-
-test('unknown report read retains the launched fence and never permits a second launch', async () => {
-  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-  fixture.reportReadError = Object.assign(new Error('report I/O failed'), { code: 'EIO' });
-  fixture.observation = { status: 'absent', processGroupAlive: false };
-
-  assert.deepEqual(await fixture.operation.run(fixture.input), {
-    status: 'safe-halt', code: 'report-operation-report-observation-unknown',
-  });
-  assert.equal(fixture.currentInvocation()?.phase, 'launched');
-  assert.equal(fixture.launches, 1);
-});
-
-test('prompt-fact drift rejects stale adoption without clearing or relaunching the attempt', async () => {
-  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-  fixture.report = Buffer.from('{"report":{"status":"direct"}}');
-  fixture.observation = { status: 'absent', processGroupAlive: false };
-  fixture.input.promptFacts = ['fact', 'new authoritative comment'];
-
-  assert.deepEqual(await fixture.operation.run(fixture.input), {
-    status: 'safe-halt', code: 'report-operation-prompt-facts-drift',
-  });
-  assert.equal(fixture.currentInvocation()?.phase, 'launched');
-  assert.equal(fixture.launches, 1);
-  assert.equal(fixture.observations, 0);
-});
-
-test('read-view cleanup failure defers recovered report adoption and preserves its fence', async () => {
-  const fixture = invocationFixture('code-review', { launch: 'safe-halt' });
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-  fixture.report = Buffer.from('{"report":{"verdict":"approved"}}');
-  fixture.observation = { status: 'absent', processGroupAlive: false };
-  fixture.cleanupError = new Error('cleanup failed');
-
-  assert.deepEqual(await fixture.operation.run(fixture.input), {
-    status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed',
-  });
-  assert.equal(fixture.cleanups, 1);
-  assert.equal(fixture.currentInvocation()?.phase, 'launched');
-  assert.equal(fixture.launches, 1);
-
-  fixture.cleanupError = undefined;
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'completed');
-  assert.equal(fixture.cleanups, 2);
-  assert.equal(fixture.launches, 1);
-});
-
-test('live, unknown, host/boot drift, and PID reuse with a live group stay fail closed without duplicate launch', async () => {
-  for (const observation of [
-    { status: 'present', processStartIdentity: 'start-1', processGroupAlive: true },
-    { status: 'unknown' },
-    { status: 'present', processStartIdentity: 'reused', processGroupAlive: true },
-  ] as const) {
-    const fixture = invocationFixture('code-review', { launch: 'safe-halt' });
-    await fixture.operation.run(fixture.input);
-    fixture.observation = observation;
-    assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-    assert.equal(fixture.launches, 1);
-    assert.equal(fixture.observations, 1);
-  }
-  const drift = invocationFixture('spec-review', { launch: 'safe-halt' });
-  await drift.operation.run(drift.input);
-  drift.dependencies.bootId = 'boot-b';
-  assert.equal((await drift.operation.run(drift.input)).status, 'safe-halt');
-  assert.equal(drift.observations, 0);
-});
-
-test('PID reuse permits abandonment only after the old process group is positively absent', async () => {
-  const fixture = invocationFixture('ambiguity-review', { launch: 'safe-halt' });
-  await fixture.operation.run(fixture.input);
-  fixture.observation = { status: 'present', processStartIdentity: 'reused', processGroupAlive: false };
-  assert.deepEqual(await fixture.operation.run(fixture.input), { status: 'retryable', code: 'report-operation-output-unavailable' });
-  assert.equal(fixture.invocation, undefined);
-  assert.equal(fixture.launches, 1);
-});
-
-test('state-CAS failure prevents launch and worktree mutation prevents report adoption', async () => {
-  const conflict = invocationFixture('triage', { launch: 'completed', rejectCas: true });
-  assert.deepEqual(await conflict.operation.run(conflict.input), { status: 'blocked', kind: 'safety', code: 'report-operation-state-conflict' });
-  assert.equal(conflict.launches, 0);
-
-  const changed = invocationFixture('triage', { launch: 'completed', mutateSnapshot: true });
-  assert.deepEqual(await changed.operation.run(changed.input), { status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated' });
-});
-
-test('spec-author report/process uncertainty and prepare CAS faults retain exact ownership without duplicate launch', async () => {
-  const reportUnknown = invocationFixture('spec-author', { launch: 'safe-halt' });
-  await reportUnknown.operation.run(reportUnknown.input);
-  reportUnknown.reportReadError = new Error('EIO');
-  reportUnknown.observation = { status: 'absent', processGroupAlive: false };
-  assert.equal((await reportUnknown.operation.run(reportUnknown.input)).status, 'safe-halt');
-  assert.equal(reportUnknown.launches, 1);
-
-  const processUnknown = invocationFixture('spec-author', { launch: 'safe-halt' });
-  await processUnknown.operation.run(processUnknown.input);
-  processUnknown.observation = { status: 'unknown' };
-  assert.equal((await processUnknown.operation.run(processUnknown.input)).status, 'safe-halt');
-  assert.equal(processUnknown.launches, 1);
-
-  const casConflict = invocationFixture('spec-author', { launch: 'completed', rejectCas: true });
-  assert.equal((await casConflict.operation.run(casConflict.input)).status, 'blocked');
-  assert.equal(casConflict.launches, 0);
-});
-
-for (const operationId of ['qualification-repair', 'implementation', 'review-feedback-implementation'] as MutableWorktreeOperationId[]) {
-  test(`${operationId} durably prepares, fences launch, and adopts one exact mutable result`, async () => {
-    const fixture = mutableInvocationFixture(operationId, 'completed');
-    assert.equal((await fixture.operation.run(fixture.input)).status, 'completed');
-    assert.deepEqual(fixture.phases, ['prepared', 'launched', 'adopted']);
-    assert.equal(fixture.launches, 1);
-  });
+function operationFixture(
+  operation: 'triage' | 'code-review',
+  reportBytes: Buffer,
+  options: {
+    prepared?: PreparedContainedReportAttempt;
+    snapshots?: unknown[];
+  } = {},
+) {
+  const events: string[] = [];
+  const snapshots = options.snapshots ?? [stableSnapshot(), stableSnapshot()];
+  let snapshotIndex = 0;
+  const dependencies: ContainedReportOperationDependencies = {
+    snapshot: async () => {
+      events.push('snapshot');
+      return structuredClone(snapshots[snapshotIndex++]);
+    },
+    prepare: async (input) => {
+      events.push(`prepare:${input.operation}`);
+      return options.prepared ?? { operation, generationHash, policy: readOnlyPolicy };
+    },
+    launch: async (input) => {
+      events.push(`launch:${input.attempt.operation}`);
+      await input.onLaunched?.({ pid: 4242, processGroupId: 4242 });
+      return { status: 'completed', reportBytes };
+    },
+  };
+  return { operation: new InjectedContainedReportOperation(dependencies), events };
 }
 
-test('mutable restart adopts the exact report and worktree result before any relaunch', async () => {
-  const fixture = mutableInvocationFixture('implementation', 'safe-halt');
-  assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
-  fixture.report = Buffer.from('{"version":1,"status":"completed"}');
-  fixture.observation = { status: 'absent', processGroupAlive: false };
-  const recovered = await fixture.operation.run(fixture.input);
-  assert.equal(recovered.status, 'completed');
-  assert.equal(fixture.launches, 1);
-  assert.equal(fixture.currentInvocation()?.phase, 'adopted');
-});
-
-test('mutable recovery rejects uncertain reports and wrong worktrees without duplicate launch', async () => {
-  const uncertain = mutableInvocationFixture('qualification-repair', 'safe-halt');
-  await uncertain.operation.run(uncertain.input);
-  uncertain.reportReadError = new Error('EIO');
-  uncertain.observation = { status: 'absent', processGroupAlive: false };
-  assert.equal((await uncertain.operation.run(uncertain.input)).status, 'safe-halt');
-  assert.equal(uncertain.launches, 1);
-
-  const wrongWorktree = mutableInvocationFixture('review-feedback-implementation', 'safe-halt');
-  await wrongWorktree.operation.run(wrongWorktree.input);
-  wrongWorktree.report = Buffer.from('{"version":1,"status":"completed"}');
-  wrongWorktree.observation = { status: 'absent', processGroupAlive: false };
-  wrongWorktree.worktreeIdentity = 'foreign-worktree';
-  assert.equal((await wrongWorktree.operation.run(wrongWorktree.input)).status, 'safe-halt');
-  assert.equal(wrongWorktree.launches, 1);
-});
-
-test('mutable terminal settlement clears prepared, quiescent launched, and exactly adopted attempts without relaunch', async () => {
-  const prepared = mutableInvocationFixture('implementation', 'completed');
-  prepared.input.beforeLaunch = async () => { throw new Error('authorization revoked'); };
-  assert.equal((await prepared.operation.run(prepared.input)).status, 'retryable');
-  assert.equal(prepared.currentInvocation()?.phase, 'prepared');
-  assert.deepEqual(await prepared.operation.settle(prepared.input), { status: 'settled' });
-  assert.equal(prepared.currentInvocation(), undefined);
-  assert.equal(prepared.launches, 0);
-
-  const launched = mutableInvocationFixture('qualification-repair', 'safe-halt');
-  assert.equal((await launched.operation.run(launched.input)).status, 'safe-halt');
-  launched.observation = { status: 'absent', processGroupAlive: false };
-  assert.deepEqual(await launched.operation.settle(launched.input), { status: 'settled' });
-  assert.equal(launched.currentInvocation(), undefined);
-  assert.equal(launched.launches, 1);
-
-  const adopted = mutableInvocationFixture('review-feedback-implementation', 'completed');
-  assert.equal((await adopted.operation.run(adopted.input)).status, 'completed');
-  adopted.report = Buffer.from('report:review-feedback-implementation');
-  assert.deepEqual(await adopted.operation.settle(adopted.input), { status: 'settled' });
-  assert.equal(adopted.currentInvocation(), undefined);
-  assert.equal(adopted.launches, 1);
-});
-
-test('mutable terminal settlement retains launched ownership when process absence or state CAS is uncertain', async () => {
-  const processUnknown = mutableInvocationFixture('implementation', 'safe-halt');
-  await processUnknown.operation.run(processUnknown.input);
-  processUnknown.observation = { status: 'unknown' };
-  assert.deepEqual(await processUnknown.operation.settle(processUnknown.input), {
-    status: 'safe-halt', code: 'mutable-operation-process-observation-unknown',
-  });
-  assert.equal(processUnknown.currentInvocation()?.phase, 'launched');
-  assert.equal(processUnknown.launches, 1);
-
-  const casConflict = mutableInvocationFixture('implementation', 'completed');
-  casConflict.input.beforeLaunch = async () => { throw new Error('authorization revoked'); };
-  await casConflict.operation.run(casConflict.input);
-  casConflict.rejectNextCas = true;
-  assert.deepEqual(await casConflict.operation.settle(casConflict.input), {
-    status: 'safe-halt', code: 'mutable-operation-state-conflict',
-  });
-  assert.equal(casConflict.currentInvocation()?.phase, 'prepared');
-  assert.equal(casConflict.launches, 0);
-});
-
-function invocationFixture(operationId: ContainedReportOperationId, options: {
-  launch: 'completed' | 'safe-halt'; rejectCas?: boolean; mutateSnapshot?: boolean;
-}) {
-  let invocation: DurableReportInvocationV1 | undefined;
-  let snapshots = 0;
-  const phases: string[] = [];
-  const fixture = {
-    launches: 0,
-    observations: 0,
-    cleanups: 0,
-    report: undefined as Buffer | undefined,
-    reportReadError: undefined as Error | undefined,
-    cleanupError: undefined as Error | undefined,
-    observation: { status: 'present', processStartIdentity: 'start-1', processGroupAlive: true } as any,
-    dependencies: {
-      host: 'host-a', bootId: 'boot-a', now: () => '2026-07-17T00:00:00.000Z',
-      createAttemptId: () => `attempt-${operationId}`,
-      snapshot: async () => ({ ...snapshot(), ...(options.mutateSnapshot && snapshots++ > 0 ? { trackedContentSha256: '9'.repeat(64) } : {}) }),
-      prepare: async () => ({ operation: operationId, generationHash,
-        policy: operationId === 'spec-author' ? specAuthorPolicy : operationId === 'acceptance-proof' ? proofPolicy : policy,
-        reportPath: `/attempts/attempt-${operationId}/report.json` }),
-      readReport: async () => {
-        if (fixture.reportReadError) throw fixture.reportReadError;
-        return fixture.report
-          ? { status: 'available' as const, bytes: fixture.report }
-          : { status: 'absent' as const };
-      },
-      settleAttempt: async () => {
-        fixture.cleanups += 1;
-        if (fixture.cleanupError) throw fixture.cleanupError;
-      },
-      processStartIdentity: async () => 'start-1',
-      inspectProcess: async () => { fixture.observations += 1; return fixture.observation; },
-      launch: async (input: any) => {
-        fixture.launches += 1;
-        await input.onSpawned({ pid: 4242, processGroupId: 4242 });
-        return options.launch === 'completed'
-          ? { status: 'completed' as const, reportBytes: Buffer.from(`report:${operationId}`) }
-          : { status: 'safe-halt' as const };
-      },
-    },
+function stableSnapshot() {
+  return {
+    headSha: '1',
+    indexTreeSha: '2',
+    trackedContentSha256: '3',
+    untrackedContentSha256: '4',
+    worktreeIdentity: '5',
   };
-  const state = {
-    read: async () => structuredClone(invocation),
-    compareAndSwap: async (expected: DurableReportInvocationV1 | undefined, next: DurableReportInvocationV1 | undefined) => {
-      if (options.rejectCas) return false;
-      assert.deepEqual(invocation, expected);
-      invocation = next ? structuredClone(next) : undefined;
-      if (next) phases.push(next.phase);
-      return true;
-    },
-  };
-  return Object.assign(fixture, {
-    currentInvocation: () => structuredClone(invocation),
-    get invocation() { return invocation; },
-    phases,
-    operation: new InjectedContainedReportOperation(fixture.dependencies),
-    input: { operation: operationId, runId: 'run-1', worktreePath: '/worktree', workflowGeneration,
-      promptFacts: ['fact'], signal: new AbortController().signal, invocationState: state },
-  });
-}
-
-function snapshot() {
-  return { headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
-    untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'worktree-1' };
-}
-
-function mutableInvocationFixture(operationId: MutableWorktreeOperationId, launch: 'completed' | 'safe-halt') {
-  let invocation: DurableMutableInvocationV1 | undefined;
-  const phases: string[] = [];
-  const fixture = {
-    launches: 0,
-    rejectNextCas: false,
-    report: undefined as Buffer | undefined,
-    reportReadError: undefined as Error | undefined,
-    observation: { status: 'present', processStartIdentity: 'start-1', processGroupAlive: true } as any,
-    worktreeIdentity: 'worktree-1',
-    dependencies: {
-      host: 'host-a', bootId: 'boot-a', now: () => '2026-07-29T00:00:00.000Z', createAttemptId: () => `attempt-${operationId}`,
-      snapshot: async () => ({ ...snapshot(), worktreeIdentity: fixture.worktreeIdentity }),
-      prepare: async () => ({ operation: operationId === 'qualification-repair' ? 'qualification-repair' as const : 'implementation' as const,
-        generationHash, policy: mutablePolicy, reportPath: `/attempts/attempt-${operationId}/report.json` }),
-      readReport: async () => {
-        if (fixture.reportReadError) throw fixture.reportReadError;
-        return fixture.report ? { status: 'available' as const, bytes: fixture.report } : { status: 'absent' as const };
-      },
-      processStartIdentity: async () => 'start-1',
-      inspectProcess: async () => fixture.observation,
-      launch: async (input: any) => {
-        fixture.launches += 1;
-        await input.onSpawned({ pid: 4242, processGroupId: 4242 });
-        const reportBytes = Buffer.from(`report:${operationId}`);
-        return launch === 'completed' ? { status: 'completed' as const, reportBytes } : { status: 'safe-halt' as const };
-      },
-    },
-  };
-  const state = {
-    read: async () => structuredClone(invocation),
-    compareAndSwap: async (expected: DurableMutableInvocationV1 | undefined, next: DurableMutableInvocationV1 | undefined) => {
-      if (fixture.rejectNextCas) { fixture.rejectNextCas = false; return false; }
-      assert.deepEqual(invocation, expected);
-      invocation = next ? structuredClone(next) : undefined;
-      if (next) phases.push(next.phase);
-      return true;
-    },
-  };
-  return Object.assign(fixture, {
-    phases,
-    currentInvocation: () => structuredClone(invocation),
-    operation: new InjectedContainedMutableOperation(fixture.dependencies),
-    input: { operation: operationId, runId: 'run-1', worktreePath: '/worktree', workflowGeneration,
-      promptFacts: ['phase-owned-fact'], signal: new AbortController().signal, invocationState: state,
-      context: { repairOnly: false, reworkFindings: [] },
-      beforeLaunch: undefined as (() => Promise<void>) | undefined },
-  });
 }

@@ -66,8 +66,8 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     for (const module of [
       'acceptance-proof', 'atomic-store', 'candidate', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
       'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
-      'proof-report', 'proof-store', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
-      'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'waiting-human', 'waiting-human-coordinator', 'workflow-assets',
+      'proof-report', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
+      'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'workflow-assets',
     ]) {
       assert.equal(packedPaths.includes(`dist/src/v2/${module}.js`), true, module);
     }
@@ -95,10 +95,9 @@ const exactApprovedCandidateAdapter: CandidateGitV2 = {
   captureAndPin: async () => { throw new Error('fixture'); },
   inspectPin: async () => { throw new Error('fixture'); },
   normalizeSharedIndex: async () => { throw new Error('fixture'); },
-  prepareExecution: async () => { throw new Error('fixture'); },
-  markExecutionLaunched: () => { throw new Error('fixture'); },
-  inspectExecution: async () => { throw new Error('fixture'); },
-  removeExecution: async () => { throw new Error('fixture'); },
+  prepareMaterialization: async () => { throw new Error('fixture'); },
+  inspectMaterialization: async () => { throw new Error('fixture'); },
+  removeMaterialization: async () => { throw new Error('fixture'); },
   copyProofArtifacts: async () => { throw new Error('fixture'); },
   createOrObserveCommit: async () => { throw new Error('fixture'); },
   releasePin: async () => { throw new Error('fixture'); },
@@ -110,9 +109,9 @@ const legacyFreshness = async (legacyPayload: CheckedChangePayloadV1): Promise<C
   worktreeIdentity: legacyPayload.worktreeIdentity, checkPolicySha256: legacyPayload.checkPolicySha256,
 });
 const legacyProof = new AcceptanceProof({
-  checkedChangeReader: {} as never, proofRecords: {} as never, proofAgent: legacyAgent,
+  checkedChangeReader: {} as never, proofAgent: legacyAgent,
   inspectFreshness: legacyFreshness, readArtifact: async () => ({} as never),
-  proofArtifactDir: '.proof', now: () => new Date(0).toISOString(),
+  proofArtifactDir: '.proof',
 });
 void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void legacyProof;
 `);

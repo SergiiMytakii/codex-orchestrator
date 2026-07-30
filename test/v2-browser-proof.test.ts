@@ -9,7 +9,6 @@ import { chromium } from 'playwright-core';
 import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../src/v2/acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { validateProofReport, type ProofReportV1 } from '../src/v2/proof-report.js';
 
 test('browser proof report requires criterion-linked responsive screenshots, DOM state, diagnostics, and analysis', () => {
@@ -94,7 +93,6 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
     }];
     const proof = new AcceptanceProof({
       checkedChangeReader: capabilities,
-      proofRecords: new InMemoryProofRecordWriter(),
       proofAgent: {
         run: async () => ({
           kind: 'report',
@@ -117,10 +115,9 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
       readArtifact: (relativePath) => readFile(join(root, relativePath)),
       inspectArtifact: async (relativePath) => ({ modifiedAt: (await stat(join(root, relativePath))).mtime.toISOString() }),
       proofArtifactDir: proofRoot,
-      now: () => new Date().toISOString(),
     });
 
-    const result = await proof.proveChange({ proofId: 'proof-browser', issue, frozenCriteria: criteria, checkedChange });
+    const result = await proof.proveChange({ proofId: 'proof-browser', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange });
     assert.equal(result.status, 'passed');
     if (result.status !== 'passed') return;
     assert.deepEqual(result.receipt.publishableEvidence.map((evidence) => evidence.ref), [
@@ -137,6 +134,7 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
 test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and misclassified browser artifacts', async () => {
   const cases: Array<{
     name: string;
+    expected?: 'internal-error' | 'report-repair';
     mutate: (input: { report: ProofReportV1; bytes: Map<string, Buffer>; metadata: Map<string, string>; changedFiles: string[] }) => void;
   }> = [
     {
@@ -161,6 +159,7 @@ test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and m
     },
     {
       name: 'local diagnostics marked publishable',
+      expected: 'report-repair',
       mutate: ({ report }) => { report.artifacts.find((artifact) => artifact.kind === 'console-log')!.publishable = true; },
     },
     {
@@ -171,7 +170,7 @@ test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and m
 
   for (const entry of cases) {
     const result = await runPolicyFixture(entry.mutate);
-    assert.equal(result.status, 'internal-error', entry.name);
+    assert.equal(result.status, entry.expected ?? 'internal-error', entry.name);
   }
 });
 
@@ -328,7 +327,6 @@ async function runPolicyFixture(
   for (const artifact of report.artifacts) artifact.sha256 = sha256(bytes.get(artifact.relativePath)!);
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofRecords: new InMemoryProofRecordWriter(),
     proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: changedFiles }) },
     inspectFreshness: async () => ({
       headSha: payload.headSha,
@@ -341,7 +339,6 @@ async function runPolicyFixture(
     readArtifact: async (relativePath) => bytes.get(relativePath)!,
     inspectArtifact: async (relativePath) => ({ modifiedAt: metadata.get(relativePath)! }),
     proofArtifactDir: 'proofs/proof-browser',
-    now: () => '2026-07-16T12:00:00.000Z',
   });
   const issue: IssueSnapshot = {
     number: 77,
@@ -353,6 +350,12 @@ async function runPolicyFixture(
   };
   return proof.proveChange({
     proofId: 'proof-browser',
+    attemptId: 'proof-attempt-1',
+    recoverOnly: false,
+    proofStartedAt: '2026-07-16T12:00:00.000Z',
+    transportRetryCount: 0,
+    reportRepairCount: 0,
+    reportRepairFindings: [],
     issue,
     frozenCriteria: [{ id: 'ac-web', order: 1, source: 'explicit', text: 'Browser behavior works.' }],
     checkedChange: capabilities.mint(payload),

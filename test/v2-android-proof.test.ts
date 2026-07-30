@@ -5,7 +5,6 @@ import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../sr
 import { checkedChangePayloadSha256, createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { validateProofReport, type ProofReportV1 } from '../src/v2/proof-report.js';
 
 test('Android proof report requires lease-bound screenshot, UI hierarchy, device log, workflow, and analysis', () => {
@@ -75,7 +74,7 @@ test('AcceptanceProof accepts current Runner-prepared Android artifacts without 
 test('AcceptanceProof persists an unfinished Android UI warning even when the worker omits it', async () => {
   const warning = 'Android UI proof unfinished: emulator boot timed out.';
   const result = await runAcceptanceFixture({ runnerPreparationWarnings: [warning] });
-  assert.equal(result.status, 'passed', JSON.stringify(result));
+  assert.equal(result.status, 'passed');
   assert.match(result.receipt.summary, /passed with warning/iu);
   assert.match(result.receipt.summary, /emulator boot timed out/iu);
   const saturated = await runAcceptanceFixture({ runnerPreparationWarnings: [warning], residualRiskCount: 256 });
@@ -108,7 +107,7 @@ test('AcceptanceProof rejects secret-bearing Android device logs before lease ac
   assert.deepEqual(calls, ['release']);
 });
 
-test('AcceptanceProof rejects stale Android state and still verifies custody after report-only repair', async () => {
+test('AcceptanceProof rejects stale Android state and retains custody for caller-owned report repair', async () => {
   const lease: AndroidLeaseVerifier = { verify: async () => {}, release: async () => {} };
   assert.equal((await runAcceptanceFixture({
     lease,
@@ -120,9 +119,8 @@ test('AcceptanceProof rejects stale Android state and still verifies custody aft
     verify: async () => { calls.push('verify'); },
     release: async () => { calls.push('release'); },
   };
-  const repaired = await runAcceptanceFixture({ lease: repairLease, malformedFirstReport: true });
-  assert.equal(repaired.status, 'passed', JSON.stringify(repaired));
-  assert.deepEqual(calls, ['verify', 'release']);
+  assert.equal((await runAcceptanceFixture({ lease: repairLease, malformedFirstReport: true })).status, 'report-repair');
+  assert.deepEqual(calls, []);
 });
 
 function androidReport(): unknown {
@@ -192,7 +190,6 @@ async function runAcceptanceFixture(input: {
   const report = androidReport() as ProofReportV1;
   if (input.runnerPreparationWarnings?.length && !input.runnerPreparedArtifactPaths) {
     report.decision = { mode: 'non-visual', targets: [] };
-    report.checks = [];
     report.criteria = report.criteria.map((criterion) => ({
       ...criterion, surfaces: ['non-visual'], evidenceRefs: [payload.checks[0]!.id],
     }));
@@ -234,21 +231,16 @@ async function runAcceptanceFixture(input: {
   const metadata = new Map(report.artifacts.map((artifact) => [artifact.relativePath, '2026-07-16T12:00:01.000Z']));
   input.mutateMetadata?.(metadata);
   for (const reportArtifact of report.artifacts) reportArtifact.sha256 = sha256(bytes.get(reportArtifact.relativePath)!);
-  const proofPhaseArtifactSha256 = () => Object.fromEntries([...bytes].map(([path, value]) => [path, sha256(value)]).sort());
   let agentCalls = 0;
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofRecords: new InMemoryProofRecordWriter(),
     proofAgent: {
       run: async () => {
         agentCalls += 1;
         if (input.malformedFirstReport && agentCalls === 1) {
           const malformed = structuredClone(report) as unknown as Record<string, unknown>;
           delete malformed.visualEvidence;
-          return {
-            kind: 'report' as const, report: malformed,
-            proofPhaseChangedFiles: report.artifacts.map((item) => item.relativePath), proofPhaseArtifactSha256: proofPhaseArtifactSha256(),
-          };
+          return { kind: 'report' as const, report: malformed, proofPhaseChangedFiles: report.artifacts.map((item) => item.relativePath) };
         }
         return {
           kind: 'report' as const,
@@ -256,7 +248,6 @@ async function runAcceptanceFixture(input: {
           proofPhaseChangedFiles: input.runnerPreparedArtifactPaths
             ? []
             : input.malformedFirstReport ? [] : report.artifacts.map((item) => item.relativePath),
-          proofPhaseArtifactSha256: proofPhaseArtifactSha256(),
         };
       },
     },
@@ -272,22 +263,18 @@ async function runAcceptanceFixture(input: {
     inspectArtifact: async (relativePath) => ({ modifiedAt: metadata.get(relativePath)! }),
     androidLease: input.lease,
     proofArtifactDir: 'proofs/proof-android',
-    now: () => '2026-07-16T12:00:00.000Z',
   });
   const issue: IssueSnapshot = {
     number: 88, title: 'Android proof fixture', body: 'Prove the ready state.',
     url: 'https://example.invalid/issues/88', state: 'OPEN', labels: ['agent:auto'],
   };
   const criteria: FrozenCriterion[] = [{ id: 'ac-android', order: 1, source: 'explicit', text: 'Android ready state is visible.' }];
-  const proofInput = {
-    proofId: 'proof-android', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload),
+  return proof.proveChange({
+    proofId: 'proof-android', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload),
     runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths,
     runnerPreparedArtifactSha256,
     runnerPreparationWarnings: input.runnerPreparationWarnings,
-  };
-  const result = await proof.proveChange(proofInput);
-  return input.malformedFirstReport && result.status === 'transport-failed'
-    ? proof.proveChange(proofInput) : result;
+  });
 }
 
 function checkedPayload(): CheckedChangePayloadV1 {

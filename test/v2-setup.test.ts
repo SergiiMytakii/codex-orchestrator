@@ -96,7 +96,7 @@ test('prepare-labels paginates case-insensitively and creates only missing label
   };
   const result = await new Setup(base).execute({ targetRoot: root, operation: 'prepare-labels', dryRun: false });
   assert.deepEqual(result, { status: 'labels-prepared' });
-  assert.deepEqual(created, ['agent:blocked', 'agent:review', 'agent:waiting-human']);
+  assert.deepEqual(created, ['agent:blocked', 'agent:review']);
   assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
 });
 
@@ -114,7 +114,6 @@ test('prepare-labels dry-run reports local and paginated GitHub actions with zer
       { kind: 'create-label', name: 'agent:running' },
       { kind: 'create-label', name: 'agent:blocked' },
       { kind: 'create-label', name: 'agent:review' },
-      { kind: 'create-label', name: 'agent:waiting-human' },
     ],
   });
   await assert.rejects(stat(join(root, '.codex-orchestrator')), { code: 'ENOENT' });
@@ -132,7 +131,7 @@ test('prepare-labels returns typed partial progress and always releases ownershi
   assert.deepEqual(result, {
     status: 'labels-partial',
     created: ['agent:auto', 'agent:running'],
-    missing: ['agent:blocked', 'agent:review', 'agent:waiting-human'],
+    missing: ['agent:blocked', 'agent:review'],
     cause: { code: 'github-unavailable', summary: 'GitHub label creation failed.' },
   });
   assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
@@ -157,7 +156,6 @@ test('doctor and status return deterministic read-only diagnostics owned by Setu
   effects.length = 0;
   deps.labels.listPage = async () => ({ labels: [
     { name: 'agent:auto' }, { name: 'agent:running' }, { name: 'agent:blocked' }, { name: 'agent:review' },
-    { name: 'agent:waiting-human' },
   ], nextCursor: undefined });
   for (const operation of ['doctor', 'status'] as const) {
     const result = await setup.execute({ targetRoot: root, operation, dryRun: false });

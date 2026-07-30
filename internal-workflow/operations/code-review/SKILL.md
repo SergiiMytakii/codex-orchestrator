@@ -7,13 +7,12 @@ separate operation. Use the declared resources for
 [confidence](../../docs/agents/confidence-rubric.md),
 [contract tests](../../docs/agents/contract-test-ledger.md),
 [review applicability](../../docs/agents/review-gates.md), and
-[Full/Closure mechanics](../../docs/agents/review-protocol.md). The supplied
+[review mechanics](../../docs/agents/review-protocol.md). The supplied
 review capsule is the exact target and authority.
 
-For Closure, copy every supplied canonical defect's `id`, `class`, `invariant`,
-`failure`, and `introducedTargetRevision` exactly. Do not paraphrase immutable
-defect fields; express verification through the allowed status, revision,
-evidence, and repair-finding outcome fields.
+Review the complete target after every repair. Account for every supplied
+previous finding ID and copy canonical defect identity fields exactly. Express
+verification through status, revision, evidence, and finding outcomes.
 
 Use `needs-work` for concrete defects that the bounded implementation cycle can
 repair. Reserve `rejected` for a target or authority that cannot safely proceed

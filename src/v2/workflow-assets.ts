@@ -24,14 +24,9 @@ const EXPECTED_OPERATION_BINDINGS: Record<string, {
   sourceSkill: string | null; dependencySkills: string[]; outputSchema: string; profile: string;
 }> = {
   'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'proof_agent' },
-  'ambiguity-review': { sourceSkill: null, dependencySkills: [], outputSchema: 'schemas/ambiguity-review-v1.json', profile: 'reviewer_deep' },
   'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json', profile: 'reviewer_standard' },
   implementation: {
     sourceSkill: 'agent-auto', dependencySkills: ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'],
-    outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer_standard',
-  },
-  'qualification-repair': {
-    sourceSkill: null, dependencySkills: ['code-debugger', 'diagnosing-bugs', 'tdd'],
     outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer_standard',
   },
   'spec-author': { sourceSkill: 'implementation-spec-maker', dependencySkills: [], outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer_standard' },
@@ -556,7 +551,7 @@ function validateOperationPolicy(id: string, value: Record<string, unknown>): vo
   if (value.network !== 'deny' || !Array.isArray(value.networkHosts) || value.networkHosts.length !== 0
     || !Array.isArray(value.mcpTools) || value.mcpTools.length !== 0 || value.approvalCeiling !== 'never'
     || value.externalWrite !== false) throw new Error(`workflow operation authority is invalid: ${id}`);
-  const expected = (id === 'implementation' || id === 'qualification-repair')
+  const expected = id === 'implementation'
     ? ['workspace-write', 'worktree', 'write', 'worktree', 'change-set']
     : id === 'acceptance-proof'
       ? ['workspace-write', 'worktree', 'write', 'worktree', 'proof-only']

@@ -44,6 +44,7 @@ export interface CheckedChangePayloadV2 {
   issueNumber: number;
   cycle: 1 | 2 | 3 | 4 | 5;
   baseSha: string;
+  deliveryAuthoritySha256: string;
   binding: CandidateBindingV2;
   changedFiles: string[];
   checks: Array<{
@@ -188,7 +189,7 @@ function validatePayloadV1(value: unknown): asserts value is CheckedChangePayloa
 
 function validatePayloadV2(value: unknown): asserts value is CheckedChangePayloadV2 {
   assertExactObject(value, [
-    'version', 'canonicalRepository', 'runId', 'issueNumber', 'cycle', 'baseSha', 'binding', 'changedFiles',
+    'version', 'canonicalRepository', 'runId', 'issueNumber', 'cycle', 'baseSha', 'deliveryAuthoritySha256', 'binding', 'changedFiles',
     'checks', 'checkPolicySha256', 'packageVersion', 'proofSchemaVersion',
   ], 'CheckedChange payload');
   if (value.version !== 2 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5 || value.proofSchemaVersion !== 1) {
@@ -196,6 +197,7 @@ function validatePayloadV2(value: unknown): asserts value is CheckedChangePayloa
   }
   validateCommonIdentity(value);
   assertGitSha(value.baseSha, 'CheckedChange.baseSha');
+  assertSha256(value.deliveryAuthoritySha256, 'CheckedChange.deliveryAuthoritySha256');
   const binding = validateCandidateBinding(value.binding, 'CheckedChange.binding', value.runId as string);
   validateChangedFiles(value.changedFiles);
   if (!sameStrings(value.changedFiles, binding.canonicalChangedFiles)) throw new Error('CheckedChange changedFiles must equal candidate binding paths');

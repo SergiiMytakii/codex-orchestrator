@@ -5,7 +5,7 @@ import { InMemoryGitHubIssueAdapter } from '../src/v2/adapters/issues.js';
 import { GhCliPullRequestAdapter } from '../src/v2/adapters/gh-pull-request-adapter.js';
 import type { CommandExecutor } from '../src/v2/adapters/gh-cli.js';
 import { InMemoryGitHubPullRequestAdapter, type GitHubPullRequestReviewTarget } from '../src/v2/adapters/pull-requests.js';
-import { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
+import { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 
 test('freezes only authorized eligible review sources', async () => {
   const pullRequests = pullRequestFixture();
@@ -87,7 +87,7 @@ for (const paginationFailure of ['omitted-end-cursor', 'page-bound'] as const) {
       if (args.some((argument) => argument.endsWith('/reviews'))) return { stdout: '', stderr: '' };
       return jsonResult(reviewTargetGraphQl());
     };
-    const service = new ReviewFeedbackCoordinator({
+    const service = new ReviewFeedbackObserver({
       pullRequests: new GhCliPullRequestAdapter('owner', 'repo', executor),
       issues: new PermissionFixture({}),
     });
@@ -132,9 +132,9 @@ for (const heads of [
     assert.ok(rest?.headSha);
     const input = { ...observationInput(), expectedHeadSha: rest.headSha, restPullRequest: {
       number: rest.number, nodeId: rest.nodeId, headSha: rest.headSha, body: rest.body,
-    } } as Parameters<ReviewFeedbackCoordinator['observeAndFreeze']>[0];
+    } } as Parameters<ReviewFeedbackObserver['observeAndFreeze']>[0];
 
-    const result = await new ReviewFeedbackCoordinator({ pullRequests, issues: new PermissionFixture({}) })
+    const result = await new ReviewFeedbackObserver({ pullRequests, issues: new PermissionFixture({}) })
       .observeAndFreeze(input);
 
     assert.equal(result.status, 'retryable');
@@ -180,8 +180,8 @@ test('revalidation rejects edited or revoked sources and post-push permits only 
   assert.equal((await service.revalidate({ batch: observed.batch, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
 });
 
-function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: PermissionFixture): ReviewFeedbackCoordinator {
-  return new ReviewFeedbackCoordinator({
+function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: PermissionFixture): ReviewFeedbackObserver {
+  return new ReviewFeedbackObserver({
     pullRequests, issues, now: () => '2026-07-27T10:05:00.000Z',
   });
 }

@@ -1,31 +1,33 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { platform, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 1_800_000;
 const liveSmokeModel = 'gpt-5.6-luna';
-const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
-  ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
+const approvedLiveSmokeRepo = 'SergiiMytakii/codex-orchestrator-live-smoke';
+const defaultLiveSmokeRepo = approvedLiveSmokeRepo;
+const productionRepo = 'SergiiMytakii/codex-orchestrator';
+const scratchLockBranch = 'codex-orchestrator-live-smoke-lock';
 const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
+  ['spec-first', runSpecFirstScenario],
+  ['product-question', runProductQuestionScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
   ['commit-policy', runCommitPolicyScenario],
-  ['infrastructure-recovery', runInfrastructureRecoveryScenario],
+  ['incomplete-progress-rework', runReviewReadyScenario],
   ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runReviewReadyScenario],
   ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
-  ['proof-invocation-recovery', runProofInvocationRecoveryScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
   ['quality-gates', runQualityGatesScenario],
   ['safety-negative', runSafetyNegativeScenario],
@@ -33,12 +35,12 @@ const scenarioDefinitions = new Map([
 
 const scenarioProfiles = new Map([
   ['core-release', [
-    'package-install', 'browser-proof', 'safety-negative',
+    'package-install', 'spec-first', 'product-question', 'review-feedback-continuation',
   ]],
   ['v2-regression', [
-    'discovery-matrix', 'commit-policy', 'infrastructure-recovery', 'report-repair',
+    'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'proof-invocation-recovery', 'review-feedback-continuation', 'quality-gates',
+    'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
@@ -50,22 +52,29 @@ async function main() {
   if (options.selfTestLiveCodex) { await selfTestLiveCodex(); return; }
   const selected = selectScenarios(options);
   const runId = options.runId ?? new Date().toISOString().replace(/[-:TZ.]/gu, '').slice(0, 14);
-  const root = options.workDir ? resolve(options.workDir) : await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
+  const root = await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
   const context = {
     options, runId, root, sourceRoot, repo: options.repo,
     reportPath: join(root, 'live-smoke-report.md'), modelAuditPath: join(root, 'model-audit.jsonl'),
-    harnessAuditPath: join(root, 'harness-audit.jsonl'),
     orchestratorHome: join(root, 'orchestrator-home'),
     targetRoot: '', cliPath: '', liveCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
+    baselineLabels: new Set(), createdLabels: [], baselineCandidateRefs: new Set(), baselineWorktrees: new Set(), lockAcquired: false,
   };
   await appendReport(context, `# V2 live smoke ${runId}\n\nRepository: ${context.repo}\n\nModel: ${liveSmokeModel}\n\n`);
   let failed = false;
   try {
+    await preflight(context);
     context.cliPath = await preparePackagedCandidate(context);
     context.liveCodexPath = await writeLiveCodex(context);
     context.targetRoot = await prepareTarget(context);
-    await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
+    await acquireScratchLock(context);
+    context.baselineCandidateRefs = new Set(await listCandidateRefs(context));
+    context.baselineWorktrees = new Set(await listWorktrees(context));
+    context.baselineLabels = new Set(await listRepositoryLabels(context));
+    const setup = await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
+    if (setup.result.status !== 'labels-prepared') throw new Error(`scratch label setup was incomplete: ${setup.result.status}`);
+    context.createdLabels = (await listRepositoryLabels(context)).filter((label) => !context.baselineLabels.has(label));
     context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
     await configureTarget(context);
     for (const scenario of selected) {
@@ -80,7 +89,6 @@ async function main() {
       await appendReport(context, `- ${scenario}: passed (${Date.now() - started}ms; ${modelEvidence})\n`);
     }
     await appendReport(context, '\nAll selected scenarios passed.\n');
-    process.stdout.write(`[v2-live-smoke] passed; report ${context.reportPath}\n`);
   } catch (error) {
     failed = true;
     await appendReport(context, `\nFailure: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -102,7 +110,7 @@ function parseArgs(args) {
   const options = {
     scenarios: [], profile: 'core-release', repo: defaultLiveSmokeRepo, cleanup: true,
     cleanupMode: 'delete', skipLocalTests: false, keepPackageTarball: false,
-    timeoutMs: defaultTimeoutMs, target: undefined, workDir: undefined, runId: undefined, help: false,
+    timeoutMs: defaultTimeoutMs, runId: undefined, help: false,
     selfTestFakeAgent: false, selfTestLiveCodex: false,
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -113,15 +121,13 @@ function parseArgs(args) {
     if (flag === '--keep-package-tarball') { options.keepPackageTarball = true; continue; }
     if (flag === '--self-test-fake-agent') { options.selfTestFakeAgent = true; continue; }
     if (flag === '--self-test-live-codex') { options.selfTestLiveCodex = true; continue; }
-    if (['--scenario', '--profile', '--repo', '--cleanup-mode', '--timeout-ms', '--target', '--work-dir', '--run-id'].includes(flag)) {
+    if (['--scenario', '--profile', '--repo', '--cleanup-mode', '--timeout-ms', '--run-id'].includes(flag)) {
       if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
       if (flag === '--scenario') options.scenarios.push(value);
       else if (flag === '--profile') options.profile = value;
       else if (flag === '--repo') options.repo = value;
       else if (flag === '--cleanup-mode') options.cleanupMode = value;
       else if (flag === '--timeout-ms') options.timeoutMs = Number(value);
-      else if (flag === '--target') options.target = value;
-      else if (flag === '--work-dir') options.workDir = value;
       else if (flag === '--run-id') options.runId = value.replace(/[^a-zA-Z0-9._-]/gu, '-');
       index += 1; continue;
     }
@@ -152,7 +158,7 @@ function helpText() {
     `Scenarios: ${Array.from(scenarioDefinitions.keys()).join(', ')}`,
     `Profiles: ${Array.from(scenarioProfiles.keys()).join(', ')}`,
     'Default core-release. Use --profile or repeat --scenario.',
-    'Clean up created issues, PRs, and branches after the run by default.',
+    'Clean up created issues, PRs, branches, labels, refs, worktrees, processes, and temporary data after the run by default.',
     'Cleanup mode: delete or close. Default delete.',
     '',
   ].join('\n');
@@ -181,6 +187,46 @@ async function preparePackagedCandidate(context) {
   return cliPath;
 }
 
+async function preflight(context) {
+  if (context.repo === productionRepo || context.repo !== approvedLiveSmokeRepo) {
+    throw new Error(`live smoke is restricted to approved scratch repository ${approvedLiveSmokeRepo}`);
+  }
+  await runCommand('gh', ['auth', 'status'], { timeoutMs: context.options.timeoutMs });
+  await runCommand('codex', ['login', 'status'], { timeoutMs: context.options.timeoutMs });
+  await runCommand('gh', ['repo', 'view', context.repo, '--json', 'nameWithOwner'], { timeoutMs: context.options.timeoutMs });
+}
+
+async function acquireScratchLock(context) {
+  const branch = await defaultBranch(context.repo);
+  const sha = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout.trim();
+  await runCommand('gh', ['api', '--method', 'POST', `repos/${context.repo}/git/refs`,
+    '-f', `ref=refs/heads/${scratchLockBranch}`, '-f', `sha=${sha}`], { timeoutMs: context.options.timeoutMs });
+  context.lockAcquired = true;
+  context.createdBranches.push(scratchLockBranch);
+}
+
+async function listRepositoryLabels(context) {
+  const result = await runCommand('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', '.[].name'], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  return result.stdout.split('\n').filter(Boolean).sort();
+}
+
+async function listCandidateRefs(context) {
+  return (await runCommand('git', ['-C', context.targetRoot, 'for-each-ref', '--format=%(refname)', 'refs/codex-orchestrator/'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout.split('\n').filter(Boolean).sort();
+}
+
+async function listWorktrees(context) {
+  const output = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout;
+  return [...output.matchAll(/^worktree (.+)$/gmu)].map((match) => match[1]);
+}
+
 export function parseNpmPackOutput(stdout) {
   const lines = String(stdout).split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
@@ -196,7 +242,6 @@ export function parseNpmPackOutput(stdout) {
 }
 
 async function prepareTarget(context) {
-  if (context.options.target) return resolve(context.options.target);
   const target = join(context.root, 'target');
   const branch = await defaultBranch(context.repo);
   await runCommand('gh', ['repo', 'clone', context.repo, target, '--', '--branch', branch], { timeoutMs: context.options.timeoutMs });
@@ -219,54 +264,9 @@ async function configureTarget(context, overrides = {}) {
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
-async function runInfrastructureRecoveryScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const modelCallsBefore = (await readModelAudit(context)).length;
-  const interrupted = await runIssue(context, issue.number);
-  assertResult(interrupted, { status: 'transport-failed', resumable: true }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  if (record.cycle !== 1 || record.reportRepairs !== 0 || record.mutableInvocation?.phase !== 'launched'
-    || Object.hasOwn(record, 'transportRetries')) {
-    throw new Error(`${scenario}: infrastructure failure consumed semantic budget or lost its canonical invocation fence`);
-  }
-  await assertNoPublication(context, issue.number, scenario);
-  const callsAfterFailure = (await readModelAudit(context)).slice(modelCallsBefore);
-  if (callsAfterFailure.some((call) => call.operation === 'implementation')) {
-    throw new Error(`${scenario}: pre-model infrastructure failure was recorded as a model launch`);
-  }
-  const cleared = await runDaemonTick(context, issue.number);
-  if (cleared.cycle !== 1 || cleared.reportRepairs !== 0 || cleared.mutableInvocation || cleared.terminalOutcome
-    || Object.hasOwn(cleared, 'transportRetries')) {
-    throw new Error(`${scenario}: recovery observation did not clear only the quiescent canonical invocation`);
-  }
-  await assertNoPublication(context, issue.number, scenario);
-  const callsAfterClearing = (await readModelAudit(context)).slice(modelCallsBefore);
-  if (callsAfterClearing.some((call) => call.operation === 'implementation')) {
-    throw new Error(`${scenario}: clearing tick launched a replacement implementation`);
-  }
-  const completed = await runDaemonOnce(context, issue.number);
-  if (completed.status !== 'review-ready') {
-    const evidence = await resultEvidenceDiagnostic(context, completed);
-    throw new Error(`${scenario}: replacement ended ${completed.status}/${completed.kind ?? 'none'}/${evidence}`);
-  }
-  const settled = await readRunRecord(context, issue.number);
-  if (settled.cycle !== 1 || settled.reportRepairs !== 0 || settled.mutableInvocation || settled.reportInvocation
-    || Object.hasOwn(settled, 'transportRetries')) {
-    throw new Error(`${scenario}: recovery changed semantic budgets or left canonical invocation ownership unsettled`);
-  }
-  const implementationCalls = (await readModelAudit(context)).slice(modelCallsBefore)
-    .filter((call) => call.operation === 'implementation');
-  if (implementationCalls.length !== 1) {
-    throw new Error(`${scenario}: expected exactly one real implementation launch after bounded recovery`);
-  }
-  await recordPublication(context, issue.number);
-}
-
 async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
-  const modelCallsBefore = (await readModelAudit(context)).length;
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'review-ready' }, scenario);
   const record = await readRunRecord(context, issue.number);
@@ -274,15 +274,11 @@ async function runReviewReadyScenario(context, scenario) {
     throw new Error(`${scenario}: review-ready lacks passed check and proof bindings`);
   }
   if (scenario === 'acceptance-proof-rework') await assertReworkCycle(context, issue.number);
+  if (scenario === 'incomplete-progress-rework' && record.transportRetries !== 1) {
+    throw new Error(`${scenario}: expected one durable transport retry`);
+  }
   if (scenario === 'report-repair' && record.reportRepairs !== 1) {
     throw new Error(`${scenario}: expected one durable report repair`);
-  }
-  if (scenario === 'report-repair') {
-    const implementationCalls = (await readModelAudit(context)).slice(modelCallsBefore)
-      .filter((call) => call.operation === 'implementation');
-    if (implementationCalls.length !== 2 || record.mutableInvocation || record.reportInvocation) {
-      throw new Error(`${scenario}: report repair did not consume its semantic budget exactly once`);
-    }
   }
   if (scenario === 'browser-proof') {
     const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
@@ -296,7 +292,7 @@ async function runReviewReadyScenario(context, scenario) {
 
 async function assertAuthoritativeCandidatePublication(context, record, publishedHeadSha) {
   const state = await readRunState(context);
-  if (state.version !== 3) throw new Error('authoritative-candidate-publication: state.version !== 3');
+  if (state.schema !== 'codex-orchestrator.run-state') throw new Error('authoritative-candidate-publication: unexpected state schema');
   const receipts = record.checks.filter((check) => check.status === 'passed');
   const bindingIds = new Set(receipts.map((check) => check.bindingId));
   const candidateTrees = new Set(receipts.map((check) => check.candidateTreeSha));
@@ -339,7 +335,7 @@ async function assertAuthoritativeCandidatePublication(context, record, publishe
   if (residualExecutionPaths.length > 0) {
     throw new Error('authoritative-candidate-publication: candidate execution directory survived successful publication');
   }
-  if (record.candidateBinding !== undefined || record.executionLease !== undefined) {
+  if (record.candidateBinding !== undefined) {
     throw new Error('authoritative-candidate-publication: durable candidate ownership survived successful publication');
   }
 }
@@ -352,14 +348,13 @@ async function assertReworkCycle(context, issueNumber) {
 }
 
 async function runReviewFeedbackContinuationScenario(context, scenario) {
-  await retirePriorDaemonCandidates(context);
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const initial = await runIssue(context, issue.number);
   assertResult(initial, { status: 'review-ready' }, scenario);
   const publication = await recordPublication(context, issue.number);
   const initialRecord = await readRunRecord(context, issue.number);
-  if (initialRecord.reviewFeedback?.phase !== 'idle'
+  if (initialRecord.reviewFeedback?.activeBatch !== null
     || initialRecord.reviewFeedback.previousPublishedHeadSha !== publication.headSha) {
     throw new Error(`${scenario}: initial publication did not bind the review feedback baseline`);
   }
@@ -373,11 +368,12 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   ].join(' '));
   await assertReviewFeedbackObservable(context, issue.number, publication.number, publication.headSha, initialRecord);
   const updated = await runDaemonOnce(context, issue.number);
+  if (updated.status !== 'review-ready') await throwResultWithEvidence(context, updated, scenario);
   assertResult(updated, { status: 'review-ready' }, scenario);
 
   const after = await readRunRecord(context, issue.number);
   const receipt = after.reviewFeedback?.history[0];
-  if (after.reviewFeedback?.phase !== 'idle' || after.reviewFeedback.history.length !== 1
+  if (after.reviewFeedback?.activeBatch !== null || after.reviewFeedback.history.length !== 1
     || receipt?.kind !== 'published') {
     throw new Error(`${scenario}: one published review feedback receipt was not persisted`);
   }
@@ -445,6 +441,47 @@ async function runPackageInstallScenario(context, scenario) {
   finally { context.cliPath = packedCliPath; }
 }
 
+async function runSpecFirstScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const result = await runIssue(context, issue.number);
+  if (result.status !== 'review-ready') await throwResultWithEvidence(context, result, scenario);
+  assertResult(result, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.routeReceipt?.route !== 'spec-required' || record.specDelivery?.stage !== 'frozen'
+    || !record.specDelivery.frozen || !record.checkedChangeSha256 || !record.proofId) {
+    throw new Error(`${scenario}: approved spec was not implemented and proved in the same Run`);
+  }
+  await recordPublication(context, issue.number);
+}
+
+async function runProductQuestionScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const frozen = await runIssue(context, issue.number);
+  assertResult(frozen, { status: 'spec-frozen' }, scenario);
+  if (!frozen.receipt?.answerPrefix) throw new Error(`${scenario}: frozen question has no exact answer prefix`);
+  const viewer = JSON.parse((await runCommand('gh', ['api', 'user'], { timeoutMs: context.options.timeoutMs })).stdout);
+  await runCommand('gh', ['issue', 'comment', String(issue.number), '--repo', context.repo,
+    '--body', `${frozen.receipt.answerPrefix} Use the bounded fixture behavior exactly.`], { timeoutMs: context.options.timeoutMs });
+  if (!viewer?.login) throw new Error(`${scenario}: authenticated owner identity is unavailable`);
+  const completed = await runIssue(context, issue.number);
+  assertResult(completed, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.specDelivery?.acceptedAnswers?.length !== 1 || record.specDelivery.stage !== 'frozen') {
+    throw new Error(`${scenario}: trusted answer was not frozen into the same Run`);
+  }
+  await recordPublication(context, issue.number);
+}
+
+async function throwResultWithEvidence(context, result, scenario) {
+  let evidence = null;
+  if (typeof result.evidencePath === 'string') {
+    try { evidence = JSON.parse(await readFile(join(context.targetRoot, result.evidencePath), 'utf8')); } catch {}
+  }
+  throw new Error(`${scenario}: unexpected result ${JSON.stringify({ result, evidence })}`);
+}
+
 async function runDiscoveryMatrixScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, false);
@@ -493,120 +530,6 @@ async function runAcceptanceProofNegativeScenario(context, scenario) {
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'blocked', kind: 'external' }, scenario);
   await assertNoPublication(context, issue.number, scenario);
-}
-
-async function runProofInvocationRecoveryScenario(context, scenario) {
-  await retirePriorDaemonCandidates(context);
-  for (const recoveryMode of ['report-ready', 'process-absent']) {
-    const issueNumber = await runProofInvocationRecoveryCase(context, scenario, recoveryMode);
-    if (recoveryMode === 'report-ready') await retireDaemonCandidate(context, issueNumber);
-  }
-}
-
-async function runProofInvocationRecoveryCase(context, scenario, recoveryMode) {
-  const owned = { timeoutMs: context.options.timeoutMs };
-  const modelCallsBefore = (await readModelAudit(context)).length;
-  context.proofRecoveryMode = recoveryMode;
-  try { return await withInterruptedProofCleanup(owned, async () => {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const readLaunchedProof = async () => {
-    const record = await readRunRecord(context, issue.number).catch(() => undefined);
-    if (!record?.proofId) return undefined;
-    const proof = await readProofState(context, record.proofId).catch(() => undefined);
-    return proof?.invocation?.phase === 'launched' ? { record, proof, invocation: proof.invocation } : undefined;
-  };
-  owned.readProofInvocation = async () => (await readLaunchedProof())?.invocation;
-  const daemon = await startDaemonOnce(context, issue.number);
-  owned.daemon = { pid: daemon.pid, processStartIdentity: daemon.processStartIdentity };
-  const launched = await waitForValue(readLaunchedProof,
-    context.options.timeoutMs, `${scenario}: durable launched proof invocation was not observed`);
-  owned.proof = {
-    pid: launched.invocation.pid, processStartIdentity: launched.invocation.processStartIdentity,
-    processGroupId: launched.invocation.processGroupId,
-  };
-  const attemptId = launched.invocation.attemptId;
-  if (!daemon.kill('SIGKILL')) throw new Error(`${scenario}: daemon child was already absent before interruption`);
-  const interrupted = await daemon.completion;
-  if (interrupted.signal !== 'SIGKILL') throw new Error(`${scenario}: daemon child did not terminate at the injected crash boundary`);
-  const afterCrash = await readProofState(context, launched.record.proofId);
-  if (afterCrash.invocation?.attemptId !== attemptId || afterCrash.invocation.phase !== 'launched') {
-    throw new Error(`${scenario}: exact launched proof attempt was not durable after daemon termination`);
-  }
-  const readinessMarkerPath = proofReadinessMarkerPath(launched.invocation.reportPath);
-  const recoveryBoundary = await observeProofRecoveryBoundary(
-    async () => readFile(readinessMarkerPath, 'utf8').then(() => true).catch((error) => {
-      if (error?.code === 'ENOENT') return false;
-      throw error;
-    }),
-    async () => processGroupIsAbsent(launched.invocation.processGroupId),
-    { attempts: Math.max(1, Math.ceil(context.options.timeoutMs / 50)), delayMs: 50 },
-  );
-  if (recoveryBoundary !== recoveryMode) {
-    throw new Error(`${scenario}: expected ${recoveryMode} recovery boundary, observed ${recoveryBoundary}`);
-  }
-  if (recoveryBoundary === 'report-ready') {
-    await waitForProcessGroupAbsent(launched.invocation.processGroupId, context.options.timeoutMs);
-  }
-  await appendFile(context.harnessAuditPath, `${JSON.stringify({ scenario, event: 'recovery-observation', attemptId })}\n`);
-  let completed;
-  if (recoveryBoundary === 'report-ready') {
-    completed = await runDaemonTick(context, issue.number);
-    if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: one bounded restart did not adopt the exact proof report`);
-  } else {
-    await runDaemonTick(context, issue.number);
-    const settledProof = await readProofState(context, launched.record.proofId);
-    if (settledProof.status !== 'active' || settledProof.invocation) {
-      throw new Error(`${scenario}: absent proof attempt was not settled without replacement`);
-    }
-    const proofCallsAfterAbsence = (await readModelAudit(context)).slice(modelCallsBefore)
-      .filter((call) => call.scenario === scenario && call.operation === 'proof');
-    if (proofCallsAfterAbsence.length !== 1) {
-      throw new Error(`${scenario}: absence recovery relaunched proof or published in the clearing tick`);
-    }
-    await assertNoPublication(context, issue.number, scenario);
-    completed = await runDaemonTick(context, issue.number);
-    if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: replacement did not reach review-ready`);
-  }
-  const adoptedProof = await readProofState(context, launched.record.proofId);
-  if (adoptedProof.status !== 'passed' || adoptedProof.invocation || adoptedProof.reportRepairs !== 0) {
-    throw new Error(`${scenario}: proof recovery did not settle as passed or consumed semantic budget`);
-  }
-  const proofCalls = (await readModelAudit(context)).slice(modelCallsBefore)
-    .filter((call) => call.scenario === scenario && call.operation === 'proof');
-  const expectedProofCalls = recoveryBoundary === 'report-ready' ? 1 : 2;
-  if (proofCalls.length !== expectedProofCalls) {
-    throw new Error(`${scenario}: proof recovery did not adopt or replace the real model invocation exactly once`);
-  }
-  const recoveryObservations = (await readHarnessAudit(context)).filter((entry) => entry.scenario === scenario
-    && entry.event === 'recovery-observation' && entry.attemptId === attemptId);
-  if (recoveryObservations.length !== 1) throw new Error(`${scenario}: expected one explicit recovery observation`);
-  const publicationsBefore = context.createdPullRequests.length;
-  await recordPublication(context, issue.number);
-  const publicationCount = context.createdPullRequests.length - publicationsBefore;
-  if (publicationCount !== 1) throw new Error(`${scenario}: expected exactly one publication`);
-  return issue.number;
-  });
-  } finally { context.proofRecoveryMode = undefined; }
-}
-
-async function retireDaemonCandidate(context, issueNumber) {
-  await runCommand('gh', [
-    'issue', 'edit', String(issueNumber), '--repo', context.repo, '--remove-label', 'agent:review',
-  ], { timeoutMs: context.options.timeoutMs });
-}
-
-async function retirePriorDaemonCandidates(context) {
-  for (const issueNumber of context.createdIssues) {
-    const labels = JSON.parse((await runCommand('gh', [
-      'issue', 'view', String(issueNumber), '--repo', context.repo, '--json', 'labels',
-    ], { timeoutMs: context.options.timeoutMs })).stdout).labels.map((label) => label.name);
-    for (const label of ['agent:auto', 'agent:review']) {
-      if (labels.includes(label)) await runCommand('gh', [
-        'issue', 'edit', String(issueNumber), '--repo', context.repo, '--remove-label', label,
-      ], { timeoutMs: context.options.timeoutMs });
-    }
-  }
 }
 
 async function runQualityGatesScenario(context, scenario) {
@@ -661,20 +584,12 @@ async function runIssue(context, issueNumber) {
     env: liveSmokeEnv(context),
   });
   const envelope = parseExactEnvelope(command.stdout, 'codex-orchestrator.agent-auto-run-result');
-  const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
+  const expectedExit = { 'review-ready': 0, 'spec-frozen': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
   if (expectedExit === undefined || command.status !== expectedExit) throw new Error('typed run result and process exit disagree');
   return envelope.result;
 }
 
 async function runDaemonOnce(context, issueNumber) {
-  const record = await runDaemonTick(context, issueNumber);
-  if (!record.terminalOutcome) {
-    throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}; lifecycle=${record.lifecycle}; reportInvocation=${record.reportInvocation?.phase ?? 'none'}; mutableInvocation=${record.mutableInvocation?.phase ?? 'none'}`);
-  }
-  return record.terminalOutcome;
-}
-
-async function runDaemonTick(context, issueNumber) {
   await assertExclusiveDaemonCandidate(context, issueNumber);
   await runCommand(process.execPath, [
     context.cliPath, 'daemon', '--target', context.targetRoot, '--once', '--issue', String(issueNumber),
@@ -683,152 +598,23 @@ async function runDaemonTick(context, issueNumber) {
     env: liveSmokeEnv(context),
   });
   await assertExclusiveDaemonCandidate(context, issueNumber);
-  return readRunRecord(context, issueNumber);
-}
-
-async function startDaemonOnce(context, issueNumber) {
-  await assertExclusiveDaemonCandidate(context, issueNumber);
-  const daemon = spawn(process.execPath, [
-    context.cliPath, 'daemon', '--target', context.targetRoot, '--once', '--issue', String(issueNumber),
-  ], { cwd: context.targetRoot, env: liveSmokeEnv(context), stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = ''; let stderr = '';
-  daemon.stdout.setEncoding('utf8'); daemon.stderr.setEncoding('utf8');
-  daemon.stdout.on('data', (chunk) => { stdout += chunk; });
-  daemon.stderr.on('data', (chunk) => { stderr += chunk; });
-  daemon.completion = new Promise((resolveCompletion, rejectCompletion) => {
-    daemon.once('error', rejectCompletion);
-    daemon.once('close', (status, signal) => resolveCompletion({ status, signal, stdout, stderr }));
-  });
-  try {
-    daemon.processStartIdentity = await readHarnessProcessStartIdentity(daemon.pid);
-    if (!daemon.processStartIdentity) throw new Error('daemon child process identity is unavailable');
-    await assertExclusiveDaemonCandidate(context, issueNumber);
-  }
-  catch (error) {
-    daemon.kill('SIGKILL');
-    await daemon.completion.catch(() => undefined);
-    throw error;
-  }
-  return daemon;
-}
-
-async function waitForValue(read, timeoutMs, message) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (value !== undefined) return value;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  throw new Error(message);
-}
-
-function proofReadinessMarkerPath(reportPath) {
-  if (!isAbsolute(reportPath)) throw new Error('proof readiness requires an absolute report path');
-  return `${reportPath}.ready`;
-}
-
-export async function withInterruptedProofCleanup(owned, action, control = harnessProcessControl) {
-  try { return await action(); }
-  finally {
-    if (owned.daemon) await settleOwnedPid(owned.daemon, owned.timeoutMs, control);
-    if (!owned.proof && owned.readProofInvocation) {
-      const invocation = await owned.readProofInvocation().catch(() => undefined);
-      if (invocation?.phase === 'launched') owned.proof = invocation;
-    }
-    if (owned.proof) await settleOwnedProcessGroup(owned.proof, owned.timeoutMs, control);
-  }
-}
-
-async function settleOwnedPid(identity, timeoutMs, control) {
-  if (await control.readProcessStartIdentity(identity.pid) !== identity.processStartIdentity) return;
-  control.terminatePid(identity.pid);
-  await control.waitForPidAbsent(identity.pid, identity.processStartIdentity, timeoutMs);
-}
-
-async function settleOwnedProcessGroup(identity, timeoutMs, control) {
-  if (await control.groupIsAbsent?.(identity.processGroupId)) return;
-  if (await control.readProcessStartIdentity(identity.pid) !== identity.processStartIdentity) {
-    throw new Error(`strict cleanup unresolved proof process-group ownership or PID reuse for PGID ${identity.processGroupId}`);
-  }
-  control.terminateGroup(identity.processGroupId);
-  await control.waitForGroupAbsent(identity.processGroupId, timeoutMs);
-}
-
-const harnessProcessControl = {
-  readProcessStartIdentity: readHarnessProcessStartIdentity,
-  groupIsAbsent: async (processGroupId) => processGroupIsAbsent(processGroupId),
-  terminatePid: (pid) => process.kill(pid, 'SIGKILL'),
-  terminateGroup: (processGroupId) => process.kill(-processGroupId, 'SIGKILL'),
-  waitForPidAbsent: async (pid, processStartIdentity, timeoutMs) => waitForValue(async () =>
-    await readHarnessProcessStartIdentity(pid) !== processStartIdentity || undefined,
-  timeoutMs, 'owned daemon child remained present after cleanup'),
-  waitForGroupAbsent: waitForProcessGroupAbsent,
-};
-
-async function readHarnessProcessStartIdentity(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-  if (platform() === 'linux') {
-    try {
-      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
-      const close = text.lastIndexOf(') ');
-      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
-      return fields[19] ? `linux:${fields[19]}` : undefined;
-    } catch { return undefined; }
-  }
-  const result = await runCommand('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { allowedExitCodes: [0, 1], timeoutMs: 5_000 });
-  const value = result.status === 0 ? result.stdout.trim().replace(/\s+/gu, ' ') : '';
-  return value ? `${platform()}:${value}` : undefined;
-}
-
-export async function observeProofRecoveryBoundary(reportReady, processAbsent, options) {
-  for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
-    if (await reportReady()) return 'report-ready';
-    if (await processAbsent()) return 'process-absent';
-    if (attempt < options.attempts && options.delayMs > 0) {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, options.delayMs));
-    }
-  }
-  throw new Error('proof worker produced neither a durable report nor positive process absence');
-}
-
-function processGroupIsAbsent(processGroupId) {
-  if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) throw new Error('invalid proof process group');
-  try { process.kill(-processGroupId, 0); return false; }
-  catch (error) { return error?.code === 'ESRCH'; }
-}
-
-async function waitForProcessGroupAbsent(processGroupId, timeoutMs) {
-  await waitForValue(async () => processGroupIsAbsent(processGroupId) || undefined,
-    timeoutMs, 'original proof wrapper process group remained present');
+  const record = await readRunRecord(context, issueNumber);
+  if (!record.terminalOutcome) throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}`);
+  return record.terminalOutcome;
 }
 
 async function assertExclusiveDaemonCandidate(context, issueNumber) {
-  await observeExclusiveDaemonCandidate(issueNumber, async () => {
-    const candidates = new Set();
-    for (const label of ['agent:auto', 'agent:review']) {
-      const result = await runCommand('gh', [
-        'issue', 'list', '--repo', context.repo, '--state', 'open', '--label', label,
-        '--json', 'number', '--limit', '100',
-      ], { timeoutMs: context.options.timeoutMs });
-      for (const issue of JSON.parse(result.stdout)) candidates.add(issue.number);
-    }
-    return candidates;
-  });
-}
-
-export async function observeExclusiveDaemonCandidate(issueNumber, observe, options = {}) {
-  await retryCleanupObservation(async () => {
-    const candidates = await observe();
-    const foreign = [...candidates].filter((candidate) => candidate !== issueNumber);
-    if (foreign.length > 0) {
-      const error = new Error(`daemon smoke observed foreign candidate issue(s): ${foreign.join(', ')}`);
-      error.retryable = false;
-      throw error;
-    }
-    if (candidates.size !== 1 || !candidates.has(issueNumber)) {
-      throw new Error(`daemon smoke has not yet observed owned issue #${issueNumber}`);
-    }
-  }, { attempts: options.attempts ?? 5, delayMs: options.delayMs ?? 500, retryIf: (error) => error?.retryable !== false });
+  const candidates = new Set();
+  for (const label of ['agent:auto', 'agent:review']) {
+    const result = await runCommand('gh', [
+      'issue', 'list', '--repo', context.repo, '--state', 'open', '--label', label,
+      '--json', 'number', '--limit', '100',
+    ], { timeoutMs: context.options.timeoutMs });
+    for (const issue of JSON.parse(result.stdout)) candidates.add(issue.number);
+  }
+  if (candidates.size !== 1 || !candidates.has(issueNumber)) {
+    throw new Error(`daemon smoke requires exclusive scratch ownership of issue #${issueNumber}`);
+  }
 }
 
 async function readRunRecord(context, issueNumber) {
@@ -844,25 +630,12 @@ async function readRunState(context) {
   return state;
 }
 
-async function readProofState(context, proofId) {
-  const repoKey = createHash('sha256').update(context.repo.toLowerCase()).digest('hex');
-  return JSON.parse(await readFile(join(context.orchestratorHome, 'v2', repoKey, 'proofs', proofId, 'state.json'), 'utf8'));
-}
-
 async function assertEvidenceCode(context, result, expectedCode) {
   if (typeof result.evidencePath !== 'string') throw new Error(`missing evidence for ${expectedCode}`);
   const evidence = JSON.parse(await readFile(join(context.targetRoot, result.evidencePath), 'utf8'));
   if (evidence.code !== expectedCode) {
     throw new Error(`expected evidence code ${expectedCode}, received ${evidence.code ?? 'missing'}`);
   }
-}
-
-async function resultEvidenceDiagnostic(context, result) {
-  if (typeof result.evidencePath !== 'string') return 'missing-evidence';
-  const evidence = JSON.parse(await readFile(join(context.targetRoot, result.evidencePath), 'utf8'));
-  const code = typeof evidence.code === 'string' ? evidence.code : 'missing-code';
-  const summary = typeof evidence.summary === 'string' ? evidence.summary.replaceAll(context.targetRoot, '<target>').slice(0, 240) : 'missing-summary';
-  return `${code}/${summary}`;
 }
 
 async function assertNoPublication(context, issueNumber, scenario) {
@@ -887,12 +660,12 @@ async function postTrustedReviewThread(context, pullRequestNumber, commitSha, pa
 
 async function assertReviewFeedbackObservable(context, issueNumber, pullRequestNumber, headSha, record) {
   const packageRoot = resolve(dirname(context.cliPath), '../../..');
-  const [{ ReviewFeedbackCoordinator }, { GhCliPullRequestAdapter }, { GhCliIssueAdapter }] = await Promise.all([
+  const [{ ReviewFeedbackObserver }, { GhCliPullRequestAdapter }, { GhCliIssueAdapter }] = await Promise.all([
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'review-feedback-coordinator.js')).href),
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'adapters', 'gh-pull-request-adapter.js')).href),
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'adapters', 'gh-issue-adapter.js')).href),
   ]);
-  const coordinator = new ReviewFeedbackCoordinator({
+  const coordinator = new ReviewFeedbackObserver({
     pullRequests: new GhCliPullRequestAdapter(ownerOf(context.repo), repoOf(context.repo)),
     issues: new GhCliIssueAdapter(ownerOf(context.repo), repoOf(context.repo)),
   });
@@ -987,19 +760,12 @@ function liveSmokeEnv(context) {
     ...process.env,
     CODEX_ORCHESTRATOR_HOME: context.orchestratorHome,
     CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: liveSmokeModel,
-    CODEX_ORCHESTRATOR_LIVE_SMOKE_PROOF_RECOVERY_MODE: context.proofRecoveryMode ?? '',
   };
 }
 
 async function readModelAudit(context) {
   let content = '';
   try { content = await readFile(context.modelAuditPath, 'utf8'); } catch {}
-  return content.split('\n').filter(Boolean).map((line) => JSON.parse(line));
-}
-
-async function readHarnessAudit(context) {
-  let content = '';
-  try { content = await readFile(context.harnessAuditPath, 'utf8'); } catch {}
   return content.split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
@@ -1016,15 +782,12 @@ function liveCodexSource(nodePath, auditPath) {
   return `#!${nodePath}
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
-
-${proofReadinessMarkerPath}
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const args = process.argv.slice(2);
 const expectedModel = ${JSON.stringify(liveSmokeModel)};
 const auditPath = ${JSON.stringify(auditPath)};
-const proofRecoveryMode = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_PROOF_RECOVERY_MODE ?? '';
 const administrative = args[0] === '--version' || (args[0] === 'login' && args[1] === 'status');
 if (administrative) { forward(''); }
 else {
@@ -1039,12 +802,16 @@ function forward(prompt) {
     process.stderr.write('live smoke model pin is missing\\n'); process.exitCode = 64; return;
   }
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const scenario = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'unknown';
-  const operation = prompt.includes('/acceptance-proof/') ? 'proof'
+  const scenario = prompt.match(/LIVE_SMOKE_SCENARIO=([A-Za-z0-9-]+)/u)?.[1]
+    ?? criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1]
+    ?? 'unknown';
+  const operation = prompt.includes('Independently prove issue') ? 'proof'
     : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
+      : prompt.includes('/spec-author/') ? 'spec-author'
+        : prompt.includes('/spec-review/') ? 'spec-review'
       : prompt.includes('/triage/') ? 'triage'
         : 'implementation';
-  if (scenario === 'infrastructure-recovery' && operation === 'implementation') {
+  if (scenario === 'incomplete-progress-rework' && operation === 'implementation') {
     const marker = gitPath('v2-live-smoke-incomplete');
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'attempted\\n');
@@ -1054,7 +821,8 @@ function forward(prompt) {
   launch(1);
 
   function launch(wrapperAttempt) {
-    const child = spawn('codex', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const smokeArgs = args.map((arg) => arg.startsWith('model_reasoning_effort=') ? 'model_reasoning_effort="low"' : arg);
+    const child = spawn('codex', smokeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stdout.pipe(process.stdout);
     child.stderr.setEncoding('utf8');
@@ -1070,7 +838,7 @@ function forward(prompt) {
           stderrTail: stderr.replaceAll(process.cwd(), '<worktree>'),
         }) + '\\n');
       }
-      const retryProof = operation === 'proof' && scenario !== 'proof-invocation-recovery' && code !== 0
+      const retryProof = operation === 'proof' && code !== 0
         && stderr.includes('stream disconnected before completion') && wrapperAttempt < 3;
       if (retryProof) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
@@ -1080,12 +848,13 @@ function forward(prompt) {
       if (code === 0 && !administrative) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
         if (operation === 'code-review') normalizeCodeReview(reportPath, prompt);
+        if (operation === 'triage' && (scenario === 'spec-first' || scenario === 'product-question')) normalizeSpecTriage(reportPath);
+        if (operation === 'spec-author') normalizeSpecAuthor(reportPath, prompt, scenario);
+        if (operation === 'spec-review') normalizeSpecReview(reportPath, prompt);
         if (operation === 'implementation' && scenario === 'review-feedback-continuation') {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
         applyFault(scenario, operation, prompt);
-        if (scenario === 'proof-invocation-recovery' && operation === 'proof'
-          && !discardProofOutputOnce(reportPath)) durableReadinessMarker(reportPath);
       }
       process.exitCode = code ?? (signal ? 1 : 0);
     });
@@ -1093,36 +862,55 @@ function forward(prompt) {
   }
 }
 
-function durableReadinessMarker(reportPath) {
-  let handle = openSync(reportPath, 'r'); fsyncSync(handle); closeSync(handle);
-  const marker = proofReadinessMarkerPath(reportPath);
-  writeFileSync(marker, 'ready\\n');
-  handle = openSync(marker, 'r'); fsyncSync(handle); closeSync(handle);
-}
-
-function discardProofOutputOnce(reportPath) {
-  if (proofRecoveryMode !== 'process-absent') return false;
-  const marker = gitPath('v2-live-smoke-proof-output-discarded');
-  try { readFileSync(marker); return false; } catch {}
-  writeFileSync(marker, 'discarded\\n');
-  rmSync(reportPath, { force: true });
-  return true;
-}
-
 function normalizeCodeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
-  const reopen = capsule.mode === 'closure' && capsule.targetRevision === 5 && prompt.includes('quality-gates');
+  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
   const report = {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: reopen ? 'needs-work' : 'approved', mode: capsule.mode,
-    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
-    reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
-    repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({
-      id: finding.id, status: reopen ? 'reopened' : 'verified',
-    })),
+    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    coverage: capsule.reviewFocus ?? [],
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   };
   writeFileSync(reportPath, JSON.stringify({ report }));
+}
+
+function normalizeSpecTriage(reportPath) {
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: 'spec-required',
+    inspectedEvidence: [{ kind: 'issue', location: 'live-smoke issue', summary: 'The fixture requests an approved spec before delivery.' }],
+    assumptions: [], direct: null,
+    specRequired: { summary: 'Specify the bounded fixture.', complexityReasons: ['Exercise durable spec delivery.'], specMode: 'compact', reviewFocus: ['acceptance', 'determinism'] },
+    blocker: null,
+  } }));
+}
+
+function normalizeSpecAuthor(reportPath, prompt, scenario) {
+  const specPath = prompt.match(/only to (.+)\. Return that exact absolute path/u)?.[1];
+  if (!specPath) throw new Error('missing spec revision path');
+  const answered = prompt.includes('"trustedAnswer":{');
+  const decisionRequired = scenario === 'product-question' && !answered;
+  const content = '# Live smoke implementation spec\\n\\nCreate and prove the two bounded scenario marker files.\\n';
+  mkdirSync(dirname(specPath), { recursive: true });
+  writeFileSync(specPath, content);
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: decisionRequired ? 'decision-required' : 'ready', specPath,
+    specSha256: createHash('sha256').update(content).digest('hex'), summary: 'Bounded fixture spec authored.', blockers: [],
+    decisionGaps: decisionRequired ? [{ id: 'fixture-behavior', summary: 'Confirm the bounded fixture behavior.', evidence: ['Issue acceptance criteria.'] }] : [],
+    question: decisionRequired ? 'Which bounded fixture behavior should be used?' : null,
+  } }));
+}
+
+function normalizeSpecReview(reportPath, prompt) {
+  const sessionId = prompt.match(/Reviewer session ID: ([^.\\n]+)/u)?.[1];
+  if (!sessionId) throw new Error('missing spec reviewer session');
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, verdict: 'approved',
+    coverage: ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation'],
+    defects: [], reviewerSessionId: sessionId, acceptedRisks: [],
+  } }));
 }
 
 function normalizeReviewFeedbackImplementation(reportPath, prompt) {
@@ -1146,11 +934,6 @@ function applyFault(scenario, operation, prompt) {
   if (!reportPath) throw new Error('missing report path');
   if (operation === 'implementation' && scenario === 'report-repair' && !prompt.includes('Report repair only')) {
     writeFileSync(reportPath, '{bad json'); return;
-  }
-  if (operation === 'implementation' && scenario === 'infrastructure-recovery') {
-    writeChange(scenario);
-    normalizeImplementationReport(reportPath, 'Infrastructure recovery fixture prepared.');
-    return;
   }
   if (operation === 'implementation' && scenario === 'commit-policy') {
     runGit(['add', '-A']);
@@ -1201,7 +984,7 @@ function applyFault(scenario, operation, prompt) {
     return;
   }
   if ([
-    'package-install', 'infrastructure-recovery', 'report-repair', 'diagnostics',
+    'package-install', 'spec-first', 'product-question', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
@@ -1221,13 +1004,18 @@ function discardProofArtifacts(prompt) {
 }
 
 function writePassingNonVisualProof(criteria, reportPath) {
+  const output = Buffer.from('V2 live-smoke proof passed.');
+  const check = {
+    id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed',
+    summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex'),
+  };
   writeProofReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
     criteria: criteria.map((item) => ({
       id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'],
-      evidenceRefs: ['smoke'], analysis: 'The Runner-owned checked command and current change satisfy this criterion.',
+      evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.',
     })),
-    checks: [], artifacts: [], findings: [], residualRisks: [],
+    checks: [check], artifacts: [], findings: [], residualRisks: [],
   });
 }
 
@@ -1296,7 +1084,7 @@ process.stdin.on('end', () => {
   mkdirSync(dirname(reportPath), { recursive: true });
   if (prompt.includes('/triage/')) writeTriage(reportPath);
   else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
-  else if (prompt.includes('/acceptance-proof/')) writeProof(marker, criteria, reportPath, prompt);
+  else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
   else writeImplementation(marker, reportPath, prompt);
 });
 
@@ -1313,12 +1101,14 @@ function writeTriage(reportPath) {
 function writeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
+  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
   writeAgentReport(reportPath, {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: 'approved', mode: capsule.mode,
-    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
-    reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
-    repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({ id: finding.id, status: 'verified' })),
+    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    coverage: capsule.reviewFocus ?? [],
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   });
 }
 
@@ -1327,7 +1117,7 @@ function writeImplementation(scenario, reportPath, prompt) {
     writeChange(scenario); writeFileSync(reportPath, '{bad json'); return;
   }
   if (!prompt.includes('Report repair only')) {
-    if (scenario === 'infrastructure-recovery') {
+    if (scenario === 'incomplete-progress-rework') {
       const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
       try { readFileSync(marker); } catch {
         writeFileSync(marker, 'attempted\\n');
@@ -1370,10 +1160,12 @@ function writeProof(scenario, criteria, reportPath, prompt) {
     }
   }
   if (scenario === 'browser-proof') { writeBrowserProof(criteria, reportPath, prompt); return; }
+  const output = Buffer.from('V2 live-smoke proof passed.');
+  const check = { id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed', summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex') };
   writeAgentReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
-    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: ['smoke'], analysis: 'Runner-owned checked evidence satisfies this criterion.' })),
-    checks: [], artifacts: [], findings: [], residualRisks: [],
+    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.' })),
+    checks: [check], artifacts: [], findings: [], residualRisks: [],
   });
 }
 
@@ -1420,12 +1212,6 @@ function writeAgentReport(reportPath, report) {
   writeFileSync(reportPath, JSON.stringify({ report: generated }));
 }
 
-function normalizeImplementationReport(reportPath, summary) {
-  const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-    .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeAgentReport(reportPath, { version: 1, status: 'completed', summary, changedFiles, residualRisks: [] });
-}
-
 function writeChange(scenario) {
   mkdirSync('src/live-smoke', { recursive: true });
   mkdirSync('test/live-smoke', { recursive: true });
@@ -1453,9 +1239,55 @@ async function cleanup(context) {
       : ['issue', 'close', String(issue), '--repo', context.repo, '--comment', `[live-smoke:${context.runId}] cleanup`];
     await bestEffort(failures, `issue #${issue}`, () => runCommand('gh', args, { timeoutMs: context.options.timeoutMs }));
   }
+  for (const label of [...new Set(context.createdLabels)].reverse()) {
+    await bestEffort(failures, `label ${label}`, () => runCommand('gh', [
+      'api', '--method', 'DELETE', `repos/${context.repo}/labels/${encodeURIComponent(label)}`,
+    ], { timeoutMs: context.options.timeoutMs }));
+  }
+  await terminateRunProcesses(context, failures);
+  await cleanupLocalSafetyResources(context, failures);
   await verifyCleanup(context, failures);
   if (failures.length > 0) throw new Error(`strict cleanup failed:\n${failures.join('\n')}`);
   await appendReport(context, '\nStrict cleanup passed.\n');
+  const report = await readFile(context.reportPath, 'utf8');
+  await removeTemporaryArtifacts(context);
+  process.stdout.write(`[v2-live-smoke] report\n${report}`);
+}
+
+async function cleanupLocalSafetyResources(context, failures) {
+  if (!context.targetRoot || !context.lockAcquired) return;
+  await bestEffort(failures, 'candidate refs', async () => {
+    const refs = (await listCandidateRefs(context)).filter((ref) => !context.baselineCandidateRefs.has(ref));
+    for (const ref of refs) await runCommand('git', ['-C', context.targetRoot, 'update-ref', '-d', ref], { timeoutMs: context.options.timeoutMs });
+  });
+  await bestEffort(failures, 'candidate worktrees', async () => {
+    const added = (await listWorktrees(context)).filter((path) => !context.baselineWorktrees.has(path));
+    for (const path of added) await runCommand('git', ['-C', context.targetRoot, 'worktree', 'remove', '--force', path], { timeoutMs: context.options.timeoutMs });
+    await runCommand('git', ['-C', context.targetRoot, 'worktree', 'prune', '--expire', 'now'], { timeoutMs: context.options.timeoutMs });
+  });
+}
+
+async function terminateRunProcesses(context, failures) {
+  await bestEffort(failures, 'terminate live-smoke processes', async () => {
+    const owned = await listRunProcessIds(context);
+    for (const pid of owned) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; } }
+    if (owned.length > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    for (const pid of await listRunProcessIds(context)) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; } }
+  });
+}
+
+async function listRunProcessIds(context) {
+  return (await runCommand('ps', ['-axo', 'pid=,command='], { timeoutMs: context.options.timeoutMs })).stdout
+    .split('\n').map((line) => line.trim()).filter(Boolean)
+    .map((line) => ({ pid: Number(line.split(/\s+/u)[0]), command: line }))
+    .filter((entry) => Number.isSafeInteger(entry.pid) && entry.pid > 1 && entry.pid !== process.pid
+      && entry.pid !== process.ppid && entry.command.includes(context.root))
+    .map((entry) => entry.pid);
+}
+
+export async function removeTemporaryArtifacts(context) {
+  await runCommand('chmod', ['-R', 'u+w', context.root], { timeoutMs: context.options.timeoutMs });
+  await rm(context.root, { recursive: true, force: true });
 }
 
 async function discoverRunArtifacts(context, failures) {
@@ -1513,6 +1345,25 @@ async function verifyCleanup(context, failures) {
       if (result.status === 0) failures.push(`issue #${issue}: still exists after delete cleanup`);
     }
   }
+  await bestEffort(failures, 'verify run-created labels', async () => {
+    const labels = new Set(await listRepositoryLabels(context));
+    const remaining = context.createdLabels.filter((label) => labels.has(label));
+    if (remaining.length > 0) throw new Error(`labels remain: ${remaining.join(', ')}`);
+  });
+  if (context.targetRoot) {
+    await bestEffort(failures, 'verify candidate refs', async () => {
+      const refs = (await listCandidateRefs(context)).filter((ref) => !context.baselineCandidateRefs.has(ref));
+      if (refs.length > 0) throw new Error(`run-created candidate refs remain: ${refs.join(', ')}`);
+    });
+    await bestEffort(failures, 'verify candidate worktrees', async () => {
+      const worktrees = (await listWorktrees(context)).filter((path) => !context.baselineWorktrees.has(path));
+      if (worktrees.length > 0) throw new Error(`run-created worktrees remain: ${worktrees.join(', ')}`);
+    });
+  }
+  await bestEffort(failures, 'verify no live-smoke child processes', async () => {
+    const processes = await listRunProcessIds(context);
+    if (processes.length > 0) throw new Error(`live-smoke processes remain: ${processes.length}`);
+  });
 }
 
 export async function retryCleanupObservation(action, options = {}) {
@@ -1525,7 +1376,6 @@ export async function retryCleanupObservation(action, options = {}) {
       return;
     } catch (error) {
       lastError = error;
-      if (options.retryIf?.(error) === false) throw error;
       if (attempt < attempts && delayMs > 0) {
         await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
       }
@@ -1611,8 +1461,8 @@ async function selfTestFakeAgent() {
     }
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {
-      operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1', targetRevision: 1,
-      targetFingerprint: 'a'.repeat(64), closureRequestSha256: null, reviewFocus: ['correctness'],
+      operation: 'code-review', reviewerSessionId: 'review-session-1', targetRevision: 1,
+      targetFingerprint: 'a'.repeat(64), reviewFocus: ['correctness'],
       defects: [], fixedRepairFindings: [],
     };
     await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {
@@ -1627,7 +1477,7 @@ async function selfTestFakeAgent() {
     const proofPath = join(root, 'proof.json');
     await runCommand(fakePath, ['exec', '--output-last-message', proofPath], {
       cwd: root,
-      stdin: `Follow the exact operation at /acceptance-proof/SKILL.md.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
+      stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
     });
     const proof = JSON.parse(await readFile(proofPath, 'utf8')).report;
     if (proof.version !== 1 || proof.status !== 'passed' || proof.criteria?.[0]?.id !== 'ac-001'
@@ -1636,7 +1486,7 @@ async function selfTestFakeAgent() {
     const browserCriteria = [{ id: 'ac-browser', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=browser-proof' }];
     await runCommand(fakePath, ['exec', '--output-last-message', browserPath], {
       cwd: root,
-      stdin: `Follow the exact operation at /acceptance-proof/SKILL.md.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
+      stdin: `Independently prove issue #2.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
     });
     const browser = JSON.parse(await readFile(browserPath, 'utf8')).report;
     if (browser.status !== 'passed' || browser.decision?.targets?.[0] !== 'browser'

@@ -5,7 +5,6 @@ import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../sr
 import { createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { IosLeaseVerifier } from '../src/v2/mobile-lease.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import { validateProofReport, type ProofReportV1 } from '../src/v2/proof-report.js';
 
 test('iOS proof report requires lease-bound screenshot, accessibility hierarchy, device log, workflow, and analysis', () => {
@@ -99,7 +98,6 @@ async function runAcceptanceFixture(lease?: IosLeaseVerifier) {
   for (const item of report.artifacts) item.sha256 = sha256(bytes.get(item.relativePath)!);
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofRecords: new InMemoryProofRecordWriter(),
     proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: report.artifacts.map((item) => item.relativePath) }) },
     inspectFreshness: async () => ({
       headSha: payload.headSha, indexTreeSha: payload.indexTreeSha,
@@ -110,14 +108,13 @@ async function runAcceptanceFixture(lease?: IosLeaseVerifier) {
     inspectArtifact: async () => ({ modifiedAt: '2026-07-17T00:00:01.000Z' }),
     iosLease: lease,
     proofArtifactDir: 'proofs/proof-ios',
-    now: () => '2026-07-17T00:00:00.000Z',
   });
   const issue: IssueSnapshot = {
     number: 89, title: 'iOS proof fixture', body: 'Prove the ready state.',
     url: 'https://example.invalid/issues/89', state: 'OPEN', labels: ['agent:auto'],
   };
   const criteria: FrozenCriterion[] = [{ id: 'ac-ios', order: 1, source: 'explicit', text: 'iOS ready state is visible.' }];
-  return proof.proveChange({ proofId: 'proof-ios', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+  return proof.proveChange({ proofId: 'proof-ios', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 }
 
 function checkedPayload(): CheckedChangePayloadV1 {

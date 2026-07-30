@@ -201,6 +201,13 @@ test('checked-in proof workflow schema matches its TypeScript owner', async () =
   assert.deepEqual(checkedIn, proofReportOutputSchema());
 });
 
+test('spec review generation reuses the exact validated code-review defect schema', async () => {
+  const specReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/spec-review-v1.json', 'utf8'));
+  const codeReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/code-review-v1.json', 'utf8'));
+  assert.deepEqual(specReview.properties.defects.items, codeReview.properties.report.properties.defects.items);
+  assert.equal(specReview.properties.defects.items.additionalProperties, false);
+});
+
 test('proof generation schema stays compact while runtime owns platform combinations', () => {
   const schema = proofReportOutputSchema();
   assert.ok(Buffer.byteLength(JSON.stringify(schema), 'utf8') < 25_000);

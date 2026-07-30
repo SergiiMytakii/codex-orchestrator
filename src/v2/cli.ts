@@ -133,6 +133,27 @@ export async function executeDaemonLoop(
   } while (true);
 }
 
+export async function executeDaemonTick(input: {
+  targetRoot: string;
+  issueNumber?: number;
+  discoverCandidates(): Promise<GitHubIssue[]>;
+  executeRun(input: RunIntent): Promise<RunIssueResult>;
+  write(text: string): void;
+  lastResults: Map<number, string>;
+}): Promise<number> {
+  const discovered = await input.discoverCandidates();
+  const candidates = input.issueNumber === undefined
+    ? discovered
+    : discovered.filter((issue) => issue.number === input.issueNumber);
+  return executeDaemonCandidates({
+    targetRoot: input.targetRoot,
+    candidates,
+    executeRun: input.executeRun,
+    write: input.write,
+    lastResults: input.lastResults,
+  });
+}
+
 export async function executeDaemonCandidates(input: {
   targetRoot: string;
   candidates: GitHubIssue[];

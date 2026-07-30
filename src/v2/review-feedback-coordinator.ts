@@ -49,7 +49,7 @@ interface CandidateSource {
   userId: string;
 }
 
-export class ReviewFeedbackCoordinator {
+export class ReviewFeedbackObserver {
   public constructor(private readonly dependencies: {
     pullRequests: GitHubPullRequestAdapter;
     issues: Pick<GitHubIssueAdapter, 'getRepositoryPermission'>;

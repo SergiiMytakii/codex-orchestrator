@@ -1,29 +1,36 @@
 import { createHash } from 'node:crypto';
 
 import { canonicalJson, containsCredentialEvidence } from './containment.js';
-import type { ContainedReportOperation, ContainedReportOperationResult, DurableReportInvocationState } from './contained-report-operation.js';
-import { hashCodeReviewReport, validateCodeReviewReport, type CodeReviewDefectV1, type CodeReviewReportV1, type ReviewMode, type ReviewOperation } from './code-review-report.js';
-import { decodeAgentReportForValidation } from './report-envelope.js';
+import type { ContainedReportOperation, ContainedReportOperationResult, ReportOnlyWorktreeSnapshot } from './contained-report-operation.js';
+import type { CodeReviewDefectV1, CodeReviewReportV1, ReviewOperation } from './code-review-report.js';
+import type { DeliveryAuthorityV1 } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_CAPSULE_BYTES = 1024 * 1024;
 
+export interface ImplementationReviewInvocation {
+  attemptId: string;
+  operation: ReviewOperation;
+  reviewerSessionId: string;
+  targetRevision: number;
+  targetFingerprint: string;
+}
+
 export interface ImplementationReviewerInput {
+  attemptId: string;
   runId: string;
   worktreePath: string;
   operation: ReviewOperation;
-  mode: ReviewMode;
   reviewerSessionId: string;
   implementationAttemptId: string;
   targetRevision: number;
   targetFingerprint: string;
-  closureRequestSha256: string | null;
   issue: unknown;
   frozenCriteria: unknown[];
   routeReceipt: unknown;
+  deliveryAuthority: DeliveryAuthorityV1;
   defects: CodeReviewDefectV1[];
-  affectedDefectIds: string[];
   fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
   reviewFocus: string[];
   workflowGeneration: WorkflowGenerationReceipt;
@@ -32,14 +39,15 @@ export interface ImplementationReviewerInput {
   validationDiagnostic: string | null;
   originalReportBytes: Buffer | null;
   signal: AbortSignal;
-  invocationState: DurableReportInvocationState;
+  onPrepared(invocation: ImplementationReviewInvocation): Promise<void>;
+  onLaunched(invocation: ImplementationReviewInvocation & { pid: number; processGroupId: number }): Promise<void>;
 }
 
 export type ImplementationReviewerResult =
   | { kind: 'completed'; attemptId: string; report: CodeReviewReportV1; artifactSha256: string }
   | { kind: 'transport-failed'; resumable: true }
   | { kind: 'report-invalid'; diagnostic: string; originalReportSha256: string; originalReportBytes: Buffer }
-  | { kind: 'safe-halt'; code: string }
+  | { kind: 'safe-halt'; process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot }; waitForAbsence(): Promise<void> }
   | { kind: 'cancelled' }
   | { kind: 'internal-error'; code: string };
 
@@ -47,17 +55,18 @@ export class ContainedImplementationReviewer {
   constructor(private readonly dependencies: { operation: ContainedReportOperation }) {}
 
   async run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult> {
+    let attemptId: string;
     let promptFacts: string[];
     try {
+      attemptId = input.attemptId;
+      assertText(attemptId, 'review attempt ID');
       assertText(input.reviewerSessionId, 'reviewer session ID');
       assertText(input.implementationAttemptId, 'implementation attempt ID');
-      if (input.reviewerSessionId === input.implementationAttemptId) {
+      if (attemptId === input.implementationAttemptId || input.reviewerSessionId === input.implementationAttemptId) {
         throw new Error('reviewer identity is not independent');
       }
       assertPositiveInteger(input.targetRevision, 'target revision');
       assertSha256(input.targetFingerprint, 'target fingerprint');
-      if (input.closureRequestSha256 !== null) assertSha256(input.closureRequestSha256, 'Closure request hash');
-      if ((input.mode === 'full') !== (input.closureRequestSha256 === null)) throw new Error('review mode/Closure hash mismatch');
       promptFacts = [buildCapsule(input)];
     } catch (error) {
       return {
@@ -66,22 +75,35 @@ export class ContainedImplementationReviewer {
       };
     }
 
+    const invocation: ImplementationReviewInvocation = {
+      attemptId, operation: input.operation, reviewerSessionId: input.reviewerSessionId,
+      targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint,
+    };
     let result: ContainedReportOperationResult;
     try {
       result = await this.dependencies.operation.run({
         operation: input.operation,
+        attemptId,
         runId: input.runId,
         worktreePath: input.worktreePath,
         workflowGeneration: structuredClone(input.workflowGeneration),
         promptFacts,
         signal: input.signal,
-        invocationState: input.invocationState,
-        forbiddenAttemptIds: [input.implementationAttemptId, input.reviewerSessionId],
+        reviewContext: {
+          operation: input.operation, targetRevision: input.targetRevision,
+          targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
+          previousFindingIds: [
+            ...input.defects.map((defect) => defect.id),
+            ...input.fixedRepairFindings.map((finding) => finding.id),
+          ].sort(),
+        },
+        onPrepared: () => input.onPrepared(structuredClone(invocation)),
+        onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
       });
     } catch {
       return { kind: 'internal-error', code: 'review-operation-threw' };
     }
-    return mapResult(result, input);
+    return mapResult(result);
   }
 }
 
@@ -90,11 +112,10 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     ? validateRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes)
     : rejectUnexpectedRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes);
   const text = canonicalJson({
-    version: 1, operation: input.operation, mode: input.mode, reviewerSessionId: input.reviewerSessionId,
+    version: 1, operation: input.operation, reviewerSessionId: input.reviewerSessionId,
     targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint,
-    closureRequestSha256: input.closureRequestSha256, issue: input.issue, frozenCriteria: input.frozenCriteria,
-    routeReceipt: input.routeReceipt, defects: input.defects,
-    affectedDefectIds: sortedUnique(input.affectedDefectIds, 'affected defect IDs'),
+    issue: input.issue, frozenCriteria: input.frozenCriteria,
+    routeReceipt: input.routeReceipt, deliveryAuthority: input.deliveryAuthority, defects: input.defects,
     fixedRepairFindings: input.fixedRepairFindings.map((finding) => ({
       id: finding.id,
       affectedContracts: sortedUnique(finding.affectedContracts, 'fixed repair finding contracts'),
@@ -121,33 +142,25 @@ function validateRepairInput(hash: string | null, diagnostic: string | null, byt
 }
 
 function rejectUnexpectedRepairInput(hash: string | null, diagnostic: string | null, bytes: Buffer | null): null {
-  if (hash !== null || diagnostic !== null || bytes !== null) throw new Error('Full/Closure review cannot carry report repair bytes');
+  if (hash !== null || diagnostic !== null || bytes !== null) throw new Error('semantic review cannot carry report repair bytes');
   return null;
 }
 
-function mapResult(result: ContainedReportOperationResult, input: ImplementationReviewerInput): ImplementationReviewerResult {
-  if (result.status === 'completed') {
-    try {
-      const report = validateCodeReviewReport(decodeAgentReportForValidation(result.reportBytes), {
-        operation: input.operation, mode: input.mode, targetRevision: input.targetRevision,
-        targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
-        closureRequestSha256: input.closureRequestSha256,
-        fixedRepairFindingIds: input.fixedRepairFindings.map((finding) => finding.id).sort(),
-      });
-      return { kind: 'completed', attemptId: result.attemptId, report, artifactSha256: hashCodeReviewReport(report) };
-    } catch (error) {
-      const text = result.reportBytes.toString('utf8');
-      if (!Buffer.from(text, 'utf8').equals(result.reportBytes) || containsCredentialEvidence(text)) {
-        return { kind: 'internal-error', code: 'review-report-invalid' };
-      }
-      return { kind: 'report-invalid', diagnostic: error instanceof Error ? error.message : 'review report invalid',
-        originalReportSha256: result.reportSha256, originalReportBytes: Buffer.from(result.reportBytes) };
-    }
-  }
+function mapResult(result: ContainedReportOperationResult): ImplementationReviewerResult {
+  if (result.status === 'completed') return {
+    kind: 'completed', attemptId: result.attemptId, report: result.validatedPayload as CodeReviewReportV1,
+    artifactSha256: result.artifactSha256,
+  };
   if (result.status === 'retryable') return { kind: 'transport-failed', resumable: true };
-  if (result.status === 'safe-halt') return { kind: 'safe-halt', code: result.code };
+  if (result.status === 'safe-halt') return { kind: 'safe-halt', process: result.process, waitForAbsence: result.waitForAbsence };
   if (result.status === 'cancelled') return { kind: 'cancelled' };
-  return { kind: 'internal-error', code: result.code };
+  if (result.status === 'invalid' && result.repairInput) return {
+    kind: 'report-invalid',
+    diagnostic: result.findings[0] ?? 'review report is invalid',
+    originalReportSha256: result.repairInput.originalReportSha256,
+    originalReportBytes: Buffer.from(result.repairInput.originalReportBytes),
+  };
+  return { kind: 'internal-error', code: result.status === 'invalid' ? 'review-report-invalid' : result.code };
 }
 
 function sortedUnique(value: string[], field: string): string[] {

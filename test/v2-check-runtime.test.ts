@@ -48,6 +48,29 @@ test('cancelled check proves a TERM-ignoring descendant is absent before returni
   ));
 });
 
+test('normal leader exit reports a live descendant process group instead of quiescence', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-check-live-descendant-'));
+  let processGroupId: number | undefined;
+  try {
+    const result = await runShellCheck(
+      "(trap '' HUP TERM; exec sleep 300) </dev/null >/dev/null 2>&1 & echo $! > child.pid",
+      cwd,
+      new AbortController().signal,
+      10_000,
+      async (launched) => { processGroupId = launched.processGroupId; },
+    );
+
+    assert.deepEqual(
+      (result as { observation?: unknown }).observation,
+      { leader: 'absent', group: 'live' },
+    );
+  } finally {
+    if (processGroupId !== undefined) {
+      try { process.kill(-processGroupId, 'SIGKILL'); } catch { /* already absent */ }
+    }
+  }
+});
+
 test('check command cannot execute before launched ownership persistence resolves', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-check-launch-gate-'));
   let release!: () => void;
