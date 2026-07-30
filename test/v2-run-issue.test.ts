@@ -12,7 +12,8 @@ import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { InjectedContainedMutableOperation, type DurableMutableInvocationV1, type MutableWorktreeOperationId } from '../src/v2/contained-report-operation.js';
-import { CandidateProofInspectionError, ProofQuiescenceError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, type IosProofInputsV1, type ProofAgent, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
+import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import {
   RunIssue,
   OwnerLockContentionError,
@@ -489,64 +490,6 @@ test('a legacy unchanged-failure check is discarded and rerun on resume', async 
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
 });
 
-test('a legacy V2 proving boundary recovers the exact V1 proof and continues legacy publication', async () => {
-  const options: FixtureOptions = {
-    proof: async () => { throw new CandidateProofInspectionError('candidate-materialization-io-failed'); },
-  };
-  const fixture = await runFixture(options);
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const interruptedState = await fixture.store.read();
-  const interrupted = structuredClone(interruptedState.runs[0]!);
-  assert.equal(interrupted.lifecycle, 'proving');
-  interrupted.checks = interrupted.checks.map(({ id, command, status, outputSha256 }) => ({ id, command, status, outputSha256 }));
-  await execFileAsync('git', ['-C', fixture.worktreePath, 'add', '--', 'feature.txt']);
-  const legacySnapshot = await fixture.dependencies.git.snapshot(fixture.worktreePath);
-  interrupted.lifecycle = 'safe-halt';
-  interrupted.process = {
-    pid: 24680, processGroupId: 24680, startedAt: '2026-07-16T12:00:00.000Z', baseline: legacySnapshot,
-    purpose: 'proof', resumeLifecycle: 'proving', resumeReviewStage: null,
-  };
-  interrupted.checkedChangeSha256 = sha256(canonicalJson({
-    version: 1,
-    canonicalRepository: interrupted.canonicalRepository,
-    runId: interrupted.runId,
-    issueNumber: interrupted.issueNumber,
-    cycle: interrupted.cycle,
-    baseSha: interrupted.baseSha,
-    headSha: legacySnapshot.headSha,
-    indexTreeSha: legacySnapshot.indexTreeSha,
-    trackedContentSha256: legacySnapshot.trackedContentSha256,
-    untrackedContentSha256: legacySnapshot.untrackedContentSha256,
-    worktreeIdentity: legacySnapshot.worktreeIdentity,
-    changedFiles: await fixture.dependencies.git.listChangedFiles(fixture.worktreePath),
-    checks: interrupted.checks,
-    checkPolicySha256: sha256(canonicalJson(configFixture().checks)),
-    packageVersion: interrupted.packageVersion,
-    proofSchemaVersion: 1,
-  }));
-  delete interrupted.changeBindingVersion;
-  delete interrupted.candidateBinding;
-  delete interrupted.executionLease;
-  const legacyStatePath = join(fixture.targetRoot, '.legacy-proving-state.json');
-  await writeFile(legacyStatePath, `${canonicalJson({
-    schema: interruptedState.schema, version: 2, generation: interruptedState.generation, runs: [interrupted],
-  })}\n`);
-  const legacyStore = new FileRunRecordWriter(legacyStatePath);
-  fixture.dependencies.runRecords = legacyStore;
-  const reviewsBefore = fixture.events.filter((event) => event === 'review:code-review').length;
-  const checksBefore = fixture.events.filter((event) => event === 'check:typecheck').length;
-  const implementationsBefore = fixture.events.filter((event) => event === 'agent').length;
-  options.proof = async () => passedProof();
-
-  const legacyResult = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(legacyResult.status, 'review-ready', JSON.stringify({ legacyResult, events: fixture.events, state: await legacyStore.read() }));
-  assert.equal((await legacyStore.read()).version, 2);
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, reviewsBefore);
-  assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, checksBefore);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, implementationsBefore);
-  assert.equal(fixture.events.includes('proof-recover-only'), true);
-});
-
 test('a qualification check launch failure resumes before implementation without consuming a cycle', async () => {
   const options: FixtureOptions = { qualificationCheckReject: true };
   const fixture = await runFixture(options);
@@ -970,11 +913,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   assert.ok(proofIndex > 1, 'proof was not launched during continuation');
   const proofValidationIndex = continuationEvents.lastIndexOf('feedback-revalidate', proofIndex);
   assert.ok(proofValidationIndex >= 0, 'proof lacked launch-gated feedback revalidation');
-  assert.equal(
-    continuationEvents.slice(proofValidationIndex + 1, proofIndex).includes('state:proving:none'),
-    true,
-    'proof command ran before launched lease persistence',
-  );
+  assert.equal(proofValidationIndex, proofIndex - 1, 'proof lacked immediate authorization before canonical invocation observation');
 
   const updated = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(updated.status, 'review-ready', JSON.stringify(updated));
@@ -2009,13 +1948,13 @@ test('candidate proof inspection failures retain typed recovery and evidence sta
   const retryableRecord = (await ioFailure.store.read()).runs[0]!;
   assert.equal(retryableRecord.terminalOutcome, undefined);
   assert.ok(retryableRecord.executionLease);
-  assert.equal(retryableRecord.executionLease?.phase, 'launched');
+  assert.equal(retryableRecord.executionLease?.phase, 'prepared');
   assert.equal(
     (await ioFailure.runner.runIssue({ targetRoot: ioFailure.targetRoot, issueNumber: 42 })).status,
     'review-ready',
   );
   assert.equal(ioAttempts, 2);
-  assert.equal(ioFailure.events.includes('candidate-process-absence'), true);
+  assert.equal(ioFailure.events.includes('candidate-process-absence'), false);
 
   const conflict = await runFixture({
     proof: async () => { throw new CandidateProofInspectionError('candidate-artifact-conflict'); },
@@ -2058,6 +1997,163 @@ test('post-proof drift persists the next cycle before fallible pin cleanup', asy
   assert.equal(transitioned.candidateBinding, undefined);
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(replay.status, 'review-ready', JSON.stringify({ replay, state: await fixture.store.read(), events: fixture.events }));
+});
+
+test('passed proof receipt remains durable while candidate cleanup replays without a second proof', async () => {
+  const fixture = await runFixture({ candidateExecutionRemoveFailOnce: true });
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  const pending = (await fixture.store.read()).runs[0]!;
+  assert.equal(pending.lifecycle, 'proving');
+  assert.ok(pending.proofReceipt);
+  assert.equal(pending.executionLease?.operation, 'acceptance-proof');
+  const proofs = fixture.events.filter((event) => event === 'proof').length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, proofs);
+});
+
+test('RunIssue defers one absent proof recovery before launching one PID-rebound replacement', async () => {
+  const fixture = await runFixture();
+  const proofRecords = new InMemoryProofRecordWriter();
+  const observedPids: number[] = [];
+  let launches = 0;
+  let recoveryObservations = 0;
+  const proofAgent: ProofAgent<any> = { run: async (input) => {
+    observedPids.push(input.iosProofInputs!.ownerPid);
+    const prior = await input.invocationState!.read();
+    if (prior) {
+      recoveryObservations += 1;
+      assert.equal(prior.attemptId, 'proof-attempt-1');
+      assert.equal(await input.invocationState!.compareAndSwap(prior, undefined), true);
+      return { kind: 'deferred', code: 'report-operation-output-unavailable' };
+    }
+    launches += 1;
+    assert.equal(await input.invocationState!.compareAndSwap(undefined, {
+      version: 1, operation: 'acceptance-proof', attemptId: `proof-attempt-${launches}`,
+      generationHash: input.workflowGeneration!.generationHash, promptFactsSha256: '9'.repeat(64),
+      reportPath: `/tmp/proof-attempt-${launches}-report.json`, phase: 'launched', host: 'host', bootId: 'boot',
+      preparedAt: '2026-07-16T12:00:00.000Z', launchedAt: '2026-07-16T12:00:01.000Z',
+      pid: input.iosProofInputs!.ownerPid, processStartIdentity: `start-${input.iosProofInputs!.ownerPid}`,
+      processGroupId: input.iosProofInputs!.ownerPid,
+      baseline: { headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+        untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'proof-candidate' },
+    }), true);
+    if (launches === 1) return { kind: 'deferred', code: 'report-operation-process-active-or-uncertain' };
+    const evidenceRef = input.checks[0]!.id;
+    return { kind: 'report', proofPhaseChangedFiles: [], proofPhaseArtifactSha256: {}, report: {
+      version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
+      criteria: input.frozenCriteria.map((criterion) => ({ id: criterion.id, status: 'passed', confidence: 'high',
+        surfaces: ['non-visual'], evidenceRefs: [evidenceRef], analysis: 'Runner check proves the criterion.' })),
+      checks: [], artifacts: [], findings: [], residualRisks: [],
+    } };
+  } };
+  const proof = new AcceptanceProof<any>({
+    checkedChangeReader: fixture.dependencies.checkedChangeMint as ReturnType<typeof createCheckedChangeCapabilities>,
+    proofRecords, proofAgent,
+    inspectFreshness: async (payload, lease) => {
+      assert.equal(payload.version, 2);
+      assert.ok(lease && fixture.dependencies.git.candidateV2);
+      const inspected = await fixture.dependencies.git.candidateV2.inspectExecution({
+        binding: payload.binding, lease, artifactDir: configFixture().proof.artifactDir,
+      });
+      assert.deepEqual(inspected, { kind: 'ok', value: 'matching' });
+      return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha,
+        checkPolicySha256: payload.checkPolicySha256 };
+    },
+    readArtifact: async () => { throw new Error('unexpected proof artifact'); },
+    proofArtifactDir: configFixture().proof.artifactDir, now: fixture.dependencies.now,
+  });
+  const ownerPids = [4242, 4343, 4444];
+  fixture.dependencies.proof.proveChange = async (input) => proof.proveChange({ ...input, iosProofInputs: {
+    helperPath: '/immutable/ios-lease.mjs', leaseRoot: '/leases', leaseArtifactPath: '/candidate/proof-1/ios-lease.json',
+    proofId: input.proofId, ownerPid: ownerPids.shift()!, xcrunPath: '/usr/bin/xcrun', runtimeId: null, deviceTypeId: null,
+  } satisfies IosProofInputsV1 });
+
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'proving');
+  assert.equal((await proofRecords.read('proof-1'))?.invocation?.attemptId, 'proof-attempt-1');
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'proving');
+  assert.equal((await proofRecords.read('proof-1'))?.invocation, undefined);
+  assert.equal(launches, 1);
+  assert.equal(recoveryObservations, 1);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(launches, 2);
+  assert.equal(recoveryObservations, 1);
+  assert.deepEqual(observedPids, [4242, 4242, 4444]);
+});
+
+test('RunIssue settles an active proof before revoked authorization releases leases or publishes terminal labels', async () => {
+  const fixture = await runFixture();
+  const proofRecords = new InMemoryProofRecordWriter();
+  let processAbsent = false;
+  let launches = 0;
+  let observations = 0;
+  let releases = 0;
+  const proof = new AcceptanceProof<any>({
+    checkedChangeReader: fixture.dependencies.checkedChangeMint as ReturnType<typeof createCheckedChangeCapabilities>,
+    proofRecords,
+    proofAgent: { run: async (input) => {
+      const prior = await input.invocationState!.read();
+      if (prior) {
+        observations += 1;
+        if (processAbsent) assert.equal(await input.invocationState!.compareAndSwap(prior, undefined), true);
+        return { kind: 'deferred', code: processAbsent
+          ? 'report-operation-output-unavailable' : 'report-operation-process-active-or-uncertain' };
+      }
+      await input.beforeLaunch?.();
+      launches += 1;
+      assert.equal(await input.invocationState!.compareAndSwap(undefined, {
+        version: 1, operation: 'acceptance-proof', attemptId: `proof-attempt-${launches}`,
+        generationHash: input.workflowGeneration!.generationHash, promptFactsSha256: '9'.repeat(64),
+        reportPath: `/tmp/proof-attempt-${launches}.json`, phase: 'launched', host: 'host', bootId: 'boot',
+        preparedAt: '2026-07-16T12:00:00.000Z', launchedAt: '2026-07-16T12:00:01.000Z',
+        pid: 4242, processStartIdentity: 'start-4242', processGroupId: 4242,
+        baseline: { headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+          untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'proof-candidate' },
+      }), true);
+      return { kind: 'deferred', code: 'report-operation-process-active-or-uncertain' };
+    } },
+    inspectFreshness: async (payload, lease) => {
+      assert.equal(payload.version, 2);
+      assert.ok(lease && fixture.dependencies.git.candidateV2);
+      const inspected = await fixture.dependencies.git.candidateV2.inspectExecution({
+        binding: payload.binding, lease, artifactDir: configFixture().proof.artifactDir,
+      });
+      assert.deepEqual(inspected, { kind: 'ok', value: 'matching' });
+      return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha,
+        checkPolicySha256: payload.checkPolicySha256 };
+    },
+    readArtifact: async () => { throw new Error('unexpected proof artifact'); },
+    androidLease: { verify: async () => {}, release: async () => { releases += 1; } },
+    proofArtifactDir: configFixture().proof.artifactDir, now: fixture.dependencies.now,
+  });
+  fixture.dependencies.proof.proveChange = async (input) => proof.proveChange({ ...input, iosProofInputs: {
+    helperPath: '/immutable/ios-lease.mjs', leaseRoot: '/leases', leaseArtifactPath: '/candidate/proof-1/ios-lease.json',
+    proofId: input.proofId, ownerPid: 4242, xcrunPath: '/usr/bin/xcrun', runtimeId: null, deviceTypeId: null,
+  } });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  await fixture.dependencies.issues.setLabels(42, []);
+  const terminalEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'proving');
+  assert.equal((await proofRecords.read('proof-1'))?.invocation?.attemptId, 'proof-attempt-1');
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, terminalEffects);
+  assert.equal(releases, 0);
+  processAbsent = true;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await proofRecords.read('proof-1'))?.invocation, undefined);
+  assert.equal(releases, 0);
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind']),
+    { status: 'blocked', kind: 'safety' });
+  assert.equal(launches, 1);
+  assert.equal(observations, 2);
+  assert.equal(releases, 1);
 });
 
 test('issue read rejection and post-effect CAS failure are resumable with retained intent', async () => {
@@ -2205,18 +2301,6 @@ test('authorization revocation defers an uncertain launched mutable invocation w
   assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffectsBefore);
 });
 
-test('proof process quiescence also safe-halts the run until absence is confirmed', async () => {
-  const absence = deferred<void>();
-  const fixture = await runFixture({ proofError: new ProofQuiescenceError(321, 321, () => absence.promise) });
-  let settled = false;
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }).finally(() => { settled = true; });
-  await waitFor(() => fixture.events.includes('state:safe-halt:none'));
-  assert.equal(settled, false);
-  assert.equal(fixture.events.includes('owner-release'), false);
-  absence.resolve();
-  assert.deepEqual(pick(await running, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
-});
-
 test('cancellation waits for deferred check and proof settlement before terminal state and owner release', async () => {
   for (const phase of ['check', 'proof'] as const) {
     const controller = new AbortController();
@@ -2239,6 +2323,70 @@ test('cancellation waits for deferred check and proof settlement before terminal
     assert.equal((await running).status, 'cancelled', phase);
     assert.equal(fixture.events.at(-1), 'owner-release', phase);
   }
+});
+
+test('persisted proving recovery runs before cancellation can terminalize the run', async () => {
+  const controller = new AbortController();
+  let proofCalls = 0;
+  const fixture = await runFixture({
+    signal: controller.signal,
+    proof: async () => {
+      proofCalls += 1;
+      return proofCalls < 3
+        ? { status: 'transport-failed', resumable: true, receipt: receipt() }
+        : { status: 'cancelled', receipt: receipt() };
+    },
+  });
+
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true });
+  assert.equal(proofCalls, 1);
+  controller.abort();
+  const terminalEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+  const recovery = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(recovery, ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true }, JSON.stringify({ recovery, proofCalls, record: (await fixture.store.read()).runs[0] }));
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.lifecycle, 'proving');
+  assert.equal(retained.terminalOutcome, undefined);
+  assert.equal(retained.executionLease?.operation, 'acceptance-proof');
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, terminalEffects);
+  assert.equal(proofCalls, 2);
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  assert.equal(proofCalls, 3);
+  assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'cancelled');
+  assert.equal(fixture.events.at(-1), 'owner-release');
+});
+
+test('persisted proving recovery precedes changed check-policy reconciliation', async () => {
+  const controller = new AbortController();
+  let proofCalls = 0;
+  const fixture = await runFixture({
+    signal: controller.signal,
+    proofBeforeLaunchSequence: [true, false, true],
+    proof: async () => {
+      proofCalls += 1;
+      return proofCalls < 3
+        ? { status: 'transport-failed', resumable: true, receipt: receipt() }
+        : { status: 'cancelled', receipt: receipt() };
+    },
+  });
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  fixture.config.checks.lint = 'npm run lint';
+  controller.abort();
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true });
+  assert.equal(proofCalls, 2);
+  assert.equal(fixture.events.includes('check:lint'), false);
+  assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'proving');
+
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: true });
+  assert.equal(proofCalls, 2);
+  assert.equal(fixture.events.includes('check:lint'), false);
+  assert.equal((await fixture.store.read()).runs[0]?.executionLease, undefined);
 });
 
 test('cancellation also waits for an in-flight store write and remote effect before releasing ownership', async () => {
@@ -2276,6 +2424,7 @@ interface FixtureOptions {
   qualificationCheck?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
   check?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
   proof?: (checkedChange: CheckedChange<any>) => Promise<ProveChangeResult>;
+  proofBeforeLaunchSequence?: boolean[];
   implementationResult?: ImplementationAgentResult;
   implementationResults?: ImplementationAgentResult[];
   skipImplementationLaunchPersistence?: boolean;
@@ -2301,6 +2450,7 @@ interface FixtureOptions {
   candidateNormalizeFailOnce?: boolean;
   candidateReleaseFailOnce?: boolean;
   candidateReleaseFailBeforeCommitOnce?: boolean;
+  candidateExecutionRemoveFailOnce?: boolean;
   initialComments?: Array<{
     id?: string;
     body: string;
@@ -2370,7 +2520,6 @@ async function runFixture(options: FixtureOptions = {}) {
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
   const config = configFixture();
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
-  const configBytes = Buffer.from(`${canonicalJson(config)}\n`);
   const capabilities = createCheckedChangeCapabilities();
   const rawStore = new InMemoryRunRecordWriter();
   const tracedStore = traceStore(rawStore, events, options.rejectStoreEvent, options.rejectStoreOccurrence, options.storeGate);
@@ -2409,7 +2558,7 @@ async function runFixture(options: FixtureOptions = {}) {
   };
   const dependencies: RunIssueDependencies = {
     readConfig: async () => ({
-      bytes: configBytes,
+      bytes: Buffer.from(`${canonicalJson(config)}\n`),
       config: options.invalidConfig ? { ...config, unknown: true } as AgentAutoConfig : config,
     }),
     ownerLock: {
@@ -2839,11 +2988,9 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     proof: {
-      proveChange: async ({ checkedChange, recoverAttemptOnly, beforeAgentLaunch, onLaunched }) => {
-        await beforeAgentLaunch?.();
-        await onLaunched?.({ pid: 24680, processGroupId: 24680, launchedAt: '2026-07-16T12:00:00.000Z' });
+      proveChange: async ({ checkedChange, beforeAgentLaunch }) => {
+        if ((options.proofBeforeLaunchSequence?.shift() ?? true)) await beforeAgentLaunch?.();
         events.push('proof');
-        if (recoverAttemptOnly) events.push('proof-recover-only');
         capabilities.verifyAndRead(checkedChange);
         if (options.proofError) throw options.proofError;
         if (options.proofReject) throw new Error('proof rejected');
@@ -2875,7 +3022,7 @@ async function runFixture(options: FixtureOptions = {}) {
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, events, evidence, store: rawStore };
+  return { runner: new RunIssue(dependencies), dependencies, options, config, targetRoot, remoteRoot, worktreePath, baseSha, events, evidence, store: rawStore };
 }
 
 function workflowGeneration(packageVersion: string, seed: string) {
@@ -2929,6 +3076,7 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   let getBaseShaRejected = false;
   let candidateNormalizeRejected = false;
   let candidateReleaseRejected = false;
+  let candidateExecutionRemoveRejected = false;
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejected.has(effect)) return false;
     rejected.add(effect);
@@ -2937,6 +3085,14 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   return {
     candidateV2: {
       ...delegate.candidateV2,
+      removeExecution: async (input) => {
+        if (options.candidateExecutionRemoveFailOnce && !candidateExecutionRemoveRejected
+          && input.lease.operation === 'acceptance-proof') {
+          candidateExecutionRemoveRejected = true;
+          return { kind: 'failed' as const, code: 'candidate-io-failed' as const, detailSha256: sha256('remove failed') };
+        }
+        return delegate.candidateV2.removeExecution(input);
+      },
       normalizeSharedIndex: async (input) => {
         if (options.candidateNormalizeFailOnce && !candidateNormalizeRejected && events.includes('git:commit')) {
           candidateNormalizeRejected = true;

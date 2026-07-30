@@ -12,7 +12,7 @@ import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackCoordinator } from './review-feedback-coordinator.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, CandidateProofInspectionError, ProofQuiescenceError, ProofReportRecoveryError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IosProofInputsV1, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import {
   InjectedContainedMutableOperation,
@@ -911,128 +911,56 @@ function implementationPromptFacts(input: {
 export class ContainedProofAgent implements ProofAgent<import('./checked-change.js').CheckedChangePayload> {
   constructor(private readonly dependencies: {
     config: () => AgentAutoConfig;
-    orchestratorHome: string;
-    parentCodexHome: string;
-    safePath: string;
     targetRoot: string;
-    bootId: string;
-    androidAdbPath: string;
-    iosXcrunPath: string;
-    processExecutor: ProcessExecutor;
-    process?: CodexProcess;
-    createAttemptId?: () => string;
+    operation: InjectedContainedReportOperation;
   }) {}
 
   async run(input: Parameters<ProofAgent['run']>[0]): ReturnType<ProofAgent['run']> {
     if (!input.workflowGeneration) throw new Error('proof workflow generation is required');
+    if (!input.iosProofInputs) throw new Error('runner-owned iOS proof inputs are required');
     const config = this.dependencies.config();
-    const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
     const issueWorktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
     const worktreePath = input.worktreePath ? resolve(input.worktreePath) : issueWorktreePath;
-    const attempt = await prepareContainedAttempt({
-      orchestratorHome: this.dependencies.orchestratorHome,
-      canonicalRepository,
-      runId: input.runId,
-      attemptId: input.attemptId ?? (this.dependencies.createAttemptId ?? randomUUID)(),
-      operationId: 'acceptance-proof',
-      workflowGeneration: input.workflowGeneration,
-      bootId: this.dependencies.bootId,
-    });
     const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
-    const snapshotRoot = dirname(attempt.sourceSkillPath ?? attempt.operationPath);
-    const iosLeaseRoot = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(canonicalRepository),
-      'leases',
-    );
-    const iosLeaseArtifact = join(artifactRoot, input.proofId, 'ios-lease.json');
-    const iosTooling = await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
-    try {
-      try {
-        const recoveredReport = await readRegularFile(attempt.reportPath);
-        const recoveredInventory = await artifactInventory(artifactRoot, config.proof.artifactDir);
-        const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
-        return {
-          kind: 'report',
-          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']),
-          proofPhaseChangedFiles: [...recoveredInventory.keys()].filter((path) => !runnerPrepared.has(path)).sort(),
-        };
-      } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) throw error;
-      }
-      if (input.recoverOnly) throw new ProofReportRecoveryError();
-      const result = await (this.dependencies.process ?? new CodexProcess()).run({
-        codexPath: config.codex.command,
-        cwd: worktreePath,
-        schemaPath: attempt.schemaPath,
-        reportPath: attempt.reportPath,
-        toolHome: attempt.toolHome,
-        tmpDir: attempt.tmpDir,
-        safePath: this.dependencies.safePath,
-        parentCodexHome: this.dependencies.parentCodexHome,
-        parentEnv: process.env,
-        prompt: [
-          `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
-          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Independently prove issue #${input.issue.number}.`,
-          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
-          `Checked change digest: ${input.checkedChangeSha256}.`,
-          `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
-          `Configured check receipts: ${canonicalJson(input.checks)}.`,
-          `Write evidence only below ${config.proof.artifactDir}.`,
-          'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
-          'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
-          ...(config.proof.android ? [
-            `Runner-owned Android artifact paths: ${canonicalJson(input.runnerPreparedArtifactPaths)}.`,
-            `Runner-owned Android preparation warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
-            'The trusted Runner owns emulator, build, adb, lease, capture, and cleanup actions. Do not invoke adb, emulator, Flutter run, or an Android lease helper.',
-            'Inspect Runner artifacts when present. If preparation warnings are present, continue with all available non-visual evidence and preserve the warning as a residual risk; Android infrastructure failure alone must not block delivery.',
-          ] : [
-            'Runner-owned Android proof is not configured for this repository. Do not invoke adb, emulator, Flutter run, or an Android lease helper; return a typed tool blocker for Android criteria.',
-          ]),
-          'When a frozen criterion has an iOS surface, follow references/ios.md from the exact acceptance-proof skill snapshot.',
-          `iOS lease helper: ${join(snapshotRoot, 'tools', 'ios-lease.mjs')}.`,
-          `iOS lease root: ${iosLeaseRoot}.`,
-          `iOS lease artifact: ${iosLeaseArtifact}.`,
-          `iOS lease proof ID: ${input.proofId}.`,
-          `iOS lease owner PID: ${process.pid}.`,
-          `iOS xcrun path: ${this.dependencies.iosXcrunPath}.`,
-          ...(iosTooling ? [
-            `iOS runtime ID: ${iosTooling.runtimeId}.`,
-            `iOS device type ID: ${iosTooling.deviceTypeId}.`,
-          ] : ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.']),
-          ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
-          'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
-        ].join('\n'),
-        timeoutMs: config.codex.timeoutMs,
-        idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
-        executionProfile: attempt.profile,
-        ...(input.onLaunched ? { onSpawned: ({ pid, processGroupId }: { pid: number; processGroupId: number }) => input.onLaunched!({
-          pid, processGroupId, launchedAt: new Date().toISOString(),
-        }) } : {}),
-      }, input.signal);
-      if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
-        return { kind: 'transport-failed', resumable: true };
-      }
-      if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
-      const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
-      return {
-        kind: 'report',
-        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']),
-        proofPhaseChangedFiles: changedArtifactPaths(before, after),
-      };
-    } catch (error) {
-      if (error instanceof ProcessQuiescenceError) {
-        throw new ProofQuiescenceError(error.pid, error.processGroupId, () => waitForProcessGroupAbsent(error.processGroupId));
-      }
-      if (error instanceof ProofReportRecoveryError) throw error;
-      return { kind: 'internal-error' };
+    if (!input.invocationState) return { kind: 'internal-error' };
+    if (input.repairOnly && await input.invocationState.read() === undefined
+      && !artifactInventoryMatches(before, input.repairArtifactSha256)) {
+      return { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' };
     }
+    const result = await this.dependencies.operation.run({
+      operation: 'acceptance-proof', runId: input.runId, worktreePath,
+      workflowGeneration: input.workflowGeneration, signal: input.signal, invocationState: input.invocationState,
+      beforeLaunch: input.beforeLaunch,
+      promptFacts: [
+        `Proof ID: ${input.proofId}. Issue: ${canonicalJson(input.issue)}.`,
+        `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}.`,
+        `Checked change: ${input.checkedChangeSha256}; files: ${canonicalJson(input.changedFiles)}; checks: ${canonicalJson(input.checks)}.`,
+        `Runner artifacts: ${canonicalJson(input.runnerPreparedArtifactPaths)}; hashes: ${canonicalJson(input.runnerPreparedArtifactSha256)}; warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
+        `Runner-owned immutable iOS proof inputs: ${canonicalJson(input.iosProofInputs)}.`,
+        ...(input.iosProofInputs.runtimeId === null || input.iosProofInputs.deviceTypeId === null
+          ? ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.'] : []),
+        `Report repair: ${canonicalJson({ repairOnly: input.repairOnly, findings: input.repairFindings })}.`,
+        ...(input.repairOnly ? [`Immutable pre-repair artifact inventory: ${canonicalJson(input.repairArtifactSha256)}.`] : []),
+      ],
+    });
+    if (result.status === 'cancelled') return { kind: 'cancelled' };
+    if (result.status !== 'completed') {
+      if (input.repairOnly && await input.invocationState.read() === undefined
+        && !artifactInventoryMatches(await artifactInventory(artifactRoot, config.proof.artifactDir), input.repairArtifactSha256)) {
+        return { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' };
+      }
+      return { kind: 'deferred', code: result.code };
+    }
+    const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
+    const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
+    const changed = before.size === 0
+      ? [...after.keys()].filter((path) => !runnerPrepared.has(path)).sort()
+      : changedArtifactPaths(before, after);
+    return {
+      kind: 'report', report: decodeAgentReportForValidation(result.reportBytes, ['visualEvidence', 'blocker']),
+      proofPhaseChangedFiles: changed, proofPhaseArtifactSha256: Object.fromEntries([...after.entries()].sort()),
+    };
   }
 }
 
@@ -1130,13 +1058,6 @@ export function createV2Runtime(input: {
     git,
     now,
   });
-  const proofAgent = input.proofAgent ?? new ContainedProofAgent({
-    ...containedDependencies(),
-    targetRoot,
-    androidAdbPath,
-    iosXcrunPath,
-    processExecutor: commandExecutor,
-  });
   const androidProofController = new RunnerAndroidProofController({
     adbPath: androidAdbPath,
     emulatorPath: androidEmulatorPath,
@@ -1161,7 +1082,9 @@ export function createV2Runtime(input: {
         bootId: input.bootId,
       }),
     }),
-    snapshot: (worktreePath) => git.snapshot(worktreePath),
+    snapshot: (worktreePath, operation) => operation === 'acceptance-proof' && proofFreshnessGit.snapshotIgnoringUntrackedRoot
+      ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, requireConfig(currentConfig).proof.artifactDir)
+      : git.snapshot(worktreePath),
     readReport: async (path) => readRegularFile(path).then((bytes) => ({ status: 'available' as const, bytes }))
       .catch((error) => isErrorCode(error, 'ENOENT') ? { status: 'absent' as const } : { status: 'unknown' as const }),
     settleAttempt: async (attempt) => attempt.tmpDir
@@ -1176,7 +1099,7 @@ export function createV2Runtime(input: {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
       }
       let readView: string | undefined;
-      if (operation !== 'spec-author') {
+      if (operation !== 'spec-author' && operation !== 'acceptance-proof') {
         try {
           readView = await materializeReportReadView({
             worktreePath,
@@ -1195,7 +1118,7 @@ export function createV2Runtime(input: {
       try {
         result = await containedProcess.run({
         codexPath: config.codex.command,
-        cwd: operation === 'spec-author' ? dirname(attempt.reportPath) : readView!,
+        cwd: operation === 'spec-author' ? dirname(attempt.reportPath) : operation === 'acceptance-proof' ? worktreePath : readView!,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
         toolHome: attempt.toolHome,
@@ -1210,6 +1133,13 @@ export function createV2Runtime(input: {
           `Runner-provided facts: ${canonicalJson(promptFacts)}`,
           `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
           'Do not modify the product worktree, prior revisions, external state, or any .env file.',
+        ].join('\n') : operation === 'acceptance-proof' ? [
+          `Package profile instructions: ${attempt.profile.developerInstructions}`,
+          `Follow the exact operation at ${attempt.operationPath}.`,
+          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
+          `Runner-provided proof facts:\n${promptFacts.join('\n')}`,
+          `Write evidence only below ${config.proof.artifactDir}. CheckedChange is the sole authority for completed checks.`,
+          'Do not modify product files, commit, push, publish, use network or MCP tools, or print credentials or local auth paths.',
         ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
@@ -1245,6 +1175,9 @@ export function createV2Runtime(input: {
       }
       return { status: 'completed' as const, reportBytes: result.report.bytes };
     },
+  });
+  const proofAgent = input.proofAgent ?? new ContainedProofAgent({
+    config: () => requireConfig(currentConfig), targetRoot, operation: reportOperation,
   });
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
@@ -1435,7 +1368,6 @@ export function createV2Runtime(input: {
         androidLease,
         iosLease,
         proofArtifactDir: config.proof.artifactDir,
-        createAttemptId: input.createAttemptId ?? randomUUID,
         now,
         signal: controller.signal,
       });
@@ -1448,11 +1380,21 @@ export function createV2Runtime(input: {
       const runnerPreparedArtifactSha256: Record<string, string> = {};
       const runnerPreparationWarnings: string[] = [];
       let preparationAttempted = false;
+      if (!proofInput.workflowGeneration) throw new Error('proof workflow generation is required');
+      const iosTooling = await discoverIosTooling(commandExecutor, iosXcrunPath);
+      const iosProofInputs: IosProofInputsV1 = {
+        helperPath: join(proofInput.workflowGeneration.generationRoot, 'skills', 'acceptance-proof', 'tools', 'ios-lease.mjs'),
+        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
+        leaseArtifactPath: resolve(worktreePath, config.proof.artifactDir, proofInput.proofId, 'ios-lease.json'),
+        proofId: proofInput.proofId, ownerPid: process.pid, xcrunPath: iosXcrunPath,
+        runtimeId: iosTooling?.runtimeId ?? null, deviceTypeId: iosTooling?.deviceTypeId ?? null,
+      };
       const result = await acceptanceProof.proveChange({
         ...proofInput,
         runnerPreparedArtifactPaths,
         runnerPreparedArtifactSha256,
         runnerPreparationWarnings,
+        iosProofInputs,
         beforeAgentLaunch: async () => {
           await proofInput.beforeAgentLaunch?.();
           if (!androidRelevant || preparationAttempted) return;
@@ -2013,6 +1955,10 @@ function changedArtifactPaths(before: Map<string, string>, after: Map<string, st
   return [...new Set([...before.keys(), ...after.keys()])]
     .filter((path) => before.get(path) !== after.get(path))
     .sort();
+}
+
+function artifactInventoryMatches(actual: Map<string, string>, expected?: Record<string, string>): boolean {
+  return canonicalJson(Object.fromEntries([...actual.entries()].sort())) === canonicalJson(expected ?? null);
 }
 
 async function fingerprintRepositoryPath(root: string, relativePath: string): Promise<unknown> {

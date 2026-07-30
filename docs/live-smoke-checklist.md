@@ -39,6 +39,12 @@ Its scenarios are intentionally bound to these current owner behaviors:
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
+- `proof-interrupted-daemon`: a scratch daemon is terminated by its exact child
+  PID after a real proof worker reaches durable launched ownership. If its report
+  is durable, one bounded `daemon --once --issue` adopts the exact attempt. If the
+  process is positively absent without a report, one tick settles it without a
+  relaunch and one later tick launches exactly one replacement. Both paths prove
+  one recovery observation, one model launch, and one publication effect.
 - `quality-gates`: the fifth failed configured-check closure exhausts the run
   without publication.
 

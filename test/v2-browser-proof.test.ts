@@ -117,7 +117,6 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
       readArtifact: (relativePath) => readFile(join(root, relativePath)),
       inspectArtifact: async (relativePath) => ({ modifiedAt: (await stat(join(root, relativePath))).mtime.toISOString() }),
       proofArtifactDir: proofRoot,
-      createAttemptId: (() => { let id = 0; return () => `browser-attempt-${++id}`; })(),
       now: () => new Date().toISOString(),
     });
 
@@ -342,7 +341,6 @@ async function runPolicyFixture(
     readArtifact: async (relativePath) => bytes.get(relativePath)!,
     inspectArtifact: async (relativePath) => ({ modifiedAt: metadata.get(relativePath)! }),
     proofArtifactDir: 'proofs/proof-browser',
-    createAttemptId: (() => { let id = 0; return () => `policy-attempt-${++id}`; })(),
     now: () => '2026-07-16T12:00:00.000Z',
   });
   const issue: IssueSnapshot = {

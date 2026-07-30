@@ -74,7 +74,7 @@ const proof = new AcceptanceProof({
     artifactRelativePathForProof: () => paths.lease,
     targetController: { release: (record) => releaseSimulator(xcrun, record) },
   }),
-  proofArtifactDir: proofRoot, createAttemptId: () => 'ios-real-attempt', now: () => startedAt,
+  proofArtifactDir: proofRoot, now: () => startedAt,
 });
 const issue: IssueSnapshot = {
   number: 505, title: 'Prove runner-created iOS fixture', body: 'The iOS fixture reaches its ready state.',

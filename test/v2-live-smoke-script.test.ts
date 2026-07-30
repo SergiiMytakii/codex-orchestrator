@@ -32,7 +32,7 @@ const retainedScenarios = [
   'package-install', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
   'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'review-feedback-continuation', 'quality-gates', 'safety-negative',
+  'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates', 'safety-negative',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
@@ -51,7 +51,7 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
       'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-      'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
+      'acceptance-proof-negative', 'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates',
     ],
   );
 });
@@ -273,7 +273,136 @@ test('daemon continuation requires exclusive scratch-repository candidate owners
   assert.match(daemon, /await assertExclusiveDaemonCandidate\(context, issueNumber\)/u);
   assert.match(daemon, /'--once', '--issue', String\(issueNumber\)/u);
   assert.match(daemon, /'agent:auto', 'agent:review'/u);
-  assert.match(daemon, /candidates\.size !== 1 \|\| !candidates\.has\(issueNumber\)/u);
+  assert.match(daemon, /observeExclusiveDaemonCandidate\(issueNumber/u);
+  const launched = daemon.slice(daemon.indexOf('async function startDaemonOnce'), daemon.indexOf('async function waitForValue'));
+  assert.equal((launched.match(/assertExclusiveDaemonCandidate\(context, issueNumber\)/gu) ?? []).length, 2);
+  assert.match(launched, /daemon\.kill\('SIGKILL'\)/u);
+});
+
+test('daemon candidate preflight retries a missing owned issue but rejects a foreign candidate immediately', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    observeExclusiveDaemonCandidate: (
+      issueNumber: number, observe: () => Promise<Set<number>>, options: { attempts: number; delayMs: number },
+    ) => Promise<void>;
+  };
+  let observations = 0;
+  await module.observeExclusiveDaemonCandidate(980, async () => {
+    observations += 1;
+    return new Set(observations === 1 ? [] : [980]);
+  }, { attempts: 2, delayMs: 0 });
+  assert.equal(observations, 2);
+
+  let foreignObservations = 0;
+  await assert.rejects(module.observeExclusiveDaemonCandidate(980, async () => {
+    foreignObservations += 1;
+    return new Set([980, 981]);
+  }, { attempts: 5, delayMs: 0 }), /foreign candidate.*981/u);
+  assert.equal(foreignObservations, 1);
+});
+
+test('scratch daemon proof interruption kills only the daemon after a real durable proof launch and resumes once', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    observeProofRecoveryBoundary: (
+      reportReady: () => Promise<boolean>, processAbsent: () => Promise<boolean>,
+      options: { attempts: number; delayMs: number },
+    ) => Promise<'report-ready' | 'process-absent'>;
+  };
+  let reportObservations = 0; let presenceObservations = 0;
+  assert.equal(await module.observeProofRecoveryBoundary(async () => {
+    reportObservations += 1; return reportObservations === 2;
+  }, async () => { presenceObservations += 1; return false; },
+  { attempts: 2, delayMs: 0 }), 'report-ready');
+  assert.deepEqual([reportObservations, presenceObservations], [2, 1]);
+  assert.equal(await module.observeProofRecoveryBoundary(async () => false, async () => true,
+    { attempts: 1, delayMs: 0 }), 'process-absent');
+
+  const text = await source();
+  const scenario = text.slice(text.indexOf('async function runInterruptedProofDaemonScenario'), text.indexOf('async function runQualityGatesScenario'));
+  assert.match(scenario, /startDaemonOnce\(context, issue\.number\)/u);
+  assert.match(scenario, /invocation\?\.phase === 'launched'/u);
+  assert.match(scenario, /daemon\.kill\('SIGKILL'\)/u);
+  assert.match(scenario, /proofReadinessMarkerPath\(launched\.invocation\.reportPath\)/u);
+  assert.match(scenario, /observeProofRecoveryBoundary/u);
+  assert.match(scenario, /Math\.ceil\(context\.options\.timeoutMs \/ 50\).*delayMs: 50/su);
+  assert.match(scenario, /recoveryBoundary === 'report-ready'/u);
+  assert.match(scenario, /settledProof\.invocation/u);
+  assert.match(scenario, /replacement did not reach review-ready/u);
+  assert.match(scenario, /attemptId/u);
+  assert.equal((scenario.match(/runDaemonTick\(context, issue\.number\)/gu) ?? []).length, 3);
+  assert.match(scenario, /proofCalls\.length !== 1/u);
+  assert.match(scenario, /proofCallsAfterAbsence\.length !== 0/u);
+  assert.match(scenario, /recoveryObservations\.length !== 1/u);
+  assert.match(scenario, /adoptedProof\.status !== 'passed'/u);
+  assert.match(scenario, /publicationCount.*!== 1/u);
+  const fault = text.slice(text.indexOf('function forward(prompt)'), text.indexOf('launch(1)'));
+  assert.doesNotMatch(fault, /proof-interrupted-daemon/u);
+  const producer = text.slice(text.indexOf('function durableReadinessMarker'), text.indexOf('function normalizeCodeReview'));
+  assert.match(producer, /proofReadinessMarkerPath\(reportPath\)/u);
+  assert.match(producer, /openSync\(reportPath, 'r'\).*fsyncSync/u);
+  assert.match(producer, /openSync\(marker, 'r'\).*fsyncSync/u);
+  assert.match(text, /\$\{proofReadinessMarkerPath\}/u);
+  assert.equal((text.match(/return `\$\{reportPath\}\.ready`;/gu) ?? []).length, 1);
+  assert.equal((text.match(/if \(!isAbsolute\(reportPath\)\)/gu) ?? []).length, 1);
+});
+
+test('interrupted proof cleanup settles exact owned identities on launched and recovery timeouts', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    withInterruptedProofCleanup: (
+      owned: Record<string, any>, action: () => Promise<void>, control: Record<string, any>,
+    ) => Promise<void>;
+  };
+  const live = new Map([[10, 'daemon-start'], [20, 'proof-start'], [99, 'unrelated-start']]);
+  const groups = new Set([20, 99]);
+  const signals: string[] = [];
+  const control = {
+    readProcessStartIdentity: async (pid: number) => live.get(pid),
+    groupIsAbsent: async (pgid: number) => !groups.has(pgid),
+    terminatePid: (pid: number) => { signals.push(`pid:${pid}`); live.delete(pid); },
+    terminateGroup: (pgid: number) => { signals.push(`pgid:${pgid}`); groups.delete(pgid); live.delete(pgid); },
+    waitForPidAbsent: async (pid: number) => assert.equal(live.has(pid), false),
+    waitForGroupAbsent: async (pgid: number) => assert.equal(groups.has(pgid), false),
+  };
+
+  const beforeLaunch: Record<string, any> = { daemon: { pid: 10, processStartIdentity: 'daemon-start' } };
+  await assert.rejects(module.withInterruptedProofCleanup(beforeLaunch, async () => {
+    throw new Error('launched-state wait timeout');
+  }, control), /launched-state wait timeout/u);
+  assert.deepEqual(signals, ['pid:10']);
+  assert.equal(live.get(99), 'unrelated-start'); assert.equal(groups.has(99), true);
+
+  live.set(10, 'daemon-start'); signals.length = 0;
+  const afterLaunch: Record<string, any> = { daemon: { pid: 10, processStartIdentity: 'daemon-start' } };
+  await assert.rejects(module.withInterruptedProofCleanup(afterLaunch, async () => {
+    afterLaunch.proof = { pid: 20, processStartIdentity: 'proof-start', processGroupId: 20 };
+    throw new Error('recovery-boundary timeout');
+  }, control), /recovery-boundary timeout/u);
+  assert.deepEqual(signals, ['pid:10', 'pgid:20']);
+  assert.equal(live.get(99), 'unrelated-start'); assert.equal(groups.has(99), true);
+
+  live.set(10, 'daemon-start'); live.set(20, 'proof-start'); groups.add(20); signals.length = 0;
+  await module.withInterruptedProofCleanup({
+    daemon: { pid: 10, processStartIdentity: 'daemon-start' },
+    proof: { pid: 20, processStartIdentity: 'proof-start', processGroupId: 20 },
+  }, async () => {}, control);
+  assert.deepEqual(signals, ['pid:10', 'pgid:20']);
+
+  live.set(10, 'reused-start'); signals.length = 0;
+  await module.withInterruptedProofCleanup({
+    daemon: { pid: 10, processStartIdentity: 'daemon-start' },
+  }, async () => {}, control);
+  assert.deepEqual(signals, []); assert.equal(live.get(10), 'reused-start');
+
+  live.set(20, 'reused-proof-start'); groups.add(20); signals.length = 0;
+  await assert.rejects(module.withInterruptedProofCleanup({
+    proof: { pid: 20, processStartIdentity: 'proof-start', processGroupId: 20 },
+  }, async () => {}, control), /strict cleanup unresolved.*ownership.*reuse/iu);
+  assert.deepEqual(signals, []); assert.equal(live.get(20), 'reused-proof-start');
+
+  groups.delete(20); signals.length = 0;
+  await module.withInterruptedProofCleanup({
+    proof: { pid: 20, processStartIdentity: 'proof-start', processGroupId: 20 },
+  }, async () => {}, control);
+  assert.deepEqual(signals, []);
 });
 
 test('scenario assertions bind live smoke outcomes to their current owner behavior', async () => {
@@ -290,13 +419,14 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   assert.match(text, /negative scenario published a branch or PR/u);
 });
 
-test('fixture happy paths normalize proof semantics after real model invocation', async () => {
+test('deterministic fixtures normalize proof semantics while interruption preserves real proof output', async () => {
   const text = await source();
   const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   for (const scenario of [
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
+  assert.doesNotMatch(applyFault, /'proof-interrupted-daemon'/u);
   assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
 });
 

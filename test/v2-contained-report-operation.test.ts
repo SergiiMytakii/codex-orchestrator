@@ -28,7 +28,11 @@ const specAuthorPolicy: WorkflowOperationPolicy = {
   sandboxMode: 'workspace-write', cwdClass: 'target-state', worktreeAccess: 'write', writableRootClasses: ['target-state'],
   runnerPostcondition: 'spec-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
 };
-const operations: ContainedReportOperationId[] = ['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review'];
+const proofPolicy: WorkflowOperationPolicy = {
+  sandboxMode: 'workspace-write', cwdClass: 'worktree', worktreeAccess: 'write', writableRootClasses: ['worktree'],
+  runnerPostcondition: 'proof-only', network: 'deny', networkHosts: [], mcpTools: [], approvalCeiling: 'never', externalWrite: false,
+};
+const operations: ContainedReportOperationId[] = ['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review', 'acceptance-proof'];
 
 for (const operationId of operations) {
   test(`${operationId} persists prepare and fenced launch before adopting its attempt-owned report`, async () => {
@@ -42,7 +46,7 @@ for (const operationId of operations) {
 }
 
 test('restart adopts the exact exited attempt report before any relaunch', async () => {
-  const fixture = invocationFixture('triage', { launch: 'safe-halt' });
+  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
   assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
   fixture.report = Buffer.from('{"report":{"status":"direct"}}');
   fixture.observation = { status: 'absent', processGroupAlive: false };
@@ -53,7 +57,7 @@ test('restart adopts the exact exited attempt report before any relaunch', async
 });
 
 test('unknown report read retains the launched fence and never permits a second launch', async () => {
-  const fixture = invocationFixture('triage', { launch: 'safe-halt' });
+  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
   assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
   fixture.reportReadError = Object.assign(new Error('report I/O failed'), { code: 'EIO' });
   fixture.observation = { status: 'absent', processGroupAlive: false };
@@ -66,7 +70,7 @@ test('unknown report read retains the launched fence and never permits a second 
 });
 
 test('prompt-fact drift rejects stale adoption without clearing or relaunching the attempt', async () => {
-  const fixture = invocationFixture('triage', { launch: 'safe-halt' });
+  const fixture = invocationFixture('acceptance-proof', { launch: 'safe-halt' });
   assert.equal((await fixture.operation.run(fixture.input)).status, 'safe-halt');
   fixture.report = Buffer.from('{"report":{"status":"direct"}}');
   fixture.observation = { status: 'absent', processGroupAlive: false };
@@ -257,7 +261,8 @@ function invocationFixture(operationId: ContainedReportOperationId, options: {
       host: 'host-a', bootId: 'boot-a', now: () => '2026-07-17T00:00:00.000Z',
       createAttemptId: () => `attempt-${operationId}`,
       snapshot: async () => ({ ...snapshot(), ...(options.mutateSnapshot && snapshots++ > 0 ? { trackedContentSha256: '9'.repeat(64) } : {}) }),
-      prepare: async () => ({ operation: operationId, generationHash, policy: operationId === 'spec-author' ? specAuthorPolicy : policy,
+      prepare: async () => ({ operation: operationId, generationHash,
+        policy: operationId === 'spec-author' ? specAuthorPolicy : operationId === 'acceptance-proof' ? proofPolicy : policy,
         reportPath: `/attempts/attempt-${operationId}/report.json` }),
       readReport: async () => {
         if (fixture.reportReadError) throw fixture.reportReadError;

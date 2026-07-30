@@ -143,8 +143,11 @@ test('one-shot report lifecycle migration fail-closes launched legacy owners wit
   const direct = legacyLaunchedDirectRecord(uuid(32), 132);
   const spec = legacyLaunchedSpecRecord(uuid(33), 133);
   const author = legacySpecAuthorRecord(uuid(34), 134, 'launched');
+  const proof = reidentify(record(), uuid(35), 135);
+  proof.lifecycle = 'safe-halt';
+  proof.process = legacyReportProcess('proof');
   const legacyBytes = Buffer.from(`${JSON.stringify({
-    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec, author],
+    schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 11, runs: [route, direct, spec, author, proof],
   })}\n`);
   await writeFile(path, legacyBytes);
 
@@ -159,11 +162,11 @@ test('one-shot report lifecycle migration fail-closes launched legacy owners wit
       resumable: run.terminalOutcome.status === 'blocked' ? run.terminalOutcome.resumable : undefined,
     }, { status: 'blocked', kind: 'safety', resumable: false });
     assert.match(run.outcomeEvidenceId ?? '', /report-lifecycle-migration/u);
-    assert.equal(run.process, undefined);
+    assert.equal('process' in run, false);
     assert.equal(run.reportInvocation, undefined);
   }
   const persisted = await readFile(path, 'utf8');
-  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-author"', '"purpose":"spec-review"', '"invocation"']) {
+  for (const removed of ['triageTransportRetries', 'ambiguityTransportRetries', '"purpose":"route"', '"purpose":"code-review"', '"purpose":"spec-author"', '"purpose":"spec-review"', '"purpose":"proof"', '"invocation"']) {
     assert.equal(persisted.includes(removed), false, removed);
   }
 });
@@ -586,12 +589,15 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
     version: 1,
     proofId: 'proof-1',
     bindingSha256: 'a'.repeat(64),
-    status: 'prepared',
-    attempts: [{ attemptId: 'attempt-1', purpose: 'proof', status: 'prepared' }],
+    status: 'active', reportRepairs: 0, repairFindings: [],
+    iosProofInputs: { helperPath: '/immutable/ios-lease.mjs', leaseRoot: '/leases',
+      leaseArtifactPath: '/candidate/proof-1/ios-lease.json', proofId: 'proof-1', ownerPid: 4242,
+      xcrunPath: '/usr/bin/xcrun', runtimeId: null, deviceTypeId: null },
     startedAt: timestamp(),
     updatedAt: timestamp(),
   });
   assert.equal(state.generation, 1);
+  assert.equal((await writer.read('proof-1'))?.iosProofInputs?.ownerPid, 4242);
   assert.equal('lifecycle' in state, false);
 
   await assert.rejects(writer.compareAndSwap('proof-2', 'b'.repeat(64), 0, {
@@ -607,6 +613,79 @@ test('proof writer persists only proof schema and cannot encode run lifecycle fi
   } as never), /keys/u);
 });
 
+test('proof writer one-shot migrates only unlaunched standalone proof state with a source-identified raw backup', async () => {
+  const root = await temporaryRoot();
+  const proofDir = join(root, 'proof-prepared');
+  const path = join(proofDir, 'state.json');
+  await mkdir(proofDir, { recursive: true });
+  const legacyBytes = Buffer.from(`${JSON.stringify(legacyProofState('proof-prepared', 'prepared'), null, 2)}\n`);
+  await writeFile(path, legacyBytes);
+  await writeFile(`${path}.pre-canonical-proof-v1`, 'prior unrelated backup\n');
+
+  const writer = new FileProofRecordWriter(root, deterministicAtomicOptions());
+  const migrated = await writer.read('proof-prepared');
+  assert.equal(migrated?.status, 'active');
+  assert.equal(migrated?.reportRepairs, 0);
+  assert.equal(migrated?.generation, 8);
+  const names = await readdir(proofDir);
+  const backup = names.find((name) => name.startsWith('state.json.pre-canonical-proof-v1.g7-'));
+  assert.ok(backup);
+  assert.deepEqual(await readFile(join(proofDir, backup)), legacyBytes);
+  const canonicalBytes = await readFile(path, 'utf8');
+  assert.equal(canonicalBytes.includes('attempts'), false);
+  assert.deepEqual(await writer.read('proof-prepared'), migrated);
+  assert.equal((await readdir(proofDir)).filter((name) => name.startsWith('state.json.pre-canonical-proof-v1.g7-')).length, 1);
+});
+
+test('proof writer fail-closes launched or ambiguous standalone proof state without resumable launch authority', async () => {
+  for (const phase of ['running', 'ambiguous'] as const) {
+    const root = await temporaryRoot();
+    const proofId = `proof-${phase}`;
+    const proofDir = join(root, proofId);
+    const path = join(proofDir, 'state.json');
+    await mkdir(proofDir, { recursive: true });
+    const legacy = legacyProofState(proofId, phase === 'running' ? 'running' : 'prepared');
+    if (phase === 'ambiguous') legacy.attempts[0].status = 'running';
+    const legacyBytes = Buffer.from(`${JSON.stringify(legacy)}\n`);
+    await writeFile(path, legacyBytes);
+
+    const migrated = await new FileProofRecordWriter(root, deterministicAtomicOptions()).read(proofId);
+    assert.equal(migrated?.status, 'internal-error', phase);
+    assert.equal(migrated?.invocation, undefined, phase);
+    assert.match(migrated?.receipt?.summary ?? '', /migration.*identity unavailable/iu, phase);
+    assert.match(migrated?.receipt?.localEvidenceId ?? '', /proof-state-migration-safety/u, phase);
+    assert.deepEqual(await readFile((migrated?.receipt?.localEvidenceId ?? '').replace('proof-state-migration-safety:', '')), legacyBytes);
+  }
+});
+
+test('proof migration decoder fail-closes every malformed prepared source instead of granting launch authority', async () => {
+  const cases: Array<[string, (legacy: any) => void]> = [
+    ['prepared receipt', (legacy) => { legacy.receipt = proofMigrationReceipt(legacy.proofId); }],
+    ['unknown effect', (legacy) => { legacy.effect = { invoked: true }; }],
+    ['duplicate attempt', (legacy) => { legacy.attempts.unshift({ ...legacy.attempts[0], status: 'terminal' }); }],
+    ['bad purpose', (legacy) => { legacy.attempts[0].purpose = 'publication'; }],
+    ['retry budget', (legacy) => {
+      legacy.attempts = [
+        { attemptId: 'proof', purpose: 'proof', status: 'terminal' },
+        { attemptId: 'retry-1', purpose: 'transport-retry', status: 'terminal' },
+        { attemptId: 'retry-2', purpose: 'transport-retry', status: 'prepared' },
+      ];
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const root = await temporaryRoot();
+    const proofId = `proof-${name.replaceAll(' ', '-')}`;
+    const proofDir = join(root, proofId);
+    await mkdir(proofDir, { recursive: true });
+    const legacy = legacyProofState(proofId, 'prepared');
+    mutate(legacy);
+    await writeFile(join(proofDir, 'state.json'), `${JSON.stringify(legacy)}\n`);
+    const migrated = await new FileProofRecordWriter(root, deterministicAtomicOptions()).read(proofId);
+    assert.equal(migrated?.status, 'internal-error', name);
+    assert.match(migrated?.receipt?.localEvidenceId ?? '', /proof-state-migration-safety/u, name);
+  }
+});
+
 test('state publication rejects symlinked parent directories before writing outside', async () => {
   const root = await temporaryRoot();
   const outside = await temporaryRoot();
@@ -618,6 +697,21 @@ test('state publication rejects symlinked parent directories before writing outs
 
 function body(runs: RunRecordV1[]): RunStateBodyV1 {
   return { schema: 'codex-orchestrator.agent-auto-state', version: 2, runs };
+}
+
+function legacyProofState(proofId: string, status: 'prepared' | 'running'): any {
+  return {
+    schema: 'codex-orchestrator.acceptance-proof-state', version: 1, generation: 7,
+    proofId, bindingSha256: 'a'.repeat(64), status,
+    attempts: [{ attemptId: 'legacy-attempt', purpose: 'proof', status }],
+    startedAt: timestamp(), updatedAt: timestamp(),
+  };
+}
+
+function proofMigrationReceipt(proofId: string): any {
+  return {
+    proofId, bindingSha256: 'a'.repeat(64), summary: 'Legacy receipt.', publishableEvidence: [], localEvidenceId: 'legacy',
+  };
 }
 
 function legacySafeRouteRecord(runId: string, issueNumber: number): any {
@@ -707,10 +801,10 @@ function legacyLaunchedSpecRecord(runId: string, issueNumber: number): any {
   return run;
 }
 
-function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-author' | 'spec-review') {
+function legacyReportProcess(purpose: 'route' | 'code-review' | 'spec-author' | 'spec-review' | 'proof') {
   return {
     pid: 51, processGroupId: 51, startedAt: timestamp(), purpose,
-    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'spec-review' || purpose === 'spec-author' ? 'spec-authoring' : 'implementing',
+    resumeLifecycle: purpose === 'route' ? 'triaging' : purpose === 'proof' ? 'proving' : purpose === 'spec-review' || purpose === 'spec-author' ? 'spec-authoring' : 'implementing',
     resumeReviewStage: purpose === 'code-review' ? 'review-full' : null,
     baseline: {
       headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),

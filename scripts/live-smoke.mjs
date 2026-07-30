@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { platform, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,6 +25,7 @@ const scenarioDefinitions = new Map([
   ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
+  ['proof-interrupted-daemon', runInterruptedProofDaemonScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
   ['quality-gates', runQualityGatesScenario],
   ['safety-negative', runSafetyNegativeScenario],
@@ -36,7 +38,7 @@ const scenarioProfiles = new Map([
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
+    'acceptance-proof-negative', 'proof-interrupted-daemon', 'review-feedback-continuation', 'quality-gates',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
@@ -52,6 +54,7 @@ async function main() {
   const context = {
     options, runId, root, sourceRoot, repo: options.repo,
     reportPath: join(root, 'live-smoke-report.md'), modelAuditPath: join(root, 'model-audit.jsonl'),
+    harnessAuditPath: join(root, 'harness-audit.jsonl'),
     orchestratorHome: join(root, 'orchestrator-home'),
     targetRoot: '', cliPath: '', liveCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
@@ -442,6 +445,79 @@ async function runAcceptanceProofNegativeScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
+async function runInterruptedProofDaemonScenario(context, scenario) {
+  const owned = { timeoutMs: context.options.timeoutMs };
+  await withInterruptedProofCleanup(owned, async () => {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const readLaunchedProof = async () => {
+    const record = await readRunRecord(context, issue.number).catch(() => undefined);
+    if (!record?.proofId) return undefined;
+    const proof = await readProofState(context, record.proofId).catch(() => undefined);
+    return proof?.invocation?.phase === 'launched' ? { record, proof, invocation: proof.invocation } : undefined;
+  };
+  owned.readProofInvocation = async () => (await readLaunchedProof())?.invocation;
+  const daemon = await startDaemonOnce(context, issue.number);
+  owned.daemon = { pid: daemon.pid, processStartIdentity: daemon.processStartIdentity };
+  const launched = await waitForValue(readLaunchedProof,
+    context.options.timeoutMs, `${scenario}: durable launched proof invocation was not observed`);
+  owned.proof = {
+    pid: launched.invocation.pid, processStartIdentity: launched.invocation.processStartIdentity,
+    processGroupId: launched.invocation.processGroupId,
+  };
+  const attemptId = launched.invocation.attemptId;
+  if (!daemon.kill('SIGKILL')) throw new Error(`${scenario}: daemon child was already absent before interruption`);
+  const interrupted = await daemon.completion;
+  if (interrupted.signal !== 'SIGKILL') throw new Error(`${scenario}: daemon child did not terminate at the injected crash boundary`);
+  const afterCrash = await readProofState(context, launched.record.proofId);
+  if (afterCrash.invocation?.attemptId !== attemptId || afterCrash.invocation.phase !== 'launched') {
+    throw new Error(`${scenario}: exact launched proof attempt was not durable after daemon termination`);
+  }
+  const readinessMarkerPath = proofReadinessMarkerPath(launched.invocation.reportPath);
+  const recoveryBoundary = await observeProofRecoveryBoundary(
+    async () => readFile(readinessMarkerPath, 'utf8').then(() => true).catch((error) => {
+      if (error?.code === 'ENOENT') return false;
+      throw error;
+    }),
+    async () => processGroupIsAbsent(launched.invocation.processGroupId),
+    { attempts: Math.max(1, Math.ceil(context.options.timeoutMs / 50)), delayMs: 50 },
+  );
+  if (recoveryBoundary === 'report-ready') {
+    await waitForProcessGroupAbsent(launched.invocation.processGroupId, context.options.timeoutMs);
+  }
+  await appendFile(context.harnessAuditPath, `${JSON.stringify({ scenario, event: 'recovery-observation', attemptId })}\n`);
+  let completed;
+  if (recoveryBoundary === 'report-ready') {
+    completed = await runDaemonTick(context, issue.number);
+    if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: one bounded restart did not adopt the exact proof report`);
+  } else {
+    const publicationsBeforeAbsenceRecovery = context.createdPullRequests.length;
+    await runDaemonTick(context, issue.number);
+    const settledProof = await readProofState(context, launched.record.proofId);
+    if (settledProof.status !== 'active' || settledProof.invocation) {
+      throw new Error(`${scenario}: absent proof attempt was not settled without replacement`);
+    }
+    const proofCallsAfterAbsence = (await readModelAudit(context)).filter((call) => call.scenario === scenario && call.operation === 'proof');
+    if (proofCallsAfterAbsence.length !== 0 || context.createdPullRequests.length !== publicationsBeforeAbsenceRecovery) {
+      throw new Error(`${scenario}: absence recovery relaunched proof or published in the clearing tick`);
+    }
+    completed = await runDaemonTick(context, issue.number);
+    if (completed.terminalOutcome?.status !== 'review-ready') throw new Error(`${scenario}: replacement did not reach review-ready`);
+  }
+  const adoptedProof = await readProofState(context, launched.record.proofId);
+  if (adoptedProof.status !== 'passed' || adoptedProof.invocation) throw new Error(`${scenario}: proof recovery did not settle as passed`);
+  const proofCalls = (await readModelAudit(context)).filter((call) => call.scenario === scenario && call.operation === 'proof');
+  if (proofCalls.length !== 1) throw new Error(`${scenario}: duplicate real proof model launch during adoption`);
+  const recoveryObservations = (await readHarnessAudit(context)).filter((entry) => entry.scenario === scenario
+    && entry.event === 'recovery-observation' && entry.attemptId === attemptId);
+  if (recoveryObservations.length !== 1) throw new Error(`${scenario}: expected one explicit recovery observation`);
+  const publicationsBefore = context.createdPullRequests.length;
+  await recordPublication(context, issue.number);
+  const publicationCount = context.createdPullRequests.length - publicationsBefore;
+  if (publicationCount !== 1) throw new Error(`${scenario}: expected exactly one publication`);
+  });
+}
+
 async function runQualityGatesScenario(context, scenario) {
   await configureTarget(context, { failingCheck: true });
   const issue = await createIssue(context, scenario, true);
@@ -500,6 +576,12 @@ async function runIssue(context, issueNumber) {
 }
 
 async function runDaemonOnce(context, issueNumber) {
+  const record = await runDaemonTick(context, issueNumber);
+  if (!record.terminalOutcome) throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}`);
+  return record.terminalOutcome;
+}
+
+async function runDaemonTick(context, issueNumber) {
   await assertExclusiveDaemonCandidate(context, issueNumber);
   await runCommand(process.execPath, [
     context.cliPath, 'daemon', '--target', context.targetRoot, '--once', '--issue', String(issueNumber),
@@ -508,23 +590,152 @@ async function runDaemonOnce(context, issueNumber) {
     env: liveSmokeEnv(context),
   });
   await assertExclusiveDaemonCandidate(context, issueNumber);
-  const record = await readRunRecord(context, issueNumber);
-  if (!record.terminalOutcome) throw new Error(`daemon did not persist a terminal outcome for issue #${issueNumber}`);
-  return record.terminalOutcome;
+  return readRunRecord(context, issueNumber);
+}
+
+async function startDaemonOnce(context, issueNumber) {
+  await assertExclusiveDaemonCandidate(context, issueNumber);
+  const daemon = spawn(process.execPath, [
+    context.cliPath, 'daemon', '--target', context.targetRoot, '--once', '--issue', String(issueNumber),
+  ], { cwd: context.targetRoot, env: liveSmokeEnv(context), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = ''; let stderr = '';
+  daemon.stdout.setEncoding('utf8'); daemon.stderr.setEncoding('utf8');
+  daemon.stdout.on('data', (chunk) => { stdout += chunk; });
+  daemon.stderr.on('data', (chunk) => { stderr += chunk; });
+  daemon.completion = new Promise((resolveCompletion, rejectCompletion) => {
+    daemon.once('error', rejectCompletion);
+    daemon.once('close', (status, signal) => resolveCompletion({ status, signal, stdout, stderr }));
+  });
+  try {
+    daemon.processStartIdentity = await readHarnessProcessStartIdentity(daemon.pid);
+    if (!daemon.processStartIdentity) throw new Error('daemon child process identity is unavailable');
+    await assertExclusiveDaemonCandidate(context, issueNumber);
+  }
+  catch (error) {
+    daemon.kill('SIGKILL');
+    await daemon.completion.catch(() => undefined);
+    throw error;
+  }
+  return daemon;
+}
+
+async function waitForValue(read, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(message);
+}
+
+function proofReadinessMarkerPath(reportPath) {
+  if (!isAbsolute(reportPath)) throw new Error('proof readiness requires an absolute report path');
+  return `${reportPath}.ready`;
+}
+
+export async function withInterruptedProofCleanup(owned, action, control = harnessProcessControl) {
+  try { return await action(); }
+  finally {
+    if (owned.daemon) await settleOwnedPid(owned.daemon, owned.timeoutMs, control);
+    if (!owned.proof && owned.readProofInvocation) {
+      const invocation = await owned.readProofInvocation().catch(() => undefined);
+      if (invocation?.phase === 'launched') owned.proof = invocation;
+    }
+    if (owned.proof) await settleOwnedProcessGroup(owned.proof, owned.timeoutMs, control);
+  }
+}
+
+async function settleOwnedPid(identity, timeoutMs, control) {
+  if (await control.readProcessStartIdentity(identity.pid) !== identity.processStartIdentity) return;
+  control.terminatePid(identity.pid);
+  await control.waitForPidAbsent(identity.pid, identity.processStartIdentity, timeoutMs);
+}
+
+async function settleOwnedProcessGroup(identity, timeoutMs, control) {
+  if (await control.groupIsAbsent?.(identity.processGroupId)) return;
+  if (await control.readProcessStartIdentity(identity.pid) !== identity.processStartIdentity) {
+    throw new Error(`strict cleanup unresolved proof process-group ownership or PID reuse for PGID ${identity.processGroupId}`);
+  }
+  control.terminateGroup(identity.processGroupId);
+  await control.waitForGroupAbsent(identity.processGroupId, timeoutMs);
+}
+
+const harnessProcessControl = {
+  readProcessStartIdentity: readHarnessProcessStartIdentity,
+  groupIsAbsent: async (processGroupId) => processGroupIsAbsent(processGroupId),
+  terminatePid: (pid) => process.kill(pid, 'SIGKILL'),
+  terminateGroup: (processGroupId) => process.kill(-processGroupId, 'SIGKILL'),
+  waitForPidAbsent: async (pid, processStartIdentity, timeoutMs) => waitForValue(async () =>
+    await readHarnessProcessStartIdentity(pid) !== processStartIdentity || undefined,
+  timeoutMs, 'owned daemon child remained present after cleanup'),
+  waitForGroupAbsent: waitForProcessGroupAbsent,
+};
+
+async function readHarnessProcessStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (platform() === 'linux') {
+    try {
+      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = text.lastIndexOf(') ');
+      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
+      return fields[19] ? `linux:${fields[19]}` : undefined;
+    } catch { return undefined; }
+  }
+  const result = await runCommand('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { allowedExitCodes: [0, 1], timeoutMs: 5_000 });
+  const value = result.status === 0 ? result.stdout.trim().replace(/\s+/gu, ' ') : '';
+  return value ? `${platform()}:${value}` : undefined;
+}
+
+export async function observeProofRecoveryBoundary(reportReady, processAbsent, options) {
+  for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+    if (await reportReady()) return 'report-ready';
+    if (await processAbsent()) return 'process-absent';
+    if (attempt < options.attempts && options.delayMs > 0) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, options.delayMs));
+    }
+  }
+  throw new Error('proof worker produced neither a durable report nor positive process absence');
+}
+
+function processGroupIsAbsent(processGroupId) {
+  if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) throw new Error('invalid proof process group');
+  try { process.kill(-processGroupId, 0); return false; }
+  catch (error) { return error?.code === 'ESRCH'; }
+}
+
+async function waitForProcessGroupAbsent(processGroupId, timeoutMs) {
+  await waitForValue(async () => processGroupIsAbsent(processGroupId) || undefined,
+    timeoutMs, 'original proof wrapper process group remained present');
 }
 
 async function assertExclusiveDaemonCandidate(context, issueNumber) {
-  const candidates = new Set();
-  for (const label of ['agent:auto', 'agent:review']) {
-    const result = await runCommand('gh', [
-      'issue', 'list', '--repo', context.repo, '--state', 'open', '--label', label,
-      '--json', 'number', '--limit', '100',
-    ], { timeoutMs: context.options.timeoutMs });
-    for (const issue of JSON.parse(result.stdout)) candidates.add(issue.number);
-  }
-  if (candidates.size !== 1 || !candidates.has(issueNumber)) {
-    throw new Error(`daemon smoke requires exclusive scratch ownership of issue #${issueNumber}`);
-  }
+  await observeExclusiveDaemonCandidate(issueNumber, async () => {
+    const candidates = new Set();
+    for (const label of ['agent:auto', 'agent:review']) {
+      const result = await runCommand('gh', [
+        'issue', 'list', '--repo', context.repo, '--state', 'open', '--label', label,
+        '--json', 'number', '--limit', '100',
+      ], { timeoutMs: context.options.timeoutMs });
+      for (const issue of JSON.parse(result.stdout)) candidates.add(issue.number);
+    }
+    return candidates;
+  });
+}
+
+export async function observeExclusiveDaemonCandidate(issueNumber, observe, options = {}) {
+  await retryCleanupObservation(async () => {
+    const candidates = await observe();
+    const foreign = [...candidates].filter((candidate) => candidate !== issueNumber);
+    if (foreign.length > 0) {
+      const error = new Error(`daemon smoke observed foreign candidate issue(s): ${foreign.join(', ')}`);
+      error.retryable = false;
+      throw error;
+    }
+    if (candidates.size !== 1 || !candidates.has(issueNumber)) {
+      throw new Error(`daemon smoke has not yet observed owned issue #${issueNumber}`);
+    }
+  }, { attempts: options.attempts ?? 5, delayMs: options.delayMs ?? 500, retryIf: (error) => error?.retryable !== false });
 }
 
 async function readRunRecord(context, issueNumber) {
@@ -538,6 +749,11 @@ async function readRunState(context) {
   const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
   const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
   return state;
+}
+
+async function readProofState(context, proofId) {
+  const repoKey = createHash('sha256').update(context.repo.toLowerCase()).digest('hex');
+  return JSON.parse(await readFile(join(context.orchestratorHome, 'v2', repoKey, 'proofs', proofId, 'state.json'), 'utf8'));
 }
 
 async function assertEvidenceCode(context, result, expectedCode) {
@@ -679,6 +895,12 @@ async function readModelAudit(context) {
   return content.split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
+async function readHarnessAudit(context) {
+  let content = '';
+  try { content = await readFile(context.harnessAuditPath, 'utf8'); } catch {}
+  return content.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
 function assertScenarioModelUsage(scenario, calls) {
   const modelBacked = scenario !== 'discovery-matrix';
   if (modelBacked && calls.length === 0) throw new Error(`${scenario}: no real Codex model invocation was observed`);
@@ -692,8 +914,10 @@ function liveCodexSource(nodePath, auditPath) {
   return `#!${nodePath}
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+
+${proofReadinessMarkerPath}
 
 const args = process.argv.slice(2);
 const expectedModel = ${JSON.stringify(liveSmokeModel)};
@@ -713,7 +937,7 @@ function forward(prompt) {
   }
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const scenario = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'unknown';
-  const operation = prompt.includes('Independently prove issue') ? 'proof'
+  const operation = prompt.includes('/acceptance-proof/') ? 'proof'
     : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
       : prompt.includes('/triage/') ? 'triage'
         : 'implementation';
@@ -743,7 +967,7 @@ function forward(prompt) {
           stderrTail: stderr.replaceAll(process.cwd(), '<worktree>'),
         }) + '\\n');
       }
-      const retryProof = operation === 'proof' && code !== 0
+      const retryProof = operation === 'proof' && scenario !== 'proof-interrupted-daemon' && code !== 0
         && stderr.includes('stream disconnected before completion') && wrapperAttempt < 3;
       if (retryProof) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
@@ -757,11 +981,19 @@ function forward(prompt) {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
         applyFault(scenario, operation, prompt);
+        if (scenario === 'proof-interrupted-daemon' && operation === 'proof') durableReadinessMarker(reportPath);
       }
       process.exitCode = code ?? (signal ? 1 : 0);
     });
     child.stdin.end(prompt);
   }
+}
+
+function durableReadinessMarker(reportPath) {
+  let handle = openSync(reportPath, 'r'); fsyncSync(handle); closeSync(handle);
+  const marker = proofReadinessMarkerPath(reportPath);
+  writeFileSync(marker, 'ready\\n');
+  handle = openSync(marker, 'r'); fsyncSync(handle); closeSync(handle);
 }
 
 function normalizeCodeReview(reportPath, prompt) {
@@ -871,18 +1103,13 @@ function discardProofArtifacts(prompt) {
 }
 
 function writePassingNonVisualProof(criteria, reportPath) {
-  const output = Buffer.from('V2 live-smoke proof passed.');
-  const check = {
-    id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed',
-    summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex'),
-  };
   writeProofReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
     criteria: criteria.map((item) => ({
       id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'],
-      evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.',
+      evidenceRefs: ['smoke'], analysis: 'The Runner-owned checked command and current change satisfy this criterion.',
     })),
-    checks: [check], artifacts: [], findings: [], residualRisks: [],
+    checks: [], artifacts: [], findings: [], residualRisks: [],
   });
 }
 
@@ -951,7 +1178,7 @@ process.stdin.on('end', () => {
   mkdirSync(dirname(reportPath), { recursive: true });
   if (prompt.includes('/triage/')) writeTriage(reportPath);
   else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
-  else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
+  else if (prompt.includes('/acceptance-proof/')) writeProof(marker, criteria, reportPath, prompt);
   else writeImplementation(marker, reportPath, prompt);
 });
 
@@ -1025,12 +1252,10 @@ function writeProof(scenario, criteria, reportPath, prompt) {
     }
   }
   if (scenario === 'browser-proof') { writeBrowserProof(criteria, reportPath, prompt); return; }
-  const output = Buffer.from('V2 live-smoke proof passed.');
-  const check = { id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed', summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex') };
   writeAgentReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
-    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.' })),
-    checks: [check], artifacts: [], findings: [], residualRisks: [],
+    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: ['smoke'], analysis: 'Runner-owned checked evidence satisfies this criterion.' })),
+    checks: [], artifacts: [], findings: [], residualRisks: [],
   });
 }
 
@@ -1176,6 +1401,7 @@ export async function retryCleanupObservation(action, options = {}) {
       return;
     } catch (error) {
       lastError = error;
+      if (options.retryIf?.(error) === false) throw error;
       if (attempt < attempts && delayMs > 0) {
         await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
       }
@@ -1277,7 +1503,7 @@ async function selfTestFakeAgent() {
     const proofPath = join(root, 'proof.json');
     await runCommand(fakePath, ['exec', '--output-last-message', proofPath], {
       cwd: root,
-      stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
+      stdin: `Follow the exact operation at /acceptance-proof/SKILL.md.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
     });
     const proof = JSON.parse(await readFile(proofPath, 'utf8')).report;
     if (proof.version !== 1 || proof.status !== 'passed' || proof.criteria?.[0]?.id !== 'ac-001'
@@ -1286,7 +1512,7 @@ async function selfTestFakeAgent() {
     const browserCriteria = [{ id: 'ac-browser', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=browser-proof' }];
     await runCommand(fakePath, ['exec', '--output-last-message', browserPath], {
       cwd: root,
-      stdin: `Independently prove issue #2.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
+      stdin: `Follow the exact operation at /acceptance-proof/SKILL.md.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
     });
     const browser = JSON.parse(await readFile(browserPath, 'utf8')).report;
     if (browser.status !== 'passed' || browser.decision?.targets?.[0] !== 'browser'

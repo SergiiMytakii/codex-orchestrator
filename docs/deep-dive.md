@@ -248,6 +248,20 @@ shared-index edits cannot invalidate or authorize the proof input.
 
 Acceptance Proof is independent from both implementation and code review. The `acceptance-proof` worker receives the frozen issue criteria and a nominal checked-change capability. It runs in a separate contained process and may write only below its proof-owned artifact root.
 
+Its proof record embeds the canonical durable invocation fence: exact attempt,
+workflow generation, prompt facts, host/boot/PID/process-start/PGID identity,
+report path, and proof-safe worktree baseline. Restart performs one report and
+process observation per tick, adopts only the exact attempt-owned report and
+hash-bound artifacts, and never relaunches while ownership is live or unknown.
+Infrastructure uncertainty spends no proof repair budget. Runner-classified
+malformed output spends the single existing report-repair bit exactly once and
+binds the complete pre-repair artifact inventory so report-only repair cannot
+modify or manufacture evidence. Immutable runner-owned iOS helper, lease,
+owner, xcrun, runtime, and device-type facts are part of the same invocation
+correlation and proof binding.
+Proof Reports cannot claim completed checks; only the nominal `CheckedChange`
+receipts can satisfy check evidence references.
+
 For V2, proof runs against its own candidate materialization. Publishable
 artifacts are hash-validated and copied back idempotently without following
 symlinks; product bytes remain immutable. The same candidate tree then becomes
@@ -271,7 +285,7 @@ Local command output and static-inspection evidence may contain machine paths be
 
 Browser proof validates current workflow evidence rather than accepting an isolated screenshot. For a configured Android surface, the trusted Runner durably reserves preparation before starting the configured AVD on an unused port with a clean ephemeral data directory. The lease records both PID and process-start identity so replay cleanup never kills a foreign emulator after port reuse, and ownership is rechecked throughout boot, install, navigation, and capture. The Runner removes any prior APK target, executes only a bounded, cancellable, process-group-owned `flutter build apk` recipe, snapshots the fresh no-symlink result outside the worker-writable tree, and installs only that exact digest-bound snapshot. It launches the application, retries exact accessibility-label navigation within configured bounds, and captures proof-bound screenshot, validated UI hierarchy, PID-scoped log, and lease. The contained proof worker can inspect immutable-digest-bound worktree artifacts but cannot invoke `adb`, the emulator, Flutter, or an Android lease helper. Terminal or exceptional proof settlement performs replay-safe lease cleanup, stops only the same Runner-created process, and removes only its validated temporary data directory. Existing physical devices, user emulators, IDE sessions, and Flutter processes are observed but never taken over. Android infrastructure or startup failure is recorded as an unfinished-UI-proof warning and does not alone block delivery; successful Android proof remains strict and cannot be claimed without the complete validated artifact set.
 
-`needs-rework` findings return to the same implementation loop and consume another cycle. External, safety, malformed, quiescence, or exhausted outcomes are mapped to typed run results. Only `passed` proof produces a proof receipt and permits publication.
+`needs-rework` findings return to the same implementation loop and consume another cycle. External, safety, malformed, quiescence, or exhausted outcomes are mapped to typed run results. A passed receipt is persisted before candidate cleanup and remains monotonic while cleanup's existing effect/postcondition settlement retries; publication remains forbidden until cleanup is proven settled.
 
 ## 10. Runner-owned publication
 

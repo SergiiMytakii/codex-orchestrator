@@ -6,7 +6,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review';
+export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review' | 'spec-author' | 'spec-review' | 'acceptance-proof';
 
 export interface ReportOnlyWorktreeSnapshot {
   headSha: string; indexTreeSha: string; trackedContentSha256: string;
@@ -37,7 +37,7 @@ export interface ContainedReportOperationInput {
   promptFacts: string[];
   signal: AbortSignal;
   invocationState: DurableReportInvocationState;
-  forbiddenAttemptIds?: string[];
+  forbiddenAttemptIds?: string[]; beforeLaunch?: () => Promise<void>;
 }
 
 export type ContainedReportOperationResult =
@@ -81,7 +81,7 @@ export interface ContainedReportOperationDependencies {
   now(): string;
   createAttemptId(): string;
   prepare(input: { operation: ContainedReportOperationId; attemptId: string; runId: string; workflowGeneration: WorkflowGenerationReceipt }): Promise<PreparedContainedReportAttempt>;
-  snapshot(worktreePath: string): Promise<unknown>;
+  snapshot(worktreePath: string, operation: ContainedReportOperationId): Promise<unknown>;
   readReport(path: string): Promise<ReportObservation>;
   settleAttempt(attempt: PreparedContainedReportAttempt): Promise<void>;
   processStartIdentity(pid: number): Promise<string | undefined>;
@@ -101,7 +101,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
 
   private async launch(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult> {
     let baseline: ReportOnlyWorktreeSnapshot;
-    try { baseline = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath)); }
+    try { baseline = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath, input.operation)); }
     catch { return blocked('safety', 'report-operation-snapshot-failed'); }
     const attemptId = this.dependencies.createAttemptId();
     if (!attemptId || input.forbiddenAttemptIds?.includes(attemptId)) return blocked('safety', 'report-operation-attempt-identity-invalid');
@@ -122,6 +122,10 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     if (!await input.invocationState.compareAndSwap(undefined, prepared)) return blocked('safety', 'report-operation-state-conflict');
     let current = prepared;
     let result: ContainedReportLaunchResult;
+    try { await input.beforeLaunch?.(); }
+    catch (error) { const abandoned = await this.abandon(input, current, attempt);
+      if (abandoned) return abandoned; throw error;
+    }
     try {
       result = await this.dependencies.launch({
         ...input,
@@ -226,7 +230,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
   private async finish(input: ContainedReportOperationInput, invocation: DurableReportInvocationV1,
     attempt: PreparedContainedReportAttempt, reportBytes: Buffer): Promise<ContainedReportOperationResult> {
     let after: ReportOnlyWorktreeSnapshot;
-    try { after = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath)); }
+    try { after = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath, input.operation)); }
     catch { return blocked('safety', 'report-operation-snapshot-failed'); }
     if (canonicalJson(invocation.baseline) !== canonicalJson(after)) return blocked('safety', 'report-operation-worktree-mutated');
     if (!await this.settleAttempt(attempt)) return { status: 'safe-halt', code: 'report-operation-attempt-cleanup-failed' };
@@ -477,7 +481,7 @@ export function validateDurableReportInvocation(value: unknown): DurableReportIn
   ];
   if (!hasExactKeys(value, keys)) throw new Error('durable report invocation is invalid');
   const record = value as Record<string, unknown>;
-  if (record.version !== 1 || !['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review'].includes(record.operation as string)
+  if (record.version !== 1 || !['triage', 'ambiguity-review', 'code-review', 'spec-author', 'spec-review', 'acceptance-proof'].includes(record.operation as string)
     || !nonEmpty(record.attemptId) || !/^[0-9a-f]{64}$/u.test(record.generationHash as string)
     || !nonEmpty(record.reportPath) || !nonEmpty(record.host) || !nonEmpty(record.bootId)
     || !/^[0-9a-f]{64}$/u.test(record.promptFactsSha256 as string)
@@ -501,6 +505,11 @@ function hasExactReportAuthority(attempt: PreparedContainedReportAttempt, input:
     return policy.sandboxMode === 'workspace-write' && policy.cwdClass === 'target-state'
       && policy.worktreeAccess === 'write' && canonicalJson(policy.writableRootClasses) === canonicalJson(['target-state'])
       && policy.runnerPostcondition === 'spec-only';
+  }
+  if (input.operation === 'acceptance-proof') {
+    return policy.sandboxMode === 'workspace-write' && policy.cwdClass === 'worktree'
+      && policy.worktreeAccess === 'write' && canonicalJson(policy.writableRootClasses) === canonicalJson(['worktree'])
+      && policy.runnerPostcondition === 'proof-only';
   }
   return policy.sandboxMode === 'read-only' && policy.cwdClass === 'worktree'
     && policy.worktreeAccess === 'read-only' && Array.isArray(policy.writableRootClasses) && policy.writableRootClasses.length === 0

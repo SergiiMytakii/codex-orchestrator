@@ -104,7 +104,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   await verifyRuntimeAssetSnapshot(left);
 });
 
-test('contained Android proof receives only Runner-prepared evidence and no host mutation authority', async () => {
+test('contained proof adapter projects exact phase facts into the canonical invocation owner', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-android-proof-prompt-'));
   const orchestratorHome = join(root, 'orchestrator');
   const targetRoot = join(root, 'target');
@@ -118,33 +118,21 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     packageVersion: '2.0.1',
     bootId: 'boot-a',
   });
-  let prompt = '';
-  let proofCwd = '';
-  let launchPersisted = false;
-  let processRuns = 0;
-  const process = {
-    run: async (invocation: { prompt: string; cwd: string; onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
-      processRuns += 1;
-      prompt = invocation.prompt;
-      proofCwd = invocation.cwd;
-      await invocation.onSpawned?.({ pid: 177, processGroupId: 177 });
-      return { kind: 'cancelled' as const };
-    },
-  };
+  let ownerInput: Record<string, unknown> | undefined;
   const agent = new ContainedProofAgent({
-    config: androidConfigFixture,
-    orchestratorHome,
-    parentCodexHome: join(root, 'codex-home'),
-    safePath: '/usr/bin:/bin',
-    targetRoot,
-    bootId: 'boot-a',
-    androidAdbPath: '/android-sdk/platform-tools/adb',
-    iosXcrunPath: '/usr/bin/xcrun',
-    processExecutor: async () => ({ stdout: '', stderr: '', exitCode: 1 }),
-    process: process as never,
-    createAttemptId: () => 'attempt-android-proof',
+    config: androidConfigFixture, targetRoot,
+    operation: { run: async (input: Record<string, unknown>) => { ownerInput = input; return { status: 'cancelled' as const }; } } as never,
   });
-  const result = await agent.run({
+  const invocationState = { read: async () => undefined, compareAndSwap: async () => true };
+  const iosProofInputs = {
+    helperPath: join(workflowGeneration.generationRoot, 'skills/acceptance-proof/tools/ios-lease.mjs'),
+    leaseRoot: join(orchestratorHome, 'v2/repository/leases'),
+    leaseArtifactPath: join(candidateWorktree, '.codex-orchestrator/v2/proofs/proof-177/ios-lease.json'),
+    proofId: 'proof-177', ownerPid: 4242, xcrunPath: '/usr/bin/xcrun',
+    runtimeId: 'com.apple.CoreSimulator.SimRuntime.iOS-26-0',
+    deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+  };
+  const result = await agent.run(Object.assign({
     proofId: 'proof-177',
     runId: 'run-177',
     issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
@@ -153,7 +141,6 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     changedFiles: ['test/widget_test.dart'],
     checks: [],
     worktreePath: candidateWorktree,
-    onLaunched: async ({ pid, processGroupId }) => { launchPersisted = pid === 177 && processGroupId === 177; },
     runnerPreparedArtifactPaths: ['.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json'],
     runnerPreparedArtifactSha256: { '.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json': 'b'.repeat(64) },
     runnerPreparationWarnings: ['Android UI proof unfinished: emulator boot timed out.'],
@@ -161,48 +148,69 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     repairFindings: [],
     workflowGeneration,
     signal: new AbortController().signal,
-  });
+    invocationState,
+  }, { iosProofInputs }) as Parameters<ContainedProofAgent['run']>[0]);
   assert.equal(result.kind, 'cancelled');
-  assert.equal(proofCwd, candidateWorktree);
-  assert.equal(launchPersisted, true);
-  assert.match(prompt, /Runner-owned Android artifact paths/u);
-  assert.match(prompt, /Do not invoke adb, emulator, Flutter run, or an Android lease helper/u);
-  assert.match(prompt, /Android UI proof unfinished: emulator boot timed out/u);
-  assert.match(prompt, /Android infrastructure failure alone must not block delivery/u);
-  assert.doesNotMatch(prompt, /Android lease root:/u);
-  assert.doesNotMatch(prompt, /Android adb path:/u);
+  assert.equal(ownerInput?.operation, 'acceptance-proof');
+  assert.equal(ownerInput?.worktreePath, candidateWorktree);
+  assert.match(JSON.stringify(ownerInput?.promptFacts), /Android UI proof unfinished: emulator boot timed out/u);
+  assert.match(JSON.stringify(ownerInput?.promptFacts), new RegExp(iosProofInputs.helperPath.replaceAll('/', '\\/'), 'u'));
+  for (const value of Object.values(iosProofInputs)) assert.match(JSON.stringify(ownerInput?.promptFacts), new RegExp(String(value).replaceAll('/', '\\/'), 'u'));
+  assert.equal((ownerInput?.promptFacts as string[]).some((fact) => fact.includes('"ownerPid":4242')), true);
+  assert.equal(ownerInput?.invocationState, invocationState);
+});
 
-  const recoveredAttemptId = 'attempt-android-proof';
-  const recoveredReportPath = join(
-    orchestratorHome, 'v2', sha256('m-ivonin/tipsterbro'), 'runs', 'run-177', 'attempts', recoveredAttemptId, 'report.json',
-  );
-  await writeFile(recoveredReportPath, '{"version":1,"status":"external-block"}\n');
-  const recovered = await agent.run({
-    attemptId: recoveredAttemptId,
-    proofId: 'proof-177', runId: 'run-177',
-    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
-    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
-    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
-    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
-    signal: new AbortController().signal,
-  });
-  assert.equal(recovered.kind, 'report');
-  assert.equal(processRuns, 1);
-
-  await unlink(recoveredReportPath);
-  await assert.rejects(agent.run({
-    attemptId: recoveredAttemptId,
-    recoverOnly: true,
-    proofId: 'proof-177', runId: 'run-177',
-    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
-    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
-    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
-    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
-    signal: new AbortController().signal,
-  }), /no recoverable report/iu);
-  assert.equal(processRuns, 1);
+test('contained proof recovery forbids repair relaunch after an interrupted worker changes artifact inventory', async () => {
+  for (const adversary of ['modify', 'manufacture'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `runtime-proof-repair-${adversary}-`));
+    const targetRoot = join(root, 'target');
+    const worktreePath = join(targetRoot, '.codex-orchestrator/worktrees/issue-177');
+    const artifactRoot = join(worktreePath, '.codex-orchestrator/v2/proofs');
+    const evidencePath = join(artifactRoot, 'proof-177/evidence.txt');
+    await mkdir(join(artifactRoot, 'proof-177'), { recursive: true });
+    await writeFile(evidencePath, 'original\n');
+    const workflowGeneration = await materializeWorkflowGeneration({
+      packageRoot, runtimeRoot: join(root, 'orchestrator'), packageVersion: '2.0.1', bootId: 'boot-a',
+    });
+    let invocation: unknown = { phase: 'launched' };
+    let operationCalls = 0;
+    const agent = new ContainedProofAgent({
+      config: androidConfigFixture, targetRoot,
+      operation: { run: async (input: any) => {
+        operationCalls += 1;
+        const prior = await input.invocationState.read();
+        await input.invocationState.compareAndSwap(prior, undefined);
+        if (adversary === 'modify') await writeFile(evidencePath, 'modified\n');
+        else await writeFile(join(artifactRoot, 'proof-177/manufactured.txt'), 'manufactured\n');
+        return { status: 'retryable', code: 'report-operation-output-unavailable' as const };
+      } } as never,
+    });
+    const invocationState = {
+      read: async () => invocation as never,
+      compareAndSwap: async (expected: unknown, next: unknown) => {
+        if (invocation !== expected) return false;
+        invocation = next;
+        return true;
+      },
+    };
+    const input = {
+      proofId: 'proof-177', runId: 'run-177',
+      issue: { number: 177, title: 'Proof', body: 'Proof.', url: 'https://example.invalid/177', state: 'OPEN' as const, labels: [] },
+      frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit' as const, text: 'Proof.' }],
+      checkedChangeSha256: 'a'.repeat(64), changedFiles: [], checks: [], worktreePath,
+      runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
+      repairOnly: true, repairFindings: ['malformed report'],
+      repairArtifactSha256: { '.codex-orchestrator/v2/proofs/proof-177/evidence.txt': sha256(Buffer.from('original\n')) },
+      iosProofInputs: {
+        helperPath: '/immutable/ios-lease.mjs', leaseRoot: '/leases', leaseArtifactPath: '/worktree/ios-lease.json',
+        proofId: 'proof-177', ownerPid: 42, xcrunPath: '/usr/bin/xcrun', runtimeId: null, deviceTypeId: null,
+      },
+      workflowGeneration, signal: new AbortController().signal, invocationState,
+    };
+    assert.deepEqual(await agent.run(input), { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' }, adversary);
+    assert.deepEqual(await agent.run(input), { kind: 'internal-error', code: 'proof-report-repair-artifact-drift' }, `${adversary} replay`);
+    assert.equal(operationCalls, 1, `${adversary} launched again`);
+  }
 });
 
 test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {

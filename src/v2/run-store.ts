@@ -5,7 +5,7 @@ import {
   type DurableMutableInvocationV1,
   type DurableReportInvocationV1,
 } from './contained-report-operation.js';
-import { projectTerminalDirectReview, validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
+import { projectTerminalDirectReview, validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
 import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
   validateRouteExecution,
@@ -44,7 +44,6 @@ export type Lifecycle =
   | 'checking'
   | 'proving'
   | 'publishing'
-  | 'safe-halt'
   | 'review-ready'
   | 'blocked'
   | 'transport-failed'
@@ -154,21 +153,6 @@ export interface RunRecordV1 {
     repairFindings?: string[];
   };
   skillHashes: Record<string, string>;
-  process?: {
-    pid: number;
-    processGroupId: number;
-    startedAt: string;
-    baseline: {
-      headSha: string;
-      indexTreeSha: string;
-      trackedContentSha256: string;
-      untrackedContentSha256: string;
-      worktreeIdentity: string;
-    };
-    purpose: 'proof';
-    resumeLifecycle: Lifecycle;
-    resumeReviewStage: DirectReviewStage | null;
-  };
   /** Legacy read compatibility for runs created before check qualification. New runs never write this field. */
   baselineChecks?: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
   /** `unchanged-failure` is accepted only so historical terminal runs remain readable. */
@@ -391,7 +375,6 @@ function validateRuns(value: unknown): asserts value is RunRecordV1[] {
 
 function validateRunRecord(value: unknown, field: string): asserts value is RunRecordV1 {
   const optional = [
-    'process',
     'checkedChangeSha256',
     'proofId',
     'proofReceipt',
@@ -445,7 +428,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   if (hasOwn(value, 'baselineChecks')) validateChecks(value.baselineChecks, `${field}.baselineChecks`, false);
   validateChecks(value.checks, `${field}.checks`);
-  if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
   let reportInvocation: DurableReportInvocationV1 | undefined;
   if (hasOwn(value, 'reportInvocation')) {
     const invocation = validateDurableReportInvocation(value.reportInvocation);
@@ -490,24 +472,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'direct') {
       throw new Error(`${field}.directReview requires a direct route`);
     }
-    const rawProcess = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
-      ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
-      : undefined;
-    const process = rawProcess && rawProcess.purpose === 'proof'
-      ? {
-        purpose: rawProcess.purpose,
-        resumeLifecycle: rawProcess.resumeLifecycle,
-        resumeReviewStage: rawProcess.resumeReviewStage,
-      }
-      : undefined;
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
       ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
-      ...(process ? { process: {
-        purpose: process.purpose,
-        resumeLifecycle: process.resumeLifecycle,
-        resumeReviewStage: process.resumeReviewStage,
-      } } : {}),
     });
   }
   if (hasOwn(value, 'specDelivery')) {
@@ -554,11 +521,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);
   }
   if (value.lifecycle === 'publishing' && !hasOwn(value, 'proofReceipt')) throw new Error(`${field} publishing requires proofReceipt`);
-  if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'process')) throw new Error(`${field} safe-halt requires retained process evidence`);
   if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || hasOwn(value, 'intent'))) {
     throw new Error(`${field} review-ready requires proofReceipt and no intent`);
   }
-  if (terminal && hasOwn(value, 'process')) throw new Error(`${field} terminal lifecycle cannot retain process ownership`);
   const retainedCandidateIntent = value.lifecycle === 'blocked'
     && (value.terminalOutcome as RunTerminalOutcome | undefined)?.status === 'blocked'
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'blocked' }>).kind === 'safety'
@@ -635,30 +600,6 @@ function validateWorkflowGeneration(value: unknown, field: string): asserts valu
     throw new Error(`${field}.generationRoot is invalid`);
   }
   assertSha256(value.contentSha256, `${field}.contentSha256`);
-}
-
-function validateProcess(value: unknown, field: string): void {
-  assertExactObject(value, [
-    'pid', 'processGroupId', 'startedAt', 'baseline', 'purpose', 'resumeLifecycle', 'resumeReviewStage',
-  ], field);
-  assertPositiveInteger(value.pid, `${field}.pid`);
-  assertPositiveInteger(value.processGroupId, `${field}.processGroupId`);
-  assertTimestamp(value.startedAt, `${field}.startedAt`);
-  assertExactObject(value.baseline, [
-    'headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity',
-  ], `${field}.baseline`);
-  assertGitSha(value.baseline.headSha, `${field}.baseline.headSha`);
-  assertGitSha(value.baseline.indexTreeSha, `${field}.baseline.indexTreeSha`);
-  assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
-  assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
-  assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (value.purpose !== 'proof') {
-    throw new Error(`${field}.purpose is invalid`);
-  }
-  if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
-  if (value.resumeReviewStage !== null && ![
-    'review-full', 'review-repair', 'review-closure',
-  ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
 }
 
 function validateChecks(value: unknown, field: string, allowUnchangedFailure = true): asserts value is RunRecordV1['checks'] {
@@ -933,7 +874,9 @@ function canonicalizeLegacyReportRun(run: Record<string, any>, backupPath: strin
     delete spec.invocation; changed = true;
   }
   if (run.reportInvocation && !hasOwn(run.reportInvocation, 'promptFactsSha256')) { delete run.reportInvocation; unsafe = changed = true; }
-  if (run.process && ['route', 'code-review', 'spec-author', 'spec-review'].includes(run.process.purpose)) { delete run.process; unsafe = changed = true; }
+  if (run.process && ['route', 'code-review', 'spec-author', 'spec-review', 'proof'].includes(run.process.purpose)) {
+    delete run.process; unsafe = changed = true;
+  }
   if (!unsafe) return changed;
   if (routeInFlight) delete run.routeExecution;
   delete run.reportInvocation; delete run.process; delete run.intent;
@@ -1048,7 +991,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): vo
     && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
     throw new Error(`${field}.reviewFeedback quiescent phase requires review-ready lifecycle`);
   }
-  if (['frozen', 'repairing'].includes(feedback.phase) && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+  if (['frozen', 'repairing'].includes(feedback.phase) && !['implementing', 'reworking', 'checking', 'proving'].includes(run.lifecycle)) {
     throw new Error(`${field}.reviewFeedback active repair phase has invalid lifecycle`);
   }
   if (feedback.phase === 'verified' && run.lifecycle !== 'publishing') {
@@ -1076,7 +1019,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): vo
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'waiting-human', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'waiting-human', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }
