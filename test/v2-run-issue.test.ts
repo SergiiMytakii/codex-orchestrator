@@ -1512,6 +1512,7 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   const terminal = await fixture.store.read();
   const interrupted = structuredClone(terminal.runs[0]!);
   interrupted.lifecycle = 'implementing';
+  delete interrupted.activeAttempt;
   delete interrupted.terminalOutcome;
   delete interrupted.outcomeEvidenceId;
   await fixture.store.compareAndSwap(terminal.generation, {

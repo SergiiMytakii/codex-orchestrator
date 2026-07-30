@@ -1245,7 +1245,12 @@ export function createV2Runtime(input: {
             `The immutable workflow root is ${attempt.workflowRoot}.`,
             `Author mode: ${mode}. Issue authority: ${canonicalJson(context.issue)}.`,
             `Frozen criteria: ${canonicalJson(context.frozenCriteria)}.`,
-            `Prior revisions and review state: ${canonicalJson({ revisions: state.revisions, review: state.review })}.`,
+            `Prior revisions, accepted answers, and review state: ${canonicalJson({
+              revisions: state.revisions,
+              acceptedAnswers: state.acceptedAnswers,
+              trustedAnswer: state.trustedAnswer ?? null,
+              review: state.review,
+            })}.`,
             `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
             'Do not modify the product worktree, prior revisions, external state, or any .env file.',
           ].join('\n'),
