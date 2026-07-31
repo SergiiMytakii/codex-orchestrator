@@ -108,6 +108,14 @@ import {
   projectValidationReviewTransportRetry,
   type ValidationCasTransition,
 } from './validation-progression.js';
+import {
+  settleCommentEffect,
+  settleCommitEffect,
+  settleCleanupEffect,
+  settleDraftPullRequestEffect,
+  settleLabelsEffect,
+  settlePushEffect,
+} from './pending-effect-settlement.js';
 
 export type RunIssueResult =
   | { status: 'state-schema-unsupported' }
@@ -341,22 +349,25 @@ export class RunIssue {
       }
     }
     if (active.record.pendingEffect?.kind === 'claim-comment') {
-      if (active.record.pendingEffect.marker !== marker || active.record.pendingEffect.bodySha256 !== sha256(body)) {
+      const effect = active.record.pendingEffect;
+      if (effect.issueNumber !== issueNumber || effect.marker !== marker || effect.bodySha256 !== sha256(body)) {
         return { result: await this.publicationDiverged(active, 'claim-comment-pendingEffect-diverged') };
       }
-      observation = await this.readIssue(issueNumber);
-      let comments = observation ? commentsWithMarker(observation, marker) : [];
-      if (comments.some((comment) => comment.body !== body) || comments.length > 1) {
-        return { result: await this.publicationDiverged(active, 'claim-comment-diverged') };
+      const settlement = await settleCommentEffect(effect, {
+        observe: async () => {
+          observation = await this.readIssue(issueNumber);
+          const comments = observation ? commentsWithMarker(observation, marker) : [];
+          if (comments.length === 0) return 'absent';
+          return comments.length === 1 && comments[0]!.body === body
+            && ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comments[0]!.authorAssociation)
+            ? 'confirmed' : 'diverged';
+        },
+        invoke: () => this.dependencies.issues.postComment(issueNumber, body),
+      });
+      if (settlement.status === 'unknown') {
+        return { result: await this.invokedFailure(active, 'claim-comment-delivery-unknown') };
       }
-      if (comments.length === 0) {
-        try { await this.dependencies.issues.postComment(issueNumber, body); }
-        catch { return { result: await this.invokedFailure(active, 'claim-comment-delivery-unknown') }; }
-        observation = await this.readIssue(issueNumber);
-        comments = observation ? commentsWithMarker(observation, marker) : [];
-      }
-      if (comments.length !== 1 || comments[0]!.body !== body
-        || !['OWNER', 'MEMBER', 'COLLABORATOR'].includes(comments[0]!.authorAssociation)) {
+      if (settlement.status !== 'confirmed') {
         return { result: await this.publicationDiverged(active, 'claim-comment-observation-diverged') };
       }
       active = await this.confirmEffect(active);
@@ -376,13 +387,23 @@ export class RunIssue {
     if (!active.record.pendingEffect) {
       active = await this.persist(active, { pendingEffect: { kind: 'claim-labels', issueNumber, expected: expectedLabels } });
     }
-    if (active.record.pendingEffect?.kind !== 'claim-labels' || !sameStrings(active.record.pendingEffect.expected, expectedLabels)) {
+    if (active.record.pendingEffect?.kind !== 'claim-labels'
+      || active.record.pendingEffect.issueNumber !== issueNumber
+      || !sameStrings(active.record.pendingEffect.expected, expectedLabels)) {
       return { result: await this.publicationDiverged(active, 'claim-labels-pendingEffect-diverged') };
     }
-    try { await this.dependencies.issues.setLabels(issueNumber, expectedLabels); }
-    catch { return { result: await this.invokedFailure(active, 'claim-labels-delivery-unknown') }; }
-    observation = await this.readIssue(issueNumber);
-    if (!observation || !sameStrings(observation.labels, expectedLabels) || !this.hasTrustedClaim(observation, active.record)) {
+    const labelSettlement = await settleLabelsEffect(active.record.pendingEffect, {
+      observe: async () => {
+        observation = await this.readIssue(issueNumber);
+        if (!observation || !this.hasTrustedClaim(observation, active.record)) return 'diverged';
+        return sameStrings(observation.labels, expectedLabels) ? 'confirmed' : 'absent';
+      },
+      invoke: () => this.dependencies.issues.setLabels(issueNumber, expectedLabels),
+    });
+    if (labelSettlement.status === 'unknown') {
+      return { result: await this.invokedFailure(active, 'claim-labels-delivery-unknown') };
+    }
+    if (labelSettlement.status !== 'confirmed') {
       return { result: await this.publicationDiverged(active, 'claim-labels-observation-diverged') };
     }
     active = await this.confirmEffect(active);
@@ -404,6 +425,13 @@ export class RunIssue {
     if (candidateBinding) {
       const candidate = this.dependencies.git.candidateV2;
       if (!candidate) return this.persistRetainedCommitIntentTerminal(active, 'candidate-git-v2-required');
+      if (active.record.pendingEffect?.kind === 'candidate-pin-release') {
+        const cleaned = await this.settleCandidatePinRelease(active, candidateBinding, {
+          kind: 'initial-push', branch: branchName, sha: commitSha,
+        });
+        if ('status' in cleaned) return cleaned;
+        active = cleaned;
+      } else {
       if (!active.record.pendingEffect) {
         if (commitSha !== candidateBinding.expectedHeadSha) return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-branch-diverged-without-pendingEffect');
         const recaptured = await candidate.captureAndPin({
@@ -447,40 +475,43 @@ export class RunIssue {
         || pendingEffect.candidateRef !== candidateBinding.candidateRef) {
         return this.persistRetainedCommitIntentTerminal(active, 'candidate-commit-pendingEffect-diverged');
       }
-      if (this.signal.aborted) return await this.persistRetainedCommitIntentTerminal(active, 'candidate-publication-cancelled');
-      if (!await this.authorized(active, config)) return await this.persistRetainedCommitIntentTerminal(active, 'candidate-publication-authority-revoked');
-      const publication = await candidate.createOrObserveCommit({
-        worktreePath,
-        branchName,
-        parentSha: pendingEffect.parentSha,
-        treeSha: pendingEffect.treeSha,
-        message: pendingEffect.message,
-        candidateRef: pendingEffect.candidateRef,
+      const settlement = await settleCommitEffect(pendingEffect, {
+        observe: async () => {
+          const observed = await candidate.createOrObserveCommit({
+            worktreePath, branchName, parentSha: pendingEffect.parentSha, treeSha: pendingEffect.treeSha,
+            message: pendingEffect.message, candidateRef: pendingEffect.candidateRef!, observeOnly: true,
+          });
+          if (observed.kind === 'failed') throw new Error(observed.code);
+          return observed.value.kind === 'created-or-observed' ? 'confirmed'
+            : observed.value.kind === 'parent-unchanged' ? 'absent' : 'diverged';
+        },
+        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+        invoke: async () => {
+          const invoked = await candidate.createOrObserveCommit({
+            worktreePath, branchName, parentSha: pendingEffect.parentSha, treeSha: pendingEffect.treeSha,
+            message: pendingEffect.message, candidateRef: pendingEffect.candidateRef!,
+          });
+          if (invoked.kind === 'failed') throw new Error(invoked.code);
+        },
       });
-      if (publication.kind === 'failed') {
-        return publication.code === 'candidate-ref-update-unknown'
-          ? this.invokedFailure(active, publication.code, 'Candidate commit outcome is unknown; retain and observe the exact commit effect.')
-          : this.mapCandidateFailure(active, publication.code);
+      if (settlement.status === 'unauthorized') {
+        return this.persistRetainedCommitIntentTerminal(active, this.signal.aborted
+          ? 'candidate-publication-cancelled' : 'candidate-publication-authority-revoked');
       }
-      if (publication.value.kind === 'parent-unchanged') return this.invokedFailure(active, 'candidate-branch-update-not-observed');
-      if (publication.value.kind === 'branch-diverged') return this.persistRetainedCommitIntentTerminal(active, 'candidate-branch-diverged');
-      commitSha = publication.value.sha;
+      if (settlement.status === 'unknown') {
+        return this.invokedFailure(active, 'candidate-ref-update-unknown', 'Candidate commit outcome is unknown; retain and observe the exact commit effect.');
+      }
+      if (settlement.status !== 'confirmed') return this.persistRetainedCommitIntentTerminal(active, 'candidate-branch-diverged');
+      commitSha = await this.dependencies.git.getHead(worktreePath);
       const normalized = await candidate.normalizeSharedIndex({ worktreePath, expectedHeadSha: commitSha });
       if (normalized.kind === 'failed') return this.mapCandidateFailure(active, normalized.code);
       const residual = await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir);
       if (residual.length > 0) return this.persistRetainedCommitIntentTerminal(active, 'candidate-residual-worktree-drift');
-      try {
-        active = await this.persist(active, {
-          pendingEffect: { kind: 'initial-push', branch: branchName, sha: commitSha },
-          changeBindingVersion: undefined,
-          candidateBinding: undefined,
-        });
-      } catch {
-        throw new PostEffectStateError(active);
-      }
-      const released = await candidate.releasePin({ binding: candidateBinding, expectedPinnedCommitSha: candidateBinding.candidateCommitSha });
-      if (released.kind === 'failed') {
-        return this.invokedFailure(active, 'candidate-pin-release-unknown', 'The publication commit is confirmed; orphan reconciliation will retry exact pin cleanup.');
+      const cleaned = await this.settleCandidatePinRelease(active, candidateBinding, {
+        kind: 'initial-push', branch: branchName, sha: commitSha,
+      });
+      if ('status' in cleaned) return cleaned;
+      active = cleaned;
       }
     } else if (active.record.pendingEffect?.kind === 'initial-commit' || !active.record.pendingEffect) {
       if (!active.record.pendingEffect) {
@@ -492,17 +523,29 @@ export class RunIssue {
       }
       const pendingEffect = active.record.pendingEffect;
       if (pendingEffect?.kind === 'initial-commit') {
-        if (commitSha === pendingEffect.parentSha) {
-          if (await this.dependencies.git.getTreeSha(worktreePath) !== pendingEffect.treeSha) return await this.publicationDiverged(active, 'commit-tree-diverged');
-          if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
-          if (!await this.authorized(active, config)) return await this.revoked(active);
-          try { commitSha = await this.dependencies.git.commit({ worktreePath, message: pendingEffect.message }); }
-          catch { return await this.invokedFailure(active, 'commit-delivery-unknown'); }
+        const settlement = await settleCommitEffect(pendingEffect, {
+          observe: async () => {
+            const observed = await this.dependencies.git.inspectHead(worktreePath);
+            if (observed.parentSha === pendingEffect.parentSha && observed.treeSha === pendingEffect.treeSha
+              && observed.message === pendingEffect.message) return 'confirmed';
+            if (observed.sha === pendingEffect.parentSha) {
+              return await this.dependencies.git.getTreeSha(worktreePath) === pendingEffect.treeSha ? 'absent' : 'diverged';
+            }
+            return 'diverged';
+          },
+          authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+          invoke: async () => { await this.dependencies.git.commit({ worktreePath, message: pendingEffect.message }); },
+        });
+        if (settlement.status === 'unauthorized') {
+          return this.signal.aborted
+            ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+            : await this.revoked(active);
         }
-        const observed = await this.dependencies.git.inspectHead(worktreePath);
-        if (observed.sha !== commitSha || observed.parentSha !== pendingEffect.parentSha || observed.treeSha !== pendingEffect.treeSha || observed.message !== pendingEffect.message) {
+        if (settlement.status === 'unknown') return await this.invokedFailure(active, 'commit-delivery-unknown');
+        if (settlement.status !== 'confirmed') {
           return await this.publicationDiverged(active, 'commit-observation-diverged');
         }
+        commitSha = await this.dependencies.git.getHead(worktreePath);
         active = await this.confirmEffect(active);
       }
     }
@@ -515,16 +558,21 @@ export class RunIssue {
       if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { kind: 'initial-push', branch: branchName, sha: commitSha } });
       const pendingEffect = active.record.pendingEffect;
       if (pendingEffect?.kind !== 'initial-push' || pendingEffect.branch !== branchName || pendingEffect.sha !== commitSha) return await this.publicationDiverged(active, 'push-pendingEffect-diverged');
-      let remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
-      if (remoteSha && remoteSha !== commitSha) return await this.publicationDiverged(active, 'remote-branch-diverged');
-      if (!remoteSha) {
-        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
-        if (!await this.authorized(active, config)) return await this.revoked(active);
-        try { await this.dependencies.git.push({ worktreePath, branchName }); }
-        catch { return await this.invokedFailure(active, 'push-delivery-unknown'); }
-        remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
+      const settlement = await settlePushEffect(pendingEffect, {
+        observe: async () => {
+          const remoteSha = await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName);
+          return remoteSha === commitSha ? 'confirmed' : remoteSha ? 'diverged' : 'absent';
+        },
+        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+        invoke: () => this.dependencies.git.push({ worktreePath, branchName }),
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.signal.aborted
+          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          : await this.revoked(active);
       }
-      if (remoteSha !== commitSha) return await this.publicationDiverged(active, 'push-observation-diverged');
+      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'push-delivery-unknown');
+      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'push-observation-diverged');
       active = await this.confirmEffect(active);
     } else if (await this.dependencies.git.getRemoteBranchSha(worktreePath, branchName) !== commitSha) {
       return await this.publicationDiverged(active, 'push-missing-before-later-effect');
@@ -541,23 +589,35 @@ export class RunIssue {
           },
         });
       }
-      let observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
-      if (observed && observed.body !== prBody) return await this.publicationDiverged(active, 'pr-marker-diverged');
-      if (!observed) {
-        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
-        if (!await this.authorized(active, config)) return await this.revoked(active);
-        try {
-
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'draft-pr' || pendingEffect.owner !== config.github.owner
+        || pendingEffect.repo !== config.github.repo || pendingEffect.head !== branchName
+        || pendingEffect.base !== config.github.baseBranch || pendingEffect.issueNumber !== issueNumber
+        || pendingEffect.marker !== prMarker) {
+        return this.publicationDiverged(active, 'pr-pendingEffect-diverged');
+      }
+      const settlement = await settleDraftPullRequestEffect(pendingEffect, {
+        observe: async () => {
+          const observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
+          return !observed ? 'absent' : observed.body === prBody ? 'confirmed' : 'diverged';
+        },
+        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+        invoke: async () => {
           await this.dependencies.pullRequests.createDraft({
             title: `Implement #${issueNumber}: ${issue.title}`,
             body: prBody,
             headBranch: branchName,
             baseBranch: config.github.baseBranch,
           });
-        } catch { return await this.invokedFailure(active, 'pr-delivery-unknown'); }
-        observed = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
+        },
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.signal.aborted
+          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          : await this.revoked(active);
       }
-      if (!observed || observed.body !== prBody) return await this.publicationDiverged(active, 'pr-observation-diverged');
+      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'pr-delivery-unknown');
+      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'pr-observation-diverged');
       active = await this.confirmEffect(active);
     }
     const pullRequest = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
@@ -571,41 +631,55 @@ export class RunIssue {
           pendingEffect: { kind: 'handoff-comment', issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
         });
       }
-      let observation = await this.readIssue(issueNumber);
-      if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-handoff');
-      let matching = commentsWithMarker(observation, handoffMarker);
-      if (matching.some((comment) => sha256(comment.body) !== sha256(handoffBody)) || matching.length > 1) {
-        return await this.publicationDiverged(active, 'handoff-comment-diverged');
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'handoff-comment' || pendingEffect.issueNumber !== issueNumber
+        || pendingEffect.marker !== handoffMarker || pendingEffect.bodySha256 !== sha256(handoffBody)) {
+        return this.publicationDiverged(active, 'handoff-comment-pendingEffect-diverged');
       }
-      if (matching.length === 0) {
-        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
-        if (!await this.authorized(active, config)) return await this.revoked(active);
-        try {
- await this.dependencies.issues.postComment(issueNumber, handoffBody); }
-        catch { return await this.invokedFailure(active, 'handoff-comment-delivery-unknown'); }
-        observation = await this.readIssue(issueNumber);
-        matching = observation ? commentsWithMarker(observation, handoffMarker) : [];
+      const settlement = await settleCommentEffect(pendingEffect, {
+        observe: async () => {
+          const observation = await this.readIssue(issueNumber);
+          if (!observation) return 'diverged';
+          const matching = commentsWithMarker(observation, handoffMarker);
+          if (matching.length === 0) return 'absent';
+          return matching.length === 1 && sha256(matching[0]!.body) === sha256(handoffBody) ? 'confirmed' : 'diverged';
+        },
+        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+        invoke: () => this.dependencies.issues.postComment(issueNumber, handoffBody),
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.signal.aborted
+          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          : await this.revoked(active);
       }
-      if (matching.length !== 1 || sha256(matching[0]!.body) !== sha256(handoffBody)) {
-        return await this.publicationDiverged(active, 'handoff-comment-observation-diverged');
-      }
+      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'handoff-comment-delivery-unknown');
+      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'handoff-comment-observation-diverged');
       active = await this.confirmEffect(active);
     }
 
     const terminalLabels = [config.github.labels.review.name];
     if (active.record.pendingEffect?.kind === 'final-labels' || !active.record.pendingEffect) {
       if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { kind: 'final-labels', issueNumber, expected: terminalLabels } });
-      let observation = await this.readIssue(issueNumber);
-      if (!observation) return await this.publicationDiverged(active, 'issue-missing-during-labels');
-      if (!sameStrings(observation.labels, terminalLabels)) {
-        if (this.signal.aborted) return await this.terminal(await this.clearEffect(active), { status: 'cancelled' });
-        if (!await this.authorized(active, config)) return await this.revoked(active);
-        try {
- await this.dependencies.issues.setLabels(issueNumber, terminalLabels); }
-        catch { return await this.invokedFailure(active, 'terminal-labels-delivery-unknown'); }
-        observation = await this.readIssue(issueNumber);
+      const pendingEffect = active.record.pendingEffect;
+      if (pendingEffect?.kind !== 'final-labels' || pendingEffect.issueNumber !== issueNumber
+        || !sameStrings(pendingEffect.expected, terminalLabels)) {
+        return this.publicationDiverged(active, 'terminal-labels-pendingEffect-diverged');
       }
-      if (!observation || !sameStrings(observation.labels, terminalLabels)) return await this.publicationDiverged(active, 'terminal-labels-diverged');
+      const settlement = await settleLabelsEffect(pendingEffect, {
+        observe: async () => {
+          const observation = await this.readIssue(issueNumber);
+          return !observation ? 'diverged' : sameStrings(observation.labels, terminalLabels) ? 'confirmed' : 'absent';
+        },
+        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
+        invoke: () => this.dependencies.issues.setLabels(issueNumber, terminalLabels),
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.signal.aborted
+          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          : await this.revoked(active);
+      }
+      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'terminal-labels-delivery-unknown');
+      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'terminal-labels-diverged');
       active = await this.confirmEffect(active);
     }
     return this.persistTerminal(active, {
@@ -651,6 +725,14 @@ export class RunIssue {
     if (candidateBinding) {
       const candidate = this.dependencies.git.candidateV2;
       if (!candidate) return this.persistRetainedCommitIntentTerminal(active, 'candidate-git-v2-required');
+      if (active.record.pendingEffect?.kind === 'candidate-pin-release') {
+        const cleaned = await this.settleCandidatePinRelease(active, candidateBinding, {
+          kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
+          priorRemoteSha: oldHead, sha: head, treeSha: candidateBinding.candidateTreeSha,
+        });
+        if ('status' in cleaned) return cleaned;
+        active = cleaned;
+      } else {
       if (!active.record.pendingEffect) {
         const recaptured = await candidate.captureAndPin({
           worktreePath: active.record.worktreePath,
@@ -694,46 +776,53 @@ export class RunIssue {
         || pendingEffect.message !== message || pendingEffect.candidateRef !== candidateBinding.candidateRef) {
         return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-candidate-pendingEffect-diverged');
       }
-      if (!await this.authorized(active, config)) return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-publication-authority-revoked');
-      const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
-      const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
-      if (validationFailure) return validationFailure;
-      const publication = await candidate.createOrObserveCommit({
-        worktreePath: active.record.worktreePath,
-        branchName: active.record.branchName,
-        parentSha: pendingEffect.parentSha,
-        treeSha: pendingEffect.treeSha,
-        message: pendingEffect.message,
-        candidateRef: pendingEffect.candidateRef,
+      let authorizationFailure: RunIssueResult | undefined;
+      const settlement = await settleCommitEffect(pendingEffect, {
+        observe: async () => {
+          const observed = await candidate.createOrObserveCommit({
+            worktreePath: active.record.worktreePath, branchName: active.record.branchName,
+            parentSha: pendingEffect.parentSha, treeSha: pendingEffect.treeSha,
+            message: pendingEffect.message, candidateRef: pendingEffect.candidateRef!, observeOnly: true,
+          });
+          if (observed.kind === 'failed') throw new Error(observed.code);
+          return observed.value.kind === 'created-or-observed' ? 'confirmed'
+            : observed.value.kind === 'parent-unchanged' ? 'absent' : 'diverged';
+        },
+        authorize: async () => {
+          if (!await this.authorized(active, config)) return false;
+          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
+          return !authorizationFailure;
+        },
+        invoke: async () => {
+          const invoked = await candidate.createOrObserveCommit({
+            worktreePath: active.record.worktreePath, branchName: active.record.branchName,
+            parentSha: pendingEffect.parentSha, treeSha: pendingEffect.treeSha,
+            message: pendingEffect.message, candidateRef: pendingEffect.candidateRef!,
+          });
+          if (invoked.kind === 'failed') throw new Error(invoked.code);
+        },
       });
-      if (publication.kind === 'failed') {
-        return publication.code === 'candidate-ref-update-unknown'
-          ? this.invokedFailure(active, publication.code, 'Candidate update outcome is unknown; retain and observe the exact commit effect.')
-          : this.mapCandidateFailure(active, publication.code);
+      if (settlement.status === 'unauthorized') {
+        return authorizationFailure
+          ?? this.persistRetainedCommitIntentTerminal(active, 'review-feedback-publication-authority-revoked');
       }
-      if (publication.value.kind === 'parent-unchanged') return this.invokedFailure(active, 'review-feedback-candidate-branch-update-not-observed');
-      if (publication.value.kind === 'branch-diverged') return this.persistRetainedCommitIntentTerminal(active, 'candidate-branch-diverged');
-      head = publication.value.sha;
+      if (settlement.status === 'unknown') {
+        return this.invokedFailure(active, 'candidate-ref-update-unknown', 'Candidate update outcome is unknown; retain and observe the exact commit effect.');
+      }
+      if (settlement.status !== 'confirmed') return this.persistRetainedCommitIntentTerminal(active, 'candidate-branch-diverged');
+      head = await this.dependencies.git.getHead(active.record.worktreePath);
       const normalized = await candidate.normalizeSharedIndex({ worktreePath: active.record.worktreePath, expectedHeadSha: head });
       if (normalized.kind === 'failed') return this.mapCandidateFailure(active, normalized.code);
       if ((await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(active.record.worktreePath, config.proof.artifactDir)).length > 0) {
         return this.persistRetainedCommitIntentTerminal(active, 'candidate-residual-worktree-drift');
       }
-      try {
-        active = await this.persist(active, {
-          pendingEffect: {
-            kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
-            priorRemoteSha: oldHead, sha: head, treeSha: candidateBinding.candidateTreeSha,
-          },
-          changeBindingVersion: undefined,
-          candidateBinding: undefined,
-        });
-      } catch {
-        throw new PostEffectStateError(active);
-      }
-      const released = await candidate.releasePin({ binding: candidateBinding, expectedPinnedCommitSha: candidateBinding.candidateCommitSha });
-      if (released.kind === 'failed') {
-        return this.invokedFailure(active, 'candidate-pin-release-unknown', 'The review update commit is confirmed; orphan reconciliation will retry exact pin cleanup.');
+      const cleaned = await this.settleCandidatePinRelease(active, candidateBinding, {
+        kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
+        priorRemoteSha: oldHead, sha: head, treeSha: candidateBinding.candidateTreeSha,
+      });
+      if ('status' in cleaned) return cleaned;
+      active = cleaned;
       }
     } else if (!active.record.pendingEffect || active.record.pendingEffect.kind === 'review-update-commit') {
       if (!active.record.pendingEffect) {
@@ -747,24 +836,37 @@ export class RunIssue {
         || pendingEffect.parentSha !== oldHead || pendingEffect.message !== message) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-pendingEffect-diverged');
       }
-      head = await this.dependencies.git.getHead(active.record.worktreePath);
-      if (head === pendingEffect.parentSha) {
-        if (!await this.authorized(active, config)) {
-          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
-        }
-        const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
-        const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
-        if (validationFailure) return validationFailure;
-        if (await this.dependencies.git.getTreeSha(active.record.worktreePath) !== pendingEffect.treeSha) {
-          return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-tree-diverged');
-        }
-        try { head = await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: pendingEffect.message }); }
-        catch { return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown'); }
+      let authorizationFailure: RunIssueResult | undefined;
+      const settlement = await settleCommitEffect(pendingEffect, {
+        observe: async () => {
+          const observed = await this.dependencies.git.inspectHead(active.record.worktreePath);
+          if (observed.parentSha === pendingEffect.parentSha && observed.treeSha === pendingEffect.treeSha
+            && observed.message === pendingEffect.message) return 'confirmed';
+          if (observed.sha === pendingEffect.parentSha) {
+            return await this.dependencies.git.getTreeSha(active.record.worktreePath) === pendingEffect.treeSha ? 'absent' : 'diverged';
+          }
+          return 'diverged';
+        },
+        authorize: async () => {
+          if (!await this.authorized(active, config)) return false;
+          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
+          return !authorizationFailure;
+        },
+        invoke: async () => {
+          await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: pendingEffect.message });
+        },
+      });
+      if (settlement.status === 'unauthorized') {
+        return authorizationFailure
+          ?? this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
-      const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
-      if (commit.sha !== head || commit.parentSha !== pendingEffect.parentSha || commit.treeSha !== pendingEffect.treeSha || commit.message !== pendingEffect.message) {
+      if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown');
+      if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-observation-diverged');
       }
+      const commit = await this.dependencies.git.inspectHead(active.record.worktreePath);
+      head = commit.sha;
       active = await this.persist(active, { pendingEffect: {
         kind: 'review-update-push', batchId: batch.batchId, branch: active.record.branchName,
         priorRemoteSha: oldHead, sha: commit.sha, treeSha: commit.treeSha,
@@ -788,19 +890,31 @@ export class RunIssue {
         || pendingEffect.treeSha !== commit.treeSha || pendingEffect.branch !== active.record.branchName || pendingEffect.priorRemoteSha !== oldHead) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-pendingEffect-diverged');
       }
-      remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
-      if (remote === oldHead) {
-        if (!await this.authorized(active, config)) {
-          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
-        }
-        const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
-        const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-prepush-revalidation-failed');
-        if (validationFailure) return validationFailure;
-        try { await this.dependencies.git.push({ worktreePath: active.record.worktreePath, branchName: active.record.branchName }); }
-        catch { return this.invokedFailure(active, 'review-feedback-push-delivery-unknown'); }
-        remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+      let authorizationFailure: RunIssueResult | undefined;
+      const settlement = await settlePushEffect(pendingEffect, {
+        observe: async () => {
+          remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
+          return remote === head ? 'confirmed' : remote === oldHead ? 'absent' : 'diverged';
+        },
+        authorize: async () => {
+          if (!await this.authorized(active, config)) return false;
+          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-prepush-revalidation-failed');
+          return !authorizationFailure;
+        },
+        invoke: () => this.dependencies.git.push({
+          worktreePath: active.record.worktreePath,
+          branchName: active.record.branchName,
+        }),
+      });
+      if (settlement.status === 'unauthorized') {
+        return authorizationFailure
+          ?? this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
-      if (remote !== head) return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-observation-diverged');
+      if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-push-delivery-unknown');
+      if (settlement.status !== 'confirmed') {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-observation-diverged');
+      }
     }
 
     const postPush = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
@@ -836,22 +950,26 @@ export class RunIssue {
       const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-summary-revalidation-failed');
       if (validationFailure) return validationFailure;
-      let matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
-        .filter((comment) => comment.body.split('\n')[0] === marker);
-      if (matches.some((comment) => comment.body !== body) || matches.length > 1) {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-diverged');
+      let matches: Array<{ id: string; body: string }> = [];
+      const settlement = await settleCommentEffect(pendingEffect, {
+        observe: async () => {
+          matches = (await this.dependencies.pullRequests.listConversationComments!(batch.pullRequest.number))
+            .filter((comment) => comment.body.split('\n')[0] === marker);
+          if (matches.length === 0) return 'absent';
+          return matches.length === 1 && matches[0]!.body === body ? 'confirmed' : 'diverged';
+        },
+        authorize: () => this.authorized(active, config),
+        invoke: async () => {
+          await this.dependencies.pullRequests.postConversationComment!(batch.pullRequest.number, body);
+        },
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
-      if (matches.length === 0) {
-        if (!await this.authorized(active, config)) {
-          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
-        }
-        try {
- await this.dependencies.pullRequests.postConversationComment(batch.pullRequest.number, body); }
-        catch { return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown'); }
-        matches = (await this.dependencies.pullRequests.listConversationComments(batch.pullRequest.number))
-          .filter((comment) => comment.body.split('\n')[0] === marker);
+      if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown');
+      if (settlement.status !== 'confirmed') {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-observation-diverged');
       }
-      if (matches.length !== 1 || matches[0]!.body !== body) return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-observation-diverged');
       summaryId = matches[0]!.id;
       active = await this.persist(active, { pendingEffect: {
         kind: 'review-final-labels', issueNumber, batchId: batch.batchId,
@@ -883,17 +1001,21 @@ export class RunIssue {
       const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-final-labels-revalidation-failed');
       if (validationFailure) return validationFailure;
-      let issue = await this.readIssue(issueNumber);
-      if (!issue || !sameStrings(issue.labels, finalLabels)) {
-        if (!await this.authorized(active, config)) {
-          return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
-        }
-        try {
- await this.dependencies.issues.setLabels(issueNumber, finalLabels); }
-        catch { return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown'); }
-        issue = await this.readIssue(issueNumber);
+      const settlement = await settleLabelsEffect(pendingEffect, {
+        observe: async () => {
+          const issue = await this.readIssue(issueNumber);
+          return !issue ? 'diverged' : sameStrings(issue.labels, finalLabels) ? 'confirmed' : 'absent';
+        },
+        authorize: () => this.authorized(active, config),
+        invoke: () => this.dependencies.issues.setLabels(issueNumber, finalLabels),
+      });
+      if (settlement.status === 'unauthorized') {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
-      if (!issue || !sameStrings(issue.labels, finalLabels)) return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-diverged');
+      if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown');
+      if (settlement.status !== 'confirmed') {
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-diverged');
+      }
       active = await this.confirmEffect(active);
     }
 
@@ -1023,17 +1145,24 @@ export class RunIssue {
     });
     const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-activation-revalidation-failed');
     if (validationFailure) return { result: validationFailure };
-    if (labelsAreReview) {
-      try {
- await this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels); }
-      catch { return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') }; }
-      const observed = await this.readIssue(active.record.issueNumber);
-      if (!observed || !sameStrings(observed.labels, runningLabels)
-        || !this.hasTrustedClaim(observed, active.record)) {
+    if (pendingEffect) {
+      const settlement = await settleLabelsEffect(pendingEffect, {
+        observe: async () => {
+          const observed = await this.readIssue(active.record.issueNumber);
+          if (!observed || !this.hasTrustedClaim(observed, active.record)) return 'diverged';
+          if (sameStrings(observed.labels, runningLabels)) return 'confirmed';
+          return sameStrings(observed.labels, reviewLabels) ? 'absent' : 'diverged';
+        },
+        invoke: () => this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels),
+      });
+      if (settlement.status === 'unknown') {
+        return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') };
+      }
+      if (settlement.status !== 'confirmed') {
         return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-labels-diverged') };
       }
+      active = await this.confirmEffect(active);
     }
-    if (pendingEffect) active = await this.confirmEffect(active);
     const worktree = await this.createContinuationWorktreeEffect(active, targetRoot, expectedHeadSha);
     if ('status' in worktree) return { result: worktree };
     active = worktree.active;
@@ -2181,18 +2310,24 @@ export class RunIssue {
     if (canonicalJson(active.record.pendingEffect) !== canonicalJson(createPendingEffect(expected))) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
     }
-    let issue = await this.readIssue(active.record.issueNumber);
-    let matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
-    if (matches.length > 1 || matches.some((comment) => sha256(comment.body) !== expected.bodySha256)) {
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== 'spec-question-comment') {
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
+    }
+    const settlement = await settleCommentEffect(effect, {
+      observe: async () => {
+        const issue = await this.readIssue(active.record.issueNumber);
+        const matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
+        if (matches.length === 0) return 'absent';
+        return matches.length === 1 && sha256(matches[0]!.body) === expected.bodySha256 ? 'confirmed' : 'diverged';
+      },
+      invoke: () => this.dependencies.issues.postComment(active.record.issueNumber, body),
+    });
+    if (settlement.status === 'unknown') return this.invokedFailure(active, 'spec-question-comment-unknown');
+    if (settlement.status === 'diverged') {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-comment-conflict');
     }
-    if (matches.length === 0) {
-      try { await this.dependencies.issues.postComment(active.record.issueNumber, body); }
-      catch { return this.invokedFailure(active, 'spec-question-comment-unknown'); }
-      issue = await this.readIssue(active.record.issueNumber);
-      matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
-    }
-    if (matches.length !== 1 || sha256(matches[0]!.body) !== expected.bodySha256) return this.invokedFailure(active, 'spec-question-comment-unobserved');
+    if (settlement.status !== 'confirmed') return this.invokedFailure(active, 'spec-question-comment-unobserved');
     active = await this.confirmEffect(active);
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: receipt.questionSha256 });
     active = await this.persist(active, {
@@ -2552,6 +2687,57 @@ export class RunIssue {
   private async confirmEffect(active: ActiveRun): Promise<ActiveRun> {
     try {
       return await this.clearEffect(active);
+    } catch {
+      throw new PostEffectStateError(active);
+    }
+  }
+
+  private async settleCandidatePinRelease(
+    active: ActiveRun,
+    binding: CandidateBindingV2,
+    nextEffect: PendingEffectInput,
+  ): Promise<ActiveRun | RunIssueResult> {
+    const candidate = this.dependencies.git.candidateV2;
+    if (!candidate) return this.invokedFailure(active, 'candidate-git-v2-required');
+    if (active.record.pendingEffect?.kind !== 'candidate-pin-release') {
+      try {
+        active = await this.persist(active, { pendingEffect: {
+          kind: 'candidate-pin-release',
+          bindingId: binding.bindingId,
+          expectedPinnedCommitSha: binding.candidateCommitSha,
+        } });
+      } catch {
+        throw new PostEffectStateError(active);
+      }
+    }
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== 'candidate-pin-release' || effect.bindingId !== binding.bindingId
+      || effect.expectedPinnedCommitSha !== binding.candidateCommitSha) {
+      return this.invokedFailure(active, 'candidate-pin-release-pendingEffect-diverged');
+    }
+    const settlement = await settleCleanupEffect(effect, {
+      observe: async () => {
+        const observed = await candidate.inspectPin(binding);
+        if (observed.kind === 'failed') throw new Error(observed.code);
+        return observed.value === 'missing' ? 'confirmed' : observed.value === 'matching' ? 'absent' : 'diverged';
+      },
+      invoke: async () => {
+        const released = await candidate.releasePin({ binding, expectedPinnedCommitSha: binding.candidateCommitSha });
+        if (released.kind === 'failed') throw new Error(released.code);
+      },
+    });
+    if (settlement.status === 'unknown') {
+      return this.invokedFailure(active, 'candidate-pin-release-unknown', 'Retain the exact candidate cleanup intent for observation.');
+    }
+    if (settlement.status !== 'confirmed') {
+      return this.invokedFailure(active, 'candidate-pin-release-diverged', 'Candidate cleanup postcondition diverged from its exact intent.');
+    }
+    try {
+      return await this.persist(active, {
+        pendingEffect: nextEffect,
+        changeBindingVersion: undefined,
+        candidateBinding: undefined,
+      });
     } catch {
       throw new PostEffectStateError(active);
     }
@@ -3444,21 +3630,26 @@ export class RunIssue {
         || existingIntent.evidenceCode !== evidenceCode) {
         return this.invokedFailure(active, 'review-feedback-blocked-labels-pendingEffect-diverged');
       }
-      let issue = await this.readIssue(active.record.issueNumber);
       const ownedRunningLabels = [config.github.labels.auto.name, config.github.labels.running.name].sort();
       const ownedReviewLabels = [config.github.labels.review.name];
-      const canReduceAuthority = !!issue && issue.state === 'OPEN'
-        && (sameStrings(issue.labels, ownedRunningLabels) || sameStrings(issue.labels, ownedReviewLabels));
-      if (issue?.state === 'OPEN' && !sameStrings(issue.labels, blockedLabels) && !canReduceAuthority) {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-source-diverged');
+      const effect = active.record.pendingEffect;
+      if (effect?.kind !== 'review-blocked-labels') {
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-pendingEffect-diverged');
       }
-      if (canReduceAuthority && !sameStrings(issue!.labels, blockedLabels)) {
-        try {
- await this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels); }
-        catch { return this.invokedFailure(active, 'review-feedback-blocked-labels-delivery-unknown'); }
-        issue = await this.readIssue(active.record.issueNumber);
+      const settlement = await settleLabelsEffect(effect, {
+        observe: async () => {
+          const issue = await this.readIssue(active.record.issueNumber);
+          if (!issue || issue.state !== 'OPEN') return 'diverged';
+          if (sameStrings(issue.labels, blockedLabels)) return 'confirmed';
+          return sameStrings(issue.labels, ownedRunningLabels) || sameStrings(issue.labels, ownedReviewLabels)
+            ? 'absent' : 'diverged';
+        },
+        invoke: () => this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels),
+      });
+      if (settlement.status === 'unknown') {
+        return this.invokedFailure(active, 'review-feedback-blocked-labels-delivery-unknown');
       }
-      if (canReduceAuthority && (!issue || !sameStrings(issue.labels, blockedLabels))) {
+      if (settlement.status !== 'confirmed') {
         return this.invokedFailure(active, 'review-feedback-blocked-labels-observation-diverged');
       }
     }

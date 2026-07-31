@@ -74,6 +74,7 @@ export type PendingEffect = EffectIdentity & (
   }
   | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
   | { kind: 'continuation-worktree-create'; worktreePath: string; branchName: string; baseBranch: string; publishedHeadSha: string }
+  | { kind: 'candidate-pin-release'; bindingId: string; expectedPinnedCommitSha: string }
   | { kind: 'outcome-evidence'; path: string; runId: string; code: string; summary: string; recordedAt: string; bytesSha256: string }
 );
 
@@ -415,6 +416,15 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       throw new Error(`${field}.pendingEffect candidate binding is invalid`);
     }
   }
+  if ((value.pendingEffect as PendingEffect | undefined)?.kind === 'candidate-pin-release') {
+    if (!hasOwn(value, 'candidateBinding')) throw new Error(`${field}.candidate pin cleanup requires candidate binding`);
+    const binding = value.candidateBinding as unknown as CandidateBindingV2;
+    const pendingEffect = value.pendingEffect as Extract<PendingEffect, { kind: 'candidate-pin-release' }>;
+    if (pendingEffect.bindingId !== binding.bindingId
+      || pendingEffect.expectedPinnedCommitSha !== binding.candidateCommitSha) {
+      throw new Error(`${field}.candidate pin cleanup binding is invalid`);
+    }
+  }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
 
@@ -633,6 +643,10 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertNonEmptyString(value.branchName, `${field}.branchName`);
     assertNonEmptyString(value.baseBranch, `${field}.baseBranch`);
     assertGitSha(value.publishedHeadSha, `${field}.publishedHeadSha`);
+  } else if (kind === 'candidate-pin-release') {
+    assertExactObject(value, [...identity, 'bindingId', 'expectedPinnedCommitSha'], field);
+    assertSha256(value.bindingId, `${field}.bindingId`);
+    assertGitSha(value.expectedPinnedCommitSha, `${field}.expectedPinnedCommitSha`);
   } else if (kind === 'outcome-evidence') {
     assertExactObject(value, [...identity, 'path', 'runId', 'code', 'summary', 'recordedAt', 'bytesSha256'], field);
     assertNonEmptyString(value.path, `${field}.path`);

@@ -1712,8 +1712,8 @@ test('confirmed candidate commit retains identity until fallible cleanup is reco
     );
     const cleanupPending = (await fixture.store.read()).runs[0]!;
     assert.equal(cleanupPending.lifecycle, 'publishing', option);
-    assert.equal(cleanupPending.pendingEffect?.kind, option === 'candidateNormalizeFailOnce' ? 'initial-commit' : 'initial-push', option);
-    assert.equal(!!cleanupPending.candidateBinding, option === 'candidateNormalizeFailOnce', option);
+    assert.equal(cleanupPending.pendingEffect?.kind, option === 'candidateNormalizeFailOnce' ? 'initial-commit' : 'candidate-pin-release', option);
+    assert.equal(!!cleanupPending.candidateBinding, true, option);
     assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready', option);
     assert.equal(fixture.events.filter((event) => event === 'git:commit').length, 1, option);
   }
@@ -1827,26 +1827,34 @@ test('issue read rejection and post-effect CAS failure are resumable with retain
   assert.deepEqual(pick(readResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   assert.equal(readFailure.events.includes('git:commit'), false);
 
-  const casFailure = await runFixture({ rejectStoreEvent: 'state:publishing:none', rejectStoreOccurrence: 2 });
+  const casFailure = await runFixture({ rejectStoreTransition: { from: 'initial-push', to: 'none' } });
   const casResult = await casFailure.runner.runIssue({ targetRoot: casFailure.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(casResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(casResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, JSON.stringify({ casResult, evidence: casFailure.evidence, events: casFailure.events, state: await casFailure.store.read() }));
   const state = await casFailure.store.read();
   assert.equal(state.runs[0]?.pendingEffect?.kind, 'initial-push');
   assert.equal(casFailure.events.includes('git:push'), true);
 });
 
 test('restart after effect-before-confirmation reconciles publication without duplicate effects', async () => {
-  for (const occurrence of [2, 3, 4] as const) {
-    const fixture = await runFixture({ rejectStoreEvent: 'state:publishing:none', rejectStoreOccurrence: occurrence });
+  const transitions = [
+    { from: 'initial-commit', to: 'candidate-pin-release' },
+    { from: 'candidate-pin-release', to: 'initial-push' },
+    { from: 'initial-push', to: 'none' },
+    { from: 'draft-pr', to: 'none' },
+    { from: 'handoff-comment', to: 'none' },
+    { from: 'final-labels', to: 'none' },
+  ];
+  for (const transition of transitions) {
+    const fixture = await runFixture({ rejectStoreTransition: transition });
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, `occurrence ${occurrence}`);
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, JSON.stringify({ transition, first, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
     const countsBefore = effectCounts(fixture.events);
 
     const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.equal(second.status, 'review-ready', `occurrence ${occurrence}: ${JSON.stringify(second)}`);
+    assert.equal(second.status, 'review-ready', `${JSON.stringify(transition)}: ${JSON.stringify(second)}`);
     const countsAfter = effectCounts(fixture.events);
     for (const [effect, count] of Object.entries(countsBefore)) {
-      if (count > 0) assert.equal(countsAfter[effect], count, `${effect} duplicated at occurrence ${occurrence}`);
+      if (count > 0) assert.equal(countsAfter[effect], count, `${effect} duplicated at ${JSON.stringify(transition)}`);
     }
     assert.equal((await fixture.store.read()).runs.length, 1);
   }
@@ -2104,6 +2112,7 @@ interface FixtureOptions {
   issueReadRejectAt?: number;
   rejectStoreEvent?: string;
   rejectStoreOccurrence?: number;
+  rejectStoreTransition?: { from: string; to: string };
   signal?: AbortSignal;
   storeGate?: { event: string; promise: Promise<void> };
   pushGate?: Promise<void>;
@@ -2181,7 +2190,14 @@ async function runFixture(options: FixtureOptions = {}) {
   const rawStore: RunRecordWriter = options.rawRunStateBytes
     ? new FileRunRecordWriter(statePath)
     : new InMemoryRunRecordWriter();
-  const tracedStore = traceStore(rawStore, events, options.rejectStoreEvent, options.rejectStoreOccurrence, options.storeGate);
+  const tracedStore = traceStore(
+    rawStore,
+    events,
+    options.rejectStoreEvent,
+    options.rejectStoreOccurrence,
+    options.storeGate,
+    options.rejectStoreTransition,
+  );
   const inspectedStore: RunRecordWriter = options.stateInspections
     ? {
       inspect: async () => structuredClone(options.stateInspections!.shift() ?? await tracedStore.inspect()),
@@ -2699,6 +2715,7 @@ function traceStore(
   rejectEvent?: string,
   rejectOccurrence = 1,
   storeGate?: { event: string; promise: Promise<void> },
+  rejectTransition?: { from: string; to: string },
 ): RunRecordWriter {
   let rejected = false;
   let matches = 0;
@@ -2708,6 +2725,8 @@ function traceStore(
     compareAndSwap: async (generation, next) => {
       const record = next.runs.at(-1);
       const event = `state:${record?.lifecycle ?? 'none'}:${record?.pendingEffect?.kind ?? 'none'}`;
+      const prior = (await store.read()).runs.find((candidate) => candidate.runId === record?.runId);
+      const transition = { from: prior?.pendingEffect?.kind ?? 'none', to: record?.pendingEffect?.kind ?? 'none' };
       events.push(event);
       if (storeGate?.event === event) {
         events.push('store:deferred');
@@ -2715,7 +2734,8 @@ function traceStore(
         storeGate = undefined;
       }
       if (rejectEvent === event) matches += 1;
-      if (!rejected && rejectEvent === event && matches === rejectOccurrence) {
+      if (!rejected && ((rejectEvent === event && matches === rejectOccurrence)
+        || (rejectTransition?.from === transition.from && rejectTransition.to === transition.to))) {
         rejected = true;
         throw new Error('store rejected');
       }
@@ -2764,7 +2784,7 @@ function traceGit(
         return delegate.candidateV2.releasePin(input);
       },
       createOrObserveCommit: async (input) => {
-        if (shouldReject('commit')) {
+        if (!input.observeOnly && shouldReject('commit')) {
           events.push('git:commit');
           if (options.commitUnknownAfterEffect) await delegate.candidateV2.createOrObserveCommit(input);
           return { kind: 'failed', code: 'candidate-ref-update-unknown', detailSha256: sha256('commit rejected') };
