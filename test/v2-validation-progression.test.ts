@@ -11,6 +11,7 @@ import {
   nextValidationTransition,
   projectValidationRepair,
   projectValidationReviewStart,
+  validationRepairBudgetExhausted,
 } from '../src/v2/validation-progression.js';
 
 test('direct and spec authority dispatch through the same fixed validation progression', () => {
@@ -91,6 +92,19 @@ test('semantic repair returns one CAS transition without a reworking lifecycle',
     proofId: undefined,
     proofReceipt: undefined,
   });
+});
+
+test('Run-owned validation budgets remain route-independent and bounded', () => {
+  const authority = deliveryAuthority('direct');
+  const initial = run('implementing', authority);
+  assert.equal(validationRepairBudgetExhausted(initial, 5), false);
+  initial.cycle = 5;
+  assert.equal(validationRepairBudgetExhausted(initial, 5), true);
+  initial.reviewFeedback = reviewFeedback();
+  initial.reviewFeedback.repairRound = 2;
+  assert.equal(validationRepairBudgetExhausted(initial, 5), false);
+  initial.reviewFeedback.repairRound = 3;
+  assert.equal(validationRepairBudgetExhausted(initial, 5), true);
 });
 
 test('CAS consumption rejects stale authority context before any write', () => {

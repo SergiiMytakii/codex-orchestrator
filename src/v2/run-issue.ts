@@ -44,7 +44,8 @@ import {
 } from './route-coordinator.js';
 import type { RoutedContinuationRegistry } from './route-continuations.js';
 import type { SpecCoordinatorResult, SpecDeliveryState } from './spec-coordinator.js';
-import { acceptTrustedSpecAnswer, type FrozenSpecQuestionReceiptV1, type FrozenSpecReceiptV1, type TrustedSpecAnswerV1 } from './spec-delivery.js';
+import type { FrozenSpecQuestionReceiptV1, FrozenSpecReceiptV1 } from './spec-delivery.js';
+import { observeTrustedSpecAnswer, revalidateTrustedSpecAnswers, specQuestionBody } from './spec-answer.js';
 import {
   downstreamLifecycleForRoute,
   validateRouteTransition,
@@ -106,6 +107,7 @@ import {
   projectValidationReviewReportRepair,
   projectValidationReviewStart,
   projectValidationReviewTransportRetry,
+  validationRepairBudgetExhausted,
   type ValidationCasTransition,
 } from './validation-progression.js';
 import {
@@ -451,7 +453,7 @@ export class RunIssue {
           if (recaptured.value.bindingId !== candidateBinding.bindingId) {
             await candidate.releasePin({ binding: recaptured.value, expectedPinnedCommitSha: recaptured.value.candidateCommitSha });
           }
-          if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+          if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
             const released = await this.clearAndReleaseCandidate(active);
             return 'status' in released
               ? released
@@ -1053,13 +1055,13 @@ export class RunIssue {
       baseBranch: config.github.baseBranch,
     });
     if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
-      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-pr-identity-missing') };
+      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-pr-identity-missing', false) };
     }
     const expectedHeadSha = feedback.previousPublishedHeadSha === null
       ? pullRequest.headSha
       : feedback.previousPublishedHeadSha;
     if (!expectedHeadSha) {
-      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-head-missing') };
+      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-head-missing', false) };
     }
     const observed = await this.dependencies.reviewFeedback.observeAndFreeze({
       runId: starting.record.runId,
@@ -1079,7 +1081,7 @@ export class RunIssue {
     });
     if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
     if (observed.status === 'blocked') {
-      return { result: await this.reviewReadyObservationBlocked(starting, 'review-feedback-observation-blocked') };
+      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-observation-blocked', false) };
     }
     if (feedback.previousPublishedHeadSha === null) {
       const sourceIds = observed.status === 'frozen'
@@ -1173,10 +1175,6 @@ export class RunIssue {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-worktree-diverged') };
     }
     return { active };
-  }
-
-  private async reviewReadyObservationBlocked(active: ActiveRun, code: string): Promise<RunIssueResult> {
-    return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, code, false);
   }
 
   async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
@@ -1434,7 +1432,7 @@ export class RunIssue {
               && active.record.activeAttempt.result !== null;
             if (!resumedSafeHalt && !transitionedFromSpec && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
               && !proofRecovery && !directReviewRepair && !attemptResultRecovery) {
-              if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+              if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
               }
               active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
@@ -1601,7 +1599,7 @@ export class RunIssue {
       }
       const implementationAttempt = active.record.activeAttempt;
       if (!implementationAttempt) return await this.terminal(active, { status: 'internal-error', code: 'implementation-attempt-missing' });
-      let implementation = await this.runImplementation({
+      let implementation = await this.dependencies.implementationAgent.run({
         operation: 'implementation',
         attemptId: implementationAttempt.attemptId,
         runId,
@@ -1613,6 +1611,7 @@ export class RunIssue {
         reworkFindings: active.record.reworkFindings,
         repairOnly: false,
         workflowGeneration: active.record.workflowGeneration,
+        signal: this.signal,
         ...implementationLaunch,
       });
       if (implementationPreparationFailure) return implementationPreparationFailure;
@@ -1650,7 +1649,7 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:report-repair`);
-        implementation = await this.runImplementation({
+        implementation = await this.dependencies.implementationAgent.run({
           operation: 'implementation',
           attemptId: active.record.activeAttempt!.attemptId,
           runId,
@@ -1662,6 +1661,7 @@ export class RunIssue {
           reworkFindings: ['The previous implementation report did not match the generated schema.'],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
+          signal: this.signal,
           ...implementationLaunch,
         });
         if (implementationPreparationFailure) return implementationPreparationFailure;
@@ -1702,7 +1702,7 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:changed-files-repair`);
-        implementation = await this.runImplementation({
+        implementation = await this.dependencies.implementationAgent.run({
           operation: 'implementation',
           attemptId: active.record.activeAttempt!.attemptId,
           runId,
@@ -1714,6 +1714,7 @@ export class RunIssue {
           reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
           repairOnly: true,
           workflowGeneration: active.record.workflowGeneration,
+          signal: this.signal,
           ...implementationLaunch,
         });
         if (implementationPreparationFailure) return implementationPreparationFailure;
@@ -1859,7 +1860,7 @@ export class RunIssue {
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
         if (check.status === 'failed') {
-          if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+          if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
             const released = await this.clearAndReleaseCandidate(active);
             if ('status' in released) return released;
             active = released.active;
@@ -2002,7 +2003,7 @@ export class RunIssue {
       active = settledProofMaterialization.active;
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
       if (proof.status === 'needs-rework') {
-        if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
+        if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
           const released = await this.clearAndReleaseCandidate(active);
           if ('status' in released) return released;
           active = released.active;
@@ -2490,95 +2491,27 @@ export class RunIssue {
     const questionResult = delivery.questionResult;
     if (!questionResult) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-question-result-missing' }) };
     const issue = await this.readIssue(active.record.issueNumber);
-    if (!issue) return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
-    const expectedQuestionBody = specQuestionBody(question);
-    const markerMatches = commentsWithMarker(issue, question.marker);
-    if (markerMatches.length !== 1 || markerMatches[0]!.body !== expectedQuestionBody) {
-      return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
-    }
-    const questionIndex = issue.comments.findIndex((comment) => comment.body === expectedQuestionBody);
-    const candidates = questionIndex < 0 ? [] : issue.comments.slice(questionIndex + 1)
-      .filter((comment) => comment.body.startsWith(question.answerPrefix));
-    const trusted: Array<{
-      comment: typeof candidates[number]; normalized: string;
-      permission: { permission: 'write' | 'admin'; userId: string; checkedAt: string };
-    }> = [];
-    for (const comment of candidates) {
-      if (!comment.id || !comment.author || !comment.authorId || !comment.createdAt || !comment.updatedAt || comment.createdAt !== comment.updatedAt) continue;
-      const normalized = comment.body.slice(question.answerPrefix.length).trim().replace(/\s+/gu, ' ');
-      if (!normalized || !this.dependencies.issues.getRepositoryPermission) continue;
-      let permission;
-      try { permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId); }
-      catch { return { result: frozenQuestionProjection(question, questionResult.evidencePath) }; }
-      if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) continue;
-      trusted.push({
-        comment, normalized,
-        permission: permission as { permission: 'write' | 'admin'; userId: string; checkedAt: string },
-      });
-    }
-    trusted.sort((left, right) => compareStableId(left.comment.id!, right.comment.id!));
-    if (trusted.length === 0) return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
-    const hashes = [...new Set(trusted.map((item) => sha256(item.normalized)))];
-    const sources = trusted.map((item) => ({
-      commentId: item.comment.id!, authorId: item.comment.authorId!, author: item.comment.author!,
-      normalizedAnswer: item.normalized, normalizedSha256: sha256(item.normalized), permission: structuredClone(item.permission),
-      commentCreatedAt: item.comment.createdAt!, commentUpdatedAt: item.comment.updatedAt!,
-    }));
-    const canonicalSource = sources[0]!;
-    const answer: TrustedSpecAnswerV1 = {
-      accepted: hashes.length === 1,
-      question: structuredClone(question),
-      frozenResult: { evidenceId: questionResult.evidenceId, evidencePath: questionResult.evidencePath },
-      canonicalSource,
-      duplicateCommentIds: sources.slice(1)
-        .filter((source) => source.normalizedSha256 === canonicalSource.normalizedSha256)
-        .map((source) => source.commentId),
-      additionalSources: sources.slice(1),
-    };
-    return { active: await this.persist(active, { specDelivery: acceptTrustedSpecAnswer(delivery, answer) }) };
+    const observed = await observeTrustedSpecAnswer({
+      delivery,
+      issue,
+      getRepositoryPermission: this.dependencies.issues.getRepositoryPermission,
+    });
+    return observed.status === 'frozen'
+      ? { result: frozenQuestionProjection(question, questionResult.evidencePath) }
+      : { active: await this.persist(active, { specDelivery: observed.delivery }) };
   }
 
   private async revalidateSpecAnswers(active: ActiveRun): Promise<
     { status: 'valid' } | { status: 'frozen'; question: FrozenSpecQuestionReceiptV1; evidencePath: string }
   > {
-    const delivery = active.record.specDelivery;
-    const answers = [
-      ...(delivery?.acceptedAnswers ?? []),
-      ...(delivery?.trustedAnswer ? [delivery.trustedAnswer] : []),
-    ];
-    if (answers.length === 0) return { status: 'valid' };
-    const fallback = answers.at(-1)!;
-    if (!this.dependencies.issues.getRepositoryPermission) {
-      return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath };
-    }
-    let issue;
+    let issue: RunIssueSnapshot | undefined;
     try { issue = await this.readIssue(active.record.issueNumber); }
-    catch { return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath }; }
-    if (!issue) return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath };
-    for (const answer of answers) {
-      const questionMatches = commentsWithMarker(issue, answer.question.marker);
-      if (questionMatches.length !== 1 || questionMatches[0]!.body !== specQuestionBody(answer.question)) {
-        return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
-      }
-      for (const source of [answer.canonicalSource, ...answer.additionalSources]) {
-        const comment = issue.comments.find((item) => item.id === source.commentId);
-        if (!comment?.author || !comment.authorId || comment.author !== source.author || comment.authorId !== source.authorId
-          || comment.createdAt !== source.commentCreatedAt || comment.updatedAt !== source.commentUpdatedAt
-          || comment.createdAt !== comment.updatedAt || !comment.body.startsWith(answer.question.answerPrefix)
-          || comment.body.slice(answer.question.answerPrefix.length).trim().replace(/\s+/gu, ' ') !== source.normalizedAnswer) {
-          return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
-        }
-        try {
-          const permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId);
-          if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) {
-            return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
-          }
-        } catch {
-          return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
-        }
-      }
-    }
-    return { status: 'valid' };
+    catch { issue = undefined; }
+    return revalidateTrustedSpecAnswers({
+      delivery: active.record.specDelivery,
+      issue,
+      getRepositoryPermission: this.dependencies.issues.getRepositoryPermission,
+    });
   }
 
   private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }> {
@@ -3318,34 +3251,6 @@ export class RunIssue {
     return this.terminal(active, { status: 'transport-failed', resumable: false }, code);
   }
 
-  private async runImplementation(input: {
-    operation: 'implementation';
-    attemptId: string;
-    runId: string;
-    worktreePath: string;
-    issue: IssueSnapshot;
-    frozenCriteria: FrozenCriterion[];
-    deliveryAuthority: DeliveryAuthorityV1;
-    cycle: number;
-    reworkFindings: string[];
-    repairOnly: boolean;
-    workflowGeneration: WorkflowGenerationReceipt;
-    reviewFeedbackRound?: number;
-    reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
-    onPrepared?: (input: { attemptId: string; reportPath: string; preparedAt: string; baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'> }) => Promise<void>;
-    onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
-  }): Promise<ImplementationAgentResult> {
-    try {
-      return await this.dependencies.implementationAgent.run({
-        ...input,
-        workflowGeneration: structuredClone(input.workflowGeneration),
-        signal: this.signal,
-      });
-    } catch {
-      return { kind: 'internal-error' };
-    }
-  }
-
   private async runFullReview(
     starting: ActiveRun,
     issue: IssueSnapshot,
@@ -3445,7 +3350,7 @@ export class RunIssue {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
         if (result.report.verdict === 'needs-work') {
-          if (this.repairBudgetExhausted(active, maxCycles)) {
+          if (validationRepairBudgetExhausted(active.record, maxCycles)) {
             return active.record.reviewFeedback?.activeBatch
               ? this.blockReviewFeedback(active, 'exhausted', 'direct-review-repair-exhausted')
               : this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
@@ -3599,12 +3504,6 @@ export class RunIssue {
       return this.invokedFailure(transitioned, 'candidate-pin-release-pending', 'The next repair cycle is durable; orphan reconciliation will retry exact pin cleanup.');
     }
     return transitioned;
-  }
-
-  private repairBudgetExhausted(active: ActiveRun, maxCycles: number): boolean {
-    return active.record.reviewFeedback?.activeBatch
-      ? active.record.reviewFeedback.repairRound >= 3
-      : active.record.cycle >= maxCycles;
   }
 
   private async blockReviewFeedback(
@@ -4051,21 +3950,6 @@ function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ bo
 
 function frozenQuestionProjection(receipt: FrozenSpecQuestionReceiptV1, evidencePath: string): RunIssueResult {
   return { status: 'spec-frozen', receipt: structuredClone(receipt), evidencePath };
-}
-
-function specQuestionBody(receipt: FrozenSpecQuestionReceiptV1): string {
-  return [
-    receipt.marker,
-    `Spec revision: ${receipt.revisionSha256}`,
-    `Decision gaps: ${canonicalJson(receipt.decisionGaps)}`,
-    receipt.question,
-    `Reply with: ${receipt.answerPrefix} <answer>`,
-    `Evidence: ${receipt.evidencePath}`,
-  ].join('\n');
-}
-
-function compareStableId(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sortedUnique(values: string[]): string[] {

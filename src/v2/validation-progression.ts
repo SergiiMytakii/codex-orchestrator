@@ -124,6 +124,12 @@ export function nextValidationTransition(
   };
 }
 
+export function validationRepairBudgetExhausted(run: Readonly<RunRecord>, maxCycles: number): boolean {
+  return run.reviewFeedback?.activeBatch
+    ? run.reviewFeedback.repairRound >= 3
+    : run.cycle >= maxCycles;
+}
+
 export function projectValidationRepair(
   run: Readonly<RunRecord>,
   findings: readonly string[],
