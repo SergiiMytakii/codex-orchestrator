@@ -624,7 +624,8 @@ async function assertExclusiveDaemonCandidate(context, issueNumber) {
     ], { timeoutMs: context.options.timeoutMs });
     for (const issue of JSON.parse(result.stdout)) candidates.add(issue.number);
   }
-  if (candidates.size !== 1 || !candidates.has(issueNumber)) {
+  const runOwnedIssues = new Set(context.createdIssues);
+  if (!candidates.has(issueNumber) || [...candidates].some((candidate) => !runOwnedIssues.has(candidate))) {
     throw new Error(`daemon smoke requires exclusive scratch ownership of issue #${issueNumber}`);
   }
 }

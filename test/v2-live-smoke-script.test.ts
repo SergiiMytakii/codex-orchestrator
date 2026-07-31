@@ -331,7 +331,9 @@ test('daemon continuation requires exclusive scratch-repository candidate owners
   assert.match(daemon, /await assertExclusiveDaemonCandidate\(context, issueNumber\)/u);
   assert.match(daemon, /'--once', '--issue', String\(issueNumber\)/u);
   assert.match(daemon, /'agent:auto', 'agent:review'/u);
-  assert.match(daemon, /candidates\.size !== 1 \|\| !candidates\.has\(issueNumber\)/u);
+  assert.match(daemon, /runOwnedIssues = new Set\(context\.createdIssues\)/u);
+  assert.match(daemon, /!candidates\.has\(issueNumber\)/u);
+  assert.match(daemon, /!runOwnedIssues\.has\(candidate\)/u);
 });
 
 test('scenario assertions bind live smoke outcomes to their current owner behavior', async () => {
