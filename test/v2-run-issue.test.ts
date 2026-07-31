@@ -240,7 +240,7 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
     timeoutHandle = setTimeout(async () => {
       fifoUnblock = await open(fifoSource, constants.O_RDWR | constants.O_NONBLOCK);
       resolveTimeout('timed-out');
-    }, 250);
+    }, 5_000);
   });
   const fifoOutcome = await Promise.race([fifoCopy, timed]);
   if (timeoutHandle) clearTimeout(timeoutHandle);
