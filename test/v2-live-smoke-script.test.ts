@@ -314,7 +314,7 @@ test('review feedback continuation smoke proves same-PR update and effect-free r
   const proofNormalization = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   assert.match(proofNormalization, /scenario === 'review-feedback-continuation'/u);
   assert.match(proofNormalization, /discardProofArtifacts\(prompt\)/u);
-  assert.match(proofNormalization, /writePassingNonVisualProof\(criteria, reportPath\)/u);
+  assert.match(proofNormalization, /writePassingNonVisualProof\(criteria, reportPath, prompt\)/u);
 });
 
 test('daemon continuation reads the target issue result from authoritative run state', async () => {
@@ -356,7 +356,9 @@ test('fixture happy paths normalize proof semantics after real model invocation'
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
-  assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
+  assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath, prompt\)/u);
+  assert.match(text, /Configured check receipts:/u);
+  assert.match(text, /checks: \[\], artifacts: \[\], findings: \[\], residualRisks: \[\]/u);
 });
 
 test('implementation operation defines changedFiles as the cumulative run change set', async () => {

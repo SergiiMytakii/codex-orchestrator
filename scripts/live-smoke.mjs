@@ -992,7 +992,7 @@ function applyFault(scenario, operation, prompt) {
   }
   if (scenario === 'review-feedback-continuation') {
     discardProofArtifacts(prompt);
-    writePassingNonVisualProof(criteria, reportPath);
+    writePassingNonVisualProof(criteria, reportPath, prompt);
     return;
   }
   if ([
@@ -1000,7 +1000,7 @@ function applyFault(scenario, operation, prompt) {
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
-    writePassingNonVisualProof(criteria, reportPath);
+    writePassingNonVisualProof(criteria, reportPath, prompt);
     return;
   }
   if (scenario === 'browser-proof') {
@@ -1015,19 +1015,19 @@ function discardProofArtifacts(prompt) {
   rmSync(artifactRoot, { recursive: true, force: true });
 }
 
-function writePassingNonVisualProof(criteria, reportPath) {
-  const output = Buffer.from('V2 live-smoke proof passed.');
-  const check = {
-    id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed',
-    summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex'),
-  };
+function writePassingNonVisualProof(criteria, reportPath, prompt) {
+  const configuredChecks = JSON.parse(prompt.match(/Configured check receipts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
+  const evidenceRefs = configuredChecks.map((check) => check.id);
+  if (evidenceRefs.length === 0 || evidenceRefs.some((id) => typeof id !== 'string' || !id)) {
+    throw new Error('missing configured check receipt IDs');
+  }
   writeProofReport(reportPath, {
     version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
     criteria: criteria.map((item) => ({
       id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'],
-      evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.',
+      evidenceRefs, analysis: 'Current checked change satisfies this criterion.',
     })),
-    checks: [check], artifacts: [], findings: [], residualRisks: [],
+    checks: [], artifacts: [], findings: [], residualRisks: [],
   });
 }
 
