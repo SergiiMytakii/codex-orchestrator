@@ -76,11 +76,13 @@ test('run state inspection reports supported exact-schema state with its raw SHA
 });
 
 test('run state inspection reports malformed and unknown schemas as unsupported without effects', async () => {
+  const { lifecycle: _missingDiscriminator, ...withoutLifecycle } = record();
   const unsupportedBytes = [
     Buffer.from('{malformed-json\n'),
     Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.agent-auto-state', generation: 7, runs: [] })}\n`),
     Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.run-state', version: 1, generation: 7, runs: [] })}\n`),
     Buffer.from(`${JSON.stringify({ schema: 'codex-orchestrator.run-state', generation: 7, runs: [], unknown: true })}\n`),
+    Buffer.from(`${canonicalJson({ schema: 'codex-orchestrator.run-state', generation: 7, runs: [withoutLifecycle] })}\n`),
   ];
 
   for (const [index, bytes] of unsupportedBytes.entries()) {

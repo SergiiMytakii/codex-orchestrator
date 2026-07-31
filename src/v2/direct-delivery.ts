@@ -52,6 +52,7 @@ export interface DirectReviewV1 {
 export interface DirectReviewValidationContext {
   lifecycle: string;
   terminalOutcome?: DirectReviewV1['terminalOutcome'];
+  terminalCode?: string;
 }
 
 export function directReviewTargetFingerprint(input: {
@@ -295,21 +296,18 @@ export function projectTerminalDirectReview(
 
 export function canRecoverTerminalDirectReviewReport(
   state: DirectReviewV1,
-  options: { allowLegacyMalformed?: boolean } = {},
 ): boolean {
   return state.status === 'terminal' && state.terminalOutcome?.status === 'internal-error'
     && state.stage === 'review'
     && state.review.disposition === 'active' && state.review.reportRepairs > 0
     && state.review.reportRepairs < MAX_DIRECT_REVIEW_REPORT_REPAIRS
-    && (state.terminalCode === 'direct-review-report-malformed'
-      || (state.terminalCode === undefined && options.allowLegacyMalformed === true));
+    && state.terminalCode === 'direct-review-report-malformed';
 }
 
 export function recoverTerminalDirectReviewReport(
   state: DirectReviewV1,
-  options: { allowLegacyMalformed?: boolean } = {},
 ): DirectReviewV1 {
-  if (!canRecoverTerminalDirectReviewReport(state, options)) {
+  if (!canRecoverTerminalDirectReviewReport(state)) {
     throw new Error('direct review terminal report is not recoverable');
   }
   const {
@@ -390,6 +388,13 @@ function validateComposite(value: Omit<DirectReviewV1, 'version' | 'targetFinger
     if (value.stage === null || value.targetRevision < 1 || !value.terminalOutcome
       || !['blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(context.lifecycle)) {
       throw new Error('terminal direct review composite is invalid');
+    }
+    if (value.terminalOutcome.status === 'internal-error') {
+      if (value.terminalCode === undefined || value.terminalCode !== context.terminalCode) {
+        throw new Error('terminal direct review code does not match run terminal outcome');
+      }
+    } else if (value.terminalCode !== undefined || context.terminalCode !== undefined) {
+      throw new Error('non-internal terminal direct review has a terminal code');
     }
     return;
   }

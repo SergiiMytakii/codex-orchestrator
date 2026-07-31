@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  acceptApprovedDirectReview, acceptNeedsWorkDirectReview, createInitialDirectReview, prepareDirectReview,
+  acceptApprovedDirectReview, acceptNeedsWorkDirectReview, canRecoverTerminalDirectReviewReport,
+  createInitialDirectReview, prepareDirectReview, projectTerminalDirectReview, recoverTerminalDirectReviewReport,
 } from '../src/v2/direct-delivery.js';
 import type { CodeReviewDefectV1, CodeReviewReportV1 } from '../src/v2/code-review-report.js';
 
@@ -35,4 +36,23 @@ test('repair creates a new target revision and another complete independent revi
     repairFindingOutcomes: [{ id: 'finding-1', status: 'verified' }],
   }), 'd'.repeat(64));
   assert.equal(clear.status, 'clear');
+});
+
+test('terminal report recovery requires the exact current terminal discriminator', () => {
+  const initial = createInitialDirectReview({ targetFingerprint: fingerprint, codeReviewerSessionId: 'review-1' });
+  const repairable = {
+    ...initial,
+    review: { ...initial.review, reportRepairs: 1 as const },
+  };
+  const current = projectTerminalDirectReview(
+    repairable,
+    { status: 'internal-error' },
+    'direct-review-report-malformed',
+  );
+  assert.equal(canRecoverTerminalDirectReviewReport(current), true);
+  assert.equal(recoverTerminalDirectReviewReport(current).status, 'active');
+
+  const { terminalCode: _removed, ...legacyMalformed } = current;
+  assert.equal(canRecoverTerminalDirectReviewReport(legacyMalformed), false);
+  assert.throws(() => recoverTerminalDirectReviewReport(legacyMalformed), /not recoverable/u);
 });

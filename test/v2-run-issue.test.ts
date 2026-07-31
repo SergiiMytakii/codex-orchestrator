@@ -1101,18 +1101,62 @@ test('unsupported state is effect-free before owner lock and after authoritative
   assert.equal(postLock.events.some((event) => event.startsWith('effect:')), false);
 });
 
-test('real unsupported state bytes remain unchanged and create no writable-root siblings', async () => {
-  const bytes = Buffer.from('{"schema":"codex-orchestrator.agent-auto-state","version":4}\n');
-  const fixture = await runFixture({ rawRunStateBytes: bytes });
+test('real old, unknown, malformed, and missing-discriminator state bytes remain unchanged and effect-free', async () => {
+  const cases = [
+    Buffer.from('{malformed-json\n'),
+    Buffer.from('{"schema":"codex-orchestrator.agent-auto-state","version":4}\n'),
+    Buffer.from('{"schema":"codex-orchestrator.run-state","generation":1,"runs":[],"unknown":true}\n'),
+    Buffer.from('{"schema":"codex-orchestrator.run-state","generation":1,"runs":[{}]}\n'),
+  ];
+  for (const bytes of cases) {
+    const fixture = await runFixture({ rawRunStateBytes: bytes });
+    assert.deepEqual(
+      await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }),
+      { status: 'state-schema-unsupported' },
+    );
+    assert.deepEqual(await readFile(fixture.statePath), bytes);
+    assert.deepEqual(await readdir(dirname(fixture.statePath)), ['run-state.json']);
+    assert.equal(fixture.events.includes('owner-acquire'), false);
+    assert.deepEqual(fixture.evidence, []);
+    assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
+  }
+});
+
+test('legacy terminal direct review without its discriminator is unsupported before owner lock', async () => {
+  const source = await runFixture({ reviewMalformedCount: 5 });
+  assert.equal((await source.runner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  const current = structuredClone(await source.store.read());
+  const run = current.runs[0]!;
+  assert.equal(run.directReview?.terminalCode, 'direct-review-report-malformed');
+  run.directReview!.review.reportRepairs = 1;
+  delete run.activeAttempt;
+  delete run.candidateMaterialization;
+
+  await mkdir(dirname(source.statePath), { recursive: true });
+  await writeFile(source.statePath, `${canonicalJson(current)}\n`);
+  const currentStore = new FileRunRecordWriter(source.statePath);
+  assert.equal((await currentStore.inspect()).status, 'supported');
+  const currentRunner = new RunIssue({ ...source.dependencies, runRecords: currentStore });
+  const currentResult = await currentRunner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 });
+  assert.equal(
+    currentResult.status,
+    'review-ready',
+    JSON.stringify({ currentResult, events: source.events, state: await currentStore.read() }),
+  );
+
+  const { terminalCode: _legacyMissing, ...legacyDirectReview } = run.directReview;
+  run.directReview = legacyDirectReview;
+  const bytes = Buffer.from(`${canonicalJson(current)}\n`);
+  const legacyFixture = await runFixture({ rawRunStateBytes: bytes });
   assert.deepEqual(
-    await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }),
+    await legacyFixture.runner.runIssue({ targetRoot: legacyFixture.targetRoot, issueNumber: 42 }),
     { status: 'state-schema-unsupported' },
   );
-  assert.deepEqual(await readFile(fixture.statePath), bytes);
-  assert.deepEqual(await readdir(dirname(fixture.statePath)), ['run-state.json']);
-  assert.equal(fixture.events.includes('owner-acquire'), false);
-  assert.deepEqual(fixture.evidence, []);
-  assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
+  assert.deepEqual(await readFile(legacyFixture.statePath), bytes);
+  assert.deepEqual(await readdir(dirname(legacyFixture.statePath)), ['run-state.json']);
+  assert.equal(legacyFixture.events.includes('owner-acquire'), false);
+  assert.deepEqual(legacyFixture.evidence, []);
+  assert.equal(legacyFixture.events.some((event) => event.startsWith('effect:')), false);
 });
 
 test('a state identity that changes twice after owner lock requeues without effects', async () => {

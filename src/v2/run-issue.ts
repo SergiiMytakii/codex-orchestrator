@@ -3342,12 +3342,10 @@ export class RunIssue {
     frozenCriteria: FrozenCriterion[],
   ): Promise<ActiveRun | undefined> {
     const directReview = active.record.directReview;
-    const allowLegacyMalformed = directReview?.terminalCode === undefined
-      && active.record.outcomeEvidenceId === `evidence:${active.record.runId}:direct-review-report-malformed`;
     if (!issue || !directReview || active.record.pendingEffect || active.record.activeAttempt
       || active.record.terminalOutcome?.status !== 'internal-error'
       || directReview.status !== 'terminal' || directReview.terminalOutcome?.status !== 'internal-error'
-      || !canRecoverTerminalDirectReviewReport(directReview, { allowLegacyMalformed })
+      || !canRecoverTerminalDirectReviewReport(directReview)
       || !this.isAuthorizedIssue(issue, active.record, config)) return undefined;
     let worktree: 'absent' | 'matching' | 'diverged';
     try {
@@ -3384,7 +3382,7 @@ export class RunIssue {
     if (targetFingerprint !== directReview.targetFingerprint) return undefined;
     return this.persist(active, {
       lifecycle: 'implementing',
-      directReview: recoverTerminalDirectReviewReport(directReview, { allowLegacyMalformed }),
+      directReview: recoverTerminalDirectReviewReport(directReview),
       terminalOutcome: undefined,
       outcomeEvidenceId: undefined,
     });

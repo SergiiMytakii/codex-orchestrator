@@ -374,6 +374,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
       ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
+      ...(hasOwn(value, 'terminalOutcome') && (value.terminalOutcome as RunTerminalOutcome).status === 'internal-error'
+        ? { terminalCode: (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'internal-error' }>).code }
+        : {}),
     });
   }
   if (hasOwn(value, 'specDelivery')) {
