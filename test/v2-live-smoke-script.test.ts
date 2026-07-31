@@ -346,6 +346,7 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   assert.match(text, /reworkFindings\[0\]\.startsWith\('Check smoke failed:'\)/u);
   assert.match(text, /denied-path-modified/u);
   assert.match(text, /negative scenario published a branch or PR/u);
+  assert.match(text, /terminalCode=\$\{terminalCode\}/u);
 });
 
 test('fixture happy paths normalize proof semantics after real model invocation', async () => {

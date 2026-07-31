@@ -275,6 +275,11 @@ async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
+  if (result.status !== 'review-ready') {
+    const failedRecord = await readRunRecord(context, issue.number);
+    const terminalCode = failedRecord.terminalOutcome?.code ?? 'none';
+    throw new Error(`${scenario}: expected status=review-ready, received ${result.status}; terminalCode=${terminalCode}`);
+  }
   assertResult(result, { status: 'review-ready' }, scenario);
   const record = await readRunRecord(context, issue.number);
   if (!record.checkedChangeSha256 || !record.proofId || record.checks.some((check) => check.status !== 'passed')) {
