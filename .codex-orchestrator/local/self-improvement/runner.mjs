@@ -199,6 +199,89 @@ function parseJson(stdout, fallback) {
   return JSON.parse(text || 'null');
 }
 
+const SHA256 = /^[0-9a-f]{64}$/u;
+
+function hasExactKeys(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+}
+
+function isHash(value) {
+  return typeof value === 'string' && SHA256.test(value);
+}
+
+function isFrozenSpecReceipt(value) {
+  const keys = [
+    'version', 'issueNumber', 'runId', 'workflowGenerationSha256', 'revision', 'path',
+    'contentSha256', 'revisionSha256', 'reviewReportSha256', 'reviewerSessionId', 'receiptSha256',
+  ];
+  return hasExactKeys(value, keys)
+    && value.version === 1
+    && Number.isSafeInteger(value.issueNumber) && value.issueNumber > 0
+    && Number.isSafeInteger(value.revision) && value.revision > 0
+    && nonEmptyString(value.runId) && nonEmptyString(value.path) && nonEmptyString(value.reviewerSessionId)
+    && ['workflowGenerationSha256', 'contentSha256', 'revisionSha256', 'reviewReportSha256', 'receiptSha256']
+      .every((field) => isHash(value[field]));
+}
+
+function isFrozenSpecQuestionReceipt(value) {
+  const keys = [
+    'version', 'revisionSha256', 'decisionGaps', 'questionId', 'question', 'answerPrefix',
+    'marker', 'evidencePath', 'questionSha256',
+  ];
+  return hasExactKeys(value, keys)
+    && value.version === 1
+    && isHash(value.revisionSha256) && isHash(value.questionSha256)
+    && ['questionId', 'question', 'answerPrefix', 'marker', 'evidencePath'].every((field) => nonEmptyString(value[field]))
+    && Array.isArray(value.decisionGaps) && value.decisionGaps.length > 0
+    && value.decisionGaps.every((gap) => hasExactKeys(gap, ['id', 'summary', 'evidence'])
+      && nonEmptyString(gap.id) && nonEmptyString(gap.summary) && nonEmptyStringArray(gap.evidence));
+}
+
+const V2_RUN_RESULT_CONTRACT = Object.freeze({
+  'state-schema-unsupported': {
+    shapes: [['status']], exitCode: 20, wrapperStatus: 'blocked', validate: () => true,
+  },
+  'review-ready': {
+    shapes: [['evidencePath', 'pullRequestUrl', 'status'], ['continuationEpoch', 'evidencePath', 'pullRequestUrl', 'status']],
+    exitCode: 0,
+    wrapperStatus: 'passed',
+    validate: (result) => nonEmptyString(result.pullRequestUrl)
+      && (!('continuationEpoch' in result) || nonEmptyString(result.continuationEpoch)),
+  },
+  'route-ready': {
+    shapes: [['evidencePath', 'route', 'status']], exitCode: 0, wrapperStatus: 'skipped',
+    validate: (result) => result.route === 'spec-required',
+  },
+  'spec-frozen': {
+    shapes: [['evidencePath', 'receipt', 'status']], exitCode: 0, wrapperStatus: 'skipped',
+    validate: (result) => isFrozenSpecReceipt(result.receipt) || isFrozenSpecQuestionReceipt(result.receipt),
+  },
+  'not-eligible': {
+    shapes: [['evidencePath', 'reason', 'status']], exitCode: 21, wrapperStatus: 'skipped',
+    validate: (result) => nonEmptyString(result.reason),
+  },
+  blocked: {
+    shapes: [['evidencePath', 'kind', 'resumable', 'status']], exitCode: 20, wrapperStatus: 'blocked',
+    validate: (result) => ['external', 'safety', 'exhausted'].includes(result.kind) && typeof result.resumable === 'boolean',
+  },
+  'transport-failed': {
+    shapes: [['evidencePath', 'resumable', 'status']], exitCode: 70, wrapperStatus: 'failed',
+    validate: (result) => typeof result.resumable === 'boolean',
+  },
+  cancelled: {
+    shapes: [['evidencePath', 'status']], exitCode: 130, wrapperStatus: 'cancelled', validate: () => true,
+  },
+  'internal-error': {
+    shapes: [['evidencePath', 'status']], exitCode: 70, wrapperStatus: 'failed', validate: () => true,
+  },
+  requeued: {
+    shapes: [['evidencePath', 'reason', 'status'], ['reason', 'status']], exitCode: 0, wrapperStatus: 'skipped',
+    validate: (result) => (result.reason === 'owner-contention' && nonEmptyString(result.evidencePath))
+      || (result.reason === 'state-changed' && !('evidencePath' in result)),
+  },
+});
+
 export function parseV2RunResult(stdout) {
   const envelope = JSON.parse(String(stdout));
   if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
@@ -210,23 +293,13 @@ export function parseV2RunResult(stdout) {
   if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.status !== 'string') {
     throw new Error('V2 run result is invalid');
   }
-  const shapes = {
-    'review-ready': ['evidencePath', 'pullRequestUrl', 'status'],
-    'not-eligible': ['evidencePath', 'reason', 'status'],
-    blocked: ['evidencePath', 'kind', 'resumable', 'status'],
-    'transport-failed': ['evidencePath', 'resumable', 'status'],
-    cancelled: ['evidencePath', 'status'],
-    'internal-error': ['evidencePath', 'status'],
-  };
-  const expected = shapes[result.status];
-  if (!expected || Object.keys(result).sort().join(',') !== [...expected].sort().join(',')
-    || !nonEmptyString(result.evidencePath)) throw new Error('V2 run result shape is invalid');
-  if (result.status === 'review-ready' && !nonEmptyString(result.pullRequestUrl)) throw new Error('V2 review-ready result is invalid');
-  if (result.status === 'not-eligible' && !nonEmptyString(result.reason)) throw new Error('V2 not-eligible result is invalid');
-  if (result.status === 'blocked' && (!['external', 'safety', 'exhausted'].includes(result.kind) || typeof result.resumable !== 'boolean')) {
-    throw new Error('V2 blocked result is invalid');
+  const contract = V2_RUN_RESULT_CONTRACT[result.status];
+  const actualKeys = Object.keys(result).sort().join(',');
+  if (!contract?.shapes.some((expected) => actualKeys === [...expected].sort().join(','))) {
+    throw new Error('V2 run result shape is invalid');
   }
-  if (result.status === 'transport-failed' && typeof result.resumable !== 'boolean') throw new Error('V2 transport result is invalid');
+  if ('evidencePath' in result && !nonEmptyString(result.evidencePath)) throw new Error('V2 run result evidence is invalid');
+  if (!contract.validate(result)) throw new Error('V2 run result value is invalid');
   return result;
 }
 
@@ -668,20 +741,18 @@ export function createRunner(options = {}) {
   }
 
   async function implement({ issue } = {}) {
-    if (!Number.isInteger(Number(issue))) return { status: 'skipped', reason: 'missing issue number' };
+    const issueNumber = Number(issue);
+    if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) return { status: 'skipped', reason: 'missing issue number' };
     const build = await exec('npm', ['run', 'build', '--silent'], { cwd });
     if (build.code !== 0) return { status: 'failed', exitCode: build.code, reason: `build failed: ${summarizeOutput(build)}` };
-    const result = await exec('node', ['dist/src/v2/cli.js', 'run', '--target', cwd, '--issue', String(issue)], { cwd });
+    const result = await exec('node', ['dist/src/v2/cli.js', 'run', '--target', cwd, '--issue', String(issueNumber)], { cwd });
     let typed;
     try { typed = parseV2RunResult(result.stdout); }
-    catch { return { status: 'failed', exitCode: result.code === 0 ? 70 : result.code, reason: 'candidate CLI returned invalid V2 JSON', issueNumber: Number(issue) }; }
-    const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, 'internal-error': 70, cancelled: 130 }[typed.status];
-    if (result.code !== expectedExit) return { status: 'failed', exitCode: result.code === 0 ? 70 : result.code, reason: 'candidate CLI exit did not match typed V2 result', issueNumber: Number(issue) };
-    if (typed.status === 'review-ready') return { status: 'passed', exitCode: 0, summary: typed, issueNumber: Number(issue) };
-    if (typed.status === 'blocked') return { status: 'blocked', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
-    if (typed.status === 'not-eligible') return { status: 'skipped', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
-    if (typed.status === 'cancelled') return { status: 'cancelled', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
-    return { status: 'failed', exitCode: result.code, reason: typed, issueNumber: Number(issue) };
+    catch { return { status: 'failed', exitCode: 70, reason: 'candidate CLI returned invalid V2 JSON', issueNumber }; }
+    const contract = V2_RUN_RESULT_CONTRACT[typed.status];
+    if (result.code !== contract.exitCode) return { status: 'failed', exitCode: 70, reason: 'candidate CLI exit did not match typed V2 result', issueNumber };
+    if (contract.wrapperStatus === 'passed') return { status: 'passed', exitCode: result.code, summary: typed, issueNumber };
+    return { status: contract.wrapperStatus, exitCode: result.code, reason: typed, issueNumber };
   }
 
   async function runLiveSmoke({ implementation } = {}) {
@@ -860,13 +931,12 @@ async function main() {
     process.exit(result.status === 'failed' ? 1 : 0);
   }
   if (command === 'implement') {
-    const issueIndex = args.indexOf('--issue');
-    const issue = args[issueIndex + 1];
-    if (issueIndex === -1 || !/^[1-9]\d*$/.test(issue ?? '')) {
+    const issue = Number(args[1]);
+    if (args.length !== 2 || args[0] !== '--issue' || !Number.isSafeInteger(issue) || issue <= 0) {
       console.error('Usage: node runner.mjs implement --issue <number>');
       process.exit(2);
     }
-    const result = await runner.implement({ issue: Number(issue) });
+    const result = await runner.implement({ issue });
     console.log(`implement: ${result.status}${result.issueNumber ? ` issue #${result.issueNumber}` : ''}${result.reason ? ` (${result.reason})` : ''}`);
     process.exit(result.exitCode ?? 1);
   }
