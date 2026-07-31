@@ -7,7 +7,6 @@ import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../sr
 import { createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { FileIosLeaseVerifier, type IosLeaseRecordV1 } from '../src/v2/mobile-lease.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import type { ProofReportV1 } from '../src/v2/proof-report.js';
 
 const execFileAsync = promisify(execFile);
@@ -60,7 +59,6 @@ const payload: CheckedChangePayloadV1 = {
 };
 const proof = new AcceptanceProof({
   checkedChangeReader: capabilities,
-  proofRecords: new InMemoryProofRecordWriter(),
   proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: report.artifacts.map((artifact) => artifact.relativePath) }) },
   inspectFreshness: async () => ({
     headSha: payload.headSha, indexTreeSha: payload.indexTreeSha,
@@ -74,14 +72,14 @@ const proof = new AcceptanceProof({
     artifactRelativePathForProof: () => paths.lease,
     targetController: { release: (record) => releaseSimulator(xcrun, record) },
   }),
-  proofArtifactDir: proofRoot, createAttemptId: () => 'ios-real-attempt', now: () => startedAt,
+  proofArtifactDir: proofRoot,
 });
 const issue: IssueSnapshot = {
   number: 505, title: 'Prove runner-created iOS fixture', body: 'The iOS fixture reaches its ready state.',
   url: 'https://example.invalid/issues/505', state: 'OPEN', labels: ['agent:auto'],
 };
 const criteria: FrozenCriterion[] = [{ id: 'ac-ios-real', order: 1, source: 'explicit', text: 'The iOS fixture visibly reaches the ready state.' }];
-const result = await proof.proveChange({ proofId, issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 process.stdout.write(`${canonicalJson(result)}\n`);
 if (result.status !== 'passed') process.exitCode = 1;
 

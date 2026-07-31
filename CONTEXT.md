@@ -16,6 +16,11 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 
 **Cycle** — one bounded implementation attempt in the Run's existing worktree.
 
+**Validation loop** — the single implementation → complete independent review
+→ checks → proof sequence used for both initial delivery and frozen trusted PR
+feedback. Repair creates a new candidate and complete review; it has no Closure
+or qualification sub-lifecycle.
+
 **Checked Change** — nominal capability binding exact repository, Git, content, worktree, check, package, and proof-schema state after checks pass.
 
 **Acceptance Proof** — separate contained phase that proves frozen criteria against the Checked Change and returns validated artifacts.
@@ -26,9 +31,9 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 
 **Resumable intent** — durable record written before an effect and reconciled against its postcondition after restart.
 
-**Waiting question** — immutable route-bound GitHub question published by the Runner after an approved `awaiting-user` decision.
+**Spec question** — immutable spec-revision-bound GitHub question published only for a real product decision gap and returned as `spec-frozen`.
 
-**Trusted answer** — unedited exact-prefix answer posted after its question by an identity with current repository WRITE or ADMIN permission and frozen into the Run before rerouting.
+**Trusted answer** — unedited exact-prefix answer from an identity with current repository WRITE or ADMIN permission, frozen into the Run before the next spec revision and independent review; triage is not repeated.
 
 **Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved.
 
@@ -42,5 +47,9 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
-- A waiting Run resumes only through its matching marker and Trusted Answer, then reruns triage before any product implementation.
+- A spec-question Run resumes only through its matching marker and Trusted
+  Answer, creates and independently reviews the next immutable spec revision,
+  then continues implementation in the same Run without repeating triage.
+- Trusted PR feedback is frozen as Run data with an update epoch and at most
+  three semantic rounds; it does not own a second lifecycle.
 - Five failed implementation cycles exhaust the Run without publication.

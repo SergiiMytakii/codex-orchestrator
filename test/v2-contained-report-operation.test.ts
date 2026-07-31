@@ -35,16 +35,7 @@ const directArtifact = {
   assumptions: [],
   direct: { summary: 'Small change.', behaviors: ['Change behavior.'], verification: ['Run test.'] },
   specRequired: null,
-  awaitingUser: null,
   blocker: null,
-};
-const reviewArtifact = {
-  version: 1,
-  candidateSha256: 'b9616d55da5ad1ef72b632cda35c61663294f682bcb4787fedc32d82e0519c31',
-  verdict: 'approved',
-  evidenceReviewed: ['issue'],
-  findings: [],
-  recommendation: 'Proceed.',
 };
 const codeReviewArtifact = {
   version: 1,
@@ -52,12 +43,10 @@ const codeReviewArtifact = {
   targetRevision: 1,
   targetFingerprint: 'd'.repeat(64),
   verdict: 'approved',
-  mode: 'full',
   coverage: ['correctness'],
   defects: [],
   residualRisks: [],
   reviewerSessionId: 'reviewer-session-1',
-  closureRequestSha256: null,
   repairFindingOutcomes: [],
 };
 
@@ -70,23 +59,9 @@ test('report-only launcher returns validated triage payload with the exact domai
     status: 'completed',
     attemptId: 'attempt-1',
     validatedPayload: directArtifact,
-    artifactSha256: 'b9616d55da5ad1ef72b632cda35c61663294f682bcb4787fedc32d82e0519c31',
+    artifactSha256: '5b88bb5dffd931030fe91e2cbe95b0c07cb6fa789b002ad76ac8fd23dc2288fa',
   });
   assert.deepEqual(fixture.events, ['snapshot', 'prepare:triage', 'launch:triage', 'snapshot']);
-});
-
-test('report-only launcher validates and hashes ambiguity-review payload independently of envelope bytes', async () => {
-  const report = Buffer.from(`{\n  "report": ${JSON.stringify(reviewArtifact)}\n}\n`);
-  const fixture = operationFixture('ambiguity-review', report);
-
-  const result = await fixture.operation.run(runInput('ambiguity-review'));
-
-  assert.deepEqual(result, {
-    status: 'completed',
-    attemptId: 'attempt-1',
-    validatedPayload: reviewArtifact,
-    artifactSha256: 'a15f377edd58ccb08d215dbf85b214a73d83c684bf3a98b626d14cf7fb4ff356',
-  });
 });
 
 test('implementation reviewer persists prepared and launched identity before accepting a correlated report', async () => {
@@ -95,9 +70,9 @@ test('implementation reviewer persists prepared and launched identity before acc
   const result = await fixture.operation.run({
     ...input,
     reviewContext: {
-      operation: 'code-review', mode: 'full', targetRevision: 1,
+      operation: 'code-review', targetRevision: 1,
       targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
-      closureRequestSha256: null,
+      previousFindingIds: [],
     },
     onPrepared: async () => { fixture.events.push('persist:prepared'); },
     onLaunched: async ({ pid, processGroupId }) => { fixture.events.push(`persist:launched:${pid}:${processGroupId}`); },
@@ -123,9 +98,9 @@ test('implementation reviewer rejects missing launch persistence and stale corre
   const stale = await staleFixture.operation.run({
     ...runInput('code-review'),
     reviewContext: {
-      operation: 'code-review', mode: 'full', targetRevision: 2,
+      operation: 'code-review', targetRevision: 2,
       targetFingerprint: 'd'.repeat(64), reviewerSessionId: 'reviewer-session-1',
-      closureRequestSha256: null,
+      previousFindingIds: [],
     },
     onPrepared: async () => {},
     onLaunched: async () => {},
@@ -178,17 +153,6 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
   assert.deepEqual(result.process.baseline, baseline);
 });
 
-test('ambiguity review uses the authoritative bounded unique-field validator', async () => {
-  for (const invalid of [
-    { ...reviewArtifact, evidenceReviewed: ['issue', 'issue'] },
-    { ...reviewArtifact, findings: Array.from({ length: 257 }, (_, index) => `finding-${index}`) },
-  ]) {
-    const fixture = operationFixture('ambiguity-review', Buffer.from(JSON.stringify({ report: invalid })));
-    const result = await fixture.operation.run(runInput('ambiguity-review'));
-    assert.equal(result.status, 'invalid');
-  }
-});
-
 test('launcher blocks authority or generation drift before starting the process', async () => {
   const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact })), {
     prepared: {
@@ -221,7 +185,7 @@ test('launcher blocks a completed report when any before/after worktree fingerpr
   });
 });
 
-function runInput(operation: 'triage' | 'ambiguity-review' | 'code-review') {
+function runInput(operation: 'triage' | 'code-review') {
   return {
     operation,
     attemptId: 'attempt-1',
@@ -234,7 +198,7 @@ function runInput(operation: 'triage' | 'ambiguity-review' | 'code-review') {
 }
 
 function operationFixture(
-  operation: 'triage' | 'ambiguity-review' | 'code-review',
+  operation: 'triage' | 'code-review',
   reportBytes: Buffer,
   options: {
     prepared?: PreparedContainedReportAttempt;

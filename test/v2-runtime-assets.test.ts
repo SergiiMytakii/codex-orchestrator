@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
 import { ContainedProofAgent, materializeReportReadView } from '../src/v2/runtime.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
+import { sha256 } from '../src/v2/containment.js';
 import { materializeWorkflowGeneration, parseWorkflowExecutionProfile } from '../src/v2/workflow-assets.js';
 
 const packageRoot = join(import.meta.dirname, '..', '..');
@@ -108,7 +109,9 @@ test('contained Android proof receives only Runner-prepared evidence and no host
   const orchestratorHome = join(root, 'orchestrator');
   const targetRoot = join(root, 'target');
   const worktree = join(targetRoot, '.codex-orchestrator/worktrees/issue-177');
+  const candidateWorktree = join(targetRoot, '.codex-orchestrator/worktrees/.candidate-executions/run/binding/proof');
   await mkdir(worktree, { recursive: true });
+  await mkdir(candidateWorktree, { recursive: true });
   const workflowGeneration = await materializeWorkflowGeneration({
     packageRoot,
     runtimeRoot: orchestratorHome,
@@ -116,9 +119,15 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     bootId: 'boot-a',
   });
   let prompt = '';
+  let proofCwd = '';
+  let launchPersisted = false;
+  let processRuns = 0;
   const process = {
-    run: async (invocation: { prompt: string }) => {
+    run: async (invocation: { prompt: string; cwd: string; onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
+      processRuns += 1;
       prompt = invocation.prompt;
+      proofCwd = invocation.cwd;
+      await invocation.onSpawned?.({ pid: 177, processGroupId: 177 });
       return { kind: 'cancelled' as const };
     },
   };
@@ -136,6 +145,7 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     createAttemptId: () => 'attempt-android-proof',
   });
   const result = await agent.run({
+    attemptId: 'attempt-android-proof',
     proofId: 'proof-177',
     runId: 'run-177',
     issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
@@ -143,6 +153,8 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     checkedChangeSha256: 'a'.repeat(64),
     changedFiles: ['test/widget_test.dart'],
     checks: [],
+    worktreePath: candidateWorktree,
+    onLaunched: async ({ pid, processGroupId }) => { launchPersisted = pid === 177 && processGroupId === 177; },
     runnerPreparedArtifactPaths: ['.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json'],
     runnerPreparedArtifactSha256: { '.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json': 'b'.repeat(64) },
     runnerPreparationWarnings: ['Android UI proof unfinished: emulator boot timed out.'],
@@ -152,12 +164,47 @@ test('contained Android proof receives only Runner-prepared evidence and no host
     signal: new AbortController().signal,
   });
   assert.equal(result.kind, 'cancelled');
+  assert.equal(proofCwd, candidateWorktree);
+  assert.equal(launchPersisted, true);
   assert.match(prompt, /Runner-owned Android artifact paths/u);
   assert.match(prompt, /Do not invoke adb, emulator, Flutter run, or an Android lease helper/u);
   assert.match(prompt, /Android UI proof unfinished: emulator boot timed out/u);
   assert.match(prompt, /Android infrastructure failure alone must not block delivery/u);
   assert.doesNotMatch(prompt, /Android lease root:/u);
   assert.doesNotMatch(prompt, /Android adb path:/u);
+
+  const recoveredAttemptId = 'attempt-android-proof';
+  const recoveredReportPath = join(
+    orchestratorHome, 'v2', sha256('m-ivonin/tipsterbro'), 'runs', 'run-177', 'attempts', recoveredAttemptId, 'report.json',
+  );
+  await writeFile(recoveredReportPath, '{"version":1,"status":"external-block"}\n');
+  const recovered = await agent.run({
+    attemptId: recoveredAttemptId,
+    proofId: 'proof-177', runId: 'run-177',
+    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
+    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
+    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
+    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
+    signal: new AbortController().signal,
+  });
+  assert.equal(recovered.kind, 'report');
+  assert.equal(processRuns, 1);
+
+  await unlink(recoveredReportPath);
+  const missingRecovery = await agent.run({
+    attemptId: recoveredAttemptId,
+    recoverOnly: true,
+    proofId: 'proof-177', runId: 'run-177',
+    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
+    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
+    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
+    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
+    signal: new AbortController().signal,
+  });
+  assert.equal(missingRecovery.kind, 'internal-error');
+  assert.equal(processRuns, 1);
 });
 
 test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {
@@ -255,7 +302,6 @@ function androidConfigFixture(): AgentAutoConfig {
         running: { name: 'agent:running', color: '000001', description: 'running' },
         blocked: { name: 'agent:blocked', color: '000002', description: 'blocked' },
         review: { name: 'agent:review', color: '000003', description: 'review' },
-        waitingHuman: { name: 'agent:waiting-human', color: '000004', description: 'waiting' },
       },
     },
     runner: {

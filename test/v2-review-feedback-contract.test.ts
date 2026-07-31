@@ -5,11 +5,11 @@ import {
   activateReviewFeedback,
   appendConsumedReviewSourceIds,
   createFrozenReviewFeedbackBatch,
-  createReviewFeedbackBootstrap,
+  createReviewFeedbackRunData,
   hashReviewFeedbackText,
   projectReviewFeedbackBatch,
   reserveNextReviewFeedbackRound,
-  validateReviewFeedbackExecution,
+  validateReviewFeedbackRunData,
   type FrozenReviewFeedbackSourceV1,
 } from '../src/v2/review-feedback.js';
 
@@ -32,11 +32,11 @@ test('consumed sources are append-preserving and batch hashes are deterministic'
   assert.equal(left.batchId, right.batchId);
   assert.deepEqual(left.sources.map((item) => item.sourceId), ['pr-review:R_1', 'pr-thread:T_1']);
 
-  const bootstrapped = appendConsumedReviewSourceIds(
-    { ...createReviewFeedbackBootstrap(), phase: 'idle', previousPublishedHeadSha: 'a'.repeat(40) },
+  const initialized = appendConsumedReviewSourceIds(
+    { ...createReviewFeedbackRunData(), previousPublishedHeadSha: 'a'.repeat(40) },
     ['pr-thread:old', 'pr-review:old'],
   );
-  const active = activateReviewFeedback(bootstrapped, left);
+  const active = activateReviewFeedback(initialized, left);
   assert.deepEqual(active.consumedSourceIds, ['pr-review:old', 'pr-thread:old', 'pr-review:R_1', 'pr-thread:T_1']);
   assert.equal(active.repairRound, 1);
   assert.equal(reserveNextReviewFeedbackRound(active).repairRound, 2);
@@ -50,11 +50,11 @@ test('review feedback validation rejects unknown keys active terminal mixtures a
     priorPublishedHeadSha: 'a'.repeat(40), sources: [sourceA], frozenAt: '2026-07-27T10:00:00.000Z',
   });
   const active = activateReviewFeedback(
-    { ...createReviewFeedbackBootstrap(), phase: 'idle', previousPublishedHeadSha: 'a'.repeat(40) }, batch,
+    { ...createReviewFeedbackRunData(), previousPublishedHeadSha: 'a'.repeat(40) }, batch,
   );
-  assert.doesNotThrow(() => validateReviewFeedbackExecution(active));
-  assert.throws(() => validateReviewFeedbackExecution({ ...active, extra: true } as never), /keys/u);
-  assert.throws(() => validateReviewFeedbackExecution({ ...active, phase: 'blocked-safety', terminal: { kind: 'safety', blockedAt: '2026-07-27T10:00:00.000Z' } } as never), /active|terminal/u);
+  assert.doesNotThrow(() => validateReviewFeedbackRunData(active));
+  assert.throws(() => validateReviewFeedbackRunData({ ...active, extra: true } as never), /keys/u);
+  assert.throws(() => validateReviewFeedbackRunData({ ...active, extraLifecycle: 'blocked-safety' } as never), /keys/u);
   const round3 = reserveNextReviewFeedbackRound(reserveNextReviewFeedbackRound(active));
   assert.throws(() => reserveNextReviewFeedbackRound(round3), /exhausted/u);
 });
@@ -75,11 +75,10 @@ test('review feedback validation binds trusted bodies and verified receipts to t
     frozenAt: '2026-07-27T10:00:00.000Z',
   });
   const active = activateReviewFeedback(
-    { ...createReviewFeedbackBootstrap(), phase: 'idle', previousPublishedHeadSha: 'a'.repeat(40) }, batch,
+    { ...createReviewFeedbackRunData(), previousPublishedHeadSha: 'a'.repeat(40) }, batch,
   );
-  assert.throws(() => validateReviewFeedbackExecution({
+  assert.throws(() => validateReviewFeedbackRunData({
     ...active,
-    phase: 'verified',
     verifiedReceipt: {
       batchId: 'f'.repeat(64), checkedChangeSha256: 'e'.repeat(64), proofId: 'proof-1',
       verifiedAt: '2026-07-27T10:00:00.000Z',

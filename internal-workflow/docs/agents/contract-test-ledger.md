@@ -41,6 +41,7 @@ Rules:
 - The invariant must be observable through the public interface or the same seam real callers use.
 - The risk must name the concrete bug class, not a vague "edge case".
 - The first test/proof must fail before the fix unless the ledger records why a RED signal is impossible.
+- Do not mark a row `green` until its test reproduces the concrete violating sequence through the production seam used by real callers.
 - `blocked` requires the missing seam, fixture, service, or decision that prevents proof.
 - Keep the ledger current as implementation proceeds; do not backfill it only at the end.
 
@@ -55,6 +56,7 @@ Ask the relevant subset before the first RED test:
 - **Retry/idempotency:** What changes on retry, and which snapshots, counters, streams, timestamps, writes, or side effects must be rebuilt instead of reused?
 - **Determinism:** When sort keys, timestamps, scores, priorities, or winners tie, what stable tie-breaker makes output repeatable?
 - **Evidence:** Which trace, audit, snapshot, Fresh-Context, summary, or generated artifact proves the behavior actually happened?
+- **Proof compatibility:** Can that source observe the exact claim at the required item/run/aggregate cardinality, and could it pass while the claim is false because of delay, redaction, correlation, or variant differences?
 - **Partial failure:** If a dependency times out, throws, returns stale data, or fails after a side effect, what durable state remains and who repairs it?
 - **Scope/cardinality:** Is data global, per-tenant, per-group, per-child, per-step, or per-item, and can one top-level field collapse multiple meaningful results?
 

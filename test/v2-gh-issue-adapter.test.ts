@@ -35,6 +35,34 @@ test('GhCliIssueAdapter preserves decimal REST comment and author IDs above MAX_
   ]);
 });
 
+test('GhCliIssueAdapter canonicalizes GitHub comment timestamps before persistence', async () => {
+  const executor: CommandExecutor = async () => ({
+    stdout: JSON.stringify({
+      number: 12,
+      title: 'Issue',
+      body: 'Body',
+      url: 'https://github.com/owner/repo/issues/12',
+      state: 'OPEN',
+      labels: [],
+      closedByPullRequestsReferences: [],
+      comments: [{
+        id: 'IC_12',
+        url: 'https://github.com/owner/repo/issues/12#issuecomment-12',
+        body: 'comment',
+        createdAt: '2026-07-17T10:00:00Z',
+        author: { login: 'maintainer' },
+        authorAssociation: 'MEMBER',
+      }],
+    }),
+    stderr: '',
+  });
+
+  const issue = await new GhCliIssueAdapter('owner', 'repo', executor).getIssue(12);
+
+  assert.equal(issue!.comments[0]!.createdAt, '2026-07-17T10:00:00.000Z');
+  assert.equal(issue!.comments[0]!.updatedAt, '2026-07-17T10:00:00.000Z');
+});
+
 test('GhCliIssueAdapter bounds historical comments to the persisted run-state contract', async () => {
   const oversizedBody = 'x'.repeat(60_000);
   const executor: CommandExecutor = async () => ({

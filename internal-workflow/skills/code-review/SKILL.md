@@ -133,7 +133,8 @@ Before deep review, decide which lenses apply.
 
 - Always activate the general correctness and spec/standards lenses.
 - Always apply bounded cleanup inside spec/standards; amplify it only for a
-  concrete evidenced Review Focus, never from size or risk labels alone.
+  concrete evidenced Review Focus or when the diff adds a flag, helper, or
+  state branch; never from size or risk labels alone.
 - Add framework lenses when explicit or strongly implied by files/configs.
 - Add targeted recipes when the diff shape matches them.
 - If the user, plan, or implementation spec provides `Review Focus`, treat each listed lens, targeted recipe, invariant, and risk as mandatory. Do not replace it with a generic review; report any focus item that cannot be verified as a verification gap.
@@ -160,6 +161,24 @@ in parallel with one disjoint lens each. Invoking `$code-review` authorizes
 these reviewers. Preserve every fulfilled launch handle if a parallel peer
 fails, then close all launched children. Tell every reviewer not to edit or
 revert unrelated work.
+
+Begin every reviewer launch brief with an exact `Assigned role: <role>` line,
+using `reviewer_fast`, `reviewer_standard`, or `reviewer_deep`. Keep that role
+explicit for Full and Closure launches even when the profile or existing
+lineage already implies it; a generic child prompt is not evidence that the
+profile-selected reviewer topology was executed.
+
+A reviewer is launched only after the child-launch tool returns a non-empty
+handle for that brief. Wait only on returned handles, then close every launched
+child. Never treat an intended role, an empty wait, coordinator analysis, or a
+final-answer claim as reviewer execution. If launch is unavailable or returns
+no handle, report the independent review gate as unavailable and do not
+self-review or claim that the reviewer completed.
+
+A recorded reviewer role or lineage from an earlier Full review identifies
+which role must own Closure; it is never a live child handle. Every Closure
+activation must launch a new child in that same role for the current session,
+capture the new non-empty handle, and wait only on that handle.
 
 For spec-driven checkpoints, obey the track assignment in the persisted Review
 Plan instead of automatically launching both default tracks.
@@ -212,6 +231,13 @@ severity, protected-contract, or invalidated-coverage triggers owned by
 `review-protocol.md`. For a scheduled Closure, send the bounded capsule to the
 selected reviewer lineage and return its defect updates.
 
+Treat a repair budget as a limit on waves, never on finding count. Put every
+mutually compatible finding into the same consolidated repair, and retain each
+canonical record until verified or explicitly blocked. When Closure returns
+only ordinary medium/low corrections that stay inside approved behavior and
+add no new mechanism, allow one bounded correction batch with direct
+failure-path checks plus affected validation; do not request another Closure.
+
 ## Evidence Standard
 
 A valid finding explains:
@@ -241,6 +267,12 @@ Automatically fix only when all are true:
 - correct fix is narrow and low-risk
 - fix matches local project patterns
 - verification is available, or the edit is obviously safe and syntax-checkable
+
+Evaluate `narrow and low-risk` against the aggregate repair diff, including all
+new parameters, helpers, branches, states, owners, and runtime boundaries—not
+against one finding in isolation. A new flag, helper, or state branch activates
+the amplified cleanup lens and requires explicit `KEEP | SIMPLIFY | REMOVE`
+decisions before auto-fix.
 
 When auto-fixing:
 

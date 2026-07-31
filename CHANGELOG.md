@@ -6,6 +6,74 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.11] - 2026-07-30
+
+### Added
+- Added V2 candidate-bound `CheckedChange` contracts and optional candidate Git
+  capability while preserving existing V1 payload and freshness semantics.
+- Added run-state V3 migration with an exact raw-byte backup, pre-publication
+  rollback guard, candidate bindings, execution leases, and retained commit
+  intents for observation-only recovery.
+
+### Changed
+- Direct-route review, checks, and Acceptance Proof now execute from fresh
+  detached materializations of one private-index-captured, ref-pinned Git tree.
+  Publication creates and observes the exact single-parent commit from that
+  tree before push, including restart-safe branch-CAS reconciliation.
+- Recovery across direct, report-only, mutable worker, spec-author, review, and
+  proof operations now uses one canonical attempt-owned invocation lifecycle.
+  Infrastructure failures before recoverable output do not consume semantic
+  budgets, while recovered Runner-classified output consumes its existing
+  phase budget exactly once.
+- Replaced the generic positive-proof live-smoke scenario with an
+  `authoritative-candidate-publication` scenario that injects stale shared-index
+  content and proves exact candidate-tree publication plus pin/materialization
+  cleanup.
+- Updated interrupted-worker live-smoke scenarios to prove bounded
+  infrastructure clearing, delayed replacement launches, no accidental
+  publication, deterministic process-absent output discard, and strict scratch
+  ownership cleanup under the canonical recovery lifecycle.
+
+### Fixed
+- New issue worktrees now use a freshly fetched configured remote base and are
+  created from its immutable pinned SHA. Base fetch failures remain unclaimed
+  and safely retryable.
+
+### Removed
+- Removed the superseded operation-specific recovery owners and parallel state
+  machines after each operation migrated to the canonical invocation lifecycle.
+
+## [2.0.10] - 2026-07-29
+
+### Fixed
+- GitHub issue comment timestamps are canonicalized before run-state
+  persistence, so second-precision API timestamps no longer prevent a fresh
+  issue run from being created.
+
+## [2.0.9] - 2026-07-29
+
+### Changed
+- Direct runs now require their scoped issue checks to pass before issue
+  implementation. Red qualification checks receive a separate sealed, bounded
+  repair operation and full-policy retry without consuming the issue
+  implementation-cycle budget; launched repairs are restart-recoverable and
+  resumed dirty worktrees qualify again before implementation.
+- Final changed-worktree checks must all pass. New runs no longer compare
+  failure output hashes or mint `unchanged-failure` success evidence, while
+  historical run state and proof capabilities remain readable.
+
+## [2.0.8] - 2026-07-29
+
+### Changed
+- Direct runs now resolve bounded verification commands from the frozen issue's
+  command-only `Verification` section instead of forcing repository-wide checks.
+  Scoped npm checks execute without a shell, while repositories without scoped
+  verification retain their configured fallback policy.
+- Check launch failures and proven-quiescent timeouts resume the same durable run
+  without consuming an implementation cycle. Timeout and cancellation retain
+  ownership until the complete process group is absent; uncertain quiescence
+  fails closed as a non-resumable safety block.
+
 ## [2.0.7] - 2026-07-28
 
 ### Changed

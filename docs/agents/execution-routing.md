@@ -3,11 +3,14 @@
 ## Sources of truth
 
 - `README.md`: public commands and lifecycle.
-- `docs/deep-dive.md`: trust, containment, durability, proof, and publication.
+- `CONTEXT.md` and relevant ADRs: durable terminology and accepted decisions.
 - `.codex-orchestrator/config.json`: this repository's exact live V2 policy.
 - `src/v2/`: reusable policy core.
 - `src/v2/adapters/`: package-owned transport and persistence closure.
 - `package.json`: scripts and npm publication boundary.
+
+`docs/deep-dive.md` is for human maintainers. Agents must not read or use it as
+context unless the user explicitly asks to edit or audit that file.
 
 ## Change routing
 

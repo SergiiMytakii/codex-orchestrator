@@ -3,6 +3,8 @@ import { lstat, readFile, rm } from 'node:fs/promises';
 import { finished } from 'node:stream/promises';
 
 import { buildContainmentCodexArgs, buildContainmentCodexEnvironment } from './containment.js';
+import { captureProcessStartIdentity } from './process-identity.js';
+import type { ProcessStartIdentity } from './active-attempt.js';
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
 const MAX_STREAM_BYTES = 1024 * 1024;
@@ -22,7 +24,9 @@ export interface SpawnSpec {
 export interface SupervisedChild {
   pid: number;
   processGroupId: number;
+  processStartIdentity: ProcessStartIdentity | null;
   lastActivityAt(): number;
+  releaseStartGate(): Promise<void>;
   writeStdinAndClose(value: string): Promise<void>;
   waitForExit(): Promise<{ exitCode: number | null; signal: string | null }>;
   terminateGroup(signal: 'SIGTERM' | 'SIGKILL'): Promise<void>;
@@ -47,7 +51,11 @@ export interface CodexProcessInput {
   idleTimeoutMs: number;
   operationPolicy: WorkflowOperationPolicy;
   executionProfile: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
-  onSpawned?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
+  onSpawned: (identity: {
+    pid: number;
+    processGroupId: number;
+    processStartIdentity: ProcessStartIdentity;
+  }) => Promise<void>;
 }
 
 export type CodexReportRead =
@@ -130,13 +138,25 @@ export class CodexProcess {
       return emptyResult('spawn-failed', errorMessage(error));
     }
 
-    if (input.onSpawned) {
-      try {
-        await input.onSpawned({ pid: child.pid, processGroupId: child.processGroupId });
-      } catch (error) {
-        const settled = await terminateAndSettle(child, child.waitForExit());
-        return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
-      }
+    if (!child.processStartIdentity) {
+      const settled = await terminateAndSettle(child, child.waitForExit());
+      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, 'process start identity is unknown');
+    }
+    try {
+      await input.onSpawned({
+        pid: child.pid,
+        processGroupId: child.processGroupId,
+        processStartIdentity: structuredClone(child.processStartIdentity),
+      });
+    } catch (error) {
+      const settled = await terminateAndSettle(child, child.waitForExit());
+      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
+    }
+    try {
+      await child.releaseStartGate();
+    } catch (error) {
+      const settled = await terminateAndSettle(child, child.waitForExit());
+      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
     }
 
     let stdinError: unknown;
@@ -373,7 +393,7 @@ async function clearPriorReport(path: string): Promise<void> {
 }
 
 export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<SupervisedChild> {
-  const child = spawn(spec.file, spec.args, {
+  const child = spawn('/bin/sh', ['-c', 'IFS= read -r _ || exit 125; exec "$@"', 'codex-launch-gate', spec.file, ...spec.args], {
     cwd: spec.cwd,
     env: spec.env,
     detached: true,
@@ -398,11 +418,20 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
   });
   if (!child.pid) throw new Error('spawned Codex process has no pid');
   const pid = child.pid;
+  const capturedStartIdentity = await captureProcessStartIdentity({
+    platform: process.platform,
+    pid,
+    processGroupId: pid,
+  });
 
   return {
     pid,
     processGroupId: pid,
+    processStartIdentity: capturedStartIdentity.status === 'available' ? capturedStartIdentity.identity : null,
     lastActivityAt: () => lastActivity,
+    releaseStartGate: async () => {
+      if (!child.stdin.write('\n')) await new Promise<void>((resolveDrain) => child.stdin.once('drain', resolveDrain));
+    },
     writeStdinAndClose: async (value) => {
       const completion = finished(child.stdin, { cleanup: true });
       if (value.length === 0) child.stdin.end();
@@ -503,6 +532,7 @@ function validateInput(input: CodexProcessInput): void {
   }
   if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs <= 0) throw new Error('timeoutMs must be a positive safe integer');
   if (!Number.isSafeInteger(input.idleTimeoutMs) || input.idleTimeoutMs <= 0) throw new Error('idleTimeoutMs must be a positive safe integer');
+  if (typeof input.onSpawned !== 'function') throw new Error('onSpawned launch persistence callback is required');
 }
 
 function delay(timeoutMs: number): Promise<void> {

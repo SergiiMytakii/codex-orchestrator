@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -150,12 +150,12 @@ test('launch gate records the spawned process before stdin and terminates on rej
     const events: string[] = [];
     const acceptedChild = new FakeChild({ reportPath: fixture.reportPath, events });
     const accepted = await new CodexProcess(async () => acceptedChild).run(fixture.input({
-      onSpawned: async ({ pid, processGroupId }) => {
-        events.push(`gate:${pid}:${processGroupId}`);
+      onSpawned: async ({ pid, processGroupId, processStartIdentity }) => {
+        events.push(`gate:${pid}:${processGroupId}:${processStartIdentity.kind}`);
       },
     }), new AbortController().signal);
     assert.equal(accepted.kind, 'completed');
-    assert.deepEqual(events.slice(0, 2), ['gate:4242:4242', 'stdin']);
+    assert.deepEqual(events.slice(0, 2), ['gate:4242:4242:linux-start-ticks', 'stdin']);
 
     const rejectedChild = new FakeChild({
       reportPath: fixture.reportPath,
@@ -169,6 +169,27 @@ test('launch gate records the spawned process before stdin and terminates on rej
     assert.equal(rejected.kind, 'launch-gate-failed');
     assert.equal(rejectedChild.events.includes('stdin'), false);
     assert.deepEqual(rejectedChild.terminations, ['SIGTERM']);
+  });
+});
+
+test('unknown process-start identity rejects the launch gate before persistence or stdin', async () => {
+  await withRunFixture(async (fixture) => {
+    const events: string[] = [];
+    const child = new FakeChild({
+      reportPath: fixture.reportPath,
+      events,
+      processStartIdentity: null,
+      pendingExit: true,
+      resolveExitOn: 'SIGTERM',
+    });
+    const result = await new CodexProcess(async () => child).run(fixture.input({
+      onSpawned: async () => { events.push('persist'); },
+    }), new AbortController().signal);
+
+    assert.equal(result.kind, 'launch-gate-failed');
+    assert.equal(events.includes('persist'), false);
+    assert.equal(events.includes('stdin'), false);
+    assert.deepEqual(child.terminations, ['SIGTERM']);
   });
 });
 
@@ -311,6 +332,7 @@ test('production supervisor captures output and exit from an immediately exiting
     env: { PATH: '/usr/bin:/bin' },
     stdin: '',
   });
+  await child.releaseStartGate?.();
   await child.writeStdinAndClose('');
   const exit = await child.waitForExit();
   await child.waitForGroupAbsent(1_000);
@@ -320,6 +342,40 @@ test('production supervisor captures output and exit from an immediately exiting
   assert.equal(streams.truncated, false);
 });
 
+test('production supervisor cannot exec Codex before the durable launch gate opens', { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-process-launch-gate-'));
+  const marker = join(root, 'executed');
+  try {
+    const child = await spawnNodeSupervisedProcess({
+      file: '/usr/bin/touch', args: [marker], cwd: root, env: { PATH: '/usr/bin:/bin' }, stdin: '',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await assert.rejects(access(marker));
+    await child.releaseStartGate?.();
+    await child.writeStdinAndClose('');
+    assert.deepEqual(await child.waitForExit(), { exitCode: 0, signal: null });
+    await access(marker);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('parent-pipe closure exits an unpersisted gate without executing the child', { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-process-parent-pipe-'));
+  const marker = join(root, 'executed');
+  try {
+    const child = await spawnNodeSupervisedProcess({
+      file: '/usr/bin/touch', args: [marker], cwd: root, env: { PATH: '/usr/bin:/bin' }, stdin: '',
+    });
+    await child.writeStdinAndClose('');
+    assert.deepEqual(await child.waitForExit(), { exitCode: 125, signal: null });
+    await child.waitForGroupAbsent(1_000);
+    await assert.rejects(access(marker));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 class FakeChild implements SupervisedChild {
   readonly pid = 4242;
   readonly processGroupId = 4242;
@@ -327,6 +383,7 @@ class FakeChild implements SupervisedChild {
   readonly terminations: Array<'SIGTERM' | 'SIGKILL'> = [];
   readonly groupTimeouts: number[] = [];
   readonly startedAt = Date.now();
+  readonly processStartIdentity;
   activityAt = this.startedAt;
   private readonly reportPath: string;
   private readonly streams: { stdout: Buffer; stderr: Buffer; truncated: boolean };
@@ -348,6 +405,7 @@ class FakeChild implements SupervisedChild {
     groupFailures?: number;
     streamFailure?: boolean;
     writeReport?: boolean;
+    processStartIdentity?: SupervisedChild['processStartIdentity'];
   }) {
     this.reportPath = options.reportPath;
     this.events = options.events ?? [];
@@ -358,11 +416,16 @@ class FakeChild implements SupervisedChild {
     this.groupFailures = options.groupFailures ?? 0;
     this.streamFailure = options.streamFailure ?? false;
     this.shouldWriteReport = options.writeReport ?? true;
+    this.processStartIdentity = options.processStartIdentity === undefined
+      ? { kind: 'linux-start-ticks' as const, value: '12345' }
+      : options.processStartIdentity;
   }
 
   lastActivityAt(): number {
     return this.activityAt;
   }
+
+  async releaseStartGate(): Promise<void> {}
 
   async writeStdinAndClose(): Promise<void> {
     this.events.push('stdin');
@@ -451,7 +514,7 @@ async function withRunFixture(
         idleTimeoutMs: overrides.idleTimeoutMs ?? 5_000,
         operationPolicy: defaultContainmentOperationPolicy(),
         executionProfile: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
-        ...(overrides.onSpawned ? { onSpawned: overrides.onSpawned } : {}),
+        onSpawned: overrides.onSpawned ?? (async () => undefined),
       }),
     });
   } finally {

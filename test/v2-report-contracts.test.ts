@@ -32,16 +32,10 @@ const passedProof: ProofReportV1 = {
     status: 'passed',
     confidence: 'high',
     surfaces: ['non-visual'],
-    evidenceRefs: ['check:typecheck', 'artifact:inspection'],
+    evidenceRefs: ['artifact:inspection'],
     analysis: 'The focused check and source inspection prove the behavior.',
   }],
-  checks: [{
-    id: 'check:typecheck',
-    command: 'npm run typecheck',
-    status: 'passed',
-    summary: 'TypeScript accepted the change.',
-    outputSha256: 'a'.repeat(64),
-  }],
+  checks: [],
   artifacts: [
     {
       id: 'artifact:inspection',
@@ -189,6 +183,7 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
     assertNoKeyword(schema, 'oneOf');
     assertNoKeyword(schema, 'uniqueItems');
     assertNoRegexLookaround(schema);
+    assertEveryArrayHasItems(schema);
   }
   assert.equal(Array.isArray((implementationReportOutputSchema().properties as Record<string, any>).report.anyOf), true);
   assert.equal(Array.isArray((proofReportOutputSchema().properties as Record<string, any>).report.anyOf), true);
@@ -204,6 +199,13 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
 test('checked-in proof workflow schema matches its TypeScript owner', async () => {
   const checkedIn = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/proof-report-v1.json', 'utf8'));
   assert.deepEqual(checkedIn, proofReportOutputSchema());
+});
+
+test('spec review generation reuses the exact validated code-review defect schema', async () => {
+  const specReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/spec-review-v1.json', 'utf8'));
+  const codeReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/code-review-v1.json', 'utf8'));
+  assert.deepEqual(specReview.properties.defects.items, codeReview.properties.report.properties.defects.items);
+  assert.equal(specReview.properties.defects.items.additionalProperties, false);
 });
 
 test('proof generation schema stays compact while runtime owns platform combinations', () => {
@@ -240,7 +242,7 @@ test('runtime validators enforce uniqueness omitted from the supported generatio
 
   const duplicateProof = {
     ...passedProof,
-    criteria: [{ ...passedProof.criteria[0], evidenceRefs: ['check:typecheck', 'check:typecheck'] }],
+    criteria: [{ ...passedProof.criteria[0], evidenceRefs: ['artifact:inspection', 'artifact:inspection'] }],
   };
   assert.equal(schemaAccepts(proofReportOutputSchema(), { report: generatedProofReport(duplicateProof) }), true);
   assert.throws(() => validateProofReport(duplicateProof), /unique/u);
@@ -459,6 +461,16 @@ function assertNoRegexLookaround(value: unknown): void {
   const pattern = (value as Record<string, unknown>).pattern;
   if (typeof pattern === 'string') assert.doesNotMatch(pattern, /\(\?/u);
   for (const child of Object.values(value)) assertNoRegexLookaround(child);
+}
+
+function assertEveryArrayHasItems(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertEveryArrayHasItems(item);
+    return;
+  }
+  if (typeof value !== 'object' || value === null) return;
+  if ((value as Record<string, unknown>).type === 'array') assert.equal(Object.hasOwn(value, 'items'), true, 'array schema is missing items');
+  for (const child of Object.values(value)) assertEveryArrayHasItems(child);
 }
 
 function visualArtifact(

@@ -5,18 +5,13 @@ import {
   validateCodeReviewReport,
   type CodeReviewValidationContext,
 } from './code-review-report.js';
-import {
-  hashAmbiguityReviewArtifact,
-  hashTriageArtifact,
-  validateAmbiguityReviewArtifact,
-} from './route-decision.js';
+import { hashTriageArtifact } from './route-decision.js';
 import { validateTriageRoute } from './triage-route.js';
 import type {
   WorkflowExecutionProfile,
   WorkflowGenerationReceipt,
   WorkflowOperationPolicy,
 } from './workflow-assets.js';
-import type { RunRecordV1 } from './run-store.js';
 
 const MAX_STRING_LENGTH = 16 * 1024;
 const POLICY_KEYS = [
@@ -24,7 +19,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'ambiguity-review' | 'code-review';
+export type ContainedReportOperationId = 'triage' | 'code-review';
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
@@ -45,7 +40,7 @@ export type ContainedReportOperationResult =
   | { status: 'retryable'; code: string }
   | {
     status: 'safe-halt';
-    process: Omit<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>;
+    process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot };
     waitForAbsence(): Promise<void>;
   }
   | { status: 'cancelled' }
@@ -55,7 +50,13 @@ export interface ContainedReportOperation {
   run(input: ContainedReportOperationInput): Promise<ContainedReportOperationResult>;
 }
 
-export type ReportOnlyWorktreeSnapshot = NonNullable<RunRecordV1['process']>['baseline'];
+export interface ReportOnlyWorktreeSnapshot {
+  headSha: string;
+  indexTreeSha: string;
+  trackedContentSha256: string;
+  untrackedContentSha256: string;
+  worktreeIdentity: string;
+}
 
 export interface PreparedContainedReportAttempt {
   operation: ContainedReportOperationId;
@@ -220,9 +221,6 @@ function validateCompletedReport(
     if (operation === 'triage') {
       validatedPayload = validateTriageRoute(decoded);
       artifactSha256 = hashTriageArtifact(validatedPayload);
-    } else if (operation === 'ambiguity-review') {
-      validatedPayload = validateAmbiguityReviewArtifact(decoded);
-      artifactSha256 = hashAmbiguityReviewArtifact(validatedPayload);
     } else {
       const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
       validatedPayload = reviewReport;

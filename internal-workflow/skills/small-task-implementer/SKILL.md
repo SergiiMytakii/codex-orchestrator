@@ -1,6 +1,6 @@
 ---
 name: small-task-implementer
-description: Implement small low-risk coding tasks with narrow edits and targeted validation. Use for tiny fixes, UI/copy changes, config/build corrections, simple tests, or one-module changes that do not need plans, specs, orchestration, or heavy review.
+description: Implement small low-risk coding tasks with narrow edits and targeted validation. Use for tiny local fixes, UI/copy changes, config/build corrections, or simple tests that do not change a shared API, DTO, schema, persistence, auth, or other review-gated contract.
 ---
 
 # Small Task Implementer
@@ -15,6 +15,14 @@ Proceed only when all are true:
 - The change is expected to touch one small area or a few tightly related files.
 - There is a narrow validation path: targeted test, lint/typecheck, build check, UI proof, or direct command.
 - The task does not require a new plan, PRD, issue breakdown, implementation spec, migration, rollout, or multi-agent orchestration.
+- The change does not alter a shared API, DTO, schema, persistence, auth,
+  permission, payment, cache, concurrency, background-job, navigation, or other
+  contract covered by `docs/agents/review-gates.md`.
+
+For a tiny local behavior change that still fits this gate, `$tdd` is an
+independent proof method: activate it when the global TDD Fit Gate passes. Do
+not relabel a feature as a bug or use `$code-debugger` unless repository
+evidence confirms a defect.
 
 Escalate out of the tiny-task route when the work has more than one coherent
 behavior, a broad ownership boundary, material rollback/recovery risk, unclear
@@ -26,8 +34,8 @@ becomes direct medium implementation.
 Escalation rule:
 
 - For clear authority and one coherent outcome, escalate to direct medium root
-  implementation under `$tdd`, affected validation, and one final review when
-  `review-gates.md` applies.
+implementation under `$tdd`, affected validation, and one final review when
+`review-gates.md` applies.
 - Use optional `$grilling`, then `$spec-to-tickets` and `$tickets-orchestrator`,
   only for unresolved product decisions or a real approved ticket graph,
   delivery dependency, or explicit orchestration request.

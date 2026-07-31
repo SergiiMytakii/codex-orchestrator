@@ -12,8 +12,8 @@ const workflowGeneration = {
 };
 const report = {
   version: 1 as const, operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
-  verdict: 'approved' as const, mode: 'full' as const, coverage: ['correctness'], defects: [], residualRisks: [],
-  reviewerSessionId: 'review-session-1', closureRequestSha256: null, repairFindingOutcomes: [],
+  verdict: 'approved' as const, coverage: ['correctness'], defects: [], residualRisks: [],
+  reviewerSessionId: 'review-session-1', repairFindingOutcomes: [],
 };
 
 test('thin reviewer facade binds an independent attempt and delegates durable launch hooks', async () => {
@@ -27,7 +27,7 @@ test('thin reviewer facade binds an independent attempt and delegates durable la
     },
   };
   const persisted: string[] = [];
-  const reviewer = new ContainedImplementationReviewer({ operation, createAttemptId: () => 'review-attempt-1' });
+  const reviewer = new ContainedImplementationReviewer({ operation });
   const result = await reviewer.run(input({
     onPrepared: async (invocation) => { persisted.push(`prepared:${invocation.attemptId}`); },
     onLaunched: async (invocation) => { persisted.push(`launched:${invocation.pid}:${invocation.processGroupId}`); },
@@ -50,10 +50,11 @@ test('report-only repair requires exact bounded secret-free original bytes and a
       };
     },
   };
-  const reviewer = new ContainedImplementationReviewer({ operation, createAttemptId: () => 'repair-attempt-2' });
+  const reviewer = new ContainedImplementationReviewer({ operation });
   const original = Buffer.from('{"report":{"version":1}}');
   const hash = createHash('sha256').update(original).digest('hex');
   const result = await reviewer.run(input({
+    attemptId: 'repair-attempt-2',
     repairOnly: true, originalReportSha256: hash, validationDiagnostic: 'missing operation', originalReportBytes: original,
   }));
   assert.equal(result.kind, 'report-invalid');
@@ -64,6 +65,7 @@ test('report-only repair requires exact bounded secret-free original bytes and a
 
   const secret = Buffer.from('{"access_token":"credential-material-12345"}');
   const rejected = await reviewer.run(input({
+    attemptId: 'repair-attempt-3',
     repairOnly: true,
     originalReportSha256: createHash('sha256').update(secret).digest('hex'),
     validationDiagnostic: 'bad envelope', originalReportBytes: secret,
@@ -75,20 +77,24 @@ test('report-only repair requires exact bounded secret-free original bytes and a
 test('reviewer facade rejects identity reuse before launching an operation', async () => {
   let called = false;
   const reviewer = new ContainedImplementationReviewer({
-    createAttemptId: () => 'implementation-attempt-1',
     operation: { run: async () => { called = true; return { status: 'cancelled' }; } },
   });
-  const result = await reviewer.run(input({ reviewerSessionId: 'implementation-attempt-1' }));
+  const result = await reviewer.run(input({ attemptId: 'implementation-attempt-1', reviewerSessionId: 'implementation-attempt-1' }));
   assert.deepEqual(result, { kind: 'internal-error', code: 'reviewer-identity-not-independent' });
   assert.equal(called, false);
 });
 
 function input(overrides: Partial<ImplementationReviewerInput> = {}): ImplementationReviewerInput {
   return {
-    runId: 'run-1', worktreePath: '/worktree', operation: 'code-review', mode: 'full',
+    attemptId: 'review-attempt-1', runId: 'run-1', worktreePath: '/worktree', operation: 'code-review',
     reviewerSessionId: 'review-session-1', implementationAttemptId: 'implementation-attempt-1', targetRevision: 1,
-    targetFingerprint: fingerprint, closureRequestSha256: null, issue: { number: 1, title: 'Issue' },
-    frozenCriteria: ['works'], routeReceipt: { route: 'direct' }, defects: [], affectedDefectIds: [],
+    targetFingerprint: fingerprint, issue: { number: 1, title: 'Issue' },
+    frozenCriteria: ['works'], routeReceipt: { route: 'direct' },
+    deliveryAuthority: {
+      version: 1, kind: 'direct', routeDecisionSha256: 'a'.repeat(64),
+      sourceSha256: 'a'.repeat(64), authoritySha256: 'b'.repeat(64),
+    },
+    defects: [],
     fixedRepairFindings: [],
     reviewFocus: ['correctness'], workflowGeneration, repairOnly: false, originalReportSha256: null,
     validationDiagnostic: null, originalReportBytes: null, signal: new AbortController().signal,

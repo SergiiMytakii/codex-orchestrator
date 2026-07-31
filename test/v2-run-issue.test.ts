@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, mkdir, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -10,7 +11,7 @@ import type { CheckedChange, CheckedChangePayloadV1 } from '../src/v2/checked-ch
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import { ProofQuiescenceError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
+import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
   RunIssue,
   OwnerLockContentionError,
@@ -20,58 +21,21 @@ import {
   type RunIssueResult,
 } from '../src/v2/run-issue.js';
 import {
+  FileRunRecordWriter,
   InMemoryRunRecordWriter,
   WorkflowGenerationUnrecoverableError,
   type RunRecordWriter,
+  type RunStateInspection,
 } from '../src/v2/run-store.js';
-import { ContainedImplementationAgent, LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
+import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import { SpecCoordinator } from '../src/v2/spec-coordinator.js';
 import { createSpecRevision } from '../src/v2/spec-delivery.js';
-import { createWaitingQuestion, hashNormalizedAnswer } from '../src/v2/waiting-human.js';
-import { createFrozenReviewFeedbackBatch, createReviewFeedbackBootstrap, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
-import type { ReviewFeedbackCoordinator } from '../src/v2/review-feedback-coordinator.js';
+import { createFrozenReviewFeedbackBatch, createReviewFeedbackRunData, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
+import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
-
-test('attempt-owned continuation report recovery rejects foreign paths and reuses the completed report', async () => {
-  const orchestratorHome = await mkdtemp(join(tmpdir(), 'codex-v2-recover-report-'));
-  const runId = '00000000-0000-4000-8000-000000000001';
-  const attemptId = 'feedback-attempt-1';
-  const reportPath = join(orchestratorHome, 'v2', sha256('owner/repo'), 'runs', runId, 'attempts', attemptId, 'report.json');
-  await mkdir(join(reportPath, '..'), { recursive: true });
-  await writeFile(reportPath, canonicalJson({ report: {
-    version: 1, status: 'completed', summary: 'recovered', changedFiles: ['feature.txt'], residualRisks: [],
-  } }));
-  const agent = new ContainedImplementationAgent({
-    config: configFixture,
-    orchestratorHome,
-    parentCodexHome: '/tmp/codex-home',
-    safePath: '/usr/bin:/bin',
-    bootId: 'boot-1',
-    git: new LocalGitRunIssueAdapter(),
-  });
-  const invocation = {
-    phase: 'launched' as const,
-    attemptId,
-    reportPath,
-    preparedAt: '2026-07-16T12:00:00.000Z',
-    baseline: {
-      headSha: 'a'.repeat(40), indexTreeSha: 'b'.repeat(40), trackedContentSha256: 'c'.repeat(64),
-      untrackedContentSha256: 'd'.repeat(64), worktreeIdentity: 'worktree-1',
-    },
-    pid: 123,
-    processGroupId: 123,
-    launchedAt: '2026-07-16T12:00:01.000Z',
-  };
-  const recovered = await agent.recover({ runId, canonicalRepository: 'owner/repo', invocation });
-  assert.equal(recovered?.kind, 'completed');
-  assert.equal((recovered?.report as { summary?: string }).summary, 'recovered');
-  await assert.rejects(agent.recover({
-    runId, canonicalRepository: 'owner/repo', invocation: { ...invocation, reportPath: '/tmp/foreign-report.json' },
-  }), /attempt-owned/u);
-});
 
 test('continuation worktree restoration proves exact local and remote refs before creation', async () => {
   const fixture = await runFixture();
@@ -128,61 +92,216 @@ test('proof freshness snapshot excludes only the configured untracked artifact r
   );
 });
 
-test('initial and persisted waiting routes use one durable continuation without implementation', async () => {
-  const fixture = await runFixture({ route: 'awaiting-user', agentWrites: false });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'awaiting-user', JSON.stringify(fixture.events));
-  assert.equal(fixture.events.includes('agent'), false);
-  const state = await fixture.store.read();
-  assert.equal(state.runs[0]?.lifecycle, 'waiting-human');
-  assert.equal(state.runs[0]?.waitingHuman?.phase, 'awaiting-answer');
-  const effects = fixture.events.length;
-  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(replay, first);
-  assert.equal(fixture.events.slice(effects).includes('agent'), false);
+test('candidate V2 ignores shared-index authority, pins the stable tree across prune, and materializes it exactly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-v2-candidate-'));
+  await execFileAsync('git', ['init', '-b', 'main', root]);
+  await writeFile(join(root, '.gitignore'), '*.ignored\n');
+  await writeFile(join(root, 'tracked.txt'), 'base\n');
+  await writeFile(join(root, 'deleted.txt'), 'delete me\n');
+  await writeFile(join(root, 'script.sh'), '#!/bin/sh\nexit 0\n');
+  await execFileAsync('git', ['-C', root, 'add', '.gitignore', 'tracked.txt', 'deleted.txt', 'script.sh']);
+  await execFileAsync('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
+  const expectedHeadSha = (await execFileAsync('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout.trim();
+
+  await writeFile(join(root, 'tracked.txt'), 'staged stale bytes\n');
+  await execFileAsync('git', ['-C', root, 'add', 'tracked.txt']);
+  await writeFile(join(root, 'tracked.txt'), 'authoritative worktree bytes\n');
+  await writeFile(join(root, 'forced.ignored'), 'staged ignored bytes\n');
+  await execFileAsync('git', ['-C', root, 'add', '-f', 'forced.ignored']);
+  await writeFile(join(root, 'forced.ignored'), 'ignored worktree bytes\n');
+  await writeFile(join(root, 'eligible.txt'), 'eligible untracked\n');
+  await execFileAsync('git', ['-C', root, 'add', 'eligible.txt']);
+  await rm(join(root, 'deleted.txt'));
+  await chmod(join(root, 'script.sh'), 0o755);
+  await symlink('tracked.txt', join(root, 'link.txt'));
+  await mkdir(join(root, '.codex-orchestrator', 'proofs', 'proof-1'), { recursive: true });
+  await writeFile(join(root, '.codex-orchestrator', 'proofs', 'proof-1', 'evidence.txt'), 'excluded proof\n');
+
+  const adapter = new LocalGitRunIssueAdapter();
+  const sharedIndexBefore = await adapter.getTreeSha(root);
+  const captured = await adapter.candidateV2.captureAndPin({
+    worktreePath: root,
+    expectedHeadSha,
+    runId: '00000000-0000-4000-8000-000000000001',
+    boundary: { kind: 'implementation-cycle', cycle: 1, authoritySha256: 'a'.repeat(64) },
+    artifactDir: '.codex-orchestrator/proofs',
+  });
+  assert.equal(captured.kind, 'ok', JSON.stringify(captured));
+  if (captured.kind !== 'ok') return;
+  const binding = captured.value;
+  assert.equal(await adapter.getTreeSha(root), sharedIndexBefore);
+  assert.deepEqual(binding.canonicalChangedFiles, ['deleted.txt', 'eligible.txt', 'link.txt', 'script.sh', 'tracked.txt']);
+  assert.equal((await execFileAsync('git', ['-C', root, 'show', `${binding.candidateCommitSha}:tracked.txt`])).stdout, 'authoritative worktree bytes\n');
+  await assert.rejects(execFileAsync('git', ['-C', root, 'cat-file', '-e', `${binding.candidateCommitSha}:forced.ignored`]));
+  await assert.rejects(execFileAsync('git', ['-C', root, 'cat-file', '-e', `${binding.candidateCommitSha}:.codex-orchestrator/proofs/proof-1/evidence.txt`]));
+
+  await execFileAsync('git', ['-C', root, 'prune', '--expire=now']);
+  assert.deepEqual(await adapter.candidateV2.inspectPin(binding), { kind: 'ok', value: 'matching' });
+  const restartedAdapter = new LocalGitRunIssueAdapter(undefined, root);
+  assert.deepEqual(await restartedAdapter.candidateV2.reconcileOrphans!({
+    repositoryRoot: root,
+    workspaceRoot: join(root, '.worktrees'),
+    activeCandidateRefs: [],
+    pendingCandidates: [{
+      runId: '00000000-0000-4000-8000-000000000001', worktreePath: root, expectedHeadSha,
+      boundary: { kind: 'implementation-cycle', cycle: 1, authoritySha256: 'a'.repeat(64) }, artifactDir: '.codex-orchestrator/proofs',
+    }],
+    activeMaterializations: [],
+  }), { kind: 'ok', value: undefined });
+  assert.deepEqual(await restartedAdapter.candidateV2.inspectPin(binding), { kind: 'ok', value: 'matching' });
+  const prepared = await adapter.candidateV2.prepareMaterialization({
+    binding,
+    runId: '00000000-0000-4000-8000-000000000001',
+    workspaceRoot: join(root, '.worktrees'),
+    materializationId: '5'.repeat(64),
+  });
+  assert.equal(prepared.kind, 'ok', JSON.stringify(prepared));
+  if (prepared.kind !== 'ok' || prepared.value.kind !== 'prepared') return;
+  const unrecordedSiblingPath = join(dirname(prepared.value.materialization.path), 'unrecorded-sibling');
+  await execFileAsync('git', ['-C', root, 'worktree', 'add', '--detach', unrecordedSiblingPath, binding.candidateCommitSha]);
+  const divergedActive = await restartedAdapter.candidateV2.reconcileOrphans!({
+    repositoryRoot: root,
+    workspaceRoot: join(root, '.worktrees'),
+    activeCandidateRefs: [binding.candidateRef],
+    pendingCandidates: [],
+    activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: 'f'.repeat(40) }],
+  });
+  assert.equal(divergedActive.kind, 'failed');
+  assert.deepEqual(await restartedAdapter.candidateV2.reconcileOrphans!({
+    repositoryRoot: root,
+    workspaceRoot: join(root, '.worktrees'),
+    activeCandidateRefs: [binding.candidateRef],
+    pendingCandidates: [],
+    activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: binding.candidateCommitSha }],
+  }), { kind: 'ok', value: undefined });
+  assert.equal((await execFileAsync('git', ['-C', prepared.value.materialization.path, 'rev-parse', 'HEAD'])).stdout.trim(), binding.candidateCommitSha);
+  await assert.rejects(readFile(join(unrecordedSiblingPath, 'tracked.txt')));
+  const orphanRef = `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000099/${'9'.repeat(64)}`;
+  const orphanPath = join(root, '.worktrees', '.candidate-materializations', 'orphan');
+  await execFileAsync('git', ['-C', root, 'update-ref', orphanRef, binding.candidateCommitSha]);
+  await mkdir(join(root, '.worktrees', '.candidate-materializations'), { recursive: true });
+  await execFileAsync('git', ['-C', root, 'worktree', 'add', '--detach', orphanPath, binding.candidateCommitSha]);
+  assert.deepEqual(await restartedAdapter.candidateV2.reconcileOrphans!({
+    repositoryRoot: root,
+    workspaceRoot: join(root, '.worktrees'),
+    activeCandidateRefs: [binding.candidateRef],
+    pendingCandidates: [],
+    activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: binding.candidateCommitSha }],
+  }), { kind: 'ok', value: undefined });
+  await assert.rejects(execFileAsync('git', ['-C', root, 'rev-parse', '--verify', orphanRef]));
+  await assert.rejects(readFile(join(orphanPath, 'tracked.txt')));
+  assert.equal((await execFileAsync('git', ['-C', prepared.value.materialization.path, 'rev-parse', 'HEAD^{tree}'])).stdout.trim(), binding.candidateTreeSha);
+  const artifactPath = '.codex-orchestrator/proofs/proof-2/evidence.txt';
+  const artifactBytes = Buffer.from('candidate evidence\n');
+  const replayArtifactPath = '.codex-orchestrator/proofs/proof-3/evidence.txt';
+  const replayArtifactSha = sha256(artifactBytes);
+  await mkdir(join(prepared.value.materialization.path, '.codex-orchestrator', 'proofs', 'proof-3'), { recursive: true });
+  await writeFile(join(prepared.value.materialization.path, replayArtifactPath), artifactBytes);
+  await mkdir(join(root, '.codex-orchestrator', 'proofs', 'proof-3'), { recursive: true });
+  await writeFile(join(root, '.codex-orchestrator', 'proofs', 'proof-3', `.evidence.txt.${replayArtifactSha}.tmp`), 'partial');
+  assert.deepEqual(await adapter.candidateV2.copyProofArtifacts({
+    materialization: prepared.value.materialization, issueWorktreePath: root, artifactDir: '.codex-orchestrator/proofs', proofId: 'proof-3',
+    artifacts: [{ relativePath: replayArtifactPath, sha256: replayArtifactSha }],
+  }), { kind: 'ok', value: { kind: 'copied-or-observed' } });
+  assert.deepEqual(await readFile(join(root, replayArtifactPath)), artifactBytes);
+  await assert.rejects(readFile(join(root, '.codex-orchestrator', 'proofs', 'proof-3', `.evidence.txt.${replayArtifactSha}.tmp`)));
+  await writeFile(join(root, '.codex-orchestrator', 'proofs', 'proof-3', `.evidence.txt.${replayArtifactSha}.tmp`), artifactBytes);
+  assert.deepEqual(await adapter.candidateV2.copyProofArtifacts({
+    materialization: prepared.value.materialization, issueWorktreePath: root, artifactDir: '.codex-orchestrator/proofs', proofId: 'proof-3',
+    artifacts: [{ relativePath: replayArtifactPath, sha256: replayArtifactSha }],
+  }), { kind: 'ok', value: { kind: 'copied-or-observed' } });
+  await assert.rejects(readFile(join(root, '.codex-orchestrator', 'proofs', 'proof-3', `.evidence.txt.${replayArtifactSha}.tmp`)));
+  await mkdir(join(prepared.value.materialization.path, '.codex-orchestrator', 'proofs', 'proof-2'), { recursive: true });
+  await writeFile(join(prepared.value.materialization.path, artifactPath), artifactBytes);
+  const escapedArtifactRoot = join(root, 'escaped-artifacts');
+  await mkdir(escapedArtifactRoot);
+  await symlink(escapedArtifactRoot, join(root, '.codex-orchestrator', 'proofs', 'proof-2'));
+  assert.deepEqual(await adapter.candidateV2.copyProofArtifacts({
+    materialization: prepared.value.materialization,
+    issueWorktreePath: root,
+    artifactDir: '.codex-orchestrator/proofs',
+    proofId: 'proof-2',
+    artifacts: [{ relativePath: artifactPath, sha256: sha256(artifactBytes) }],
+  }), { kind: 'ok', value: { kind: 'artifact-conflict', relativePath: artifactPath } });
+  await assert.rejects(readFile(join(escapedArtifactRoot, 'evidence.txt')));
+  const fifoArtifactPath = '.codex-orchestrator/proofs/proof-4/evidence.fifo';
+  const fifoSource = join(prepared.value.materialization.path, fifoArtifactPath);
+  await mkdir(dirname(fifoSource), { recursive: true });
+  await execFileAsync('mkfifo', [fifoSource]);
+  const fifoCopy = adapter.candidateV2.copyProofArtifacts({
+    materialization: prepared.value.materialization, issueWorktreePath: root, artifactDir: '.codex-orchestrator/proofs', proofId: 'proof-4',
+    artifacts: [{ relativePath: fifoArtifactPath, sha256: sha256(artifactBytes) }],
+  });
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let fifoUnblock: Awaited<ReturnType<typeof open>> | undefined;
+  const timed = new Promise<'timed-out'>((resolveTimeout) => {
+    timeoutHandle = setTimeout(async () => {
+      fifoUnblock = await open(fifoSource, constants.O_RDWR | constants.O_NONBLOCK);
+      resolveTimeout('timed-out');
+    }, 250);
+  });
+  const fifoOutcome = await Promise.race([fifoCopy, timed]);
+  if (timeoutHandle) clearTimeout(timeoutHandle);
+  if (fifoOutcome === 'timed-out') {
+    await fifoCopy;
+    await fifoUnblock?.close();
+    assert.fail('FIFO artifact inspection blocked before rejecting the non-regular file');
+  }
+  assert.deepEqual(fifoOutcome, { kind: 'ok', value: { kind: 'artifact-conflict', relativePath: fifoArtifactPath } });
+  await rm(fifoSource);
+  assert.deepEqual(await adapter.candidateV2.inspectMaterialization({ binding, materialization: prepared.value.materialization, artifactDir: '.codex-orchestrator/proofs' }), { kind: 'ok', value: 'matching' });
+  assert.deepEqual(await adapter.candidateV2.removeMaterialization({ materialization: prepared.value.materialization }), { kind: 'ok', value: undefined });
+  assert.deepEqual(await adapter.candidateV2.releasePin({ binding, expectedPinnedCommitSha: binding.candidateCommitSha }), { kind: 'ok', value: undefined });
+  assert.deepEqual(await adapter.candidateV2.inspectPin(binding), { kind: 'ok', value: 'missing' });
 });
 
-test('spec-required route freezes independently reviewed authority without product implementation', async () => {
-  const fixture = await runFixture({ route: 'spec-required', agentWrites: false });
+test('spec-required route freezes independently reviewed authority and implements it in the same run', async () => {
+  const fixture = await runFixture({ route: 'spec-required' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'spec-frozen', JSON.stringify(fixture.events));
-  assert.equal(fixture.events.includes('agent'), false);
-  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, state: await fixture.store.read() }));
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review']);
   const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.lifecycle, 'spec-authoring');
+  assert.equal(run.lifecycle, 'review-ready');
   assert.equal(run.specDelivery?.stage, 'frozen');
-  assert.equal(run.specDelivery?.frozen?.receiptSha256, result.status === 'spec-frozen' ? result.receipt.receiptSha256 : '');
+  assert.equal(run.deliveryAuthority?.kind, 'spec');
+  assert.equal(run.deliveryAuthority?.sourceSha256, run.specDelivery?.frozen?.receiptSha256);
+  assert.equal(run.cycle, 1);
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(replay, result);
-  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review:full']);
+  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review']);
 });
 
-test('trusted waiting answer reroutes the same run before implementation and retains terminal history', async () => {
-  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'direct'], trustedAnswerOnReplay: true });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
-  const before = fixture.events.length;
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify(fixture.events.slice(before)));
-  const resumedEvents = fixture.events.slice(before);
-  assert.equal(resumedEvents.filter((event) => event === 'route:triage').length, 1);
-  assert.ok(resumedEvents.indexOf('route:triage') < resumedEvents.indexOf('agent'));
-  const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.runId, '00000000-0000-4000-8000-000000000001');
-  assert.equal(run.waitingHuman?.phase, 'history-only');
-  assert.equal(run.waitingHuman?.history.length, 1);
-});
-
-test('a second approved awaiting-user route re-enters waiting-human in the same run', async () => {
-  const fixture = await runFixture({ routeSequence: ['awaiting-user', 'awaiting-user'], trustedAnswerOnReplay: true, agentWrites: false });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'awaiting-user');
-  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(second.status, 'awaiting-user', JSON.stringify(fixture.events));
-  const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.lifecycle, 'waiting-human');
-  assert.equal(run.waitingHuman?.phase, 'awaiting-answer');
-  assert.equal(run.waitingHuman?.history.length, 1);
-  assert.equal('questionReceipt' in run.waitingHuman! ? run.waitingHuman.questionReceipt.question.generation : undefined, 2);
+test('trusted product answer advances the frozen spec without retriage or a waiting lifecycle', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen', JSON.stringify(first));
+  if (first.status !== 'spec-frozen' || !('questionId' in first.receipt)) return;
+  assert.equal((await fixture.store.read()).runs[0]?.specDelivery?.stage, 'question');
   assert.equal(fixture.events.includes('agent'), false);
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const triageCount = fixture.events.filter((event) => event === 'route:triage').length;
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events }));
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, triageCount);
+  assert.deepEqual(fixture.events.filter((event) => event === 'spec-review'), ['spec-review']);
+});
+
+test('edited product answer remains spec-frozen and launches no delivery work', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'edited-answer', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:01.000Z',
+  });
+  const before = fixture.events.length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'spec-frozen');
+  assert.equal(fixture.events.slice(before).some((event) => event === 'agent' || event.startsWith('spec-review:')), false);
 });
 
 test('known live owner contention requeues before labels or state', async () => {
@@ -230,7 +349,7 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal(result.status, 'review-ready', `${JSON.stringify(result)}\n${fixture.events.join('\n')}`);
   assertSubsequence(fixture.events, [
     'issue-read:initial',
-    'state:claimed:comment',
+    'state:claimed:claim-comment',
     'effect:claim-comment',
     'state:claimed:claim-labels',
     'effect:claim-labels',
@@ -243,23 +362,21 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
     'agent',
     'state:checking:none',
     'check:typecheck',
-    'git:stage',
     'state:proving:none',
     'proof',
     'state:publishing:none',
-    'state:publishing:commit',
+    'state:publishing:initial-commit',
     'issue-read:authorize',
-    'git:commit',
-    'state:publishing:push',
+    'state:publishing:initial-push',
     'issue-read:authorize',
     'git:push',
-    'state:publishing:pr',
+    'state:publishing:draft-pr',
     'issue-read:authorize',
     'effect:pr',
-    'state:publishing:comment',
+    'state:publishing:handoff-comment',
     'issue-read:authorize',
     'effect:handoff-comment',
-    'state:publishing:labels',
+    'state:publishing:final-labels',
     'issue-read:authorize',
     'effect:terminal-labels',
     'state:review-ready:none',
@@ -268,7 +385,48 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   const remoteHead = (await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'rev-parse', 'refs/heads/codex/issue-42'])).stdout.trim();
   assert.match(remoteHead, /^[0-9a-f]{40}$/u);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${fixture.baseSha}..HEAD`])).stdout.trim(), '1');
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
+  assert.ok(fixture.events.indexOf('state:publication-watermark') < fixture.events.indexOf('git:commit'));
+});
+
+test('direct run executes issue-scoped verification checks instead of repository-wide configured checks', async () => {
+  const scopedCommand = 'npm --prefix src/service test -- --runInBand scoped.spec.ts';
+  const fixture = await runFixture({ issueBody: `Verification:\n- ${scopedCommand}\n\nRisk:\nLow.` });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.includes('check:changed:issue-verification-001'), true);
+  assert.equal(fixture.events.some((event) => event.endsWith(':typecheck')), false);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(record.checks.map(({ id, command }) => ({ id, command })), [
+    { id: 'issue-verification-001', command: scopedCommand },
+  ]);
+});
+
+test('invalid issue Verification blocks before any configured or scoped check runs', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal(fixture.events.some((event) => event.startsWith('check:')), false);
+  assert.equal((await fixture.store.read()).runs[0]?.terminalOutcome, undefined);
+});
+
+test('a check launch failure is resumable without consuming an implementation cycle', async () => {
+  const options: FixtureOptions = { checkReject: true };
+  const fixture = await runFixture(options);
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+
+  options.checkReject = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
 });
 
 test('malformed code review consumes one durable report-repair bit and retries before checks', async () => {
@@ -289,61 +447,10 @@ test('code review gets four report-only repairs per target revision', async () =
   assert.equal((await fixture.store.read()).runs[0]?.directReview?.review.reportRepairs, 4);
 });
 
-test('an exhausted malformed Closure report remains terminal on replay', async () => {
-  let checkCalls = 0;
-  const fixture = await runFixture({
-    reviewMalformedCount: 5,
-    reviewMalformedMode: 'closure',
-    check: async () => (++checkCalls === 1
-      ? { status: 'failed', output: Buffer.from('task regression') }
-      : { status: 'passed', output: Buffer.from('ok') }),
-  });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
-  const terminal = await fixture.store.read();
-  const reviewCalls = fixture.events.filter((event) => event === 'review:code-review').length;
-  const implementationCalls = fixture.events.filter((event) => event === 'agent').length;
-  fixture.options.reviewMalformedCount = 0;
-
-  const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(replayed.status, 'internal-error');
-  const replayedState = await fixture.store.read();
-  assert.equal(replayedState.generation, terminal.generation);
-  assert.equal(replayedState.runs[0]?.outcomeEvidenceId, terminal.runs[0]?.outcomeEvidenceId);
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, reviewCalls);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, implementationCalls);
-});
-
-test('a legacy malformed Closure terminal resumes review without rerunning implementation', async () => {
-  let checkCalls = 0;
-  const fixture = await runFixture({
-    reviewMalformedCount: 5,
-    reviewMalformedMode: 'closure',
-    check: async () => (++checkCalls === 1
-      ? { status: 'failed', output: Buffer.from('task regression') }
-      : { status: 'passed', output: Buffer.from('ok') }),
-  });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
-  const terminal = await fixture.store.read();
-  const legacy = structuredClone(terminal.runs[0]!);
-  assert.equal(legacy.directReview?.terminalCode, 'direct-review-report-malformed');
-  legacy.directReview!.review.reportRepairs = 1;
-  delete legacy.directReview!.terminalCode;
-  legacy.outcomeEvidenceId = `evidence:${legacy.runId}:direct-review-report-malformed`;
-  await fixture.store.compareAndSwap(terminal.generation, {
-    schema: terminal.schema, version: terminal.version, runs: [legacy],
-  });
-  const implementationCalls = fixture.events.filter((event) => event === 'agent').length;
-  fixture.options.reviewMalformedCount = 0;
-
-  const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(recovered.status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, implementationCalls);
-});
-
 test('repeated runIssue replays the durable terminal outcome without a second claim or publication', async () => {
   const fixture = await runFixture();
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'review-ready');
+  assert.equal(first.status, 'review-ready', JSON.stringify({ first, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   const effectsBefore = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length;
 
   const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -354,32 +461,38 @@ test('repeated runIssue replays the durable terminal outcome without a second cl
 
 test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
   const fixture = await runFixture();
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(recovered.status, 'review-ready', JSON.stringify({ recovered, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   const before = (await fixture.store.read()).runs[0]!;
   const previousHead = before.reviewFeedback?.previousPublishedHeadSha;
-  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
+  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackObserver;
 
   const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  assert.deepEqual(
+    pick(blocked, ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: false },
+    JSON.stringify({ blocked, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }),
+  );
   const after = (await fixture.store.read()).runs[0]!;
-  assert.equal(after.reviewFeedback?.phase, 'idle');
+  assert.equal(after.reviewFeedback?.activeBatch, null);
   assert.equal(after.reviewFeedback?.previousPublishedHeadSha, previousHead);
   assert.deepEqual(after.reviewFeedback?.history, before.reviewFeedback?.history);
 });
 
-test('migrated bootstrap feedback can fail closed without losing its owner', async () => {
+test('uninitialized feedback data fails closed without losing the Run', async () => {
   const fixture = await runFixture();
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(recovered.status, 'review-ready', JSON.stringify({ recovered, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   const state = await fixture.store.read();
   await fixture.store.compareAndSwap(state.generation, {
-    schema: state.schema, version: 2,
-    runs: state.runs.map((run) => ({ ...run, reviewFeedback: createReviewFeedbackBootstrap() })),
+    schema: state.schema,
+    runs: state.runs.map((run) => ({ ...run, reviewFeedback: createReviewFeedbackRunData() })),
   });
-  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackCoordinator;
+  fixture.dependencies.reviewFeedback = {} as ReviewFeedbackObserver;
 
   const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
-  assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.phase, 'bootstrap-required');
+  assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.previousPublishedHeadSha, null);
 });
 
 test('review-ready replay remains effect-free without an eligible feedback batch and updates the same PR once for a trusted batch', async () => {
@@ -389,7 +502,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   const initialState = await fixture.store.read();
   const record = initialState.runs[0]!;
   const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
-  assert.equal(record.reviewFeedback?.phase, 'idle');
+  assert.equal(record.reviewFeedback?.activeBatch, null);
 
   const batch = createFrozenReviewFeedbackBatch({
     runId: record.runId,
@@ -420,13 +533,13 @@ test('review-ready replay remains effect-free without an eligible feedback batch
     },
     revalidate: async ({ expectedHeadSha }: { expectedHeadSha: string }) => {
       fixture.events.push('feedback-revalidate');
-      if (transientPrePush && fixture.events.filter((event) => event === 'git:commit').length >= 2) {
+      if (transientPrePush && (await fixture.store.read()).runs[0]?.pendingEffect?.kind === 'review-update-push') {
         transientPrePush = false;
         return { status: 'retryable', reason: 'temporary GitHub timeout' };
       }
       return { status: 'valid', observedHeadSha: expectedHeadSha };
     },
-  } as unknown as ReviewFeedbackCoordinator;
+  } as unknown as ReviewFeedbackObserver;
   const prComments: Array<{ id: string; body: string }> = [];
   fixture.dependencies.pullRequests.findOpen = async () => ({
     url: 'https://example.invalid/pull/1',
@@ -443,15 +556,15 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   };
   let feedbackImplementationCalls = 0;
   fixture.dependencies.implementationAgent = {
-    run: async ({ worktreePath, onPrepared, onLaunched }) => {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
       feedbackImplementationCalls += 1;
-      const attemptId = `feedback-implementation-${feedbackImplementationCalls}`;
       const baseline = await fixture.dependencies.git.snapshot(worktreePath);
       await onPrepared?.({
         attemptId, reportPath: `/tmp/${attemptId}-report.json`,
         preparedAt: '2026-07-16T12:00:00.000Z', baseline,
       });
       await onLaunched?.({ attemptId, pid: 5050 + feedbackImplementationCalls, processGroupId: 5050 + feedbackImplementationCalls, launchedAt: '2026-07-16T12:00:00.000Z' });
+      fixture.events.push('feedback-implementation');
       await writeFile(join(worktreePath, 'feature.txt'), `implemented after review ${feedbackImplementationCalls}\n`);
       return {
         kind: 'completed', attemptId,
@@ -464,7 +577,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   await setLabels(42, []);
   const revoked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(revoked.status, 'review-ready');
-  assert.equal((await fixture.store.read()).runs[0]!.reviewFeedback?.phase, 'idle');
+  assert.equal((await fixture.store.read()).runs[0]!.reviewFeedback?.activeBatch, null);
   await setLabels(42, ['agent:review']);
   offered = false;
 
@@ -479,30 +592,49 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(interrupted, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const frozen = (await fixture.store.read()).runs[0]!;
-  assert.equal(frozen.reviewFeedback?.phase, 'frozen');
+  assert.equal(frozen.reviewFeedback?.activeBatch?.batchId, batch.batchId);
   assert.equal(frozen.reviewFeedback?.repairRound, 1);
-  assert.equal(frozen.intent?.kind, 'review-activation-labels');
+  assert.equal(frozen.pendingEffect?.kind, 'review-activation-labels');
 
   const continuationStart = fixture.events.length;
   const transient = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(transient, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const interruptedPublication = (await fixture.store.read()).runs[0]!;
-  assert.equal(interruptedPublication.reviewFeedback?.phase, 'publishing');
-  assert.equal(interruptedPublication.intent?.kind, 'review-update-push');
-  if (interruptedPublication.intent?.kind === 'review-update-push') assert.match(interruptedPublication.intent.treeSha, /^[0-9a-f]{40}$/u);
+  assert.equal(interruptedPublication.reviewFeedback?.verifiedReceipt?.batchId, batch.batchId);
+  assert.equal(interruptedPublication.pendingEffect?.kind, 'review-update-push');
+  if (interruptedPublication.pendingEffect?.kind === 'review-update-push') assert.match(interruptedPublication.pendingEffect.treeSha, /^[0-9a-f]{40}$/u);
 
   const continuationEvents = fixture.events.slice(continuationStart);
-  for (const workerEvent of ['review:code-review', 'proof']) {
-    const index = continuationEvents.indexOf(workerEvent);
-    assert.ok(index > 0, `${workerEvent} was not launched during continuation`);
-    assert.equal(continuationEvents[index - 1], 'feedback-revalidate', `${workerEvent} lacked immediate feedback revalidation`);
-  }
+  const implementationIndex = continuationEvents.indexOf('feedback-implementation');
+  assert.ok(implementationIndex > 0, 'feedback implementation was not launched during continuation');
+  assert.ok(
+    continuationEvents.slice(0, implementationIndex).filter((event) => event === 'feedback-revalidate').length >= 2,
+    'feedback implementation lacked launch-gated authorization after preparation',
+  );
+  const reviewIndex = continuationEvents.indexOf('review:code-review');
+  assert.ok(reviewIndex > 0, 'review:code-review was not launched during continuation');
+  assert.equal(continuationEvents[reviewIndex - 1], 'feedback-revalidate', 'review lacked immediate feedback revalidation');
+  const reviewLaunchedIndex = continuationEvents.indexOf('review:code-review-launched');
+  assert.ok(reviewLaunchedIndex > reviewIndex, 'review launch callback did not complete');
+  assert.ok(
+    continuationEvents.slice(reviewIndex, reviewLaunchedIndex).filter((event) => event === 'feedback-revalidate').length >= 1,
+    'review lacked launch-gated feedback revalidation after preparation',
+  );
+  const proofIndex = continuationEvents.indexOf('proof');
+  assert.ok(proofIndex > 1, 'proof was not launched during continuation');
+  const proofValidationIndex = continuationEvents.lastIndexOf('feedback-revalidate', proofIndex);
+  assert.ok(proofValidationIndex >= 0, 'proof lacked launch-gated feedback revalidation');
+  assert.equal(
+    continuationEvents.slice(proofValidationIndex + 1, proofIndex).includes('state:proving:none'),
+    true,
+    'proof command ran before launched lease persistence',
+  );
 
   const updated = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(updated.status, 'review-ready', JSON.stringify(updated));
+  assert.equal(updated.status, 'review-ready', JSON.stringify({ updated, evidence: fixture.evidence, state: await fixture.store.read(), events: fixture.events }));
   const after = (await fixture.store.read()).runs[0]!;
   assert.equal(after.cycle, record.cycle);
-  assert.equal(after.reviewFeedback?.phase, 'idle');
+  assert.equal(after.reviewFeedback?.activeBatch, null);
   assert.equal(after.reviewFeedback?.history.length, 1);
   assert.equal(prComments.length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
@@ -552,20 +684,24 @@ test('review-ready replay remains effect-free without an eligible feedback batch
       }
       return { status: 'valid', observedHeadSha: expectedHeadSha };
     },
-  } as unknown as ReviewFeedbackCoordinator;
+  } as unknown as ReviewFeedbackObserver;
   const drifted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(
     pick(drifted, ['status', 'resumable']),
     { status: 'transport-failed', resumable: true },
-    `${JSON.stringify(drifted)}\n${JSON.stringify((await fixture.store.read()).runs[0]?.intent)}\n${fixture.events.join('\n')}`,
+    `${JSON.stringify(drifted)}\n${JSON.stringify((await fixture.store.read()).runs[0]?.pendingEffect)}\n${fixture.events.join('\n')}`,
   );
-  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'review-blocked-labels');
+  assert.equal(
+    (await fixture.store.read()).runs[0]?.pendingEffect?.kind,
+    'review-blocked-labels',
+    JSON.stringify((await fixture.store.read()).runs[0]),
+  );
   await fixture.dependencies.issues.setLabels(42, ['agent:review']);
   const interruptedBlock = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(interruptedBlock, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const interruptedBlockRecord = (await fixture.store.read()).runs[0]!;
-  assert.equal(interruptedBlockRecord.lifecycle, 'publishing');
-  assert.equal(interruptedBlockRecord.intent?.kind, 'review-blocked-labels');
+  assert.equal(interruptedBlockRecord.lifecycle, 'blocked');
+  assert.equal(interruptedBlockRecord.pendingEffect?.kind, 'outcome-evidence');
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
   const commentsBeforeRecovery = prComments.length;
 
@@ -605,13 +741,13 @@ test('not eligible and revoked authorization start no implementation or publicat
   assert.equal((await ineligible.runner.runIssue({ targetRoot: ineligible.targetRoot, issueNumber: 42 })).status, 'not-eligible');
   assert.equal(ineligible.events.includes('agent'), false);
 
-  const orphanWaiting = await runFixture({ initialLabels: ['agent:auto', 'agent:waiting-human'] });
-  assert.equal((await orphanWaiting.runner.runIssue({ targetRoot: orphanWaiting.targetRoot, issueNumber: 42 })).status, 'not-eligible');
-  assert.equal(orphanWaiting.events.some((event) => event.startsWith('effect:claim')), false);
-
   const revoked = await runFixture({ revokeAtAuthorization: 1 });
   const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: true });
+  assert.deepEqual(
+    pick(result, ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: true },
+    JSON.stringify({ result, evidence: revoked.evidence, events: revoked.events, state: await revoked.store.read() }),
+  );
   assert.equal(revoked.events.includes('agent'), false);
 });
 
@@ -625,6 +761,60 @@ test('malformed config and run state return typed internal error before claim ef
   assert.equal(invalidState.events.includes('effect:claim-labels'), false);
 });
 
+test('unsupported state is effect-free before owner lock and after authoritative reread', async () => {
+  const unsupported = { status: 'unsupported' as const, rawSha256: 'a'.repeat(64) };
+  const preflight = await runFixture({ stateInspections: [unsupported] });
+  assert.deepEqual(
+    await preflight.runner.runIssue({ targetRoot: preflight.targetRoot, issueNumber: 42 }),
+    { status: 'state-schema-unsupported' },
+  );
+  assert.equal(preflight.events.includes('owner-acquire'), false);
+  assert.deepEqual(preflight.evidence, []);
+  assert.equal(preflight.events.some((event) => event.startsWith('effect:')), false);
+
+  const postLock = await runFixture({
+    stateInspections: [{ status: 'absent', rawSha256: null }, unsupported],
+  });
+  assert.deepEqual(
+    await postLock.runner.runIssue({ targetRoot: postLock.targetRoot, issueNumber: 42 }),
+    { status: 'state-schema-unsupported' },
+  );
+  assert.equal(postLock.events.includes('owner-acquire'), true);
+  assert.deepEqual(postLock.evidence, []);
+  assert.equal(postLock.events.some((event) => event.startsWith('effect:')), false);
+});
+
+test('real unsupported state bytes remain unchanged and create no writable-root siblings', async () => {
+  const bytes = Buffer.from('{"schema":"codex-orchestrator.agent-auto-state","version":4}\n');
+  const fixture = await runFixture({ rawRunStateBytes: bytes });
+  assert.deepEqual(
+    await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }),
+    { status: 'state-schema-unsupported' },
+  );
+  assert.deepEqual(await readFile(fixture.statePath), bytes);
+  assert.deepEqual(await readdir(dirname(fixture.statePath)), ['run-state.json']);
+  assert.equal(fixture.events.includes('owner-acquire'), false);
+  assert.deepEqual(fixture.evidence, []);
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
+});
+
+test('a state identity that changes twice after owner lock requeues without effects', async () => {
+  const fixture = await runFixture({ stateInspections: [
+    { status: 'absent', rawSha256: null },
+    {
+      status: 'supported',
+      rawSha256: 'b'.repeat(64),
+      state: { schema: 'codex-orchestrator.run-state', generation: 0, runs: [] },
+    },
+    { status: 'absent', rawSha256: null },
+  ] });
+  assert.deepEqual(
+    await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }),
+    { status: 'requeued', reason: 'state-changed' },
+  );
+  assert.deepEqual(fixture.evidence, []);
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
+});
 
 test('claimed initialization verifies the pinned workflow generation before triage', async () => {
   const fixture = await runFixture({ workflowVerificationReject: true });
@@ -652,8 +842,18 @@ test('worktree creation failure is diagnostic and resumes the claimed run', asyn
   assert.doesNotMatch(summary, /\u0000/u);
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
+});
+
+test('base refresh failure is resumable and creates no claim or run state', async () => {
+  const fixture = await runFixture({ getBaseShaRejectOnce: true });
+  const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(interrupted, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs.length, 0);
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:claim')), false);
+  assert.equal(fixture.evidence.at(-1)?.code, 'base-refresh-failed');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
 });
 
 test('partial worktree creation artifacts remain correctable in the same claimed run', async () => {
@@ -694,7 +894,11 @@ test('triage receives persisted issue comments and authorization is rechecked af
 
   const revoked = await runFixture({ revokeDuringRoute: true });
   const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
+  assert.deepEqual(
+    pick(result, ['status', 'kind']),
+    { status: 'blocked', kind: 'safety' },
+    JSON.stringify({ result, evidence: revoked.evidence, events: revoked.events, state: await revoked.store.read() }),
+  );
   assert.equal(revoked.events.includes('agent'), false);
 });
 
@@ -741,7 +945,6 @@ test('a pre-upgrade snapshot without comment ids accepts only a live claim that 
   }
   await fixture.store.compareAndSwap(persisted.generation, {
     schema: legacy.schema,
-    version: legacy.version,
     runs: legacy.runs,
   });
 
@@ -873,6 +1076,7 @@ test('failed checks and proof findings rework the same worktree until review-rea
   });
   assert.equal((await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(checkFixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal(checkFixture.events.filter((event) => event === 'review:code-review').length, 2);
   assert.equal((await checkFixture.store.read()).runs[0]?.cycle, 2);
 
   let proofCalls = 0;
@@ -883,68 +1087,9 @@ test('failed checks and proof findings rework the same worktree until review-rea
   });
   assert.equal((await proofFixture.runner.runIssue({ targetRoot: proofFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(proofFixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal(proofFixture.events.filter((event) => event === 'review:code-review').length, 2);
   assert.equal(proofFixture.events.filter((event) => event === 'proof').length, 2);
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
-});
-
-test('an unchanged check failure already present on the base is recorded without reworking the task', async () => {
-  const output = Buffer.from('pre-existing test failure');
-  const fixture = await runFixture({
-    baselineCheck: async () => ({ status: 'failed', output }),
-    check: async () => ({ status: 'failed', output }),
-  });
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
-  assert.equal((await fixture.store.read()).runs[0]?.checks[0]?.status, 'unchanged-failure');
-});
-
-test('a changed full-output digest is reworked even when the retained diagnostics are identical', async () => {
-  const output = Buffer.from('same retained prefix');
-  let changedCalls = 0;
-  const fixture = await runFixture({
-    baselineCheck: async () => ({ status: 'failed', output, outputSha256: 'a'.repeat(64) }),
-    check: async () => (++changedCalls === 1
-      ? { status: 'failed', output, outputSha256: 'b'.repeat(64) }
-      : { status: 'passed', output: Buffer.from('ok'), outputSha256: 'c'.repeat(64) }),
-  });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-});
-
-test('a changed baseline command replaces the stale same-ID result on restart', async () => {
-  const options: FixtureOptions = {
-    implementationResult: { kind: 'transport-failed', resumable: false },
-  };
-  const fixture = await runFixture(options);
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const terminal = await fixture.store.read();
-  const interrupted = structuredClone(terminal.runs[0]!);
-  assert.equal(interrupted.directReview, undefined);
-  assert.equal(interrupted.routeReceipt?.route, 'direct');
-  assert.equal(interrupted.cycle, 1);
-  interrupted.lifecycle = 'implementing';
-  delete interrupted.terminalOutcome;
-  delete interrupted.outcomeEvidenceId;
-  await fixture.store.compareAndSwap(terminal.generation, {
-    schema: terminal.schema, version: terminal.version, runs: [interrupted],
-  });
-  const nextConfig = { ...configFixture(), checks: { typecheck: 'npm test' } };
-  fixture.dependencies.readConfig = async () => ({
-    config: nextConfig,
-    bytes: Buffer.from(`${canonicalJson(nextConfig)}\n`),
-  });
-  options.implementationResult = undefined;
-
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  const resumed = (await fixture.store.read()).runs[0]!;
-  assert.equal(fixture.events.filter((event) => event === 'check:baseline:typecheck').length, 2);
-  assert.deepEqual(resumed.baselineChecks?.map(({ id, command }) => ({ id, command })), [
-    { id: 'typecheck', command: 'npm test' },
-  ]);
-  assert.deepEqual(resumed.checks.map(({ id, command }) => ({ id, command })), [
-    { id: 'typecheck', command: 'npm test' },
-  ]);
 });
 
 test('the fifth failed implementation cycle exhausts without publication', async () => {
@@ -976,14 +1121,18 @@ test('ordinary external safety and exhausted terminals publish the blocked issue
   }
 });
 
-test('blocked label delivery resumes from its durable intent without rerunning work', async () => {
+test('blocked label delivery resumes from its durable pendingEffect without rerunning work', async () => {
   const fixture = await runFixture({
     rejectEffect: 'labels',
     proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
-  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  assert.deepEqual(
+    pick(first, ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+    JSON.stringify({ first, evidence: fixture.evidence, events: fixture.events }),
+  );
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-labels');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1000,7 +1149,7 @@ test('blocked label delivery survives a crash after the remote effect without du
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
-  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
   const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
 
@@ -1059,7 +1208,7 @@ test('blocked transition resumes when the post-effect projection write fails', a
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked']);
-  assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, 'blocked-labels');
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-labels');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
   const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
 
@@ -1130,36 +1279,83 @@ test('resumable implementation transport retries once when the interrupted attem
   assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
 });
 
-test('invoked publication rejection is resumable, retains intent, and starts no later effect', async () => {
+test('invoked publication rejection is resumable, retains pendingEffect, and starts no later effect', async () => {
   const fixture = await runFixture({ rejectEffect: 'push' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const state = await fixture.store.read();
   assert.equal(state.runs[0]?.lifecycle, 'publishing');
-  assert.equal(state.runs[0]?.intent?.kind, 'push');
+  assert.equal(state.runs[0]?.pendingEffect?.kind, 'initial-push');
   assert.equal(fixture.events.includes('effect:pr'), false);
 });
 
-test('every invoked effect rejection stays resumable with its exact durable intent', async () => {
-  const remoteCases: Array<{ effect: NonNullable<FixtureOptions['rejectEffect']>; intent: string }> = [
-    { effect: 'claim-labels', intent: 'claim-labels' },
-    { effect: 'claim-comment', intent: 'comment' },
-    { effect: 'pr', intent: 'pr' },
-    { effect: 'comment', intent: 'comment' },
-    { effect: 'labels', intent: 'labels' },
+test('every invoked effect rejection stays resumable with its exact durable pendingEffect', async () => {
+  const remoteCases: Array<{ effect: NonNullable<FixtureOptions['rejectEffect']>; pendingEffect: string }> = [
+    { effect: 'claim-labels', pendingEffect: 'claim-labels' },
+    { effect: 'claim-comment', pendingEffect: 'claim-comment' },
+    { effect: 'pr', pendingEffect: 'draft-pr' },
+    { effect: 'comment', pendingEffect: 'handoff-comment' },
+    { effect: 'labels', pendingEffect: 'final-labels' },
   ];
   for (const entry of remoteCases) {
     const fixture = await runFixture({ rejectEffect: entry.effect });
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.effect);
-    assert.equal((await fixture.store.read()).runs[0]?.intent?.kind, entry.intent, entry.effect);
+    assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, entry.pendingEffect, entry.effect);
   }
   const local = await runFixture({ rejectEffect: 'commit' });
   assert.deepEqual(
     pick(await local.runner.runIssue({ targetRoot: local.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
     { status: 'transport-failed', resumable: true },
   );
+  const unknownState = await local.store.read();
+  assert.equal(unknownState.runs[0]?.pendingEffect?.kind, 'initial-commit');
   assert.equal(local.events.includes('git:push'), false);
+  const unknownRun = unknownState.runs[0]!;
+  const unknownIntent = unknownRun.pendingEffect;
+  assert.ok(unknownIntent?.kind === 'initial-commit');
+  if (unknownIntent?.kind !== 'initial-commit') return;
+  await assert.rejects(local.store.compareAndSwap(unknownState.generation, {
+    schema: unknownState.schema,
+    runs: [{
+      ...unknownRun,
+      pendingEffect: {
+        ...unknownIntent,
+        candidateRef: `refs/codex-orchestrator/candidates/${unknownRun.runId}/${'f'.repeat(64)}`,
+      },
+    }],
+  }), /effectId|candidate binding/u);
+  const recoveredLocal = await local.runner.runIssue({ targetRoot: local.targetRoot, issueNumber: 42 });
+  assert.equal(recoveredLocal.status, 'review-ready', JSON.stringify({ recoveredLocal, record: (await local.store.read()).runs[0] }));
+  assert.equal(local.events.filter((event) => event === 'git:commit').length, 2);
+});
+
+test('unknown candidate branch CAS observes an exact completed effect before replay', async () => {
+  const fixture = await runFixture({ rejectEffect: 'commit', commitUnknownAfterEffect: true });
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal(fixture.events.filter((event) => event === 'git:commit').length, 1);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'git:commit').length, 1);
+});
+
+test('confirmed candidate commit retains identity until fallible cleanup is reconciled', async () => {
+  for (const option of ['candidateNormalizeFailOnce', 'candidateReleaseFailOnce'] as const) {
+    const fixture = await runFixture({ [option]: true });
+    assert.deepEqual(
+      pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+      { status: 'transport-failed', resumable: true },
+      option,
+    );
+    const cleanupPending = (await fixture.store.read()).runs[0]!;
+    assert.equal(cleanupPending.lifecycle, 'publishing', option);
+    assert.equal(cleanupPending.pendingEffect?.kind, option === 'candidateNormalizeFailOnce' ? 'initial-commit' : 'initial-push', option);
+    assert.equal(!!cleanupPending.candidateBinding, option === 'candidateNormalizeFailOnce', option);
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready', option);
+    assert.equal(fixture.events.filter((event) => event === 'git:commit').length, 1, option);
+  }
 });
 
 test('a rejected claim comment never grants the running status label', async () => {
@@ -1183,7 +1379,7 @@ test('implementation and proof transport, cancellation, internal failure, and ma
     { name: 'proof cancelled', options: { proof: async () => ({ status: 'cancelled', receipt: receipt() }) }, status: 'cancelled' },
     { name: 'proof internal', options: { proof: async () => ({ status: 'internal-error', receipt: receipt() }) }, status: 'internal-error' },
     { name: 'proof rejects', options: { proofReject: true }, status: 'internal-error' },
-    { name: 'check rejects', options: { checkReject: true }, status: 'internal-error' },
+    { name: 'check rejects', options: { checkReject: true }, status: 'transport-failed', resumable: true },
     { name: 'unchanged', options: { agentWrites: false }, status: 'internal-error' },
   ];
   for (const entry of cases) {
@@ -1195,7 +1391,76 @@ test('implementation and proof transport, cancellation, internal failure, and ma
   }
 });
 
-test('issue read rejection and post-effect CAS failure are resumable with retained intent', async () => {
+test('candidate proof inspection failures retain typed recovery and evidence states', async () => {
+  let ioAttempts = 0;
+  const ioFailure = await runFixture({
+    proof: async () => {
+      ioAttempts += 1;
+      if (ioAttempts === 1) throw new CandidateProofInspectionError('candidate-materialization-io-failed');
+      return passedProof();
+    },
+  });
+  assert.deepEqual(
+    pick(await ioFailure.runner.runIssue({ targetRoot: ioFailure.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal(ioFailure.events.includes('git:commit'), false);
+  const retryableRecord = (await ioFailure.store.read()).runs[0]!;
+  assert.equal(retryableRecord.terminalOutcome, undefined);
+  assert.ok(retryableRecord.candidateMaterialization);
+  assert.equal(retryableRecord.activeAttempt?.stage, 'launched');
+  assert.equal(
+    (await ioFailure.runner.runIssue({ targetRoot: ioFailure.targetRoot, issueNumber: 42 })).status,
+    'review-ready',
+    JSON.stringify({ evidence: ioFailure.evidence, state: await ioFailure.store.read(), events: ioFailure.events }),
+  );
+  assert.equal(ioAttempts, 2);
+  assert.equal(ioFailure.events.includes('candidate-process-absence'), true);
+
+  const conflict = await runFixture({
+    proof: async () => { throw new CandidateProofInspectionError('candidate-artifact-conflict'); },
+  });
+  assert.deepEqual(
+    pick(await conflict.runner.runIssue({ targetRoot: conflict.targetRoot, issueNumber: 42 }), ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: false },
+  );
+  const record = (await conflict.store.read()).runs[0]!;
+  assert.ok(record.candidateBinding);
+  assert.equal(record.pendingEffect, undefined);
+  assert.equal(conflict.events.includes('effect:terminal-labels'), false);
+  assert.equal(conflict.events.includes('git:commit'), false);
+});
+
+test('post-proof candidate drift opens the next bounded cycle without a terminal wedge', async () => {
+  const fixture = await runFixture({ proofMutatesWorktreeOnce: true });
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  const reopened = (await fixture.store.read()).runs[0]!;
+  assert.equal(reopened.lifecycle, 'implementing');
+  assert.equal(reopened.cycle, 2);
+  assert.equal(reopened.terminalOutcome, undefined);
+  assert.equal(reopened.candidateBinding, undefined);
+  const retried = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(retried.status, 'review-ready', JSON.stringify({ retried, record: (await fixture.store.read()).runs[0], events: fixture.events }));
+});
+
+test('post-proof drift persists the next cycle before fallible pin cleanup', async () => {
+  const fixture = await runFixture({ proofMutatesWorktreeOnce: true, candidateReleaseFailBeforeCommitOnce: true });
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  const transitioned = (await fixture.store.read()).runs[0]!;
+  assert.equal(transitioned.lifecycle, 'implementing');
+  assert.equal(transitioned.cycle, 2);
+  assert.equal(transitioned.candidateBinding, undefined);
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(replay.status, 'review-ready', JSON.stringify({ replay, state: await fixture.store.read(), events: fixture.events }));
+});
+
+test('issue read rejection and post-effect CAS failure are resumable with retained pendingEffect', async () => {
   const readFailure = await runFixture({ issueReadRejectAt: 3 });
   const readResult = await readFailure.runner.runIssue({ targetRoot: readFailure.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(readResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
@@ -1205,12 +1470,12 @@ test('issue read rejection and post-effect CAS failure are resumable with retain
   const casResult = await casFailure.runner.runIssue({ targetRoot: casFailure.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(casResult, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const state = await casFailure.store.read();
-  assert.equal(state.runs[0]?.intent?.kind, 'commit');
-  assert.equal(casFailure.events.includes('git:push'), false);
+  assert.equal(state.runs[0]?.pendingEffect?.kind, 'initial-push');
+  assert.equal(casFailure.events.includes('git:push'), true);
 });
 
 test('restart after effect-before-confirmation reconciles publication without duplicate effects', async () => {
-  for (const occurrence of [2, 3, 4, 5] as const) {
+  for (const occurrence of [2, 3, 4] as const) {
     const fixture = await runFixture({ rejectStoreEvent: 'state:publishing:none', rejectStoreOccurrence: occurrence });
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, `occurrence ${occurrence}`);
@@ -1247,11 +1512,11 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   const terminal = await fixture.store.read();
   const interrupted = structuredClone(terminal.runs[0]!);
   interrupted.lifecycle = 'implementing';
+  delete interrupted.activeAttempt;
   delete interrupted.terminalOutcome;
   delete interrupted.outcomeEvidenceId;
   await fixture.store.compareAndSwap(terminal.generation, {
-    schema: 'codex-orchestrator.agent-auto-state',
-    version: 2,
+    schema: 'codex-orchestrator.run-state',
     runs: [interrupted],
   });
   options.implementationResult = undefined;
@@ -1269,23 +1534,11 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   assert.equal(state.runs[0]?.worktreePath, fixture.worktreePath);
 });
 
-test('safe-halt retains process ownership and owner lock until absence is confirmed', async () => {
+test('safe-halt retains active attempt ownership and owner lock until absence is confirmed', async () => {
   const absence = deferred<void>();
   const fixture = await runFixture({
     implementationResult: {
       kind: 'safe-halt',
-      process: {
-        pid: 123,
-        processGroupId: 123,
-        startedAt: '2026-07-16T12:00:00.000Z',
-        baseline: {
-          headSha: 'a'.repeat(40),
-          indexTreeSha: 'b'.repeat(40),
-          trackedContentSha256: 'c'.repeat(64),
-          untrackedContentSha256: 'd'.repeat(64),
-          worktreeIdentity: 'worktree',
-        },
-      },
       waitForAbsence: () => absence.promise,
     },
   });
@@ -1299,18 +1552,6 @@ test('safe-halt retains process ownership and owner lock until absence is confir
   const result = await running;
   assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
   assert.equal(fixture.events.at(-1), 'owner-release');
-});
-
-test('proof process quiescence also safe-halts the run until absence is confirmed', async () => {
-  const absence = deferred<void>();
-  const fixture = await runFixture({ proofError: new ProofQuiescenceError(321, 321, () => absence.promise) });
-  let settled = false;
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }).finally(() => { settled = true; });
-  await waitFor(() => fixture.events.includes('state:safe-halt:none'));
-  assert.equal(settled, false);
-  assert.equal(fixture.events.includes('owner-release'), false);
-  absence.resolve();
-  assert.deepEqual(pick(await running, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
 });
 
 test('cancellation waits for deferred check and proof settlement before terminal state and owner release', async () => {
@@ -1361,25 +1602,28 @@ test('cancellation also waits for an in-flight store write and remote effect bef
 });
 
 interface FixtureOptions {
+  rawRunStateBytes?: Buffer;
+  stateInspections?: RunStateInspection[];
   ownerContention?: boolean;
-  route?: 'direct' | 'awaiting-user' | 'spec-required';
-  routeSequence?: Array<'direct' | 'awaiting-user' | 'spec-required'>;
-  trustedAnswerOnReplay?: boolean;
+  route?: 'direct' | 'spec-required';
+  routeSequence?: Array<'direct' | 'spec-required'>;
+  specQuestionOnce?: boolean;
   initialLabels?: string[];
   blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
   agentCommit?: boolean;
-  baselineCheck?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
   check?: () => Promise<{ status: 'passed' | 'failed'; output: Buffer; outputSha256?: string }>;
-  proof?: (checkedChange: CheckedChange) => Promise<ProveChangeResult>;
+  proof?: (checkedChange: CheckedChange<any>) => Promise<ProveChangeResult>;
   implementationResult?: ImplementationAgentResult;
   implementationResults?: ImplementationAgentResult[];
+  skipImplementationLaunchPersistence?: boolean;
   transportWrites?: boolean;
   agentWrites?: boolean;
   agentWritesDeniedIgnoredPath?: boolean;
   checkReject?: boolean;
   proofReject?: boolean;
   proofError?: Error;
+  proofMutatesWorktreeOnce?: boolean;
   issueReadRejectAt?: number;
   rejectStoreEvent?: string;
   rejectStoreOccurrence?: number;
@@ -1390,12 +1634,18 @@ interface FixtureOptions {
   storeReadReject?: boolean;
   storeReadError?: Error;
   rejectEffect?: 'claim-labels' | 'claim-comment' | 'commit' | 'push' | 'pr' | 'comment' | 'labels';
+  commitUnknownAfterEffect?: boolean;
+  candidateNormalizeFailOnce?: boolean;
+  candidateReleaseFailOnce?: boolean;
+  candidateReleaseFailBeforeCommitOnce?: boolean;
   initialComments?: Array<{
     id?: string;
     body: string;
     authorAssociation: string;
     createdAt?: string;
     updatedAt?: string;
+    author?: string;
+    authorId?: string;
   }>;
   expectedTriageComment?: string;
   revokeDuringRoute?: boolean;
@@ -1403,10 +1653,10 @@ interface FixtureOptions {
   workflowVerificationReject?: boolean;
   reviewMalformedOnce?: boolean;
   reviewMalformedCount?: number;
-  reviewMalformedMode?: 'full' | 'closure';
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
+  getBaseShaRejectOnce?: boolean;
   competingClaimDuringRoute?: boolean;
   malformedCurrentClaimDuringRoute?: boolean;
   replaceHistoricalClaimDuringRoute?: boolean;
@@ -1414,6 +1664,7 @@ interface FixtureOptions {
   ordinaryCommentAfterClaim?: string;
   issueBodyAfterClaim?: string;
   expectedTriageIssueBody?: string;
+  issueBody?: string;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -1428,6 +1679,7 @@ async function runFixture(options: FixtureOptions = {}) {
   await execFileAsync('git', ['-C', targetRoot, 'add', 'README.md', ...(options.agentWritesDeniedIgnoredPath ? ['.gitignore'] : [])]);
   await execFileAsync('git', ['-C', targetRoot, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'base']);
   await execFileAsync('git', ['-C', targetRoot, 'remote', 'add', 'origin', remoteRoot]);
+  await execFileAsync('git', ['-C', targetRoot, 'push', '-u', 'origin', 'main']);
   const baseSha = (await execFileAsync('git', ['-C', targetRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   const events: string[] = [];
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
@@ -1435,11 +1687,29 @@ async function runFixture(options: FixtureOptions = {}) {
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
   const configBytes = Buffer.from(`${canonicalJson(config)}\n`);
   const capabilities = createCheckedChangeCapabilities();
-  const rawStore = new InMemoryRunRecordWriter();
+  const statePath = join(targetRoot, '.codex-orchestrator', 'run-state.json');
+  if (options.rawRunStateBytes) {
+    await mkdir(dirname(statePath), { recursive: true });
+    await writeFile(statePath, options.rawRunStateBytes);
+  }
+  const rawStore: RunRecordWriter = options.rawRunStateBytes
+    ? new FileRunRecordWriter(statePath)
+    : new InMemoryRunRecordWriter();
   const tracedStore = traceStore(rawStore, events, options.rejectStoreEvent, options.rejectStoreOccurrence, options.storeGate);
-  const store: RunRecordWriter = options.storeReadReject || options.storeReadError
-    ? { read: async () => { throw options.storeReadError ?? new Error('malformed state'); }, compareAndSwap: tracedStore.compareAndSwap }
+  const inspectedStore: RunRecordWriter = options.stateInspections
+    ? {
+      inspect: async () => structuredClone(options.stateInspections!.shift() ?? await tracedStore.inspect()),
+      read: tracedStore.read,
+      compareAndSwap: tracedStore.compareAndSwap,
+    }
     : tracedStore;
+  const store: RunRecordWriter = options.storeReadReject || options.storeReadError
+    ? {
+      inspect: async () => { throw options.storeReadError ?? new Error('state read failed'); },
+      read: async () => { throw options.storeReadError ?? new Error('state read failed'); },
+      compareAndSwap: tracedStore.compareAndSwap,
+    }
+    : inspectedStore;
   const localGit = new LocalGitRunIssueAdapter();
   const git = traceGit(localGit, events, options);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
@@ -1451,6 +1721,8 @@ async function runFixture(options: FixtureOptions = {}) {
     authorAssociation: string;
     createdAt?: string;
     updatedAt?: string;
+    author?: string;
+    authorId?: string;
   }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
   let reads = 0;
@@ -1465,7 +1737,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const issue = {
     number: 42,
     title: 'Implement behavior',
-    body: '## Acceptance Criteria\n- The behavior works.',
+    body: options.issueBody ?? '## Acceptance Criteria\n- The behavior works.',
     url: 'https://example.invalid/issues/42',
     state: 'OPEN' as const,
   };
@@ -1476,6 +1748,7 @@ async function runFixture(options: FixtureOptions = {}) {
     }),
     ownerLock: {
       acquire: async () => {
+        events.push('owner-acquire');
         if (options.ownerContention) throw new OwnerLockContentionError('live');
         return { release: async () => { events.push('owner-release'); } };
       },
@@ -1506,7 +1779,7 @@ async function runFixture(options: FixtureOptions = {}) {
           blockedTransitionMutated = true;
           labels = [...options.blockedTransitionLabels];
         }
-        if (labels.includes(policy.review) || labels.includes(policy.waitingHuman)) return;
+        if (labels.includes(policy.review)) return;
         if (!labels.some((label) => label === policy.auto || label === policy.running || label === policy.blocked)) return;
         labels = labels.filter((label) => label !== policy.running);
         if (!labels.includes(policy.blocked)) labels.push(policy.blocked);
@@ -1536,6 +1809,7 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         if (claim && options.issueBodyAfterClaim) issue.body = options.issueBodyAfterClaim;
       },
+      getRepositoryPermission: async (_login, expectedUserId) => ({ permission: 'write', checkedAt: '2026-07-30T00:00:01.000Z', userId: expectedUserId }),
     },
     pullRequests: {
       findOpen: async () => pullRequest,
@@ -1562,30 +1836,17 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         const expected = await state.read();
         const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
-        const awaiting = route === 'awaiting-user';
-        const artifact = awaiting ? {
-          version: 1 as const, status: 'awaiting-user' as const,
-          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
-          direct: null, specRequired: null,
-          awaitingUser: {
-            outcomes: [
-              { id: 'a', title: 'A', behaviorDelta: 'Use A.', evidence: ['Issue is ambiguous.'] },
-              { id: 'b', title: 'B', behaviorDelta: 'Use B.', evidence: ['Issue is ambiguous.'] },
-            ],
-            absenceOfAuthorizedChoiceEvidence: ['No authorized answer.'], recommendation: 'Choose A.', question: 'A or B?',
-          },
-          blocker: null,
-        } : route === 'spec-required' ? {
+        const artifact = route === 'spec-required' ? {
           version: 1 as const, status: 'spec-required' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
           direct: null,
           specRequired: { summary: 'Spec fixture.', complexityReasons: ['Durable review authority.'], specMode: 'standard' as const, reviewFocus: ['independence'] },
-          awaitingUser: null, blocker: null,
+          blocker: null,
         } : {
           version: 1 as const, status: 'direct' as const,
           inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
           direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
-          specRequired: null, awaitingUser: null, blocker: null,
+          specRequired: null, blocker: null,
         };
         const triage = {
           operation: 'triage' as const,
@@ -1593,10 +1854,7 @@ async function runFixture(options: FixtureOptions = {}) {
           artifactSha256: hashTriageArtifact(artifact),
           generationHash: workflowGeneration.generationHash,
         };
-        const review = awaiting ? {
-          operation: 'ambiguity-review' as const, attemptId: 'review-fixture', candidateSha256: triage.artifactSha256,
-          artifactSha256: '9'.repeat(64), verdict: 'approved' as const, generationHash: workflowGeneration.generationHash,
-        } : null;
+        const review = null;
         const receipt: RouteReceiptV1 = {
           version: 1,
           route,
@@ -1612,13 +1870,10 @@ async function runFixture(options: FixtureOptions = {}) {
           version: expected.version,
           triageRepairs: expected.triageRepairs,
           triageTransportRetries: expected.triageTransportRetries,
-          ambiguityTransportRetries: expected.ambiguityTransportRetries,
-          candidateReviews: awaiting ? 1 as const : expected.candidateReviews,
           phase: 'route-complete' as const,
           triage,
-          review,
         };
-        assert.equal(await state.complete(expected, completed, receipt), true);
+        assert.equal(await state.complete(expected, completed, receipt, triage.artifactSha256), true);
         if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
         if (options.dropRunningDuringRoute) labels = labels.filter((label) => label !== 'agent:running');
         if (options.competingClaimDuringRoute) {
@@ -1654,112 +1909,71 @@ async function runFixture(options: FixtureOptions = {}) {
       specRequired: (context, state, signal) => new SpecCoordinator({
         state,
         operation: {
-          author: async ({ state: delivery, onPrepared, onLaunched }) => {
+          author: async ({ attemptId, state: delivery, onPrepared, onLaunched }) => {
             events.push('spec-author');
-            const attemptId = `author-${delivery.revisions.length + 1}`;
             const sessionId = delivery.authorSessionId ?? 'author-session';
             await onPrepared({ attemptId, sessionId });
             await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
-            return { status: 'completed', value: createSpecRevision({
-              revision: delivery.revisions.length + 1, path: '/state/spec.md', content: '# Frozen spec\n',
+            const revision = createSpecRevision({
+              revision: delivery.revisions.length + 1, path: `/state/spec-${delivery.revisions.length + 1}.md`, content: '# Frozen spec\n',
               evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
               author: { attemptId, sessionId }, previousRevision: delivery.revisions.at(-1) ?? null,
-            }) };
+            });
+            if (options.specQuestionOnce && delivery.stage === 'authoring') return {
+              status: 'decision-required', attemptResultSha256: 'c'.repeat(64), value: revision,
+              decisionGaps: [{ id: 'pricing', summary: 'Choose pricing behavior.', evidence: ['issue:42'] }],
+              question: 'Which pricing behavior?',
+            };
+            return { status: 'completed', attemptResultSha256: 'c'.repeat(64), value: revision };
           },
-          review: async ({ state: delivery, mode, onPrepared, onLaunched }) => {
-            events.push(`spec-review:${mode}`);
-            const attemptId = `review-${mode}`;
+          review: async ({ attemptId, state: delivery, onPrepared, onLaunched }) => {
+            events.push('spec-review');
             const sessionId = delivery.review.reviewer?.sessionId ?? 'review-session';
             await onPrepared({ attemptId, sessionId });
             await onLaunched({ attemptId, sessionId, pid: 702, processGroupId: 702 });
             const target = delivery.revisions.at(-1)!;
-            return { status: 'completed', reportSha256: 'd'.repeat(64), value: {
+            return { status: 'completed', attemptResultSha256: 'd'.repeat(64), reportSha256: 'd'.repeat(64), value: {
               version: 1 as const, targetRevision: target.revision, targetSha256: target.revisionSha256,
-              mode, verdict: 'approved' as const, reviewer: { attemptId, sessionId },
+              verdict: 'approved' as const, reviewer: { attemptId, sessionId },
               coverage: ['approved-product-intent','deterministic-executability','safety','scope','validation'],
-              defects: [], affectedDefectIds: [], affectedContracts: [],
-              closureRequestSha256: mode === 'closure' ? delivery.review.closureRequestSha256 : null,
-              acceptedRisks: [], coverageInvalidated: false,
+              defects: [], acceptedRisks: [],
             } };
           },
-          recover: async () => ({ status: 'blocked', kind: 'safety', code: 'unexpected-spec-recovery' }),
         },
       }).run(context, signal),
-      awaitingUser: async (context, state) => {
-        const current = await state.read();
-        if (current?.phase === 'awaiting-answer') {
-          if (options.trustedAnswerOnReplay) {
-            const normalizedAnswer = 'Choose A';
-            const answer = {
-              version: 1 as const, questionId: current.questionReceipt.question.questionId,
-              questionSha256: current.questionReceipt.question.questionSha256,
-              commentId: '102', commentUrl: 'https://example.invalid/comments/102', authorId: '2', author: 'maintainer',
-              permission: 'write' as const, permissionCheckedAt: '2026-07-16T12:03:00.000Z',
-              commentCreatedAt: '2026-07-16T12:02:00.000Z', commentUpdatedAt: '2026-07-16T12:02:00.000Z',
-              observedAt: '2026-07-16T12:03:00.000Z', normalizedAnswer,
-              normalizedSha256: hashNormalizedAnswer(normalizedAnswer), duplicateCommentIds: [],
-            };
-            const next = { ...current, phase: 'resume-ready' as const, answerReceipt: answer };
-            assert.equal(await state.compareAndSwap(current, next), true);
-            return { status: 'resume-ready' as const, answer };
-          }
-          return { status: 'awaiting-answer', questionId: current.questionReceipt.question.questionId, answerPrefix: current.questionReceipt.question.answerPrefix };
-        }
-        if (current?.phase === 'resumed') {
-          const prior = current.history[0]!.question;
-          const question = createWaitingQuestion({
-            runId: context.runId, generation: 2, routeDecisionSha256: context.receipt.decisionSha256,
-            workflowGenerationHash: context.workflowGeneration.generationHash,
-            priorQuestionSha256: prior.questionSha256, conflictHashes: [],
-            recommendation: 'Choose A.', question: 'A or B?',
-          });
-          const next = {
-            version: 1 as const, clarificationAttempts: 1 as const, permissionRetries: current.permissionRetries,
-            effectRetries: structuredClone(current.effectRetries), history: structuredClone(current.history),
-            phase: 'awaiting-answer' as const,
-            questionReceipt: {
-              question, commentId: '103', commentUrl: 'https://example.invalid/comments/103', authorId: '1', author: 'runner',
-              createdAt: '2026-07-16T12:04:00.000Z', observedAt: '2026-07-16T12:04:00.000Z',
-            },
-          };
-          assert.equal(await state.compareAndSwap(current, next), true);
-          return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
-        }
-        const question = createWaitingQuestion({
-          runId: context.runId, generation: 1, routeDecisionSha256: context.receipt.decisionSha256,
-          workflowGenerationHash: context.workflowGeneration.generationHash, priorQuestionSha256: null, conflictHashes: [],
-          recommendation: 'Choose A.', question: 'A or B?',
-        });
-        const next = {
-          version: 1 as const, clarificationAttempts: 0 as const, permissionRetries: 0 as const,
-          effectRetries: { questionComment: 0 as const, waitLabels: 0 as const, resumeLabels: 0 as const, revokeLabels: 0 as const },
-          history: [], phase: 'awaiting-answer' as const,
-          questionReceipt: {
-            question, commentId: '101', commentUrl: 'https://example.invalid/comments/101', authorId: '1', author: 'runner',
-            createdAt: '2026-07-16T12:01:00.000Z', observedAt: '2026-07-16T12:01:00.000Z',
-          },
-        };
-        assert.equal(await state.compareAndSwap(undefined, next), true);
-        return { status: 'awaiting-answer', questionId: question.questionId, answerPrefix: question.answerPrefix };
-      },
     },
     implementationAgent: {
-      run: async ({ worktreePath: path }) => {
+      run: async ({ attemptId, worktreePath: path, onPrepared, onLaunched }) => {
         events.push('agent');
+        events.push('agent:implementation');
+        await onPrepared?.({
+          attemptId,
+          reportPath: `/tmp/${attemptId}-report.json`,
+          preparedAt: '2026-07-16T12:00:00.000Z',
+          baseline: await dependencies.git.snapshot(path),
+        });
+        if (!options.skipImplementationLaunchPersistence) {
+          await onLaunched?.({
+            attemptId, pid: 6060, processGroupId: 6060, launchedAt: '2026-07-16T12:00:01.000Z',
+          });
+        }
         const sequenced = options.implementationResults?.shift();
         const selected = sequenced ?? options.implementationResult;
         if (options.transportWrites && selected?.kind === 'transport-failed') {
           await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
         }
         if (selected?.kind !== 'completed' && selected) return selected;
-        if (options.agentWrites !== false) await writeFile(join(path, 'feature.txt'), 'implemented\n');
+        if (options.agentWrites !== false) {
+          await writeFile(join(path, 'feature.txt'), 'implemented\n');
+        }
         if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
         if (options.agentCommit) {
           await execFileAsync('git', ['-C', path, 'add', '--all']);
           await execFileAsync('git', ['-C', path, '-c', 'user.name=agent', '-c', 'user.email=agent@example.com', 'commit', '-m', 'agent commit']);
         }
-        const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
-        return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? 'implementation-attempt-1' } : completed;
+        const changedFiles = ['feature.txt'];
+        const completed = selected ?? { kind: 'completed' as const, report: { version: 1, status: 'completed', summary: 'done', changedFiles, residualRisks: [] } };
+        return completed.kind === 'completed' ? { ...completed, attemptId: completed.attemptId ?? attemptId } : completed;
       },
     },
     implementationReviewer: {
@@ -1767,14 +1981,15 @@ async function runFixture(options: FixtureOptions = {}) {
         reviewCalls += 1;
         events.push('review:code-review');
         const invocation = {
-          attemptId: 'code-review-attempt-1', operation: input.operation, mode: input.mode,
+          attemptId: input.attemptId, operation: input.operation,
           reviewerSessionId: input.reviewerSessionId, targetRevision: input.targetRevision,
-          targetFingerprint: input.targetFingerprint, closureRequestSha256: input.closureRequestSha256,
+          targetFingerprint: input.targetFingerprint,
         };
         await input.onPrepared(invocation);
         await input.onLaunched({ ...invocation, pid: 4242, processGroupId: 4242 });
+        events.push('review:code-review-launched');
         if ((options.reviewMalformedOnce && reviewCalls === 1)
-          || ((options.reviewMalformedCount ?? 0) > 0 && (!options.reviewMalformedMode || options.reviewMalformedMode === input.mode))) {
+          || (options.reviewMalformedCount ?? 0) > 0) {
           if ((options.reviewMalformedCount ?? 0) > 0) options.reviewMalformedCount!--;
           const originalReportBytes = Buffer.from('{"report":{"version":1}}');
           return {
@@ -1786,36 +2001,51 @@ async function runFixture(options: FixtureOptions = {}) {
           kind: 'completed', attemptId: invocation.attemptId, artifactSha256: '8'.repeat(64),
           report: {
             version: 1, operation: input.operation, targetRevision: input.targetRevision,
-            targetFingerprint: input.targetFingerprint, verdict: 'approved', mode: input.mode,
-            coverage: ['acceptance-criteria', 'correctness', 'test-quality'], defects: [], residualRisks: [],
-            reviewerSessionId: input.reviewerSessionId, closureRequestSha256: input.closureRequestSha256,
-            repairFindingOutcomes: input.fixedRepairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
+            targetFingerprint: input.targetFingerprint, verdict: 'approved',
+            coverage: ['acceptance-criteria', 'correctness', 'test-quality'],
+            defects: input.defects.map((defect) => ({ ...defect, status: 'verified' as const, statusTargetRevision: input.targetRevision })),
+            residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+            repairFindingOutcomes: [
+              ...input.defects.map((defect) => ({ id: defect.id, status: 'verified' as const })),
+              ...input.fixedRepairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
+            ],
           },
         };
       },
     },
-    waitForReviewProcessAbsence: async () => {},
+    waitForReviewProcessAbsence: async () => { events.push('candidate-process-absence'); },
     checks: {
-      run: async ({ phase }) => {
-        events.push(phase === 'baseline' ? 'check:baseline:typecheck' : 'check:typecheck');
+      supportsLaunchOwnership: true,
+      run: async ({ id, onLaunched }) => {
+        await onLaunched?.({ pid: 987654, processGroupId: 987654 });
+        events.push(id === 'typecheck' ? 'check:typecheck' : `check:changed:${id}`);
         if (options.checkReject) throw new Error('check rejected');
         const fallback: { status: 'passed'; output: Buffer; outputSha256?: string } = {
           status: 'passed', output: Buffer.from('ok'),
         };
-        const result = await (phase === 'baseline'
-          ? options.baselineCheck?.() ?? fallback
-          : options.check?.() ?? fallback);
-        return { ...result, outputSha256: result.outputSha256 ?? sha256(result.output) };
+        const result = await (options.check?.() ?? fallback);
+        return {
+          ...result,
+          outputSha256: result.outputSha256 ?? sha256(result.output),
+          observation: { leader: 'absent' as const, group: 'absent' as const },
+        };
       },
     },
     proof: {
-      proveChange: async ({ checkedChange, beforeAgentLaunch }) => {
+      proveChange: async ({ checkedChange, recoverOnly, beforeAgentLaunch, onLaunched }) => {
         await beforeAgentLaunch?.();
+        await onLaunched?.({ pid: 24680, processGroupId: 24680, launchedAt: '2026-07-16T12:00:00.000Z' });
         events.push('proof');
+        if (recoverOnly) events.push('proof-recover-only');
         capabilities.verifyAndRead(checkedChange);
         if (options.proofError) throw options.proofError;
         if (options.proofReject) throw new Error('proof rejected');
-        return options.proof?.(checkedChange) ?? passedProof();
+        const result = await (options.proof?.(checkedChange) ?? passedProof());
+        if (options.proofMutatesWorktreeOnce) {
+          options.proofMutatesWorktreeOnce = false;
+          await writeFile(join(worktreePath, 'feature.txt'), 'post-proof drift\n');
+        }
+        return result;
       },
     },
     checkedChangeMint: capabilities,
@@ -1823,6 +2053,27 @@ async function runFixture(options: FixtureOptions = {}) {
     writeEvidence: async (entry) => {
       evidence.push(structuredClone(entry));
       return { id: `evidence:${entry.runId}:${entry.code}`, path: `.codex-orchestrator/evidence/${entry.runId}.json` };
+    },
+    outcomeEvidencePath: (runId, code, summarySha256) => `.codex-orchestrator/evidence/${runId}/${sha256(code)}-${summarySha256}.json`,
+    inspectOutcomeEvidence: async (path) => {
+      try { return { sha256: sha256(await readFile(resolve(targetRoot, path))) }; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+    },
+    writeOutcomeEvidence: async ({ path, bytes, sha256: expectedSha256 }) => {
+      const destination = resolve(targetRoot, path);
+      await mkdir(dirname(destination), { recursive: true });
+      try {
+        const existing = await readFile(destination);
+        if (sha256(existing) !== expectedSha256) throw new Error('evidence diverged');
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      assert.equal(sha256(bytes), expectedSha256);
+      await writeFile(destination, bytes);
     },
     packageVersion: '0.1.51',
     createWorkflowGeneration: async () => ({
@@ -1835,10 +2086,34 @@ async function runFixture(options: FixtureOptions = {}) {
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
     createReviewSessionId: () => 'code-review-session-1',
+    processIdentity: {
+      host: 'fixture-host', bootId: 'fixture-boot',
+      capture: async () => ({ kind: 'unavailable', platform: 'darwin' }),
+      observe: async () => {
+        events.push('candidate-process-absence');
+        return { leader: 'absent', group: 'absent' };
+      },
+    },
+    inspectAttemptResult: async (path) => {
+      try {
+        const bytes = await readFile(path);
+        return { bytes, sha256: sha256(bytes) };
+      }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+    },
+    writeAttemptResult: async ({ path, bytes, sha256: expectedSha256 }) => {
+      assert.equal(sha256(bytes), expectedSha256);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, bytes);
+    },
+    attemptResultPath: ({ attemptId }) => `/tmp/${attemptId}-report.json`,
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, events, evidence, store: rawStore };
+  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath, events, evidence, store: rawStore, comments };
 }
 
 function workflowGeneration(packageVersion: string, seed: string) {
@@ -1861,10 +2136,11 @@ function traceStore(
   let rejected = false;
   let matches = 0;
   return {
+    inspect: () => store.inspect(),
     read: () => store.read(),
     compareAndSwap: async (generation, next) => {
       const record = next.runs.at(-1);
-      const event = `state:${record?.lifecycle ?? 'none'}:${record?.intent?.kind ?? 'none'}`;
+      const event = `state:${record?.lifecycle ?? 'none'}:${record?.pendingEffect?.kind ?? 'none'}`;
       events.push(event);
       if (storeGate?.event === event) {
         events.push('store:deferred');
@@ -1885,13 +2161,51 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   const rejected = new Set<string>();
   let createWorktreeRejected = false;
   let inspectWorktreeDiverged = false;
+  let getBaseShaRejected = false;
+  let candidateNormalizeRejected = false;
+  let candidateReleaseRejected = false;
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejected.has(effect)) return false;
     rejected.add(effect);
     return true;
   };
   return {
-    getBaseSha: (input) => delegate.getBaseSha(input),
+    candidateV2: {
+      ...delegate.candidateV2,
+      normalizeSharedIndex: async (input) => {
+        if (options.candidateNormalizeFailOnce && !candidateNormalizeRejected && events.includes('git:commit')) {
+          candidateNormalizeRejected = true;
+          return { kind: 'failed', code: 'candidate-io-failed', detailSha256: sha256('normalize failed') };
+        }
+        return delegate.candidateV2.normalizeSharedIndex(input);
+      },
+      releasePin: async (input) => {
+        if (!candidateReleaseRejected && ((options.candidateReleaseFailBeforeCommitOnce && events.includes('proof'))
+          || (options.candidateReleaseFailOnce && events.includes('git:commit')))) {
+          candidateReleaseRejected = true;
+          return { kind: 'failed', code: 'candidate-ref-update-unknown', detailSha256: sha256('release failed') };
+        }
+        return delegate.candidateV2.releasePin(input);
+      },
+      createOrObserveCommit: async (input) => {
+        if (shouldReject('commit')) {
+          events.push('git:commit');
+          if (options.commitUnknownAfterEffect) await delegate.candidateV2.createOrObserveCommit(input);
+          return { kind: 'failed', code: 'candidate-ref-update-unknown', detailSha256: sha256('commit rejected') };
+        }
+        const before = await delegate.getHead(input.worktreePath);
+        const result = await delegate.candidateV2.createOrObserveCommit(input);
+        if (!input.observeOnly && before === input.parentSha) events.push('git:commit');
+        return result;
+      },
+    },
+    getBaseSha: async (input) => {
+      if (options.getBaseShaRejectOnce && !getBaseShaRejected) {
+        getBaseShaRejected = true;
+        throw new Error('remote unavailable');
+      }
+      return delegate.getBaseSha(input);
+    },
     createWorktree: async (input) => {
       if (options.createIncompleteWorktreeThenRejectOnce && !createWorktreeRejected) {
         createWorktreeRejected = true;
@@ -1950,7 +2264,6 @@ function configFixture(): AgentAutoConfig {
         running: label('agent:running'),
         blocked: label('agent:blocked'),
         review: label('agent:review'),
-        waitingHuman: label('agent:waiting-human'),
       },
     },
     runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60, maxCycles: 5 },

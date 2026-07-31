@@ -57,10 +57,12 @@ Improvements never block. Only an execution risk may become `accepted-risk`,
 and only with explicit authority, reason, scope, and target revision. A blocker
 cannot be accepted or downgraded.
 
-Move blocking defects `open -> fixed -> verified`. For ordinary medium/low
-behavior-preserving repairs, root may verify after checking the cited failure
-path and affected validation. Closure-triggering defects require affected
-independent verification.
+Move blocking defects `open -> fixed -> verified`. A repair-wave budget limits
+iterations, never the number of findings: every valid finding remains recorded
+until it is verified, blocked, accepted-risk with authority, or superseded by a
+named canonical record. For ordinary medium/low behavior-preserving repairs,
+root may verify after checking the cited failure path and affected validation.
+Closure-triggering defects require affected independent verification.
 
 In Closure, copy each supplied canonical defect's `id`, `class`, `invariant`,
 `failure`, and introduced target revision byte-for-byte. Never paraphrase those
@@ -69,15 +71,24 @@ the status, status target revision, evidence, and repair-finding outcome fields.
 
 ## Repair And Stop
 
-Repair compatible findings in one consolidated batch. Before repeating review,
-the target, evidence, repair, or source decision must change materially.
-Review count and elapsed time are audit signals, never approval or blocking
-conditions.
+Repair all mutually compatible findings in one consolidated batch; do not cap
+that batch by finding count. If Closure reports ordinary medium/low findings
+whose exact correction stays inside the approved behavior and adds no public
+parameter, durable transition, retry/flag, owner, or runtime boundary, root may
+apply one bounded Closure-correction batch and close it through the cited
+failure paths plus affected validation. Do not launch another Closure for that
+ordinary correction.
 
-Stop when repair requires a product/scope/owner decision, mandatory evidence or
-reviewer is unavailable, no substantive repair exists, or the same failure
-repeats without progress. Do not create micro-cycles for ordinary medium/low
-findings.
+Before repeating independent review, the target, evidence, repair, or source
+decision must change materially. Review count and elapsed time are audit
+signals, never approval or blocking conditions.
+
+Stop when repair requires a product/scope/owner decision or a new public or
+durable mechanism, mandatory evidence or reviewer is unavailable, no
+substantive repair exists, the same failure repeats without progress, or a
+Closure correction would itself require another Closure. Keep every unresolved
+finding open and report the blocker. Do not create micro-cycles for ordinary
+medium/low findings.
 
 Waive review only after explicit user instruction. Record skipped coverage and
 open defects. Waiver is not approval and accepts no defect automatically.

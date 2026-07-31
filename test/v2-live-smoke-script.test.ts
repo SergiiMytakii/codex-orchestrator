@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -29,9 +31,9 @@ async function source(): Promise<string> {
 }
 
 const retainedScenarios = [
-  'package-install', 'discovery-matrix', 'commit-policy',
+  'package-install', 'spec-first', 'product-question', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
-  'acceptance-proof-positive', 'acceptance-proof-rework', 'acceptance-proof-negative',
+  'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
   'review-feedback-continuation', 'quality-gates', 'safety-negative',
 ];
 
@@ -50,7 +52,7 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
     [...profile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
-      'report-repair', 'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
+      'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
       'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
     ],
   );
@@ -61,17 +63,30 @@ test('live smoke omits legacy scenario aliases without distinct V2 behavior', as
   for (const alias of [
     'baseline', 'remote-base-branch', 'scoped-runner-commit', 'run-scoped',
     'loop-policy', 'proof-strategy-non-visual-smoke',
+    'acceptance-proof-positive',
   ]) {
     assert.doesNotMatch(result.stdout, new RegExp(`\\b${alias}\\b`, 'u'));
   }
 });
 
-test('default core release keeps only external integration proofs', async () => {
+test('authoritative candidate smoke proves mixed-index capture and exact publication cleanup', async () => {
+  const text = await source();
+  assert.match(text, /authoritative-candidate-publication/u);
+  assert.match(text, /staged content must not become authoritative/u);
+  assert.match(text, /git diff --cached --quiet/u);
+  assert.match(text, /state\.schema !== 'codex-orchestrator\.run-state'/u);
+  assert.match(text, /candidateTreeSha !== publishedTreeSha/u);
+  assert.match(text, /candidate pin survived successful publication/u);
+  assert.match(text, /candidate execution worktree survived successful publication/u);
+  assert.match(text, /candidate execution directory survived successful publication/u);
+});
+
+test('default core release proves direct, spec-first, product-question, and post-PR flows', async () => {
   const text = await source();
   const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['v2-regression'"));
   assert.deepEqual(
     [...coreProfile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
-    ['core-release', 'package-install', 'browser-proof', 'safety-negative'],
+    ['core-release', 'package-install', 'spec-first', 'product-question', 'review-feedback-continuation'],
   );
 });
 
@@ -123,7 +138,7 @@ test('packed smoke parses npm JSON after prepack lifecycle output', async () => 
 test('live smoke documents scratch repo and strict cleanup defaults', async () => {
   const result = await runLiveSmoke(['--help']);
   assert.match(result.stdout, /SergiiMytakii\/codex-orchestrator-live-smoke/u);
-  assert.match(result.stdout, /Clean up created issues, PRs, and branches after the run by default/u);
+  assert.match(result.stdout, /Clean up created issues, PRs, branches, labels, refs, worktrees, processes, and temporary data after the run by default/u);
   assert.match(result.stdout, /Cleanup mode: delete or close\. Default delete/u);
   const text = await source();
   const cleanup = text.slice(text.indexOf('async function cleanup'), text.indexOf('async function bestEffort'));
@@ -131,6 +146,59 @@ test('live smoke documents scratch repo and strict cleanup defaults', async () =
   assert.match(cleanup, /--state', 'all'/u);
   assert.match(cleanup, /LIVE_SMOKE_RUN_ID=/u);
   assert.match(cleanup, /await verifyCleanup\(context, failures\)/u);
+  assert.match(cleanup, /createdLabels/u);
+  assert.match(cleanup, /candidate refs/u);
+  assert.match(cleanup, /candidate worktrees/u);
+  assert.match(cleanup, /live-smoke child processes/u);
+});
+
+test('live smoke preflight is authenticated, scratch-only, and exclusively locked', async () => {
+  const text = await source();
+  const preflight = text.slice(text.indexOf('async function preflight'), text.indexOf('async function prepareTarget'));
+  assert.match(preflight, /productionRepo/u);
+  assert.match(preflight, /approvedLiveSmokeRepo/u);
+  assert.doesNotMatch(preflight, /CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO/u);
+  assert.match(preflight, /gh', \['auth', 'status'/u);
+  assert.match(preflight, /codex', \['login', 'status'/u);
+  assert.match(preflight, /scratchLockBranch/u);
+  assert.match(preflight, /refs\/heads/u);
+});
+
+test('strict cleanup removes only run-created local resources and requires complete label setup', async () => {
+  const text = await source();
+  const parser = text.slice(text.indexOf('function parseArgs'), text.indexOf('function selectScenarios'));
+  assert.doesNotMatch(parser, /--work-dir|--target/u);
+  assert.match(text, /setup\.result\.status !== 'labels-prepared'/u);
+  const cleanup = text.slice(text.indexOf('async function cleanupLocalSafetyResources'), text.indexOf('async function removeTemporaryArtifacts'));
+  assert.match(cleanup, /baselineCandidateRefs/u);
+  assert.match(cleanup, /baselineWorktrees/u);
+  assert.match(cleanup, /!context\.lockAcquired/u);
+  assert.match(cleanup, /worktree', 'remove', '--force'/u);
+  assert.doesNotMatch(cleanup, /for \(const ref of refs\).*every/u);
+  assert.match(text, /terminateRunProcesses/u);
+  assert.match(text, /SIGTERM/u);
+  assert.match(text, /SIGKILL/u);
+  const removal = text.slice(text.indexOf('async function removeTemporaryArtifacts'), text.indexOf('async function discoverRunArtifacts'));
+  assert.match(removal, /rm\(context\.root, \{ recursive: true, force: true \}\)/u);
+  assert.doesNotMatch(removal, /for \(const name/u);
+});
+
+test('spec-first and product-question continue approved authority in the same Run', async () => {
+  const text = await source();
+  const scenarios = text.slice(text.indexOf('async function runSpecFirstScenario'), text.indexOf('async function runDiscoveryMatrixScenario'));
+  assert.match(scenarios, /routeReceipt\?\.route !== 'spec-required'/u);
+  assert.match(scenarios, /specDelivery\?\.stage !== 'frozen'/u);
+  assert.match(scenarios, /status: 'spec-frozen'/u);
+  assert.match(scenarios, /receipt\.answerPrefix/u);
+  assert.match(scenarios, /acceptedAnswers\?\.length !== 1/u);
+  const normalization = text.slice(text.indexOf('function normalizeSpecReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
+  for (const coverage of ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation']) {
+    assert.match(normalization, new RegExp(coverage, 'u'));
+  }
+  assert.match(text, /'spec-frozen': 0/u);
+  const runtime = await readFile(fileURLToPath(new URL('../../src/v2/runtime.ts', import.meta.url)), 'utf8');
+  assert.match(runtime, /acceptedAnswers: state\.acceptedAnswers/u);
+  assert.match(runtime, /trustedAnswer: state\.trustedAnswer \?\? null/u);
 });
 
 test('live smoke omits the redundant free-form real-codex scenario', async () => {
@@ -144,6 +212,7 @@ test('every model-backed live smoke invocation pins GPT-5.6 Luna', async () => {
   assert.match(text, /CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: liveSmokeModel/u);
   assert.match(text, /context\.liveCodexPath/u);
   assert.doesNotMatch(text, /context\.fakeCodexPath/u);
+  assert.match(text, /model_reasoning_effort="low"/u);
 });
 
 test('live smoke starts the packaged runtime without a certification step', async () => {
@@ -159,15 +228,14 @@ test('real Codex smoke budgets cover the complete multi-operation workflow', asy
   assert.match(text, /config\.codex\.timeoutMs = 600_000;/u);
 });
 
-test('quality-gates deterministically reopens the failed check at the fifth closure', async () => {
+test('quality-gates consumes implementation cycles without a second review lifecycle', async () => {
   const text = await source();
   const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function applyFault'));
   assert.match(normalization, /coverage: capsule\.reviewFocus/u);
   assert.match(normalization, /capsule\.fixedRepairFindings/u);
-  assert.match(normalization, /capsule\.targetRevision === 5/u);
-  assert.match(normalization, /prompt\.includes\('quality-gates'\)/u);
-  assert.match(normalization, /verdict: reopen \? 'needs-work' : 'approved'/u);
-  assert.match(normalization, /status: reopen \? 'reopened' : 'verified'/u);
+  assert.match(normalization, /verdict: 'approved'/u);
+  assert.match(normalization, /status: 'verified'/u);
+  assert.doesNotMatch(normalization, /closure|mode|reopen/u);
 });
 
 test('every live code review is normalized from the runner-owned review capsule', async () => {
@@ -282,7 +350,7 @@ test('fixture happy paths normalize proof semantics after real model invocation'
   const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   for (const scenario of [
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'acceptance-proof-positive', 'acceptance-proof-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
   assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath\)/u);
 });
@@ -306,4 +374,17 @@ test('strict cleanup retries eventually consistent observations before failing',
   await assert.rejects(module.retryCleanupObservation(async () => {
     throw new Error('still present');
   }, { attempts: 2, delayMs: 0 }), /still present/u);
+});
+
+test('strict temporary cleanup removes the complete read-only run root', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    removeTemporaryArtifacts: (context: { root: string; options: { timeoutMs: number } }) => Promise<void>;
+  };
+  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-cleanup-test-'));
+  const nested = join(root, 'readonly');
+  await mkdir(nested);
+  await writeFile(join(nested, 'artifact.json'), '{}\n');
+  await chmod(nested, 0o500);
+  await module.removeTemporaryArtifacts({ root, options: { timeoutMs: 10_000 } });
+  await assert.rejects(readFile(join(nested, 'artifact.json')), /ENOENT/u);
 });

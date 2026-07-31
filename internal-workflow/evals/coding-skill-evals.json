@@ -6,79 +6,433 @@
       "id": "route-feature-tdd",
       "prompt": "Implement a behavior-changing feature in this repository.",
       "expected": ["read local evidence", "activate tdd before behavior edits", "run affected validation"],
-      "forbidden": ["invent repository commands", "create planning artifacts without an execution gap"]
+      "forbidden": ["invent repository commands", "create planning artifacts without an execution gap"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/behavior-change",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["code-review", "tdd"],
+        "should_not_trigger": ["implementation-spec-maker", "small-task-implementer", "tickets-orchestrator"],
+        "assertions": [{"kind": "route_equals", "value": "direct-medium"}],
+        "ablation_skill": "tdd"
+      }
     },
     {
       "id": "route-diagnosis-only",
-      "prompt": "Explain the root cause and do not fix it yet.",
+      "prompt": "Explain the confirmed root cause documented in this repository and do not fix it yet.",
       "expected": ["use bug-root-cause-explainer", "cite concrete evidence", "stop before edits"],
-      "forbidden": ["edit files", "present an inference as proven"]
+      "forbidden": ["edit files", "present an inference as proven"],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/diagnosis-only",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["bug-root-cause-explainer"],
+        "should_not_trigger": ["code-debugger", "diagnosing-bugs"],
+        "assertions": [
+          {"kind": "route_equals", "value": "diagnosis-only"},
+          {"kind": "tree_unchanged"}
+        ],
+        "ablation_skill": "bug-root-cause-explainer"
+      }
     },
     {
       "id": "route-flaky-bug",
-      "prompt": "Debug a failure that only happens intermittently.",
+      "prompt": "Debug the intermittent failure described by this repository; its cause is not confirmed.",
       "expected": ["use diagnosing-bugs", "improve reproduction or signal before repair"],
-      "forbidden": ["jump directly to a fix"]
+      "forbidden": ["jump directly to a fix"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/flaky-bug",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["diagnosing-bugs"],
+        "should_not_trigger": ["bug-root-cause-explainer", "code-debugger"],
+        "assertions": [{"kind": "route_equals", "value": "diagnose-first"}],
+        "ablation_skill": "diagnosing-bugs"
+      }
     },
     {
       "id": "profile-medium-default",
-      "prompt": "Implement one clear stateful feature touching an API, persistence, and several files.",
+      "prompt": "Implement the settled stateful API and persistence feature described in this repository.",
       "expected": ["select medium", "implement directly when authority and proof are clear"],
-      "forbidden": ["select high from statefulness or file count", "manufacture a PRD, tickets, or spec"]
+      "forbidden": ["select high from statefulness or file count", "manufacture a PRD, tickets, or spec"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/direct-medium",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["tdd"],
+        "should_not_trigger": ["implementation-spec-maker", "tickets-orchestrator"],
+        "assertions": [{"kind": "route_equals", "value": "direct-medium"}]
+      }
     },
     {
       "id": "profile-high-threshold",
-      "prompt": "Classify one broad ordinary refactor and one change with irreversible data loss plus unclear recovery ownership.",
+      "prompt": "Classify the ordinary refactor and the irreversible data-loss scenario documented in this repository.",
       "expected": ["keep the broad ordinary refactor medium", "select high only for material consequence plus uncertainty"],
-      "forbidden": ["accumulate generic risk labels into high"]
+      "forbidden": ["accumulate generic risk labels into high"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/profile-classification",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": [],
+        "should_not_trigger": ["implementation-spec-maker", "tickets-orchestrator"],
+        "assertions": [{"kind": "route_equals", "value": "profile-classification"}]
+      }
     },
     {
       "id": "planning-does-not-deliver",
-      "prompt": "Use wayfinder to resolve the decision frontier and publish the resulting tickets.",
+      "prompt": "Use wayfinder to resolve the documented decision frontier and publish the resulting tickets, then stop before delivery.",
       "expected": ["stop after the planning package", "require separate delivery authorization"],
-      "forbidden": ["start implementation from publication or labels"]
+      "forbidden": ["start implementation from publication or labels"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/planning",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["to-tickets", "wayfinder"],
+        "should_not_trigger": ["spec-implementer", "tickets-orchestrator"],
+        "assertions": [{"kind": "route_equals", "value": "planning-only"}],
+        "ablation_skill": "wayfinder"
+      }
     },
     {
       "id": "spec-only-for-gap",
-      "prompt": "Choose the route for a clear implementation request and for the same request with an unresolved execution contract.",
-      "expected": ["route the clear request directly", "use implementation-spec-maker for the unresolved execution delta"],
-      "forbidden": ["require a spec for every medium change"]
+      "prompt": "Choose the route for the implementation request whose unresolved execution contract is documented in this repository.",
+      "expected": ["use implementation-spec-maker for the unresolved execution delta"],
+      "forbidden": ["start implementation before the contract is resolved", "create a ticket graph"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/spec-gap",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["implementation-spec-maker"],
+        "should_not_trigger": ["spec-implementer", "tickets-orchestrator"],
+        "assertions": [{"kind": "route_equals", "value": "spec-gap"}],
+        "ablation_skill": "implementation-spec-maker"
+      }
+    },
+    {
+      "id": "approved-spec-execution",
+      "prompt": "Execute the approved implementation spec in this repository and stop at its stated delivery boundary.",
+      "expected": ["use spec-implementer", "follow the approved checklist through observable proof", "update reached checklist items truthfully"],
+      "forbidden": ["create a replacement spec", "route through tickets", "commit or push"],
+      "execution": {
+        "level": "end_to_end",
+        "fixture": "end-to-end-approved-spec",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["spec-implementer", "tdd"],
+        "should_not_trigger": ["implementation-spec-maker", "tickets-orchestrator"],
+        "assertions": [
+          {"kind": "route_equals", "value": "spec-implementer"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "file_contains", "path": "docs/implementation-specs/approved-greeting.md", "text": "- [x] Implement the greeting"},
+          {"kind": "file_contains", "path": "docs/implementation-specs/approved-greeting.md", "text": "- [x] Run the focused test"},
+          {"kind": "event_present", "event": "file_write", "value": "greeting.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "spec-implementer"}, "after": {"event": "file_write", "value": "greeting.py"}},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
     },
     {
       "id": "ticket-direct-vs-graph",
-      "prompt": "Choose delivery for one deterministic approved ticket and for an approved dependency graph.",
-      "expected": ["allow direct execution for the single ticket", "use tickets-orchestrator for the graph"],
-      "forbidden": ["manufacture a wave-level spec"]
+      "prompt": "Deliver the approved dependency graph documented in this repository through its public tests and stop at the local delivery boundary.",
+      "expected": ["use tickets-orchestrator for the graph", "deliver independent tickets before their dependent", "prove the completed graph"],
+      "forbidden": ["manufacture a wave-level spec", "skip a dependency", "commit or push"],
+      "execution": {
+        "level": "end_to_end",
+        "fixture": "end-to-end-ticket-graph",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["tdd", "tickets-orchestrator"],
+        "should_not_trigger": ["implementation-spec-maker", "spec-implementer"],
+        "assertions": [
+          {"kind": "route_equals", "value": "ticket-graph"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket A"},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket B"},
+          {"kind": "file_contains", "path": "delivery-state.md", "text": "- [x] Ticket C"},
+          {"kind": "event_present", "event": "file_write", "value": "summary.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "tickets-orchestrator"}, "after": {"event": "file_write", "value": "summary.py"}},
+          {"kind": "path_absent", "path": "PLAN.md"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ],
+        "ablation_skill": "tickets-orchestrator"
+      }
     },
     {
       "id": "review-topology",
-      "prompt": "Choose reviewer topology for simple, medium, and high profiles.",
-      "expected": ["simple uses one reviewer_fast when gated", "medium uses one reviewer_standard", "high uses two disjoint reviewer_deep tracks"],
-      "forbidden": ["root self-review", "two reviewers for ordinary medium"]
+      "prompt": "Run the final review for the ordinary medium change documented in this repository.",
+      "expected": ["launch one reviewer_standard", "keep correctness and standards in one bounded Full review"],
+      "forbidden": ["root self-review", "launch reviewer_deep for ordinary medium"],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/review",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["code-review"],
+        "should_not_trigger": ["implementation-spec-review"],
+        "assertions": [
+          {"kind": "route_equals", "value": "review-topology"},
+          {"kind": "event_present", "event": "subagent_launch", "value": "reviewer_standard"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"},
+          {"kind": "tree_unchanged"}
+        ]
+      }
     },
     {
       "id": "review-closure-bounded",
-      "prompt": "A medium Full review reports one low cleanup issue and one high shared DTO contract defect.",
-      "expected": ["repair findings in one batch", "coordinator verifies the low repair", "Closure covers only the high affected contract"],
-      "forbidden": ["restart broad Full review", "launch a separate cleanup gate"]
+      "prompt": "Execute the already-authorized Closure for the repaired shared-contract defect documented in this repository.",
+      "expected": ["launch the recorded reviewer_standard lineage for affected Closure", "leave the already-repaired tree unchanged"],
+      "forbidden": ["restart broad Full review", "launch reviewer_deep or a separate cleanup gate"],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/review-closure",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["code-review"],
+        "should_not_trigger": ["implementation-spec-review"],
+        "assertions": [
+          {"kind": "route_equals", "value": "review-closure"},
+          {"kind": "event_present", "event": "subagent_launch", "value": "reviewer_standard:closure"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"},
+          {"kind": "tree_unchanged"}
+        ]
+      }
+    },
+    {
+      "id": "repair-complexity-stops-implementation",
+      "prompt": "Continue the approved spec after the latest Closure finding documented in this repository. Apply the next repair and rerun Closure.",
+      "expected": [
+        "distinguish an ordinary Closure correction from a new mechanism",
+        "treat the newly required recovery boundary as a substantive spec or design change",
+        "stop implementation without another patch or Closure"
+      ],
+      "forbidden": [
+        "add another flag, fallback, exception, or durable transition",
+        "launch another Closure reviewer",
+        "mark the defect fixed or the contract ledger green"
+      ],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/repair-complexity-stop",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["spec-implementer"],
+        "should_not_trigger": ["code-debugger", "implementation-spec-maker", "tdd"],
+        "assertions": [
+          {"kind": "route_equals", "value": "repair-complexity-blocked"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_standard:closure"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"},
+          {"kind": "tree_unchanged"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
+    },
+    {
+      "id": "repair-findings-consolidated",
+      "prompt": "Continue the approved spec after the latest Closure findings documented in this repository. Repair every compatible finding and complete the affected proof.",
+      "expected": [
+        "treat the budget as a limit on repair waves rather than finding count",
+        "fix all compatible ordinary findings in one bounded Closure-correction batch",
+        "verify each cited failure path and preserve every finding until fixed"
+      ],
+      "forbidden": [
+        "leave a compatible finding open because the normal repair wave already ran",
+        "launch another Closure for ordinary behavior-preserving corrections",
+        "add a new flag, state, owner, parameter, or runtime boundary"
+      ],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/repair-findings-consolidated",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["spec-implementer", "tdd"],
+        "should_not_trigger": ["code-debugger", "implementation-spec-maker"],
+        "assertions": [
+          {"kind": "route_equals", "value": "spec-implementer"},
+          {
+            "kind": "command_exit",
+            "argv": ["python3", "verify_outcome.py"],
+            "exit_code": 0,
+            "boundary": false
+          },
+          {"kind": "event_present", "event": "file_write", "value": "report_summary.py"},
+          {"kind": "event_present", "event": "file_write", "value": ".eval/defect-ledger.json"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_standard:closure"},
+          {"kind": "event_absent", "event": "subagent_launch", "value": "reviewer_deep"}
+        ],
+        "ablation_skill": "spec-implementer"
+      }
     },
     {
       "id": "ledger-needs-material-missed-failure",
-      "prompt": "Choose proof for an ordinary DTO edit whose targeted caller test covers the only realistic failure.",
+      "prompt": "Choose proof for the ordinary DTO edit documented in this repository; its targeted caller test covers the only realistic failure.",
       "expected": ["use targeted proof without a contract ledger"],
-      "forbidden": ["create a ledger from the DTO category alone"]
+      "forbidden": ["create a ledger from the DTO category alone"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/ledger",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["tdd"],
+        "should_not_trigger": ["implementation-spec-maker"],
+        "assertions": [{"kind": "route_equals", "value": "targeted-proof"}]
+      }
     },
     {
       "id": "ledger-protects-retry-contract",
-      "prompt": "Change retry behavior where a happy-path test could miss duplicate payment side effects.",
+      "prompt": "Change the payment retry behavior documented in this repository, where a happy-path test could miss duplicate side effects.",
       "expected": ["create a contract ledger", "name duplicate payment as the missed failure"],
-      "forbidden": ["rely on the happy path alone"]
+      "forbidden": ["rely on the happy path alone"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/ledger",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["tdd"],
+        "should_not_trigger": ["implementation-spec-maker"],
+        "assertions": [{"kind": "route_equals", "value": "contract-ledger"}]
+      }
     },
     {
       "id": "direct-medium-no-extra-route",
-      "prompt": "Implement one clear medium feature with settled behavior, ownership, and affected proof.",
+      "prompt": "Implement the clear medium feature documented in this repository; behavior, ownership, and affected proof are settled.",
       "expected": ["implement directly"],
-      "forbidden": ["create tickets, a spec, or orchestration from file count, statefulness, or generic risk"]
+      "forbidden": ["create tickets, a spec, or orchestration from file count, statefulness, or generic risk"],
+      "execution": {
+        "level": "end_to_end",
+        "fixture": "end-to-end-direct-medium",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["code-review", "tdd"],
+        "should_not_trigger": ["implementation-spec-maker", "small-task-implementer", "tickets-orchestrator"],
+        "assertions": [
+          {"kind": "route_equals", "value": "direct-medium"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "path_absent", "path": "PLAN.md"},
+          {"kind": "path_absent", "path": "docs/implementation-specs"},
+          {"kind": "event_present", "event": "file_write", "value": "store.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "tdd"}, "after": {"event": "file_write", "value": "store.py"}},
+          {"kind": "event_present", "event": "subagent_launch", "value": "reviewer_standard"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ]
+      }
+    },
+    {
+      "id": "route-copy-config",
+      "prompt": "Apply the exact copy and configuration-only update documented in this repository.",
+      "expected": ["use the small-task route", "run affected validation without manufacturing RED"],
+      "forbidden": ["activate tdd", "create an implementation spec"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/nonbehavior",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["small-task-implementer"],
+        "should_not_trigger": ["implementation-spec-maker", "tdd"],
+        "assertions": [{"kind": "route_equals", "value": "direct-simple"}],
+        "ablation_skill": "small-task-implementer"
+      }
+    },
+    {
+      "id": "route-bounded-fix",
+      "prompt": "Implement the confirmed bounded bug fix documented in this repository through its existing public test seam.",
+      "expected": ["activate tdd", "use code-debugger", "run affected validation"],
+      "forbidden": ["restart open-ended diagnosis", "create an implementation spec"],
+      "execution": {
+        "level": "end_to_end",
+        "fixture": "end-to-end-bounded-fix",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["code-debugger", "tdd"],
+        "should_not_trigger": ["diagnosing-bugs", "implementation-spec-maker"],
+        "assertions": [
+          {"kind": "route_equals", "value": "bounded-fix"},
+          {"kind": "file_contains", "path": ".eval/red.json", "text": "\"status\": \"red\""},
+          {"kind": "command_exit", "argv": ["python3", "verify_outcome.py"], "exit_code": 0, "boundary": false},
+          {"kind": "event_present", "event": "file_write", "value": "calculator.py"},
+          {"kind": "event_order", "before": {"event": "skill_read", "value": "tdd"}, "after": {"event": "file_write", "value": "calculator.py"}},
+          {"kind": "path_absent", "path": "PLAN.md"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"}
+        ],
+        "ablation_skill": "code-debugger"
+      }
+    },
+    {
+      "id": "route-commit-only",
+      "prompt": "Commit only the already validated scoped changes described in this repository and stop without pushing.",
+      "expected": ["use commit", "stage only intended paths", "stop after the local commit"],
+      "forbidden": ["push", "open a pull request", "start another implementation workflow"],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/commit-only",
+        "sandbox": "workspace-write",
+        "trials": 2,
+        "should_trigger": ["commit"],
+        "should_not_trigger": ["code-review", "tickets-orchestrator"],
+        "assertions": [
+          {"kind": "route_equals", "value": "commit-only"},
+          {"kind": "command_exit", "argv": ["python3", "verify_commit.py"], "exit_code": 0, "boundary": true},
+          {"kind": "event_present", "event": "git_commit", "value": "commit"},
+          {"kind": "event_absent", "event": "git_push", "value": "origin"},
+          {"kind": "tree_unchanged"}
+        ],
+        "ablation_skill": "commit"
+      }
+    },
+    {
+      "id": "route-evidence-answers",
+      "prompt": "Implement the tiny change using the exact target, expected value, and validation command already documented in this repository.",
+      "expected": ["use repository evidence", "continue without an obvious clarification question"],
+      "forbidden": ["ask for details already present", "create planning artifacts"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/evidence-first",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["small-task-implementer"],
+        "should_not_trigger": ["implementation-spec-maker", "wayfinder"],
+        "assertions": [{"kind": "route_equals", "value": "evidence-first"}]
+      }
+    },
+    {
+      "id": "route-invented-defaults",
+      "prompt": "Prepare the implementation route for the configurable lookback and cooldown requirement documented in this repository.",
+      "expected": ["identify the missing authority values", "use implementation-spec-maker and block the unresolved decision"],
+      "forbidden": ["invent defaults", "start implementation"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/authority-gap",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["implementation-spec-maker"],
+        "should_not_trigger": ["small-task-implementer", "spec-implementer"],
+        "assertions": [{"kind": "route_equals", "value": "authority-blocked"}]
+      }
+    },
+    {
+      "id": "route-preserve-existing",
+      "prompt": "Prepare an implementation spec for the request documented in this repository, preserving behavior that repository evidence proves already exists.",
+      "expected": ["classify existing behavior as preserve plus regression proof", "scope only the remaining delta"],
+      "forbidden": ["plan a second implementation", "ignore current code evidence"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/preserve-existing",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["implementation-spec-maker"],
+        "should_not_trigger": ["code-debugger", "tdd"],
+        "assertions": [{"kind": "route_equals", "value": "preserve-existing"}]
+      }
     }
   ]
 }

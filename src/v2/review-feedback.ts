@@ -49,23 +49,6 @@ export interface FrozenReviewFeedbackBatchV1 {
   frozenAt: string;
 }
 
-export interface ReviewFeedbackImplementationInvocationV1 {
-  phase: 'prepared' | 'launched';
-  attemptId: string;
-  reportPath: string;
-  preparedAt: string;
-  baseline: {
-    headSha: string;
-    indexTreeSha: string;
-    trackedContentSha256: string;
-    untrackedContentSha256: string;
-    worktreeIdentity: string;
-  };
-  pid: number | null;
-  processGroupId: number | null;
-  launchedAt: string | null;
-}
-
 export interface ReviewFeedbackPublishedReceiptV1 {
   kind: 'published';
   batchId: string;
@@ -83,31 +66,27 @@ export interface ReviewFeedbackBlockedReceiptV1 {
   blockedAt: string;
 }
 
-export interface ReviewFeedbackExecutionV1 {
+export interface ReviewFeedbackRunDataV1 {
   version: 1;
-  phase: 'bootstrap-required' | 'idle' | 'frozen' | 'repairing' | 'verified' | 'publishing' | 'blocked-safety' | 'blocked-exhausted';
+  updateEpoch: number;
   consumedSourceIds: string[];
   previousPublishedHeadSha: string | null;
   repairRound: 0 | 1 | 2 | 3;
   activeBatch: FrozenReviewFeedbackBatchV1 | null;
-  implementationInvocation: ReviewFeedbackImplementationInvocationV1 | null;
   history: Array<ReviewFeedbackPublishedReceiptV1 | ReviewFeedbackBlockedReceiptV1>;
   verifiedReceipt: { batchId: string; checkedChangeSha256: string; proofId: string; verifiedAt: string } | null;
-  terminal: { kind: 'safety' | 'exhausted'; blockedAt: string } | null;
 }
 
-export function createReviewFeedbackBootstrap(): ReviewFeedbackExecutionV1 {
+export function createReviewFeedbackRunData(): ReviewFeedbackRunDataV1 {
   return {
     version: 1,
-    phase: 'bootstrap-required',
+    updateEpoch: 0,
     consumedSourceIds: [],
     previousPublishedHeadSha: null,
     repairRound: 0,
     activeBatch: null,
-    implementationInvocation: null,
     history: [],
     verifiedReceipt: null,
-    terminal: null,
   };
 }
 
@@ -186,10 +165,10 @@ export function projectReviewFeedbackBatch(batch: FrozenReviewFeedbackBatchV1, t
 }
 
 export function appendConsumedReviewSourceIds(
-  execution: ReviewFeedbackExecutionV1,
+  execution: ReviewFeedbackRunDataV1,
   sourceIds: string[],
-): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
+): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
   const seen = new Set(execution.consumedSourceIds);
   const consumedSourceIds = [...execution.consumedSourceIds];
   for (const sourceId of [...sourceIds].sort()) {
@@ -202,173 +181,139 @@ export function appendConsumedReviewSourceIds(
   return { ...structuredClone(execution), consumedSourceIds };
 }
 
-export function bootstrapReviewFeedback(
-  execution: ReviewFeedbackExecutionV1,
+export function initializeReviewFeedback(
+  execution: ReviewFeedbackRunDataV1,
   previousPublishedHeadSha: string,
   existingSourceIds: string[],
-): ReviewFeedbackExecutionV1 {
-  if (execution.phase !== 'bootstrap-required') throw new Error('review feedback bootstrap is already complete');
+): ReviewFeedbackRunDataV1 {
+  if (execution.previousPublishedHeadSha !== null || execution.activeBatch !== null) throw new Error('review feedback bootstrap is already complete');
   assertGitSha(previousPublishedHeadSha, 'review feedback previous published head');
   const next = appendConsumedReviewSourceIds(execution, existingSourceIds);
-  const result: ReviewFeedbackExecutionV1 = {
-    ...next, phase: 'idle', previousPublishedHeadSha, repairRound: 0,
+  const result: ReviewFeedbackRunDataV1 = {
+    ...next, previousPublishedHeadSha, repairRound: 0,
   };
-  validateReviewFeedbackExecution(result);
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
 export function activateReviewFeedback(
-  execution: ReviewFeedbackExecutionV1,
+  execution: ReviewFeedbackRunDataV1,
   batch: FrozenReviewFeedbackBatchV1,
-): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
+): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
   validateFrozenReviewFeedbackBatch(batch);
-  if (execution.phase !== 'idle' || execution.previousPublishedHeadSha !== batch.priorPublishedHeadSha
+  if (execution.activeBatch !== null || execution.previousPublishedHeadSha !== batch.priorPublishedHeadSha
     || batch.sources.some((source) => execution.consumedSourceIds.includes(source.sourceId))) {
     throw new Error('review feedback execution cannot activate this batch');
   }
   const withConsumed = appendConsumedReviewSourceIds(execution, batch.sources.map((source) => source.sourceId));
-  const result: ReviewFeedbackExecutionV1 = {
+  const result: ReviewFeedbackRunDataV1 = {
     ...withConsumed,
-    phase: 'frozen',
+    updateEpoch: execution.updateEpoch + 1,
     repairRound: 1,
     activeBatch: structuredClone(batch),
-    implementationInvocation: null,
     verifiedReceipt: null,
-    terminal: null,
   };
-  validateReviewFeedbackExecution(result);
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
-export function reserveNextReviewFeedbackRound(execution: ReviewFeedbackExecutionV1): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
-  if (!['frozen', 'repairing'].includes(execution.phase) || execution.repairRound >= 3) {
+export function reserveNextReviewFeedbackRound(execution: ReviewFeedbackRunDataV1): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
+  if (!execution.activeBatch || execution.repairRound >= 3) {
     throw new Error('review feedback repair budget is exhausted or inactive');
   }
-  const result = { ...structuredClone(execution), phase: 'repairing' as const, repairRound: (execution.repairRound + 1) as 2 | 3 };
-  validateReviewFeedbackExecution(result);
+  const result = {
+    ...structuredClone(execution),
+    repairRound: (execution.repairRound + 1) as 2 | 3,
+    verifiedReceipt: null,
+  };
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
-export function markReviewFeedbackRepairing(execution: ReviewFeedbackExecutionV1): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
-  if (execution.phase !== 'frozen' && execution.phase !== 'repairing') throw new Error('review feedback is not ready for repair');
-  const result = { ...structuredClone(execution), phase: 'repairing' as const };
-  validateReviewFeedbackExecution(result);
-  return result;
-}
-
-export function markReviewFeedbackVerified(execution: ReviewFeedbackExecutionV1, input: {
+export function markReviewFeedbackVerified(execution: ReviewFeedbackRunDataV1, input: {
   checkedChangeSha256: string;
   proofId: string;
   verifiedAt: string;
-}): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
-  if (execution.phase !== 'repairing' || !execution.activeBatch) throw new Error('review feedback is not ready to verify');
-  const result: ReviewFeedbackExecutionV1 = {
+}): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
+  if (!execution.activeBatch) throw new Error('review feedback is not ready to verify');
+  const result: ReviewFeedbackRunDataV1 = {
     ...structuredClone(execution),
-    phase: 'verified',
-    implementationInvocation: null,
     verifiedReceipt: { batchId: execution.activeBatch.batchId, ...structuredClone(input) },
   };
-  validateReviewFeedbackExecution(result);
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
-export function markReviewFeedbackPublishing(execution: ReviewFeedbackExecutionV1): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
-  if (execution.phase !== 'verified') throw new Error('review feedback is not verified for publication');
-  const result = { ...structuredClone(execution), phase: 'publishing' as const };
-  validateReviewFeedbackExecution(result);
-  return result;
-}
-
-export function publishReviewFeedback(execution: ReviewFeedbackExecutionV1, receipt: ReviewFeedbackPublishedReceiptV1): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
+export function publishReviewFeedback(execution: ReviewFeedbackRunDataV1, receipt: ReviewFeedbackPublishedReceiptV1): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
   validatePublishedReceipt(receipt);
-  if (execution.phase !== 'publishing' || !execution.activeBatch || receipt.batchId !== execution.activeBatch.batchId) {
+  if (!execution.activeBatch || !execution.verifiedReceipt || receipt.batchId !== execution.activeBatch.batchId) {
     throw new Error('review feedback publication receipt does not match active batch');
   }
-  const result: ReviewFeedbackExecutionV1 = {
-    ...createReviewFeedbackBootstrap(),
-    phase: 'idle',
+  const result: ReviewFeedbackRunDataV1 = {
+    ...createReviewFeedbackRunData(),
+    updateEpoch: execution.updateEpoch,
     consumedSourceIds: [...execution.consumedSourceIds],
     previousPublishedHeadSha: receipt.publishedHeadSha,
     history: [...execution.history, structuredClone(receipt)],
   };
-  validateReviewFeedbackExecution(result);
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
 export function blockReviewFeedback(
-  execution: ReviewFeedbackExecutionV1,
+  execution: ReviewFeedbackRunDataV1,
   kind: 'safety' | 'exhausted',
   blockedAt: string,
-): ReviewFeedbackExecutionV1 {
-  validateReviewFeedbackExecution(execution);
+): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
   if (!execution.activeBatch) throw new Error('review feedback has no active batch to block');
   const receipt: ReviewFeedbackBlockedReceiptV1 = {
     kind: kind === 'safety' ? 'blocked-safety' : 'blocked-exhausted',
     batchId: execution.activeBatch.batchId,
     blockedAt,
   };
-  const result: ReviewFeedbackExecutionV1 = {
+  const result: ReviewFeedbackRunDataV1 = {
     ...structuredClone(execution),
-    phase: receipt.kind,
     activeBatch: null,
-    implementationInvocation: null,
+    repairRound: 0,
     history: [...execution.history, receipt],
     verifiedReceipt: null,
-    terminal: { kind, blockedAt },
   };
-  validateReviewFeedbackExecution(result);
+  validateReviewFeedbackRunData(result);
   return result;
 }
 
-export function validateReviewFeedbackExecution(value: unknown): asserts value is ReviewFeedbackExecutionV1 {
+export function validateReviewFeedbackRunData(value: unknown): asserts value is ReviewFeedbackRunDataV1 {
   exactObject(value, [
-    'version', 'phase', 'consumedSourceIds', 'previousPublishedHeadSha', 'repairRound', 'activeBatch',
-    'implementationInvocation', 'history', 'verifiedReceipt', 'terminal',
+    'version', 'updateEpoch', 'consumedSourceIds', 'previousPublishedHeadSha', 'repairRound', 'activeBatch',
+    'history', 'verifiedReceipt',
   ], 'review feedback execution');
   if (value.version !== 1) throw new Error('review feedback execution version is invalid');
-  const phases = ['bootstrap-required', 'idle', 'frozen', 'repairing', 'verified', 'publishing', 'blocked-safety', 'blocked-exhausted'];
-  if (!phases.includes(value.phase as string)) throw new Error('review feedback execution phase is invalid');
+  if (!Number.isSafeInteger(value.updateEpoch) || (value.updateEpoch as number) < 0) throw new Error('review feedback update epoch is invalid');
   validateSourceIds(value.consumedSourceIds, 'review feedback consumed source IDs');
   if (value.previousPublishedHeadSha !== null) assertGitSha(value.previousPublishedHeadSha, 'review feedback previous published head');
   if (![0, 1, 2, 3].includes(value.repairRound as number)) throw new Error('review feedback repair round is invalid');
   if (!Array.isArray(value.history) || value.history.length > MAX_SOURCES) throw new Error('review feedback history is invalid');
   for (const item of value.history) validateHistory(item);
   if (value.activeBatch !== null) validateFrozenReviewFeedbackBatch(value.activeBatch);
-  if (value.implementationInvocation !== null) validateImplementationInvocation(value.implementationInvocation);
   if (value.verifiedReceipt !== null) validateVerifiedReceipt(value.verifiedReceipt);
-  if (value.terminal !== null) validateTerminal(value.terminal);
-
-  const phase = value.phase as ReviewFeedbackExecutionV1['phase'];
-  const active = ['frozen', 'repairing', 'verified', 'publishing'].includes(phase);
-  const blocked = phase === 'blocked-safety' || phase === 'blocked-exhausted';
-  if (phase === 'bootstrap-required' && (value.previousPublishedHeadSha !== null || value.repairRound !== 0 || value.activeBatch !== null)) {
+  if (value.previousPublishedHeadSha === null && (value.repairRound !== 0 || value.activeBatch !== null || value.updateEpoch !== 0)) {
     throw new Error('review feedback bootstrap state is invalid');
   }
-  if (phase === 'idle' && (value.previousPublishedHeadSha === null || value.repairRound !== 0 || value.activeBatch !== null
-    || value.implementationInvocation !== null || value.terminal !== null)) {
+  if (value.activeBatch === null && value.previousPublishedHeadSha !== null && value.repairRound !== 0) {
     throw new Error('review feedback idle state is invalid');
   }
-  if (active && (value.previousPublishedHeadSha === null || value.activeBatch === null
-    || ![1, 2, 3].includes(value.repairRound as number) || value.terminal !== null
+  if (value.activeBatch !== null && (value.previousPublishedHeadSha === null
+    || ![1, 2, 3].includes(value.repairRound as number)
     || (value.activeBatch as FrozenReviewFeedbackBatchV1).priorPublishedHeadSha !== value.previousPublishedHeadSha)) {
     throw new Error('review feedback active state is invalid');
   }
-  if (blocked && (value.activeBatch !== null || value.implementationInvocation !== null || value.terminal === null
-    || (phase === 'blocked-safety') !== ((value.terminal as { kind: string }).kind === 'safety'))) {
-    throw new Error('review feedback terminal state cannot retain active execution');
-  }
-  if (!active && value.implementationInvocation !== null) throw new Error('review feedback invocation requires an active batch');
-  if (phase !== 'verified' && phase !== 'publishing' && value.verifiedReceipt !== null) {
-    throw new Error('review feedback verified receipt is invalid for phase');
-  }
-  if ((phase === 'verified' || phase === 'publishing')
-    && (value.verifiedReceipt as { batchId?: unknown } | null)?.batchId !== (value.activeBatch as FrozenReviewFeedbackBatchV1 | null)?.batchId) {
+  if (value.verifiedReceipt !== null
+    && (value.verifiedReceipt as { batchId?: unknown }).batchId !== (value.activeBatch as FrozenReviewFeedbackBatchV1 | null)?.batchId) {
     throw new Error('review feedback verified receipt batch does not match active batch');
   }
 }
@@ -433,25 +378,6 @@ function validateFrozenSource(value: unknown): asserts value is FrozenReviewFeed
   assertTimestamp(value.permission.checkedAt, 'review feedback permission checkedAt');
 }
 
-function validateImplementationInvocation(value: unknown): void {
-  exactObject(value, ['phase', 'attemptId', 'reportPath', 'preparedAt', 'baseline', 'pid', 'processGroupId', 'launchedAt'], 'review feedback implementation invocation');
-  if (value.phase !== 'prepared' && value.phase !== 'launched') throw new Error('review feedback invocation phase is invalid');
-  assertString(value.attemptId, 'review feedback invocation attempt ID');
-  assertString(value.reportPath, 'review feedback invocation report path');
-  assertTimestamp(value.preparedAt, 'review feedback invocation preparedAt');
-  exactObject(value.baseline, ['headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity'], 'review feedback invocation baseline');
-  assertGitSha(value.baseline.headSha, 'review feedback invocation head');
-  assertGitSha(value.baseline.indexTreeSha, 'review feedback invocation index tree');
-  assertSha(value.baseline.trackedContentSha256, 'review feedback invocation tracked hash');
-  assertSha(value.baseline.untrackedContentSha256, 'review feedback invocation untracked hash');
-  assertString(value.baseline.worktreeIdentity, 'review feedback invocation worktree identity');
-  if (value.phase === 'prepared' && (value.pid !== null || value.processGroupId !== null || value.launchedAt !== null)) throw new Error('prepared review feedback invocation has launch evidence');
-  if (value.phase === 'launched') {
-    if (!Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || !Number.isSafeInteger(value.processGroupId) || (value.processGroupId as number) < 1) throw new Error('launched review feedback invocation process is invalid');
-    assertTimestamp(value.launchedAt, 'review feedback invocation launchedAt');
-  }
-}
-
 function validateHistory(value: unknown): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('review feedback history item is invalid');
   const kind = (value as { kind?: unknown }).kind;
@@ -481,12 +407,6 @@ function validateVerifiedReceipt(value: unknown): void {
   assertSha(value.checkedChangeSha256, 'review feedback checked change hash');
   assertString(value.proofId, 'review feedback proof ID');
   assertTimestamp(value.verifiedAt, 'review feedback verifiedAt');
-}
-
-function validateTerminal(value: unknown): void {
-  exactObject(value, ['kind', 'blockedAt'], 'review feedback terminal');
-  if (value.kind !== 'safety' && value.kind !== 'exhausted') throw new Error('review feedback terminal kind is invalid');
-  assertTimestamp(value.blockedAt, 'review feedback terminal blockedAt');
 }
 
 function validateSourceIds(value: unknown, field: string): asserts value is string[] {

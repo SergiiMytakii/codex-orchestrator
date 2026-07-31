@@ -1,5 +1,6 @@
 import type { ProofReceipt } from './proof-report.js';
-import { validateDirectReview, type DirectReviewStage, type DirectReviewV1 } from './direct-delivery.js';
+import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
+import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
 import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
   validateRouteExecution,
@@ -9,13 +10,16 @@ import {
   type RouteReceiptV1,
 } from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
-import { validateWaitingHumanExecution, type WaitingHumanExecutionV1 } from './waiting-human.js';
+import { validateDeliveryAuthority, type DeliveryAuthorityV1 } from './delivery-authority.js';
+import { constants } from 'node:fs';
 import { posix } from 'node:path';
+import { open, type FileHandle } from 'node:fs/promises';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
+import { canonicalJson, sha256 } from './containment.js';
+import { validateCandidateBinding, validateCandidateMaterialization, type CandidateBindingV2, type CandidateMaterializationV2 } from './candidate.js';
 import {
-  createReviewFeedbackBootstrap,
-  validateReviewFeedbackExecution,
-  type ReviewFeedbackExecutionV1,
+  validateReviewFeedbackRunData,
+  type ReviewFeedbackRunDataV1,
 } from './review-feedback.js';
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -26,7 +30,6 @@ export type Lifecycle =
   | 'claimed'
   | 'triaging'
   | 'routed'
-  | 'waiting-human'
   | 'spec-authoring'
   | 'implementing'
   | 'reworking'
@@ -40,13 +43,15 @@ export type Lifecycle =
   | 'cancelled'
   | 'internal-error';
 
-export type PublicationIntent =
+type EffectIdentity = { effectId: string };
+
+export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
-  | { kind: 'commit'; parentSha: string; treeSha: string; message: string }
-  | { kind: 'push'; branch: string; sha: string }
-  | { kind: 'pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
-  | { kind: 'comment'; issueNumber: number; marker: string; bodySha256: string }
-  | { kind: 'labels'; issueNumber: number; expected: string[] }
+  | { kind: 'claim-comment' | 'handoff-comment' | 'spec-question-comment'; issueNumber: number; marker: string; bodySha256: string }
+  | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
+  | { kind: 'initial-push'; branch: string; sha: string }
+  | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
+  | { kind: 'final-labels'; issueNumber: number; expected: string[] }
   | {
     kind: 'blocked-labels';
     issueNumber: number;
@@ -56,7 +61,7 @@ export type PublicationIntent =
     evidenceCode: string;
   }
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
-  | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string }
+  | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
   | { kind: 'review-summary'; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; marker: string; bodySha256: string; epochHeadSha: string }
   | { kind: 'review-final-labels'; issueNumber: number; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; epochHeadSha: string; expected: string[] }
@@ -67,7 +72,19 @@ export type PublicationIntent =
     expected: string[];
     blockKind: 'safety' | 'exhausted';
     evidenceCode: string;
-  };
+  }
+  | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
+  | { kind: 'continuation-worktree-create'; worktreePath: string; branchName: string; baseBranch: string; publishedHeadSha: string }
+  | { kind: 'outcome-evidence'; path: string; runId: string; code: string; summary: string; recordedAt: string; bytesSha256: string }
+);
+
+export type PendingEffectInput = PendingEffect extends infer T
+  ? T extends EffectIdentity ? Omit<T, 'effectId'> : never
+  : never;
+
+export function createPendingEffect<T extends PendingEffectInput>(effect: T): T & EffectIdentity {
+  return { ...structuredClone(effect), effectId: sha256(canonicalJson(effect)) };
+}
 
 export type RunTerminalOutcome =
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
@@ -99,7 +116,17 @@ export interface PersistedFrozenCriterionV1 {
   source: 'explicit' | 'fallback';
 }
 
-export interface RunRecordV1 {
+export interface CandidateCheckReceiptV2 {
+  id: string;
+  command: string;
+  status: 'passed' | 'failed';
+  outputSha256: string;
+  bindingId: string;
+  candidateTreeSha: string;
+  checkPolicySha256: string;
+}
+
+export interface RunRecord {
   runId: string;
   issueNumber: number;
   canonicalRepository: string;
@@ -117,50 +144,52 @@ export interface RunRecordV1 {
   workflowGeneration: WorkflowGenerationReceipt;
   routeExecution?: RouteExecutionV1;
   routeReceipt?: RouteReceiptV1;
-  waitingHuman?: WaitingHumanExecutionV1;
+  deliveryAuthority?: DeliveryAuthorityV1;
   directReview?: DirectReviewV1;
   specDelivery?: SpecDeliveryV1;
-  reviewFeedback?: ReviewFeedbackExecutionV1;
+  reviewFeedback?: ReviewFeedbackRunDataV1;
+  changeBindingVersion?: 2;
+  candidateBinding?: CandidateBindingV2;
+  candidateMaterialization?: CandidateMaterializationV2;
   skillHashes: Record<string, string>;
-  process?: {
-    pid: number;
-    processGroupId: number;
-    startedAt: string;
-    baseline: {
-      headSha: string;
-      indexTreeSha: string;
-      trackedContentSha256: string;
-      untrackedContentSha256: string;
-      worktreeIdentity: string;
-    };
-    purpose: 'route' | 'implementation' | 'code-review' | 'proof' | 'spec-author' | 'spec-review';
-    resumeLifecycle: Lifecycle;
-    resumeReviewStage: DirectReviewStage | null;
-  };
-  baselineChecks?: Array<{ id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }>;
-  checks: Array<{ id: string; command: string; status: 'passed' | 'failed' | 'unchanged-failure'; outputSha256: string }>;
+  activeAttempt?: ActiveAttempt;
+  checks: Array<
+    | { id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }
+    | CandidateCheckReceiptV2
+  >;
   checkedChangeSha256?: string;
   proofId?: string;
+  proofExecution?: {
+    startedAt: string;
+    transportRetryCount: 0 | 1;
+    reportRepairCount: 0 | 1;
+    reportRepairFindings: string[];
+  };
   proofReceipt?: ProofReceipt;
-  intent?: PublicationIntent;
+  pendingEffect?: PendingEffect;
   outcomeEvidenceId?: string;
   terminalOutcome?: RunTerminalOutcome;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface RunStateFileV1 {
-  schema: 'codex-orchestrator.agent-auto-state';
-  version: 2;
+export interface RunStateFile {
+  schema: 'codex-orchestrator.run-state';
   generation: number;
-  runs: RunRecordV1[];
+  runs: RunRecord[];
 }
 
-export type RunStateBodyV1 = Omit<RunStateFileV1, 'generation'>;
+export type RunStateBody = Omit<RunStateFile, 'generation'>;
+
+export type RunStateInspection =
+  | { status: 'absent'; rawSha256: null }
+  | { status: 'supported'; rawSha256: string; state: RunStateFile }
+  | { status: 'unsupported'; rawSha256: string };
 
 export interface RunRecordWriter {
-  read(): Promise<RunStateFileV1>;
-  compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1>;
+  inspect(): Promise<RunStateInspection>;
+  read(): Promise<RunStateFile>;
+  compareAndSwap(expectedGeneration: number, next: RunStateBody): Promise<RunStateFile>;
 }
 
 export class WorkflowGenerationUnrecoverableError extends Error {
@@ -178,65 +207,81 @@ export class RouteInitializationUnrecoverableError extends Error {
 }
 
 export class FileRunRecordWriter implements RunRecordWriter {
-  private readonly file: AtomicStateFile<RunStateFileV1>;
+  private readonly file: AtomicStateFile<RunStateFile>;
+  private readonly maxBytes: number;
 
   constructor(path: string, options: AtomicStateFileOptions = {}) {
     this.file = new AtomicStateFile(path, validateRunStateFile, options);
+    this.maxBytes = options.maxBytes ?? 1024 * 1024;
   }
 
-  async read(): Promise<RunStateFileV1> {
-    return await this.file.read() ?? emptyRunState();
+  async inspect(): Promise<RunStateInspection> {
+    const bytes = await readOptionalStateFile(this.file.path);
+    if (!bytes) return { status: 'absent', rawSha256: null };
+    const rawSha256 = sha256(bytes);
+    if (bytes.length > this.maxBytes) return { status: 'unsupported', rawSha256 };
+    try {
+      return { status: 'supported', rawSha256, state: parseRawState(bytes) };
+    } catch {
+      return { status: 'unsupported', rawSha256 };
+    }
   }
 
-  async compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1> {
+  async read(): Promise<RunStateFile> {
+    const inspection = await this.inspect();
+    if (inspection.status === 'absent') return emptyRunState();
+    if (inspection.status === 'supported') return inspection.state;
+    throw new Error('run state schema is unsupported');
+  }
+
+  async compareAndSwap(expectedGeneration: number, next: RunStateBody): Promise<RunStateFile> {
     validateRunStateBody(next);
-    return this.file.compareAndSwap(expectedGeneration, { ...structuredClone(next), generation: expectedGeneration + 1 });
+    const candidate = { ...structuredClone(next), generation: expectedGeneration + 1 };
+    return this.file.compareAndSwap(expectedGeneration, candidate);
   }
 }
 
 export class InMemoryRunRecordWriter implements RunRecordWriter {
-  private state = emptyRunState();
+  private state: RunStateFile | undefined;
 
-  async read(): Promise<RunStateFileV1> {
-    return structuredClone(this.state);
+  async inspect(): Promise<RunStateInspection> {
+    if (!this.state) return { status: 'absent', rawSha256: null };
+    const state = structuredClone(this.state);
+    return {
+      status: 'supported',
+      rawSha256: sha256(`${canonicalJson(state)}\n`),
+      state,
+    };
   }
 
-  async compareAndSwap(expectedGeneration: number, next: RunStateBodyV1): Promise<RunStateFileV1> {
-    if (this.state.generation !== expectedGeneration) throw new Error('run state generation conflict');
+  async read(): Promise<RunStateFile> {
+    return structuredClone(this.state ?? emptyRunState());
+  }
+
+  async compareAndSwap(expectedGeneration: number, next: RunStateBody): Promise<RunStateFile> {
+    if ((this.state?.generation ?? 0) !== expectedGeneration) throw new Error('run state generation conflict');
+    validateRunStateBody(next);
     const value = validateRunStateFile({ ...structuredClone(next), generation: expectedGeneration + 1 });
     this.state = value;
     return structuredClone(value);
   }
 }
 
-export function validateRunStateFile(value: unknown): RunStateFileV1 {
-  assertExactObject(value, ['schema', 'version', 'generation', 'runs'], 'run state');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || (value.version !== 1 && value.version !== 2)) throw new Error('run state schema/version is invalid');
+export function validateRunStateFile(value: unknown): RunStateFile {
+  assertExactObject(value, ['schema', 'generation', 'runs'], 'run state');
+  if (value.schema !== 'codex-orchestrator.run-state') throw new Error('run state schema is invalid');
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) throw new Error('run state generation is invalid');
   validateRuns(value.runs);
-  if (value.version === 1) {
-    for (const run of value.runs as RunRecordV1[]) {
-      if (hasOwn(run, 'reviewFeedback')) throw new Error('V1 run state cannot contain review feedback');
-    }
-    return {
-      schema: 'codex-orchestrator.agent-auto-state',
-      version: 2,
-      generation: value.generation as number,
-      runs: (value.runs as RunRecordV1[]).map((run) => run.lifecycle === 'review-ready'
-        ? { ...structuredClone(run), reviewFeedback: createReviewFeedbackBootstrap() }
-        : structuredClone(run)),
-    };
-  }
-  return value as unknown as RunStateFileV1;
+  return value as unknown as RunStateFile;
 }
 
-function validateRunStateBody(value: unknown): asserts value is RunStateBodyV1 {
-  assertExactObject(value, ['schema', 'version', 'runs'], 'run state body');
-  if (value.schema !== 'codex-orchestrator.agent-auto-state' || value.version !== 2) throw new Error('run state schema/version is invalid');
+function validateRunStateBody(value: unknown): asserts value is RunStateBody {
+  assertExactObject(value, ['schema', 'runs'], 'run state body');
+  if (value.schema !== 'codex-orchestrator.run-state') throw new Error('run state schema is invalid');
   validateRuns(value.runs);
 }
 
-function validateRuns(value: unknown): asserts value is RunRecordV1[] {
+function validateRuns(value: unknown): asserts value is RunRecord[] {
   if (!Array.isArray(value) || value.length > 256) throw new Error('run state runs are invalid');
   const ids = new Set<string>();
   for (const [index, run] of value.entries()) {
@@ -246,22 +291,25 @@ function validateRuns(value: unknown): asserts value is RunRecordV1[] {
   }
 }
 
-function validateRunRecord(value: unknown, field: string): asserts value is RunRecordV1 {
+function validateRunRecord(value: unknown, field: string): asserts value is RunRecord {
   const optional = [
-    'process',
+    'activeAttempt',
     'checkedChangeSha256',
     'proofId',
+    'proofExecution',
     'proofReceipt',
-    'intent',
+    'pendingEffect',
     'outcomeEvidenceId',
     'terminalOutcome',
     'routeExecution',
     'routeReceipt',
-    'waitingHuman',
+    'deliveryAuthority',
     'directReview',
     'specDelivery',
     'reviewFeedback',
-    'baselineChecks',
+    'changeBindingVersion',
+    'candidateBinding',
+    'candidateMaterialization',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -294,48 +342,38 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   const routeGenerationHash = workflowGeneration.generationHash;
   if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
   if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
+  if (hasOwn(value, 'deliveryAuthority')) {
+    if (!hasOwn(value, 'routeReceipt')) throw new Error(`${field}.deliveryAuthority requires route receipt`);
+    validateDeliveryAuthority(
+      value.deliveryAuthority,
+      value.routeReceipt as RouteReceiptV1,
+      hasOwn(value, 'specDelivery') ? value.specDelivery as SpecDeliveryV1 : undefined,
+    );
+  }
+  if (['implementing', 'reworking', 'checking', 'proving', 'publishing', 'review-ready'].includes(value.lifecycle as string)
+    && hasOwn(value, 'routeReceipt') && !hasOwn(value, 'deliveryAuthority')) {
+    throw new Error(`${field}.deliveryAuthority is required for delivery progression`);
+  }
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
-  if (hasOwn(value, 'baselineChecks')) validateChecks(value.baselineChecks, `${field}.baselineChecks`, false);
   validateChecks(value.checks, `${field}.checks`);
-  if (hasOwn(value, 'process')) validateProcess(value.process, `${field}.process`);
+  if (hasOwn(value, 'activeAttempt')) {
+    const attempt = validateActiveAttempt(value.activeAttempt);
+    if (attempt.runId !== value.runId) throw new Error(`${field}.activeAttempt run identity is invalid`);
+  }
   if (hasOwn(value, 'checkedChangeSha256')) assertSha256(value.checkedChangeSha256, `${field}.checkedChangeSha256`);
   if (hasOwn(value, 'proofId')) assertNonEmptyString(value.proofId, `${field}.proofId`);
+  if (hasOwn(value, 'proofExecution')) validateProofExecution(value.proofExecution, `${field}.proofExecution`);
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
-  if (hasOwn(value, 'intent')) validateIntent(value.intent, `${field}.intent`);
+  if (hasOwn(value, 'pendingEffect')) validatePendingEffect(value.pendingEffect, `${field}.pendingEffect`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
-  if (hasOwn(value, 'waitingHuman')) {
-    if (!routeGenerationHash) throw new WorkflowGenerationUnrecoverableError();
-    validateWaitingHumanExecution(value.waitingHuman, {
-      runId: value.runId,
-      lifecycle: value.lifecycle,
-      workflowGenerationHash: routeGenerationHash,
-      routeReceipt: hasOwn(value, 'routeReceipt') ? value.routeReceipt as RouteReceiptV1 : undefined,
-      terminalOutcome: hasOwn(value, 'terminalOutcome') ? value.terminalOutcome as RunTerminalOutcome : undefined,
-    });
-  }
   if (hasOwn(value, 'directReview')) {
-    if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'direct') {
-      throw new Error(`${field}.directReview requires a direct route`);
+    if (!hasOwn(value, 'routeReceipt') || !['direct', 'spec-required'].includes((value.routeReceipt as RouteReceiptV1).route)) {
+      throw new Error(`${field}.directReview requires a delivery authority route`);
     }
-    const rawProcess = hasOwn(value, 'process') && hasOwn(value.process, 'purpose')
-      ? value.process as RunRecordV1['process'] & Required<Pick<NonNullable<RunRecordV1['process']>, 'purpose' | 'resumeLifecycle' | 'resumeReviewStage'>>
-      : undefined;
-    const process = rawProcess && !['spec-author', 'spec-review'].includes(rawProcess.purpose)
-      ? {
-        purpose: rawProcess.purpose as 'route' | 'implementation' | 'code-review' | 'proof',
-        resumeLifecycle: rawProcess.resumeLifecycle,
-        resumeReviewStage: rawProcess.resumeReviewStage,
-      }
-      : undefined;
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
       ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
-      ...(process ? { process: {
-        purpose: process.purpose,
-        resumeLifecycle: process.resumeLifecycle,
-        resumeReviewStage: process.resumeReviewStage,
-      } } : {}),
     });
   }
   if (hasOwn(value, 'specDelivery')) {
@@ -347,10 +385,33 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       || spec.workflowGenerationSha256 !== routeGenerationHash) {
       throw new Error(`${field}.specDelivery identity binding is invalid`);
     }
+    if (value.lifecycle === 'implementing' && spec.stage !== 'frozen') {
+      throw new Error(`${field}.specDelivery must be frozen before implementation`);
+    }
   }
   if (hasOwn(value, 'reviewFeedback')) {
-    validateReviewFeedbackExecution(value.reviewFeedback);
-    validateReviewFeedbackRunInvariant(value as unknown as RunRecordV1, field);
+    validateReviewFeedbackRunData(value.reviewFeedback);
+    validateReviewFeedbackRunInvariant(value as unknown as RunRecord, field);
+  }
+  if (hasOwn(value, 'changeBindingVersion') && value.changeBindingVersion !== 2) throw new Error(`${field}.changeBindingVersion is invalid`);
+  if (hasOwn(value, 'candidateBinding')) validateCandidateBinding(value.candidateBinding, `${field}.candidateBinding`, value.runId as string);
+  if (hasOwn(value, 'candidateMaterialization')) validateCandidateMaterialization(value.candidateMaterialization, `${field}.candidateMaterialization`);
+  if (hasOwn(value, 'candidateBinding') !== hasOwn(value, 'changeBindingVersion')) throw new Error(`${field} candidate binding version is incomplete`);
+  if (hasOwn(value, 'candidateMaterialization')) {
+    if (!hasOwn(value, 'candidateBinding')) throw new Error(`${field}.candidateMaterialization requires candidate binding`);
+    const binding = value.candidateBinding as unknown as CandidateBindingV2;
+    const materialization = value.candidateMaterialization as unknown as CandidateMaterializationV2;
+    if (materialization.bindingId !== binding.bindingId || materialization.candidateCommitSha !== binding.candidateCommitSha) {
+      throw new Error(`${field}.candidateMaterialization binding is invalid`);
+    }
+  }
+  if (hasOwn(value, 'pendingEffect') && hasOwn(value.pendingEffect, 'candidateRef')) {
+    if (!hasOwn(value, 'candidateBinding')) throw new Error(`${field}.pendingEffect candidate ref requires candidate binding`);
+    const binding = value.candidateBinding as unknown as CandidateBindingV2;
+    const pendingEffect = value.pendingEffect as Extract<PendingEffect, { kind: 'initial-commit' | 'review-update-commit' }>;
+    if (pendingEffect.candidateRef !== binding.candidateRef || pendingEffect.treeSha !== binding.candidateTreeSha) {
+      throw new Error(`${field}.pendingEffect candidate binding is invalid`);
+    }
   }
   assertTimestamp(value.createdAt, `${field}.createdAt`);
   assertTimestamp(value.updatedAt, `${field}.updatedAt`);
@@ -363,17 +424,27 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);
   }
   if (value.lifecycle === 'publishing' && !hasOwn(value, 'proofReceipt')) throw new Error(`${field} publishing requires proofReceipt`);
-  if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'process')) throw new Error(`${field} safe-halt requires retained process evidence`);
-  if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || hasOwn(value, 'intent'))) {
-    throw new Error(`${field} review-ready requires proofReceipt and no intent`);
+  if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
+  const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
+  const reviewReadyEffectAllowed = reviewReadyEffect === undefined
+    || ['review-activation-labels', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence'].includes(reviewReadyEffect);
+  if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || !reviewReadyEffectAllowed)) {
+    throw new Error(`${field} review-ready requires proofReceipt and only a review continuation or terminal effect`);
   }
-  if (terminal && hasOwn(value, 'process')) throw new Error(`${field} terminal lifecycle cannot retain process ownership`);
-  if (terminal && hasOwn(value, 'intent') && value.lifecycle !== 'transport-failed') throw new Error(`${field} terminal lifecycle cannot retain intent`);
-  if (value.lifecycle === 'transport-failed' && hasOwn(value, 'intent')
+  const retainedCandidateEffect = value.lifecycle === 'blocked'
+    && (value.terminalOutcome as RunTerminalOutcome | undefined)?.status === 'blocked'
+    && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'blocked' }>).kind === 'safety'
+    && !(value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'blocked' }>).resumable
+    && hasOwn(value, 'candidateBinding')
+    && ((value.pendingEffect as PendingEffect | undefined)?.kind === 'initial-commit' || (value.pendingEffect as PendingEffect | undefined)?.kind === 'review-update-commit');
+  const settlingOutcomeEvidence = (value.pendingEffect as PendingEffect | undefined)?.kind === 'outcome-evidence';
+  if (terminal && hasOwn(value, 'pendingEffect') && value.lifecycle !== 'transport-failed'
+    && !retainedCandidateEffect && !settlingOutcomeEvidence) throw new Error(`${field} terminal lifecycle cannot retain pending effect`);
+  if (value.lifecycle === 'transport-failed' && hasOwn(value, 'pendingEffect')
+    && !settlingOutcomeEvidence
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
-    throw new Error(`${field} resumable transport failure cannot retain intent`);
+    throw new Error(`${field} resumable transport failure cannot retain pending effect`);
   }
-  if (value.lifecycle === 'waiting-human' && !hasOwn(value, 'waitingHuman')) throw new Error(`${field} waiting-human lifecycle requires waitingHuman execution`);
   validateRouteStateInvariant({
     lifecycle: value.lifecycle,
     routeExecution: value.routeExecution,
@@ -402,40 +473,24 @@ function validateWorkflowGeneration(value: unknown, field: string): asserts valu
   assertSha256(value.contentSha256, `${field}.contentSha256`);
 }
 
-function validateProcess(value: unknown, field: string): void {
-  assertExactObject(value, [
-    'pid', 'processGroupId', 'startedAt', 'baseline', 'purpose', 'resumeLifecycle', 'resumeReviewStage',
-  ], field);
-  assertPositiveInteger(value.pid, `${field}.pid`);
-  assertPositiveInteger(value.processGroupId, `${field}.processGroupId`);
-  assertTimestamp(value.startedAt, `${field}.startedAt`);
-  assertExactObject(value.baseline, [
-    'headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity',
-  ], `${field}.baseline`);
-  assertGitSha(value.baseline.headSha, `${field}.baseline.headSha`);
-  assertGitSha(value.baseline.indexTreeSha, `${field}.baseline.indexTreeSha`);
-  assertSha256(value.baseline.trackedContentSha256, `${field}.baseline.trackedContentSha256`);
-  assertSha256(value.baseline.untrackedContentSha256, `${field}.baseline.untrackedContentSha256`);
-  assertNonEmptyString(value.baseline.worktreeIdentity, `${field}.baseline.worktreeIdentity`);
-  if (!['route', 'implementation', 'code-review', 'proof', 'spec-author', 'spec-review'].includes(value.purpose as string)) {
-    throw new Error(`${field}.purpose is invalid`);
-  }
-  if (!isLifecycle(value.resumeLifecycle)) throw new Error(`${field}.resumeLifecycle is invalid`);
-  if (value.resumeReviewStage !== null && ![
-    'review-full', 'review-repair', 'review-closure',
-  ].includes(value.resumeReviewStage as string)) throw new Error(`${field}.resumeReviewStage is invalid`);
-}
-
-function validateChecks(value: unknown, field: string, allowUnchangedFailure = true): asserts value is RunRecordV1['checks'] {
+function validateChecks(value: unknown, field: string): asserts value is RunRecord['checks'] {
   if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
   const ids = new Set<string>();
   for (const [index, check] of value.entries()) {
-    assertExactObject(check, ['id', 'command', 'status', 'outputSha256'], `${field}[${index}]`);
+    const candidate = hasOwn(check, 'bindingId') || hasOwn(check, 'candidateTreeSha') || hasOwn(check, 'checkPolicySha256');
+    assertExactObject(check, [
+      'id', 'command', 'status', 'outputSha256',
+      ...(candidate ? ['bindingId', 'candidateTreeSha', 'checkPolicySha256'] : []),
+    ], `${field}[${index}]`);
     assertNonEmptyString(check.id, `${field}[${index}].id`);
     assertNonEmptyString(check.command, `${field}[${index}].command`);
-    if (check.status !== 'passed' && check.status !== 'failed'
-      && (check.status !== 'unchanged-failure' || !allowUnchangedFailure)) throw new Error(`${field}[${index}].status is invalid`);
+    if (check.status !== 'passed' && check.status !== 'failed') throw new Error(`${field}[${index}].status is invalid`);
     assertSha256(check.outputSha256, `${field}[${index}].outputSha256`);
+    if (candidate) {
+      assertSha256(check.bindingId, `${field}[${index}].bindingId`);
+      assertGitSha(check.candidateTreeSha, `${field}[${index}].candidateTreeSha`);
+      assertSha256(check.checkPolicySha256, `${field}[${index}].checkPolicySha256`);
+    }
     if (ids.has(check.id)) throw new Error(`${field} IDs must be unique`);
     ids.add(check.id);
   }
@@ -487,51 +542,55 @@ function validateStringList(value: unknown, field: string): asserts value is str
   for (const item of value) assertNonEmptyString(item, field);
 }
 
-function validateIntent(value: unknown, field: string): void {
+function validatePendingEffect(value: unknown, field: string): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid`);
   const kind = (value as { kind?: unknown }).kind;
-  if (kind === 'claim-labels' || kind === 'labels') {
-    assertExactObject(value, ['kind', 'issueNumber', 'expected'], field);
+  const identity = ['effectId', 'kind'];
+  if (kind === 'claim-labels' || kind === 'final-labels'
+    ) {
+    assertExactObject(value, [...identity, 'issueNumber', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
-  } else if (kind === 'commit') {
-    assertExactObject(value, ['kind', 'parentSha', 'treeSha', 'message'], field);
+  } else if (kind === 'initial-commit') {
+    assertExactObject(value, [...identity, 'parentSha', 'treeSha', 'message', ...(hasOwn(value, 'candidateRef') ? ['candidateRef'] : [])], field);
     assertGitSha(value.parentSha, `${field}.parentSha`);
     assertGitSha(value.treeSha, `${field}.treeSha`);
     assertNonEmptyString(value.message, `${field}.message`);
-  } else if (kind === 'push') {
-    assertExactObject(value, ['kind', 'branch', 'sha'], field);
+    if (hasOwn(value, 'candidateRef')) assertCandidateRef(value.candidateRef, `${field}.candidateRef`);
+  } else if (kind === 'initial-push') {
+    assertExactObject(value, [...identity, 'branch', 'sha'], field);
     assertNonEmptyString(value.branch, `${field}.branch`);
     assertGitSha(value.sha, `${field}.sha`);
-  } else if (kind === 'pr') {
-    assertExactObject(value, ['kind', 'owner', 'repo', 'head', 'base', 'issueNumber', 'marker'], field);
+  } else if (kind === 'draft-pr') {
+    assertExactObject(value, [...identity, 'owner', 'repo', 'head', 'base', 'issueNumber', 'marker'], field);
     for (const key of ['owner', 'repo', 'head', 'base', 'marker'] as const) assertNonEmptyString(value[key], `${field}.${key}`);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-  } else if (kind === 'comment') {
-    assertExactObject(value, ['kind', 'issueNumber', 'marker', 'bodySha256'], field);
+  } else if (kind === 'claim-comment' || kind === 'handoff-comment' || kind === 'spec-question-comment') {
+    assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
     assertSha256(value.bodySha256, `${field}.bodySha256`);
   } else if (kind === 'review-activation-labels') {
-    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'expected'], field);
+    assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertSha256(value.batchId, `${field}.batchId`);
     validateStringArray(value.expected, `${field}.expected`);
   } else if (kind === 'review-update-commit') {
-    assertExactObject(value, ['kind', 'batchId', 'parentSha', 'treeSha', 'message'], field);
+    assertExactObject(value, [...identity, 'batchId', 'parentSha', 'treeSha', 'message', ...(hasOwn(value, 'candidateRef') ? ['candidateRef'] : [])], field);
     assertSha256(value.batchId, `${field}.batchId`);
     assertGitSha(value.parentSha, `${field}.parentSha`);
     assertGitSha(value.treeSha, `${field}.treeSha`);
     assertNonEmptyString(value.message, `${field}.message`);
+    if (hasOwn(value, 'candidateRef')) assertCandidateRef(value.candidateRef, `${field}.candidateRef`);
   } else if (kind === 'review-update-push') {
-    assertExactObject(value, ['kind', 'batchId', 'branch', 'priorRemoteSha', 'sha', 'treeSha'], field);
+    assertExactObject(value, [...identity, 'batchId', 'branch', 'priorRemoteSha', 'sha', 'treeSha'], field);
     assertSha256(value.batchId, `${field}.batchId`);
     assertNonEmptyString(value.branch, `${field}.branch`);
     assertGitSha(value.priorRemoteSha, `${field}.priorRemoteSha`);
     assertGitSha(value.sha, `${field}.sha`);
     assertGitSha(value.treeSha, `${field}.treeSha`);
   } else if (kind === 'review-summary') {
-    assertExactObject(value, ['kind', 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'marker', 'bodySha256', 'epochHeadSha'], field);
+    assertExactObject(value, [...identity, 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'marker', 'bodySha256', 'epochHeadSha'], field);
     assertSha256(value.batchId, `${field}.batchId`);
     assertPositiveInteger(value.pullRequestNumber, `${field}.pullRequestNumber`);
     assertNonEmptyString(value.pullRequestNodeId, `${field}.pullRequestNodeId`);
@@ -539,7 +598,7 @@ function validateIntent(value: unknown, field: string): void {
     assertSha256(value.bodySha256, `${field}.bodySha256`);
     assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
   } else if (kind === 'review-final-labels') {
-    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'epochHeadSha', 'expected'], field);
+    assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'pullRequestNumber', 'pullRequestNodeId', 'epochHeadSha', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertSha256(value.batchId, `${field}.batchId`);
     assertPositiveInteger(value.pullRequestNumber, `${field}.pullRequestNumber`);
@@ -547,22 +606,45 @@ function validateIntent(value: unknown, field: string): void {
     assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
     validateStringArray(value.expected, `${field}.expected`);
   } else if (kind === 'review-blocked-labels') {
-    assertExactObject(value, ['kind', 'issueNumber', 'batchId', 'expected', 'blockKind', 'evidenceCode'], field);
+    assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'expected', 'blockKind', 'evidenceCode'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertSha256(value.batchId, `${field}.batchId`);
     validateStringArray(value.expected, `${field}.expected`);
     if (value.blockKind !== 'safety' && value.blockKind !== 'exhausted') throw new Error(`${field}.blockKind is invalid`);
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else if (kind === 'blocked-labels') {
-    assertExactObject(value, ['kind', 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode'], field);
+    assertExactObject(value, [...identity, 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
     if (!['external', 'safety', 'exhausted'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
     if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
+  } else if (kind === 'worktree-create') {
+    assertExactObject(value, [...identity, 'worktreePath', 'branchName', 'baseBranch', 'baseSha'], field);
+    assertAbsolutePath(value.worktreePath, `${field}.worktreePath`);
+    assertNonEmptyString(value.branchName, `${field}.branchName`);
+    assertNonEmptyString(value.baseBranch, `${field}.baseBranch`);
+    assertGitSha(value.baseSha, `${field}.baseSha`);
+  } else if (kind === 'continuation-worktree-create') {
+    assertExactObject(value, [...identity, 'worktreePath', 'branchName', 'baseBranch', 'publishedHeadSha'], field);
+    assertAbsolutePath(value.worktreePath, `${field}.worktreePath`);
+    assertNonEmptyString(value.branchName, `${field}.branchName`);
+    assertNonEmptyString(value.baseBranch, `${field}.baseBranch`);
+    assertGitSha(value.publishedHeadSha, `${field}.publishedHeadSha`);
+  } else if (kind === 'outcome-evidence') {
+    assertExactObject(value, [...identity, 'path', 'runId', 'code', 'summary', 'recordedAt', 'bytesSha256'], field);
+    assertNonEmptyString(value.path, `${field}.path`);
+    if (typeof value.runId !== 'string' || !UUID_V4_PATTERN.test(value.runId)) throw new Error(`${field}.runId is invalid`);
+    assertNonEmptyString(value.code, `${field}.code`);
+    assertNonEmptyString(value.summary, `${field}.summary`);
+    assertTimestamp(value.recordedAt, `${field}.recordedAt`);
+    assertSha256(value.bytesSha256, `${field}.bytesSha256`);
   } else {
     throw new Error(`${field}.kind is invalid`);
   }
+  assertSha256(value.effectId, `${field}.effectId`);
+  const { effectId, ...payload } = value;
+  if (effectId !== sha256(canonicalJson(payload))) throw new Error(`${field}.effectId does not match its payload`);
 }
 
 function validateTerminalOutcome(value: unknown, field: string): void {
@@ -606,6 +688,17 @@ function validateReceipt(value: unknown, field: string): void {
   }
 }
 
+function validateProofExecution(value: unknown, field: string): void {
+  assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings'], field);
+  assertTimestamp(value.startedAt, `${field}.startedAt`);
+  if (value.transportRetryCount !== 0 && value.transportRetryCount !== 1) throw new Error(`${field}.transportRetryCount is invalid`);
+  if (value.reportRepairCount !== 0 && value.reportRepairCount !== 1) throw new Error(`${field}.reportRepairCount is invalid`);
+  validateStringList(value.reportRepairFindings, `${field}.reportRepairFindings`);
+  if ((value.reportRepairCount === 0) !== (value.reportRepairFindings.length === 0)) {
+    throw new Error(`${field} report repair state is invalid`);
+  }
+}
+
 function validateStringShaRecord(value: unknown, field: string): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid`);
   if (Object.keys(value).length > 256) throw new Error(`${field} is too large`);
@@ -622,11 +715,39 @@ function validateStringArray(value: unknown, field: string): void {
   if (new Set(value).size !== value.length || value.some((item, index) => item !== sorted[index])) throw new Error(`${field} must be sorted and unique`);
 }
 
-function emptyRunState(): RunStateFileV1 {
-  return { schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 0, runs: [] };
+function emptyRunState(): RunStateFile {
+  return { schema: 'codex-orchestrator.run-state', generation: 0, runs: [] };
 }
 
-function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): void {
+function parseRawState(bytes: Buffer): RunStateFile {
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { throw new Error('run state JSON is malformed'); }
+  return validateRunStateFile(value);
+}
+
+async function readOptionalStateFile(path: string): Promise<Buffer | undefined> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrorCode(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`${path} is not a regular file`);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as NodeJS.ErrnoException).code === code;
+}
+
+function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void {
   const feedback = run.reviewFeedback!;
   const batch = feedback.activeBatch;
   if (batch && (batch.runId !== run.runId || batch.canonicalRepository !== run.canonicalRepository
@@ -634,22 +755,16 @@ function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): vo
     || batch.priorPublishedHeadSha !== feedback.previousPublishedHeadSha)) {
     throw new Error(`${field}.reviewFeedback active batch identity binding is invalid`);
   }
-  const retainedQuiescentHistory = (feedback.phase === 'idle' || feedback.phase === 'bootstrap-required') && !batch
-    && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
-  if ((feedback.phase === 'bootstrap-required' || feedback.phase === 'idle')
-    && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
-    throw new Error(`${field}.reviewFeedback quiescent phase requires review-ready lifecycle`);
+  const retainedQuiescentHistory = !batch && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
+  if (!batch && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
+    throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }
-  if (['frozen', 'repairing'].includes(feedback.phase) && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
-    throw new Error(`${field}.reviewFeedback active repair phase has invalid lifecycle`);
+  if (batch && !feedback.verifiedReceipt
+    && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    throw new Error(`${field}.reviewFeedback active batch has invalid lifecycle`);
   }
-  if (feedback.phase === 'verified' && run.lifecycle !== 'publishing') {
-    throw new Error(`${field}.reviewFeedback verified phase requires publishing lifecycle`);
-  }
-  if (feedback.phase === 'publishing' && run.lifecycle !== 'publishing') {
-    throw new Error(`${field}.reviewFeedback publishing phase requires publishing lifecycle`);
-  }
-  if (feedback.phase === 'verified' || feedback.phase === 'publishing') {
+  if (feedback.verifiedReceipt) {
+    if (run.lifecycle !== 'publishing') throw new Error(`${field}.reviewFeedback verified batch requires publishing lifecycle`);
     const verified = feedback.verifiedReceipt;
     if (!verified || verified.batchId !== batch?.batchId
       || verified.checkedChangeSha256 !== run.checkedChangeSha256
@@ -658,17 +773,11 @@ function validateReviewFeedbackRunInvariant(run: RunRecordV1, field: string): vo
       throw new Error(`${field}.reviewFeedback verification receipt binding is invalid`);
     }
   }
-  if (feedback.phase === 'blocked-safety' || feedback.phase === 'blocked-exhausted') {
-    if (run.lifecycle !== 'blocked' || run.terminalOutcome?.status !== 'blocked' || run.terminalOutcome.resumable
-      || run.terminalOutcome.kind !== (feedback.phase === 'blocked-safety' ? 'safety' : 'exhausted')) {
-      throw new Error(`${field}.reviewFeedback terminal projection mismatch`);
-    }
-  }
 }
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'waiting-human', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }
@@ -688,6 +797,10 @@ function assertNonEmptyString(value: unknown, field: string): asserts value is s
   if (typeof value !== 'string' || value.length === 0 || value.length > 16 * 1024) throw new Error(`${field} is invalid`);
 }
 
+function assertAbsolutePath(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !value.startsWith('/') || posix.normalize(value) !== value) throw new Error(`${field} is invalid`);
+}
+
 function assertPositiveInteger(value: unknown, field: string): asserts value is number {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) throw new Error(`${field} is invalid`);
 }
@@ -698,6 +811,12 @@ function assertSha256(value: unknown, field: string): asserts value is string {
 
 function assertGitSha(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !GIT_SHA_PATTERN.test(value)) throw new Error(`${field} must be a Git object ID`);
+}
+
+function assertCandidateRef(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !/^refs\/codex-orchestrator\/candidates\/[0-9a-f-]{36}\/[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`${field} is invalid`);
+  }
 }
 
 function assertTimestamp(value: unknown, field: string): asserts value is string {

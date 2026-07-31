@@ -18,6 +18,11 @@ Read before editing:
 
 ## Modes
 
+The primary route remains `spec-implementer` whenever an approved spec is the
+execution authority. Do not report `implementation_size`, TDD, a Contract Test
+Ledger, or review as a replacement route; those are execution details inside
+this route.
+
 Compact and full specs use the same direct phase flow. `compact` describes
 document density, not implementation size or risk. Full mode adds only the
 concrete `Risk Controls`, stop conditions, validation, or coordination contract
@@ -46,7 +51,9 @@ and one integrator. Otherwise execute single-agent.
 For each phase:
 
 1. Re-read its scope and preconditions.
-2. Implement narrow vertical behavior slices through `$tdd` when applicable.
+2. For an applicable behavior slice, activate and read `$tdd` before the first
+   RED, then implement through that skill. A spec-provided failing command or
+   RED recorder does not replace loading the TDD contract.
 3. Update reached checklist and Contract Test Ledger items at natural
    checkpoints; never save all updates for the end.
 4. Run the phase's targeted exit proof.
@@ -84,11 +91,15 @@ Immediately before the first reviewer launch, create only the minimal
 `## Implementation Review State` required by `references/review-loop.md`.
 Reconcile a recorded live session before replacement after interruption.
 
-Repair compatible findings once and rerun affected validation. Coordinator
-verification closes ordinary medium/low behavior-preserving repairs. Use
-Closure only for critical/high, protected trust/data/concurrency/shared-contract
-impact, or invalidated mandatory coverage. Do not restart broad Full review
-unless the repair actually invalidated its coverage.
+Repair all mutually compatible findings in one consolidated wave and rerun
+affected validation; the wave limit never caps finding count. Coordinator
+verification closes ordinary medium/low behavior-preserving repairs, including
+one bounded Closure-correction batch that stays inside the approved behavior
+without adding a new mechanism. Keep incompatible or unresolved findings open
+with a concrete blocker. Use Closure only for critical/high, protected
+trust/data/concurrency/shared-contract impact, or invalidated mandatory
+coverage. Do not restart broad Full review unless the repair actually
+invalidated its coverage.
 
 ## Stop Conditions
 

@@ -1,6 +1,6 @@
 interface:
   display_name: "Small Task Implementer"
-  short_description: "Fast bounded low-risk code changes"
-  default_prompt: "Use $small-task-implementer to make this small low-risk change with targeted validation."
+  short_description: "Fast bounded local low-risk code changes"
+  default_prompt: "Use $small-task-implementer to make this small local low-risk change with targeted validation, escalating shared contracts to the direct medium route."
 policy:
   allow_implicit_invocation: true

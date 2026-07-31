@@ -26,13 +26,6 @@ interface SpecRequiredRoute {
   reviewFocus: string[];
 }
 
-interface AwaitingUserRoute {
-  outcomes: Array<{ id: string; title: string; behaviorDelta: string; evidence: string[] }>;
-  absenceOfAuthorizedChoiceEvidence: string[];
-  recommendation: string;
-  question: string;
-}
-
 interface BlockerRoute {
   kind: 'external' | 'safety' | 'exhausted';
   code: string;
@@ -47,16 +40,15 @@ interface TriageRouteBase {
 }
 
 export type TriageRouteV1 = TriageRouteBase & (
-  | { status: 'direct'; direct: DirectRoute; specRequired: null; awaitingUser: null; blocker: null }
-  | { status: 'spec-required'; direct: null; specRequired: SpecRequiredRoute; awaitingUser: null; blocker: null }
-  | { status: 'awaiting-user'; direct: null; specRequired: null; awaitingUser: AwaitingUserRoute; blocker: null }
-  | { status: 'blocked'; direct: null; specRequired: null; awaitingUser: null; blocker: BlockerRoute }
+  | { status: 'direct'; direct: DirectRoute; specRequired: null; blocker: null }
+  | { status: 'spec-required'; direct: null; specRequired: SpecRequiredRoute; blocker: null }
+  | { status: 'blocked'; direct: null; specRequired: null; blocker: BlockerRoute }
 );
 
 export function validateTriageRoute(value: unknown): TriageRouteV1 {
   assertExactObject(value, [
     'version', 'status', 'inspectedEvidence', 'assumptions',
-    'direct', 'specRequired', 'awaitingUser', 'blocker',
+    'direct', 'specRequired', 'blocker',
   ], 'triage route');
   if (value.version !== 1) throw new Error('triage route.version must be 1');
   validateEvidence(value.inspectedEvidence);
@@ -66,22 +58,14 @@ export function validateTriageRoute(value: unknown): TriageRouteV1 {
   if (value.status === 'direct') {
     validateDirect(value.direct);
     assertInactive(value.specRequired, 'specRequired');
-    assertInactive(value.awaitingUser, 'awaitingUser');
     assertInactive(value.blocker, 'blocker');
   } else if (value.status === 'spec-required') {
     assertInactive(value.direct, 'direct');
     validateSpecRequired(value.specRequired);
-    assertInactive(value.awaitingUser, 'awaitingUser');
-    assertInactive(value.blocker, 'blocker');
-  } else if (value.status === 'awaiting-user') {
-    assertInactive(value.direct, 'direct');
-    assertInactive(value.specRequired, 'specRequired');
-    validateAwaitingUser(value.awaitingUser);
     assertInactive(value.blocker, 'blocker');
   } else if (value.status === 'blocked') {
     assertInactive(value.direct, 'direct');
     assertInactive(value.specRequired, 'specRequired');
-    assertInactive(value.awaitingUser, 'awaitingUser');
     validateBlocker(value.blocker);
   } else {
     throw new Error('triage route.status is invalid');
@@ -91,10 +75,9 @@ export function validateTriageRoute(value: unknown): TriageRouteV1 {
 
 export function triageRouteOutputSchema(): Record<string, unknown> {
   return agentReportEnvelopeSchema([
-    routeSchema('direct', directSchema(), nullSchema(), nullSchema(), nullSchema()),
-    routeSchema('spec-required', nullSchema(), specRequiredSchema(), nullSchema(), nullSchema()),
-    routeSchema('awaiting-user', nullSchema(), nullSchema(), awaitingUserSchema(), nullSchema()),
-    routeSchema('blocked', nullSchema(), nullSchema(), nullSchema(), blockerSchema()),
+    routeSchema('direct', directSchema(), nullSchema(), nullSchema()),
+    routeSchema('spec-required', nullSchema(), specRequiredSchema(), nullSchema()),
+    routeSchema('blocked', nullSchema(), nullSchema(), blockerSchema()),
   ]);
 }
 
@@ -102,7 +85,6 @@ function routeSchema(
   status: TriageRouteV1['status'],
   direct: Record<string, unknown>,
   specRequired: Record<string, unknown>,
-  awaitingUser: Record<string, unknown>,
   blocker: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
@@ -110,7 +92,7 @@ function routeSchema(
     additionalProperties: false,
     required: [
       'version', 'status', 'inspectedEvidence', 'assumptions',
-      'direct', 'specRequired', 'awaitingUser', 'blocker',
+      'direct', 'specRequired', 'blocker',
     ],
     properties: {
       version: { type: 'integer', const: 1 },
@@ -119,7 +101,6 @@ function routeSchema(
       assumptions: stringArraySchema(0),
       direct,
       specRequired,
-      awaitingUser,
       blocker,
     },
   };
@@ -147,25 +128,6 @@ function specRequiredSchema(): Record<string, unknown> {
     complexityReasons: stringArraySchema(1),
     specMode: { type: 'string', enum: ['compact', 'standard'] },
     reviewFocus: stringArraySchema(1),
-  });
-}
-
-function awaitingUserSchema(): Record<string, unknown> {
-  return objectSchema(['outcomes', 'absenceOfAuthorizedChoiceEvidence', 'recommendation', 'question'], {
-    outcomes: {
-      type: 'array',
-      minItems: 2,
-      maxItems: MAX_ARRAY_LENGTH,
-      items: objectSchema(['id', 'title', 'behaviorDelta', 'evidence'], {
-        id: stringSchema(),
-        title: stringSchema(),
-        behaviorDelta: stringSchema(),
-        evidence: stringArraySchema(1),
-      }),
-    },
-    absenceOfAuthorizedChoiceEvidence: stringArraySchema(1),
-    recommendation: stringSchema(),
-    question: stringSchema(),
   });
 }
 
@@ -223,39 +185,6 @@ function validateSpecRequired(value: unknown): asserts value is SpecRequiredRout
   assertStringArray(value.reviewFocus, 'triage route.specRequired.reviewFocus', 1);
   assertUnique(value.complexityReasons, 'triage route.specRequired.complexityReasons');
   assertUnique(value.reviewFocus, 'triage route.specRequired.reviewFocus');
-}
-
-function validateAwaitingUser(value: unknown): asserts value is AwaitingUserRoute {
-  assertExactObject(
-    value,
-    ['outcomes', 'absenceOfAuthorizedChoiceEvidence', 'recommendation', 'question'],
-    'triage route.awaitingUser',
-  );
-  if (!Array.isArray(value.outcomes) || value.outcomes.length < 2 || value.outcomes.length > MAX_ARRAY_LENGTH) {
-    throw new Error('triage route.awaitingUser.outcomes must contain at least two entries');
-  }
-  const ids: string[] = [];
-  for (const [index, outcome] of value.outcomes.entries()) {
-    assertExactObject(outcome, ['id', 'title', 'behaviorDelta', 'evidence'], `triage route.awaitingUser.outcomes[${index}]`);
-    assertString(outcome.id, 'triage route.awaitingUser outcome id');
-    assertString(outcome.title, 'triage route.awaitingUser outcome title');
-    assertString(outcome.behaviorDelta, 'triage route.awaitingUser outcome behaviorDelta');
-    assertStringArray(outcome.evidence, 'triage route.awaitingUser outcome evidence', 1);
-    assertUnique(outcome.evidence, 'triage route.awaitingUser outcome evidence');
-    ids.push(outcome.id);
-  }
-  assertUnique(ids, 'triage route.awaitingUser outcome IDs');
-  assertStringArray(
-    value.absenceOfAuthorizedChoiceEvidence,
-    'triage route.awaitingUser.absenceOfAuthorizedChoiceEvidence',
-    1,
-  );
-  assertUnique(
-    value.absenceOfAuthorizedChoiceEvidence,
-    'triage route.awaitingUser.absenceOfAuthorizedChoiceEvidence',
-  );
-  assertString(value.recommendation, 'triage route.awaitingUser.recommendation');
-  assertString(value.question, 'triage route.awaitingUser.question');
 }
 
 function validateBlocker(value: unknown): asserts value is BlockerRoute {

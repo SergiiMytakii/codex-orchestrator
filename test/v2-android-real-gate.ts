@@ -5,7 +5,6 @@ import { AcceptanceProof, type FrozenCriterion, type IssueSnapshot } from '../sr
 import { createCheckedChangeCapabilities, type CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import { FileAndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
-import { InMemoryProofRecordWriter } from '../src/v2/proof-store.js';
 import type { ProofReportV1 } from '../src/v2/proof-report.js';
 
 const args = parseArgs(process.argv.slice(2));
@@ -100,7 +99,6 @@ const criteria: FrozenCriterion[] = [{
 }];
 const proof = new AcceptanceProof({
   checkedChangeReader: capabilities,
-  proofRecords: new InMemoryProofRecordWriter(),
   proofAgent: {
     run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: report.artifacts.map((artifact) => artifact.relativePath) }),
   },
@@ -116,10 +114,8 @@ const proof = new AcceptanceProof({
   inspectArtifact: async (relativePath) => ({ modifiedAt: (await stat(resolve(root, relativePath))).mtime.toISOString() }),
   androidLease: new FileAndroidLeaseVerifier({ leaseRoot: required(args['lease-root']), worktreeRoot: root }),
   proofArtifactDir: proofRoot,
-  createAttemptId: () => 'android-real-attempt',
-  now: () => startedAt,
 });
-const result = await proof.proveChange({ proofId, issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 process.stdout.write(`${canonicalJson(result)}\n`);
 if (result.status !== 'passed') process.exitCode = 1;
 

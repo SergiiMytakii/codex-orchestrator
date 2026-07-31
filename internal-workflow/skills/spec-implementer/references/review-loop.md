@@ -67,14 +67,40 @@ per-slice handoff bookkeeping.
 
 ## Findings And Closure
 
-Root aggregates findings, repairs compatible defects once, and reruns only
-affected validation. Coordinator verification closes ordinary medium/low
-behavior-preserving findings after confirming the repair matches the failure.
+Root aggregates findings and repairs all mutually compatible defects in one
+consolidated wave, then reruns only affected validation. The budget limits
+repair waves, never finding count. Preserve every canonical defect until it is
+verified, blocked, accepted-risk with authority, or superseded by a named
+record. Coordinator verification closes ordinary medium/low
+behavior-preserving findings after confirming each repair matches its cited
+failure.
+
+Judge auto-fix risk from the complete repair diff, not one finding in
+isolation. After Full, any repair that adds a public parameter, durable
+transition, retry or flag, owner, or runtime boundary is a substantive
+spec change: stop auto-fix, mark the implementation `Blocked`, and return the
+changed design through artifact review. Include this repair complexity delta in
+any Closure capsule.
 
 Use shared-protocol Closure only for critical/high defects, protected
 trust/data/concurrency/shared API impact, or invalidated mandatory coverage.
 Closure stays with the affected reviewer lineage and repaired targets. Start a
 new Full only when the repair invalidated mandatory-lens coverage.
+
+The normal budget is one Full, one consolidated repair wave, and at most one
+Closure; it never limits how many compatible findings the repair wave closes.
+If Closure returns ordinary medium/low findings whose exact corrections stay
+inside approved behavior and add no public parameter, durable transition,
+retry/flag, owner, or runtime boundary, apply all of them in one bounded
+Closure-correction batch and close them through direct failure-path checks plus
+affected validation. Do not launch a second Closure for that ordinary batch.
+
+If a Closure finding requires a new mechanism or decision, invalidates
+mandatory coverage, repeats after the bounded correction, or otherwise needs
+another Closure, mark it `Blocked: non-converging repair`; do not patch it in
+isolation. Continue only after a revised approved spec or explicit user
+decision resolves the changed design. Never hide an unresolved finding merely
+because the normal review budget ended.
 
 Do not repeat review without a material change in target, evidence, repair, or
 source decision. Stop and surface the actual decision or evidence blocker when

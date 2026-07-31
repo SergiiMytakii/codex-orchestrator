@@ -8,8 +8,8 @@ policy own TDD, review order, commit behavior, and response style.
 - Product workflow and commands: `README.md`.
 - Coding, validation, live-smoke, and release routing:
   `docs/agents/execution-routing.md`.
-- Runner architecture and policy: `docs/deep-dive.md` and
-  `docs/adr/0001-runner-owned-loop-policy.md`.
+- Runner architecture and policy: current `src/v2/` code, configuration, tests,
+  `CONTEXT.md`, and relevant ADRs under `docs/adr/`.
 - Issues, triage, and domain language: `docs/agents/issue-tracker.md`,
   `docs/agents/triage-labels.md`, `docs/agents/domain.md`, and `CONTEXT.md`.
 - Live-smoke scenarios and release history: `docs/live-smoke-checklist.md` and
@@ -17,6 +17,8 @@ policy own TDD, review order, commit behavior, and response style.
 
 ## Repository Boundaries
 
+- `docs/deep-dive.md` is a human-maintainer guide. Agents must not read or use
+  it as context unless the user explicitly asks to edit or audit that file.
 - Reusable TypeScript orchestration belongs in `src/v2/`, its package-owned
   adapters in `src/v2/adapters/`, and tests in `test/v2-*.test.ts`.
 - Target-repository policy belongs under `.codex-orchestrator/`; its

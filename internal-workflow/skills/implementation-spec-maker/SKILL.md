@@ -19,6 +19,7 @@ Create or revise an execution-ready specification for a downstream coding agent.
 
 1. Read the source authority, applicable repository instructions, and only the evidence needed to confirm targets, commands, contracts, consumers, fixtures, and validation.
 2. Build a transient evidence-backed scope delta with three facts per material requirement: approved behavior, current capability/owner/seam, and the smallest remaining implementation delta. Pass it in the reviewer capsule; persist it in the spec only when an executor needs it.
+   For a revision or conflicting authority, also compare the prior and current observable claim, mechanism/owner, source of truth, evidence unit/cardinality, and blocked/failure meaning. Any authority-driven change invalidates reused review coverage for that requirement; replacing a bad proof to match an unchanged reviewed claim does not.
 3. Treat behavior already present as `preserve + regression proof`, not new implementation. Stop with a blocked spec when an unresolved product value, copy decision, policy, or ownership choice changes the implementation; never manufacture a working default to keep drafting.
 4. Reuse valid Evidence Maps and `$research` artifacts. Refresh only claims invalidated by changed files, versions, dates, contracts, or conflicts.
 5. Read the relevant section of [source modes](references/source-modes.md). Stop or mark the spec blocked when its source-specific requirements are not satisfied.
@@ -28,6 +29,8 @@ Create or revise an execution-ready specification for a downstream coding agent.
    - `review_profile`: `simple | medium | high` — consequence and uncertainty,
      resolved through the review loop owned by `$implementation-spec-review`.
    - `expected_repositories`: exact positive integer from approved scope.
+
+Before drafting, run a proof-compatibility check for each material outcome: the named proof must be able to observe the exact claim, at the required cardinality, and must not pass while that claim is false. Split platform, provider, tenant, region, or mode proofs whenever their mechanism, source of truth, granularity, timing/redaction, or failure semantics differ; reuse one proof only with evidence of equivalence.
 
 Do not infer one classification from another. For ticket work, `direct` returns
 to `$tdd`, `compact spec` requests compact mode, and `standard spec` asks the

@@ -8,9 +8,9 @@ The package is designed for unattended local execution without giving the Codex 
 
 Add the configured `agent:auto` label to an open issue, then run the orchestrator. It will choose one of three routes:
 
-- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, configured checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
+- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, issue-scoped verification checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
 - **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; the Runner freezes the approved revision and returns `spec-frozen`. Implementation is intentionally a separate follow-up run or workflow.
-- **Human decision required:** the repository does not contain enough authority to choose between materially different product outcomes. The package posts one precise question, applies `agent:waiting-human`, and resumes the same run after an authorized repository writer answers with the requested prefix.
+- **Human decision required:** an independently authored spec found a real product gap. The package returns `spec-frozen`, posts one revision-bound question, and resumes the same Run at the next spec revision after a trusted answer.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
@@ -40,7 +40,7 @@ npx codex-orchestrator setup --target "$PWD" --prepare-labels
 npx codex-orchestrator doctor --target "$PWD"
 ```
 
-`setup` infers the GitHub repository and base branch from the target checkout. If that is not possible, provide both repository fields:
+`setup` derives the base branch only from `origin/HEAD`. When an agent performs setup, it must show that detected branch and obtain explicit user confirmation before running the mutating setup command. If repository inference is not possible, provide both repository fields:
 
 ```sh
 npx codex-orchestrator setup \
@@ -57,7 +57,7 @@ Now create or choose a clear GitHub Issue, include acceptance criteria when poss
 npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
-The command prints one JSON result. A successful direct delivery returns `review-ready` with the draft PR URL. A complex issue may instead return `spec-frozen`; a genuine product decision returns `awaiting-user` with the answer prefix to use in the issue comment.
+The command prints one JSON result. Direct and approved spec-first delivery return `review-ready` with the draft PR URL. A genuine product decision returns `spec-frozen` with the exact revision, immutable gaps, question marker, answer prefix, and evidence path.
 
 ## Main commands
 
@@ -106,6 +106,8 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
 
+Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
+
 ### `daemon`
 
 Poll for open issues carrying `agent:auto` and process them serially:
@@ -134,8 +136,9 @@ same-repository draft PR receives a new unresolved inline thread root or a
 non-empty `CHANGES_REQUESTED` review from a current repository writer or admin,
 the Runner freezes that exact feedback batch and resumes the existing run.
 
-The repair uses the existing implementation and affected Closure flow, then
-reruns configured checks and Acceptance Proof against the repaired content. It
+The frozen batch enters the same implementation → complete independent review
+→ checks → proof loop used by initial delivery. Every repair creates a new
+candidate and receives a complete review that accounts for prior finding IDs. It
 has a separate maximum of three feedback rounds and does not consume the
 original five implementation cycles. Publication appends one fast-forward
 commit to the existing branch and PR; divergence blocks without reset, rebase,
@@ -156,7 +159,6 @@ The default labels are:
 | --- | --- |
 | `agent:auto` | The issue is authorized for orchestration. |
 | `agent:running` | A Runner has claimed the issue. |
-| `agent:waiting-human` | One approved product question is waiting for an authorized answer. |
 | `agent:blocked` | The run stopped on an external, safety, or exhausted-budget blocker. |
 | `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 
@@ -165,8 +167,7 @@ Important command results:
 | Result | What to do |
 | --- | --- |
 | `review-ready` | Open the returned draft PR URL and review the change; later trusted unresolved feedback may resume the same run and PR. |
-| `spec-frozen` | Use the returned frozen specification receipt as the authority for a later implementation workflow. |
-| `awaiting-user` | Reply to the issue using the returned answer prefix. Re-run the command or let the daemon pick it up. |
+| `spec-frozen` | Reply to the revision-bound issue question using its answer prefix. Re-run the command or let the daemon continue the same Run; an approved spec otherwise proceeds automatically. |
 | `not-eligible` | Check that the issue is open, has only the appropriate authorization label, and has no existing open PR for its branch. |
 | `requeued` | Another known Runner owns the repository; retry later. |
 | `blocked` | Read `kind`, `resumable`, and `evidencePath`; fix the external condition only when the evidence says it is safe to resume. |
@@ -180,10 +181,11 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite Runner-owned commands. The Runner snapshots them on the clean
-  base and reruns them after implementation; only a new or changed failure is
-  task-owned rework, while a byte-identical base failure is retained as an
-  explicit `unchanged-failure` warning.
+- `checks`: finite fallback commands for issues without a command-only
+  `Verification:` section. They run after each complete independent review.
+  A failed check becomes a bounded finding for the next implementation cycle;
+  there is no qualification operation or separate retry coordinator. Final
+  checks must all pass; failures are never accepted by comparing output hashes.
 - `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
 - `proof.android`: optional Runner-owned Android recipe. It selects `avdName`, creates an ephemeral clean data directory, requires fixed `build apk` arguments, removes any old `apkPath`, snapshots a fresh no-symlink APK outside the worker-writable tree, and binds its digest to the checked change. It installs and launches that exact snapshot, repeatedly verifies emulator process identity, waits up to `navigationTimeoutMs` for each exact `tapText` accessibility label, and captures proof-bound screenshot, hierarchy, PID log, and lease artifacts. Commands are bounded, cancellable, and process-group quiescent; URI query/fragment credentials are rejected. The contained proof worker never receives `adb`, emulator, Flutter, or durable lease authority. Emulator or Android-tool startup failure is retained as an explicit unfinished-UI-proof warning and does not by itself block delivery.
 - `deny.readPaths`: paths the worker must not read or modify.
@@ -213,6 +215,29 @@ npm pack --dry-run --json
 
 `npm run refresh:workflow` rebuilds the package-owned workflow inventory from the explicit allowlist in `scripts/agent-auto-workflow-source.json`, validates operation bindings, and runs focused contract tests. `npm run check:workflow` is the non-writing drift check; `npm run verify:workflow` verifies the committed generated workflow without reading local skills.
 
+After changing packaged skills or evals, compare the source and generated eval
+plans locally. This check is offline and does not run a model:
+
+```sh
+set -e
+PACKAGE_ROOT="$PWD"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+PARITY_ROOT="$(mktemp -d)"
+cd "$CODEX_HOME"
+python3 scripts/run_coding_skill_evals.py --output "$PARITY_ROOT/source"
+python3 scripts/run_coding_skill_evals.py \
+  --workflow-root "$PACKAGE_ROOT/internal-workflow" \
+  --fixture-root "$CODEX_HOME/scripts/fixtures/coding-skill-evals" \
+  --output "$PARITY_ROOT/package"
+jq -S '.cases' "$PARITY_ROOT/source/plan.json" > "$PARITY_ROOT/source-cases.json"
+jq -S '.cases' "$PARITY_ROOT/package/plan.json" > "$PARITY_ROOT/package-cases.json"
+diff -u "$PARITY_ROOT/source-cases.json" "$PARITY_ROOT/package-cases.json"
+```
+
+Do not add live eval profiles to `refresh:workflow`, package tests, build, or
+release scripts. Live execution remains an explicit maintainer action from the
+local skill checkout.
+
 `npm run smoke:live` packs the current package and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
-For the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model, see [docs/deep-dive.md](docs/deep-dive.md). For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).
+Human maintainers can find the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model in [docs/deep-dive.md](docs/deep-dive.md). That guide is not agent context. For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).

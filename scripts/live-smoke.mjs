@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -9,19 +9,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const defaultTimeoutMs = 1_800_000;
 const liveSmokeModel = 'gpt-5.6-luna';
-const defaultLiveSmokeRepo = process.env.CODEX_ORCHESTRATOR_LIVE_SMOKE_REPO
-  ?? 'SergiiMytakii/codex-orchestrator-live-smoke';
+const approvedLiveSmokeRepo = 'SergiiMytakii/codex-orchestrator-live-smoke';
+const defaultLiveSmokeRepo = approvedLiveSmokeRepo;
+const productionRepo = 'SergiiMytakii/codex-orchestrator';
+const scratchLockBranch = 'codex-orchestrator-live-smoke-lock';
 const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
+  ['spec-first', runSpecFirstScenario],
+  ['product-question', runProductQuestionScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
   ['commit-policy', runCommitPolicyScenario],
   ['incomplete-progress-rework', runReviewReadyScenario],
   ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['browser-proof', runReviewReadyScenario],
-  ['acceptance-proof-positive', runReviewReadyScenario],
+  ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
@@ -31,11 +35,11 @@ const scenarioDefinitions = new Map([
 
 const scenarioProfiles = new Map([
   ['core-release', [
-    'package-install', 'browser-proof', 'safety-negative',
+    'package-install', 'spec-first', 'product-question', 'review-feedback-continuation',
   ]],
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
-    'diagnostics', 'acceptance-proof-positive', 'acceptance-proof-rework',
+    'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
     'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
@@ -48,21 +52,29 @@ async function main() {
   if (options.selfTestLiveCodex) { await selfTestLiveCodex(); return; }
   const selected = selectScenarios(options);
   const runId = options.runId ?? new Date().toISOString().replace(/[-:TZ.]/gu, '').slice(0, 14);
-  const root = options.workDir ? resolve(options.workDir) : await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
+  const root = await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
   const context = {
     options, runId, root, sourceRoot, repo: options.repo,
     reportPath: join(root, 'live-smoke-report.md'), modelAuditPath: join(root, 'model-audit.jsonl'),
     orchestratorHome: join(root, 'orchestrator-home'),
     targetRoot: '', cliPath: '', liveCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
+    baselineLabels: new Set(), createdLabels: [], baselineCandidateRefs: new Set(), baselineWorktrees: new Set(), lockAcquired: false,
   };
   await appendReport(context, `# V2 live smoke ${runId}\n\nRepository: ${context.repo}\n\nModel: ${liveSmokeModel}\n\n`);
   let failed = false;
   try {
+    await preflight(context);
     context.cliPath = await preparePackagedCandidate(context);
     context.liveCodexPath = await writeLiveCodex(context);
     context.targetRoot = await prepareTarget(context);
-    await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
+    await acquireScratchLock(context);
+    context.baselineCandidateRefs = new Set(await listCandidateRefs(context));
+    context.baselineWorktrees = new Set(await listWorktrees(context));
+    context.baselineLabels = new Set(await listRepositoryLabels(context));
+    const setup = await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
+    if (setup.result.status !== 'labels-prepared') throw new Error(`scratch label setup was incomplete: ${setup.result.status}`);
+    context.createdLabels = (await listRepositoryLabels(context)).filter((label) => !context.baselineLabels.has(label));
     context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
     await configureTarget(context);
     for (const scenario of selected) {
@@ -77,7 +89,6 @@ async function main() {
       await appendReport(context, `- ${scenario}: passed (${Date.now() - started}ms; ${modelEvidence})\n`);
     }
     await appendReport(context, '\nAll selected scenarios passed.\n');
-    process.stdout.write(`[v2-live-smoke] passed; report ${context.reportPath}\n`);
   } catch (error) {
     failed = true;
     await appendReport(context, `\nFailure: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -99,7 +110,7 @@ function parseArgs(args) {
   const options = {
     scenarios: [], profile: 'core-release', repo: defaultLiveSmokeRepo, cleanup: true,
     cleanupMode: 'delete', skipLocalTests: false, keepPackageTarball: false,
-    timeoutMs: defaultTimeoutMs, target: undefined, workDir: undefined, runId: undefined, help: false,
+    timeoutMs: defaultTimeoutMs, runId: undefined, help: false,
     selfTestFakeAgent: false, selfTestLiveCodex: false,
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -110,15 +121,13 @@ function parseArgs(args) {
     if (flag === '--keep-package-tarball') { options.keepPackageTarball = true; continue; }
     if (flag === '--self-test-fake-agent') { options.selfTestFakeAgent = true; continue; }
     if (flag === '--self-test-live-codex') { options.selfTestLiveCodex = true; continue; }
-    if (['--scenario', '--profile', '--repo', '--cleanup-mode', '--timeout-ms', '--target', '--work-dir', '--run-id'].includes(flag)) {
+    if (['--scenario', '--profile', '--repo', '--cleanup-mode', '--timeout-ms', '--run-id'].includes(flag)) {
       if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
       if (flag === '--scenario') options.scenarios.push(value);
       else if (flag === '--profile') options.profile = value;
       else if (flag === '--repo') options.repo = value;
       else if (flag === '--cleanup-mode') options.cleanupMode = value;
       else if (flag === '--timeout-ms') options.timeoutMs = Number(value);
-      else if (flag === '--target') options.target = value;
-      else if (flag === '--work-dir') options.workDir = value;
       else if (flag === '--run-id') options.runId = value.replace(/[^a-zA-Z0-9._-]/gu, '-');
       index += 1; continue;
     }
@@ -149,7 +158,7 @@ function helpText() {
     `Scenarios: ${Array.from(scenarioDefinitions.keys()).join(', ')}`,
     `Profiles: ${Array.from(scenarioProfiles.keys()).join(', ')}`,
     'Default core-release. Use --profile or repeat --scenario.',
-    'Clean up created issues, PRs, and branches after the run by default.',
+    'Clean up created issues, PRs, branches, labels, refs, worktrees, processes, and temporary data after the run by default.',
     'Cleanup mode: delete or close. Default delete.',
     '',
   ].join('\n');
@@ -178,6 +187,46 @@ async function preparePackagedCandidate(context) {
   return cliPath;
 }
 
+async function preflight(context) {
+  if (context.repo === productionRepo || context.repo !== approvedLiveSmokeRepo) {
+    throw new Error(`live smoke is restricted to approved scratch repository ${approvedLiveSmokeRepo}`);
+  }
+  await runCommand('gh', ['auth', 'status'], { timeoutMs: context.options.timeoutMs });
+  await runCommand('codex', ['login', 'status'], { timeoutMs: context.options.timeoutMs });
+  await runCommand('gh', ['repo', 'view', context.repo, '--json', 'nameWithOwner'], { timeoutMs: context.options.timeoutMs });
+}
+
+async function acquireScratchLock(context) {
+  const branch = await defaultBranch(context.repo);
+  const sha = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout.trim();
+  await runCommand('gh', ['api', '--method', 'POST', `repos/${context.repo}/git/refs`,
+    '-f', `ref=refs/heads/${scratchLockBranch}`, '-f', `sha=${sha}`], { timeoutMs: context.options.timeoutMs });
+  context.lockAcquired = true;
+  context.createdBranches.push(scratchLockBranch);
+}
+
+async function listRepositoryLabels(context) {
+  const result = await runCommand('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', '.[].name'], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  return result.stdout.split('\n').filter(Boolean).sort();
+}
+
+async function listCandidateRefs(context) {
+  return (await runCommand('git', ['-C', context.targetRoot, 'for-each-ref', '--format=%(refname)', 'refs/codex-orchestrator/'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout.split('\n').filter(Boolean).sort();
+}
+
+async function listWorktrees(context) {
+  const output = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout;
+  return [...output.matchAll(/^worktree (.+)$/gmu)].map((match) => match[1]);
+}
+
 export function parseNpmPackOutput(stdout) {
   const lines = String(stdout).split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
@@ -193,7 +242,6 @@ export function parseNpmPackOutput(stdout) {
 }
 
 async function prepareTarget(context) {
-  if (context.options.target) return resolve(context.options.target);
   const target = join(context.root, 'target');
   const branch = await defaultBranch(context.repo);
   await runCommand('gh', ['repo', 'clone', context.repo, target, '--', '--branch', branch], { timeoutMs: context.options.timeoutMs });
@@ -210,12 +258,14 @@ async function configureTarget(context, overrides = {}) {
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
   config.checks = overrides.failingCheck
     ? { smoke: `${process.execPath} -e "process.exit(1)"` }
-    : { smoke: `${process.execPath} --version` };
+    : overrides.authoritativeCandidate
+      ? { smoke: 'if [ -e src/live-smoke/authoritative-candidate-publication.txt ]; then [ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ] && git diff --cached --quiet; else git diff --cached --quiet; fi' }
+      : { smoke: `${process.execPath} --version` };
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
 async function runReviewReadyScenario(context, scenario) {
-  await configureTarget(context);
+  await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'review-ready' }, scenario);
@@ -234,7 +284,60 @@ async function runReviewReadyScenario(context, scenario) {
     const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
     if (screenshots.length !== 2) throw new Error(`${scenario}: expected two publishable responsive screenshots`);
   }
-  await recordPublication(context, issue.number);
+  const publication = await recordPublication(context, issue.number);
+  if (scenario === 'authoritative-candidate-publication') {
+    await assertAuthoritativeCandidatePublication(context, record, publication.headSha);
+  }
+}
+
+async function assertAuthoritativeCandidatePublication(context, record, publishedHeadSha) {
+  const state = await readRunState(context);
+  if (state.schema !== 'codex-orchestrator.run-state') throw new Error('authoritative-candidate-publication: unexpected state schema');
+  const receipts = record.checks.filter((check) => check.status === 'passed');
+  const bindingIds = new Set(receipts.map((check) => check.bindingId));
+  const candidateTrees = new Set(receipts.map((check) => check.candidateTreeSha));
+  if (receipts.length === 0 || bindingIds.size !== 1 || bindingIds.has(undefined)
+    || candidateTrees.size !== 1 || candidateTrees.has(undefined)) {
+    throw new Error('authoritative-candidate-publication: final checks do not share one V2 candidate binding');
+  }
+  const [bindingId] = bindingIds;
+  const [candidateTreeSha] = candidateTrees;
+  const publishedTreeSha = (await runCommand('git', [
+    '-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`,
+  ], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  if (candidateTreeSha !== publishedTreeSha) {
+    throw new Error('authoritative-candidate-publication: candidateTreeSha !== publishedTreeSha');
+  }
+  const publishedContent = (await runCommand('git', [
+    '-C', context.targetRoot, 'show', `${publishedHeadSha}:src/live-smoke/authoritative-candidate-publication.txt`,
+  ], { timeoutMs: context.options.timeoutMs })).stdout;
+  if (publishedContent !== 'authoritative-candidate-publication\n') {
+    throw new Error('authoritative-candidate-publication: staged content became authoritative');
+  }
+  const pin = `refs/codex-orchestrator/candidates/${record.runId}/${bindingId}`;
+  const pinProbe = await runCommand('git', ['-C', context.targetRoot, 'show-ref', '--verify', '--quiet', pin], {
+    timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 1],
+  });
+  if (pinProbe.status === 0) throw new Error('authoritative-candidate-publication: candidate pin survived successful publication');
+  const worktrees = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+    timeoutMs: context.options.timeoutMs,
+  })).stdout;
+  if (worktrees.includes('/.candidate-executions/')) {
+    throw new Error('authoritative-candidate-publication: candidate execution worktree survived successful publication');
+  }
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const bindingRoot = join(context.targetRoot, config.runner.workspaceRoot, '.candidate-executions', record.runId, bindingId);
+  let residualExecutionPaths = [];
+  try { residualExecutionPaths = await readdir(bindingRoot); }
+  catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+  }
+  if (residualExecutionPaths.length > 0) {
+    throw new Error('authoritative-candidate-publication: candidate execution directory survived successful publication');
+  }
+  if (record.candidateBinding !== undefined) {
+    throw new Error('authoritative-candidate-publication: durable candidate ownership survived successful publication');
+  }
 }
 
 async function assertReworkCycle(context, issueNumber) {
@@ -251,7 +354,7 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   assertResult(initial, { status: 'review-ready' }, scenario);
   const publication = await recordPublication(context, issue.number);
   const initialRecord = await readRunRecord(context, issue.number);
-  if (initialRecord.reviewFeedback?.phase !== 'idle'
+  if (initialRecord.reviewFeedback?.activeBatch !== null
     || initialRecord.reviewFeedback.previousPublishedHeadSha !== publication.headSha) {
     throw new Error(`${scenario}: initial publication did not bind the review feedback baseline`);
   }
@@ -265,11 +368,12 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   ].join(' '));
   await assertReviewFeedbackObservable(context, issue.number, publication.number, publication.headSha, initialRecord);
   const updated = await runDaemonOnce(context, issue.number);
+  if (updated.status !== 'review-ready') await throwResultWithEvidence(context, updated, scenario);
   assertResult(updated, { status: 'review-ready' }, scenario);
 
   const after = await readRunRecord(context, issue.number);
   const receipt = after.reviewFeedback?.history[0];
-  if (after.reviewFeedback?.phase !== 'idle' || after.reviewFeedback.history.length !== 1
+  if (after.reviewFeedback?.activeBatch !== null || after.reviewFeedback.history.length !== 1
     || receipt?.kind !== 'published') {
     throw new Error(`${scenario}: one published review feedback receipt was not persisted`);
   }
@@ -335,6 +439,47 @@ async function runPackageInstallScenario(context, scenario) {
   context.cliPath = installedCliPath;
   try { await runReviewReadyScenario(context, scenario); }
   finally { context.cliPath = packedCliPath; }
+}
+
+async function runSpecFirstScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const result = await runIssue(context, issue.number);
+  if (result.status !== 'review-ready') await throwResultWithEvidence(context, result, scenario);
+  assertResult(result, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.routeReceipt?.route !== 'spec-required' || record.specDelivery?.stage !== 'frozen'
+    || !record.specDelivery.frozen || !record.checkedChangeSha256 || !record.proofId) {
+    throw new Error(`${scenario}: approved spec was not implemented and proved in the same Run`);
+  }
+  await recordPublication(context, issue.number);
+}
+
+async function runProductQuestionScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const frozen = await runIssue(context, issue.number);
+  assertResult(frozen, { status: 'spec-frozen' }, scenario);
+  if (!frozen.receipt?.answerPrefix) throw new Error(`${scenario}: frozen question has no exact answer prefix`);
+  const viewer = JSON.parse((await runCommand('gh', ['api', 'user'], { timeoutMs: context.options.timeoutMs })).stdout);
+  await runCommand('gh', ['issue', 'comment', String(issue.number), '--repo', context.repo,
+    '--body', `${frozen.receipt.answerPrefix} Use the bounded fixture behavior exactly.`], { timeoutMs: context.options.timeoutMs });
+  if (!viewer?.login) throw new Error(`${scenario}: authenticated owner identity is unavailable`);
+  const completed = await runIssue(context, issue.number);
+  assertResult(completed, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.specDelivery?.acceptedAnswers?.length !== 1 || record.specDelivery.stage !== 'frozen') {
+    throw new Error(`${scenario}: trusted answer was not frozen into the same Run`);
+  }
+  await recordPublication(context, issue.number);
+}
+
+async function throwResultWithEvidence(context, result, scenario) {
+  let evidence = null;
+  if (typeof result.evidencePath === 'string') {
+    try { evidence = JSON.parse(await readFile(join(context.targetRoot, result.evidencePath), 'utf8')); } catch {}
+  }
+  throw new Error(`${scenario}: unexpected result ${JSON.stringify({ result, evidence })}`);
 }
 
 async function runDiscoveryMatrixScenario(context, scenario) {
@@ -439,7 +584,7 @@ async function runIssue(context, issueNumber) {
     env: liveSmokeEnv(context),
   });
   const envelope = parseExactEnvelope(command.stdout, 'codex-orchestrator.agent-auto-run-result');
-  const expectedExit = { 'review-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
+  const expectedExit = { 'review-ready': 0, 'spec-frozen': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
   if (expectedExit === undefined || command.status !== expectedExit) throw new Error('typed run result and process exit disagree');
   return envelope.result;
 }
@@ -473,11 +618,16 @@ async function assertExclusiveDaemonCandidate(context, issueNumber) {
 }
 
 async function readRunRecord(context, issueNumber) {
-  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
-  const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
+  const state = await readRunState(context);
   const record = state.runs.find((candidate) => candidate.issueNumber === issueNumber);
   if (!record) throw new Error(`run state for issue #${issueNumber} is missing`);
   return record;
+}
+
+async function readRunState(context) {
+  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+  const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
+  return state;
 }
 
 async function assertEvidenceCode(context, result, expectedCode) {
@@ -510,12 +660,12 @@ async function postTrustedReviewThread(context, pullRequestNumber, commitSha, pa
 
 async function assertReviewFeedbackObservable(context, issueNumber, pullRequestNumber, headSha, record) {
   const packageRoot = resolve(dirname(context.cliPath), '../../..');
-  const [{ ReviewFeedbackCoordinator }, { GhCliPullRequestAdapter }, { GhCliIssueAdapter }] = await Promise.all([
+  const [{ ReviewFeedbackObserver }, { GhCliPullRequestAdapter }, { GhCliIssueAdapter }] = await Promise.all([
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'review-feedback-coordinator.js')).href),
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'adapters', 'gh-pull-request-adapter.js')).href),
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'adapters', 'gh-issue-adapter.js')).href),
   ]);
-  const coordinator = new ReviewFeedbackCoordinator({
+  const coordinator = new ReviewFeedbackObserver({
     pullRequests: new GhCliPullRequestAdapter(ownerOf(context.repo), repoOf(context.repo)),
     issues: new GhCliIssueAdapter(ownerOf(context.repo), repoOf(context.repo)),
   });
@@ -652,9 +802,13 @@ function forward(prompt) {
     process.stderr.write('live smoke model pin is missing\\n'); process.exitCode = 64; return;
   }
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const scenario = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'unknown';
+  const scenario = prompt.match(/LIVE_SMOKE_SCENARIO=([A-Za-z0-9-]+)/u)?.[1]
+    ?? criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1]
+    ?? 'unknown';
   const operation = prompt.includes('Independently prove issue') ? 'proof'
     : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
+      : prompt.includes('/spec-author/') ? 'spec-author'
+        : prompt.includes('/spec-review/') ? 'spec-review'
       : prompt.includes('/triage/') ? 'triage'
         : 'implementation';
   if (scenario === 'incomplete-progress-rework' && operation === 'implementation') {
@@ -667,7 +821,8 @@ function forward(prompt) {
   launch(1);
 
   function launch(wrapperAttempt) {
-    const child = spawn('codex', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const smokeArgs = args.map((arg) => arg.startsWith('model_reasoning_effort=') ? 'model_reasoning_effort="low"' : arg);
+    const child = spawn('codex', smokeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stdout.pipe(process.stdout);
     child.stderr.setEncoding('utf8');
@@ -693,6 +848,9 @@ function forward(prompt) {
       if (code === 0 && !administrative) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
         if (operation === 'code-review') normalizeCodeReview(reportPath, prompt);
+        if (operation === 'triage' && (scenario === 'spec-first' || scenario === 'product-question')) normalizeSpecTriage(reportPath);
+        if (operation === 'spec-author') normalizeSpecAuthor(reportPath, prompt, scenario);
+        if (operation === 'spec-review') normalizeSpecReview(reportPath, prompt);
         if (operation === 'implementation' && scenario === 'review-feedback-continuation') {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
@@ -707,17 +865,52 @@ function forward(prompt) {
 function normalizeCodeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
-  const reopen = capsule.mode === 'closure' && capsule.targetRevision === 5 && prompt.includes('quality-gates');
+  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
   const report = {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: reopen ? 'needs-work' : 'approved', mode: capsule.mode,
-    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
-    reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
-    repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({
-      id: finding.id, status: reopen ? 'reopened' : 'verified',
-    })),
+    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    coverage: capsule.reviewFocus ?? [],
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   };
   writeFileSync(reportPath, JSON.stringify({ report }));
+}
+
+function normalizeSpecTriage(reportPath) {
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: 'spec-required',
+    inspectedEvidence: [{ kind: 'issue', location: 'live-smoke issue', summary: 'The fixture requests an approved spec before delivery.' }],
+    assumptions: [], direct: null,
+    specRequired: { summary: 'Specify the bounded fixture.', complexityReasons: ['Exercise durable spec delivery.'], specMode: 'compact', reviewFocus: ['acceptance', 'determinism'] },
+    blocker: null,
+  } }));
+}
+
+function normalizeSpecAuthor(reportPath, prompt, scenario) {
+  const specPath = prompt.match(/only to (.+)\. Return that exact absolute path/u)?.[1];
+  if (!specPath) throw new Error('missing spec revision path');
+  const answered = prompt.includes('"trustedAnswer":{');
+  const decisionRequired = scenario === 'product-question' && !answered;
+  const content = '# Live smoke implementation spec\\n\\nCreate and prove the two bounded scenario marker files.\\n';
+  mkdirSync(dirname(specPath), { recursive: true });
+  writeFileSync(specPath, content);
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: decisionRequired ? 'decision-required' : 'ready', specPath,
+    specSha256: createHash('sha256').update(content).digest('hex'), summary: 'Bounded fixture spec authored.', blockers: [],
+    decisionGaps: decisionRequired ? [{ id: 'fixture-behavior', summary: 'Confirm the bounded fixture behavior.', evidence: ['Issue acceptance criteria.'] }] : [],
+    question: decisionRequired ? 'Which bounded fixture behavior should be used?' : null,
+  } }));
+}
+
+function normalizeSpecReview(reportPath, prompt) {
+  const sessionId = prompt.match(/Reviewer session ID: ([^.\\n]+)/u)?.[1];
+  if (!sessionId) throw new Error('missing spec reviewer session');
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, verdict: 'approved',
+    coverage: ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation'],
+    defects: [], reviewerSessionId: sessionId, acceptedRisks: [],
+  } }));
 }
 
 function normalizeReviewFeedbackImplementation(reportPath, prompt) {
@@ -749,6 +942,14 @@ function applyFault(scenario, operation, prompt) {
   }
   if (operation === 'implementation' && scenario === 'safety-negative') {
     writeFileSync('.env', 'blocked fixture\\n'); return;
+  }
+  if (operation === 'implementation' && scenario === 'authoritative-candidate-publication') {
+    const path = 'src/live-smoke/authoritative-candidate-publication.txt';
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, 'staged content must not become authoritative\\n');
+    runGit(['add', '--', path]);
+    writeFileSync(path, 'authoritative-candidate-publication\\n');
+    return;
   }
   if (operation !== 'proof') return;
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
@@ -783,8 +984,8 @@ function applyFault(scenario, operation, prompt) {
     return;
   }
   if ([
-    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'acceptance-proof-positive', 'acceptance-proof-rework',
+    'package-install', 'spec-first', 'product-question', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
+    'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
     writePassingNonVisualProof(criteria, reportPath);
@@ -879,7 +1080,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { prompt += chunk; });
 process.stdin.on('end', () => {
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'acceptance-proof-positive';
+  const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'authoritative-candidate-publication';
   mkdirSync(dirname(reportPath), { recursive: true });
   if (prompt.includes('/triage/')) writeTriage(reportPath);
   else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
@@ -900,12 +1101,14 @@ function writeTriage(reportPath) {
 function writeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
+  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
   writeAgentReport(reportPath, {
     version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: 'approved', mode: capsule.mode,
-    coverage: capsule.reviewFocus ?? [], defects: capsule.defects ?? [], residualRisks: [],
-    reviewerSessionId: capsule.reviewerSessionId, closureRequestSha256: capsule.closureRequestSha256,
-    repairFindingOutcomes: (capsule.fixedRepairFindings ?? []).map((finding) => ({ id: finding.id, status: 'verified' })),
+    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    coverage: capsule.reviewFocus ?? [],
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   });
 }
 
@@ -1036,9 +1239,55 @@ async function cleanup(context) {
       : ['issue', 'close', String(issue), '--repo', context.repo, '--comment', `[live-smoke:${context.runId}] cleanup`];
     await bestEffort(failures, `issue #${issue}`, () => runCommand('gh', args, { timeoutMs: context.options.timeoutMs }));
   }
+  for (const label of [...new Set(context.createdLabels)].reverse()) {
+    await bestEffort(failures, `label ${label}`, () => runCommand('gh', [
+      'api', '--method', 'DELETE', `repos/${context.repo}/labels/${encodeURIComponent(label)}`,
+    ], { timeoutMs: context.options.timeoutMs }));
+  }
+  await terminateRunProcesses(context, failures);
+  await cleanupLocalSafetyResources(context, failures);
   await verifyCleanup(context, failures);
   if (failures.length > 0) throw new Error(`strict cleanup failed:\n${failures.join('\n')}`);
   await appendReport(context, '\nStrict cleanup passed.\n');
+  const report = await readFile(context.reportPath, 'utf8');
+  await removeTemporaryArtifacts(context);
+  process.stdout.write(`[v2-live-smoke] report\n${report}`);
+}
+
+async function cleanupLocalSafetyResources(context, failures) {
+  if (!context.targetRoot || !context.lockAcquired) return;
+  await bestEffort(failures, 'candidate refs', async () => {
+    const refs = (await listCandidateRefs(context)).filter((ref) => !context.baselineCandidateRefs.has(ref));
+    for (const ref of refs) await runCommand('git', ['-C', context.targetRoot, 'update-ref', '-d', ref], { timeoutMs: context.options.timeoutMs });
+  });
+  await bestEffort(failures, 'candidate worktrees', async () => {
+    const added = (await listWorktrees(context)).filter((path) => !context.baselineWorktrees.has(path));
+    for (const path of added) await runCommand('git', ['-C', context.targetRoot, 'worktree', 'remove', '--force', path], { timeoutMs: context.options.timeoutMs });
+    await runCommand('git', ['-C', context.targetRoot, 'worktree', 'prune', '--expire', 'now'], { timeoutMs: context.options.timeoutMs });
+  });
+}
+
+async function terminateRunProcesses(context, failures) {
+  await bestEffort(failures, 'terminate live-smoke processes', async () => {
+    const owned = await listRunProcessIds(context);
+    for (const pid of owned) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; } }
+    if (owned.length > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+    for (const pid of await listRunProcessIds(context)) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; } }
+  });
+}
+
+async function listRunProcessIds(context) {
+  return (await runCommand('ps', ['-axo', 'pid=,command='], { timeoutMs: context.options.timeoutMs })).stdout
+    .split('\n').map((line) => line.trim()).filter(Boolean)
+    .map((line) => ({ pid: Number(line.split(/\s+/u)[0]), command: line }))
+    .filter((entry) => Number.isSafeInteger(entry.pid) && entry.pid > 1 && entry.pid !== process.pid
+      && entry.pid !== process.ppid && entry.command.includes(context.root))
+    .map((entry) => entry.pid);
+}
+
+export async function removeTemporaryArtifacts(context) {
+  await runCommand('chmod', ['-R', 'u+w', context.root], { timeoutMs: context.options.timeoutMs });
+  await rm(context.root, { recursive: true, force: true });
 }
 
 async function discoverRunArtifacts(context, failures) {
@@ -1096,6 +1345,25 @@ async function verifyCleanup(context, failures) {
       if (result.status === 0) failures.push(`issue #${issue}: still exists after delete cleanup`);
     }
   }
+  await bestEffort(failures, 'verify run-created labels', async () => {
+    const labels = new Set(await listRepositoryLabels(context));
+    const remaining = context.createdLabels.filter((label) => labels.has(label));
+    if (remaining.length > 0) throw new Error(`labels remain: ${remaining.join(', ')}`);
+  });
+  if (context.targetRoot) {
+    await bestEffort(failures, 'verify candidate refs', async () => {
+      const refs = (await listCandidateRefs(context)).filter((ref) => !context.baselineCandidateRefs.has(ref));
+      if (refs.length > 0) throw new Error(`run-created candidate refs remain: ${refs.join(', ')}`);
+    });
+    await bestEffort(failures, 'verify candidate worktrees', async () => {
+      const worktrees = (await listWorktrees(context)).filter((path) => !context.baselineWorktrees.has(path));
+      if (worktrees.length > 0) throw new Error(`run-created worktrees remain: ${worktrees.join(', ')}`);
+    });
+  }
+  await bestEffort(failures, 'verify no live-smoke child processes', async () => {
+    const processes = await listRunProcessIds(context);
+    if (processes.length > 0) throw new Error(`live-smoke processes remain: ${processes.length}`);
+  });
 }
 
 export async function retryCleanupObservation(action, options = {}) {
@@ -1171,7 +1439,7 @@ async function selfTestFakeAgent() {
     await runCommand('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fake codex']);
     const version = await runCommand(fakePath, ['--version'], { cwd: root });
     if (version.stdout !== `${installedVersion}\n`) throw new Error('fake agent version contract failed');
-    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=acceptance-proof-positive' }];
+    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=authoritative-candidate-publication' }];
     const implementationPath = join(root, 'implementation.json');
     await runCommand(fakePath, ['exec', '--output-last-message', implementationPath], {
       cwd: root,
@@ -1193,8 +1461,8 @@ async function selfTestFakeAgent() {
     }
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {
-      operation: 'code-review', mode: 'full', reviewerSessionId: 'review-session-1', targetRevision: 1,
-      targetFingerprint: 'a'.repeat(64), closureRequestSha256: null, reviewFocus: ['correctness'],
+      operation: 'code-review', reviewerSessionId: 'review-session-1', targetRevision: 1,
+      targetFingerprint: 'a'.repeat(64), reviewFocus: ['correctness'],
       defects: [], fixedRepairFindings: [],
     };
     await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {

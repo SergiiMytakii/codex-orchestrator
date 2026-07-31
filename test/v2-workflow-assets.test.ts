@@ -43,14 +43,82 @@ test('workflow V2 exposes current operation dependencies and keeps evals out of 
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
   assert.deepEqual(Object.keys(loaded.manifest.operations).sort(), [
-    'acceptance-proof', 'ambiguity-review', 'code-review', 'implementation', 'spec-author', 'spec-review', 'triage',
+    'acceptance-proof', 'code-review', 'implementation', 'spec-author', 'spec-review', 'triage',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
     'code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd',
   ]);
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
+  assert.equal('qualification-repair' in loaded.manifest.operations, false);
   assert.equal(Object.keys(loaded.manifest.evals).length >= 2, true);
+});
+
+test('workflow eval execution metadata survives generation', async () => {
+  const loaded = await loadPackageWorkflow(packageRoot);
+  const shared = loaded.manifest.evals['shared/coding-skill-evals'];
+  assert.ok(shared);
+  const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...shared.path.split('/')), 'utf8')) as {
+    cases: Array<Record<string, any>>;
+  };
+  assert.equal(value.cases.length, 22);
+  const approvedSpec = value.cases.find((item) => item.id === 'approved-spec-execution');
+  assert.ok(approvedSpec);
+  assert.deepEqual(approvedSpec.execution, {
+    level: 'end_to_end',
+    fixture: 'end-to-end-approved-spec',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer', 'tdd'],
+    should_not_trigger: ['implementation-spec-maker', 'tickets-orchestrator'],
+    assertions: [
+      { kind: 'route_equals', value: 'spec-implementer' },
+      { kind: 'file_contains', path: '.eval/red.json', text: '"status": "red"' },
+      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
+      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Implement the greeting' },
+      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Run the focused test' },
+      { kind: 'event_present', event: 'file_write', value: 'greeting.py' },
+      { kind: 'event_order', before: { event: 'skill_read', value: 'spec-implementer' }, after: { event: 'file_write', value: 'greeting.py' } },
+      { kind: 'event_absent', event: 'git_push', value: 'origin' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
+  const repairComplexity = value.cases.find((item) => item.id === 'repair-complexity-stops-implementation');
+  assert.ok(repairComplexity);
+  assert.deepEqual(repairComplexity.execution, {
+    level: 'behavior',
+    fixture: 'behavior/repair-complexity-stop',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer'],
+    should_not_trigger: ['code-debugger', 'implementation-spec-maker', 'tdd'],
+    assertions: [
+      { kind: 'route_equals', value: 'repair-complexity-blocked' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
+      { kind: 'tree_unchanged' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
+  const consolidatedFindings = value.cases.find((item) => item.id === 'repair-findings-consolidated');
+  assert.ok(consolidatedFindings);
+  assert.deepEqual(consolidatedFindings.execution, {
+    level: 'behavior',
+    fixture: 'behavior/repair-findings-consolidated',
+    sandbox: 'workspace-write',
+    trials: 2,
+    should_trigger: ['spec-implementer', 'tdd'],
+    should_not_trigger: ['code-debugger', 'implementation-spec-maker'],
+    assertions: [
+      { kind: 'route_equals', value: 'spec-implementer' },
+      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
+      { kind: 'event_present', event: 'file_write', value: 'report_summary.py' },
+      { kind: 'event_present', event: 'file_write', value: '.eval/defect-ledger.json' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
+      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
+    ],
+    ablation_skill: 'spec-implementer',
+  });
 });
 
 
