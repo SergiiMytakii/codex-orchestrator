@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   classifyIssueWorkflow,
@@ -19,6 +21,70 @@ import {
 
 function v2RunResult(result) {
   return JSON.stringify({ schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result });
+}
+
+const validFrozenSpecReceipt = {
+  version: 1,
+  issueNumber: 123,
+  runId: 'run-123',
+  workflowGenerationSha256: 'a'.repeat(64),
+  revision: 1,
+  path: 'specs/123.md',
+  contentSha256: 'b'.repeat(64),
+  revisionSha256: 'c'.repeat(64),
+  reviewReportSha256: 'd'.repeat(64),
+  reviewerSessionId: 'reviewer-session',
+  receiptSha256: 'e'.repeat(64),
+};
+
+const validFrozenSpecQuestionReceipt = {
+  version: 1,
+  revisionSha256: 'f'.repeat(64),
+  decisionGaps: [{ id: 'product-choice', summary: 'Choose the intended behavior.', evidence: ['issue body'] }],
+  questionId: 'q-123',
+  question: 'Which behavior should be used?',
+  answerPrefix: 'Answer q-123:',
+  marker: '<!-- codex-orchestrator:spec-question:q-123 -->',
+  evidencePath: 'specs/123.md',
+  questionSha256: '1'.repeat(64),
+};
+
+const runnerPath = fileURLToPath(new URL('./runner.mjs', import.meta.url));
+
+async function runStandaloneImplement({ result, exitCode, args = ['--issue', '123'] }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'self-improvement-cli-test-'));
+  const binDir = path.join(root, 'bin');
+  await mkdir(binDir);
+  const npmPath = path.join(binDir, 'npm');
+  const nodePath = path.join(binDir, 'node');
+  await writeFile(npmPath, '#!/bin/sh\nexit 0\n');
+  await writeFile(nodePath, '#!/bin/sh\nprintf "%s" "$SELF_IMPROVEMENT_V2_RESULT"\nexit "$SELF_IMPROVEMENT_V2_EXIT"\n');
+  await chmod(npmPath, 0o755);
+  await chmod(nodePath, 0o755);
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [runnerPath, 'implement', ...args], {
+        cwd: root,
+        env: {
+          ...process.env,
+          CODEX_ORCHESTRATOR_SELF_IMPROVEMENT_CWD: root,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+          SELF_IMPROVEMENT_V2_RESULT: result ? v2RunResult(result) : '',
+          SELF_IMPROVEMENT_V2_EXIT: String(exitCode ?? 0),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 function commandKey(command, args = []) {
@@ -81,6 +147,126 @@ const validFinding = {
 
 test('local boundary expects runner exports before implementation', () => {
   assert.equal(typeof createRunner, 'function');
+});
+
+for (const scenario of [
+  {
+    name: 'review-ready',
+    wrapperStatus: 'passed',
+    exitCode: 0,
+    result: { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'blocked',
+    wrapperStatus: 'blocked',
+    exitCode: 20,
+    result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'not-eligible',
+    wrapperStatus: 'skipped',
+    exitCode: 21,
+    result: { status: 'not-eligible', reason: 'issue is closed', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'cancelled',
+    wrapperStatus: 'cancelled',
+    exitCode: 130,
+    result: { status: 'cancelled', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'route-ready',
+    wrapperStatus: 'skipped',
+    exitCode: 0,
+    result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'spec-frozen',
+    wrapperStatus: 'skipped',
+    exitCode: 0,
+    result: { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'requeued owner contention',
+    wrapperStatus: 'skipped',
+    exitCode: 0,
+    result: { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'requeued state change',
+    wrapperStatus: 'skipped',
+    exitCode: 0,
+    result: { status: 'requeued', reason: 'state-changed' },
+  },
+  {
+    name: 'state-schema-unsupported',
+    wrapperStatus: 'blocked',
+    exitCode: 20,
+    result: { status: 'state-schema-unsupported' },
+  },
+  {
+    name: 'transport-failed',
+    wrapperStatus: 'failed',
+    exitCode: 70,
+    result: { status: 'transport-failed', resumable: true, evidencePath: 'evidence.json' },
+  },
+  {
+    name: 'internal-error',
+    wrapperStatus: 'failed',
+    exitCode: 70,
+    result: { status: 'internal-error', evidencePath: 'evidence.json' },
+  },
+]) {
+  test(`standalone implement preserves the ${scenario.name} V2 exit code`, async () => {
+    const result = await runStandaloneImplement(scenario);
+    assert.equal(result.code, scenario.exitCode);
+    assert.match(result.stdout, new RegExp(`implement: ${scenario.wrapperStatus} issue #123`));
+  });
+}
+
+for (const args of [
+  [],
+  ['--issue'],
+  ['--issue', '0'],
+  ['--issue', '-1'],
+  ['--issue', 'not-a-number'],
+  ['--issue', '9007199254740993'],
+  ['--issue', '123', '--typo'],
+  ['--issue', '123', '--issue', '456'],
+]) test(`standalone implement rejects invalid arguments: ${JSON.stringify(args)}`, async () => {
+  const result = await runStandaloneImplement({ args });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /--issue <number>/);
+});
+
+test('standalone implement fails closed when the candidate returns invalid V2 output with exit 0', async () => {
+  const result = await runStandaloneImplement({ exitCode: 0 });
+  assert.equal(result.code, 70);
+  assert.match(result.stdout, /implement: failed issue #123/);
+});
+
+test('standalone implement fails closed when invalid V2 output uses a semantic nonzero exit', async () => {
+  const result = await runStandaloneImplement({ exitCode: 20 });
+  assert.equal(result.code, 70);
+  assert.match(result.stdout, /implement: failed issue #123/);
+});
+
+test('standalone implement fails closed when the typed result and exit code disagree', async () => {
+  const result = await runStandaloneImplement({
+    exitCode: 21,
+    result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' },
+  });
+  assert.equal(result.code, 70);
+  assert.match(result.stdout, /implement: failed issue #123/);
+});
+
+test('standalone implement rejects an incomplete spec-frozen receipt', async () => {
+  const result = await runStandaloneImplement({
+    exitCode: 0,
+    result: { status: 'spec-frozen', receipt: { version: 1 }, evidencePath: 'evidence.json' },
+  });
+  assert.equal(result.code, 70);
+  assert.match(result.stdout, /implement: failed issue #123/);
 });
 
 test('issue workflow classification centralizes code, blocking, and review eligibility rules', () => {
@@ -538,11 +724,18 @@ test('typed V2 result parser rejects misleading prose and maps every result stat
   assert.throws(() => parseV2RunResult('review-ready status: blocked'));
   for (const result of [
     { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' },
+    { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json', continuationEpoch: 'epoch-1' },
+    { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
+    { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
+    { status: 'spec-frozen', receipt: validFrozenSpecQuestionReceipt, evidencePath: 'evidence.json' },
     { status: 'not-eligible', reason: 'closed', evidencePath: 'evidence.json' },
     { status: 'blocked', kind: 'safety', resumable: false, evidencePath: 'evidence.json' },
     { status: 'transport-failed', resumable: true, evidencePath: 'evidence.json' },
     { status: 'cancelled', evidencePath: 'evidence.json' },
     { status: 'internal-error', evidencePath: 'evidence.json' },
+    { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence.json' },
+    { status: 'requeued', reason: 'state-changed' },
+    { status: 'state-schema-unsupported' },
   ]) assert.deepEqual(parseV2RunResult(v2RunResult(result)), result);
 });
 
@@ -561,6 +754,32 @@ test('implement trusts typed blocked result instead of misleading successful pro
     assert.equal(result.status, 'blocked');
     assert.equal(result.issueNumber, 123);
     assert.equal(result.exitCode, 20);
+  } finally {
+    await cleanup();
+  }
+});
+
+for (const result of [
+  { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
+  { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
+  { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence.json' },
+  { status: 'requeued', reason: 'state-changed' },
+]) test(`zero-code ${result.status} outcome cannot trigger live smoke`, async () => {
+  const exec = makeExecStub({
+    [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: 'built' },
+    [commandKey('node', ['dist/src/v2/cli.js', 'run', '--target', '<cwd>', '--issue', '123'])]: {
+      code: 0,
+      stdout: v2RunResult(result),
+    },
+    [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'must not run' },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const implementation = await runner.implement({ issue: 123 });
+    assert.equal(implementation.status, 'skipped');
+    const smoke = await runner.runLiveSmoke({ implementation });
+    assert.equal(smoke.status, 'skipped');
+    assert.equal(exec.calls.some((call) => call.command === 'npm' && call.args.join(' ') === 'run smoke:live'), false);
   } finally {
     await cleanup();
   }
