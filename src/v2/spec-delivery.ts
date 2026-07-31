@@ -47,6 +47,7 @@ export interface FrozenSpecReceiptV1 {
   contentSha256: string;
   revisionSha256: string;
   reviewReportSha256: string;
+  reviewerAttemptId: string;
   reviewerSessionId: string;
   receiptSha256: string;
 }
@@ -251,7 +252,8 @@ export function freezeApprovedSpec(state: SpecDeliveryV1): SpecDeliveryV1 {
     version: 1 as const, issueNumber: state.issueNumber, runId: state.runId,
     workflowGenerationSha256: state.workflowGenerationSha256, revision: revision.revision, path: revision.path,
     contentSha256: revision.contentSha256, revisionSha256: revision.revisionSha256,
-    reviewReportSha256: state.review.acceptedReportSha256, reviewerSessionId: state.review.reviewer.sessionId,
+    reviewReportSha256: state.review.acceptedReportSha256,
+    reviewerAttemptId: state.review.reviewer.attemptId, reviewerSessionId: state.review.reviewer.sessionId,
   };
   const frozen = { ...payload, receiptSha256: frozenDigest(payload) };
   const next: SpecDeliveryV1 = { ...structuredClone(state), stage: 'frozen', frozen };
@@ -259,12 +261,13 @@ export function freezeApprovedSpec(state: SpecDeliveryV1): SpecDeliveryV1 {
 }
 
 export function validateFrozenSpecReceipt(value: unknown, state: SpecDeliveryV1): FrozenSpecReceiptV1 {
-  exact(value, ['version','issueNumber','runId','workflowGenerationSha256','revision','path','contentSha256','revisionSha256','reviewReportSha256','reviewerSessionId','receiptSha256'], 'frozen spec receipt');
+  exact(value, ['version','issueNumber','runId','workflowGenerationSha256','revision','path','contentSha256','revisionSha256','reviewReportSha256','reviewerAttemptId','reviewerSessionId','receiptSha256'], 'frozen spec receipt');
   const revision = state.revisions.at(-1);
   if (!revision || value.version !== 1 || value.issueNumber !== state.issueNumber || value.runId !== state.runId
     || value.workflowGenerationSha256 !== state.workflowGenerationSha256 || value.revision !== revision.revision
     || value.path !== revision.path || value.contentSha256 !== revision.contentSha256 || value.revisionSha256 !== revision.revisionSha256
-    || value.reviewReportSha256 !== state.review.acceptedReportSha256 || value.reviewerSessionId !== state.review.reviewer?.sessionId) {
+    || value.reviewReportSha256 !== state.review.acceptedReportSha256
+    || value.reviewerAttemptId !== state.review.reviewer?.attemptId || value.reviewerSessionId !== state.review.reviewer?.sessionId) {
     throw new Error('frozen spec receipt binding is invalid');
   }
   const { receiptSha256, ...payload } = value as unknown as FrozenSpecReceiptV1;

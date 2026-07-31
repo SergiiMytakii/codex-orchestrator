@@ -7,10 +7,11 @@ import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 
-import type { CheckedChange, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
+import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
+import type { DeliveryAuthorityV1 } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import {
   RunIssue,
@@ -266,10 +267,65 @@ test('spec-required route freezes independently reviewed authority and implement
   assert.equal(run.specDelivery?.stage, 'frozen');
   assert.equal(run.deliveryAuthority?.kind, 'spec');
   assert.equal(run.deliveryAuthority?.sourceSha256, run.specDelivery?.frozen?.receiptSha256);
+  assert.equal(fixture.implementationAuthorities.length, 1);
+  assert.equal(fixture.reviewAuthorities.length, 1);
+  assert.deepEqual(fixture.implementationAuthorities[0], run.deliveryAuthority);
+  assert.deepEqual(fixture.reviewAuthorities[0], run.deliveryAuthority);
+  if (run.deliveryAuthority?.kind === 'spec') {
+    assert.equal(run.deliveryAuthority.frozenSpec.content, '# Frozen spec\n');
+    assert.deepEqual(run.deliveryAuthority.frozenSpec.approvalReceipt, run.specDelivery?.frozen);
+  }
+  const downstream = JSON.stringify({
+    candidateBinding: run.candidateBinding,
+    checks: run.checks,
+    checkedChangeSha256: run.checkedChangeSha256,
+    proofReceipt: run.proofReceipt,
+    pendingEffect: run.pendingEffect,
+    terminalOutcome: run.terminalOutcome,
+  });
+  assert.equal(downstream.includes('# Frozen spec'), false);
+  assert.equal(downstream.includes('approvalReceipt'), false);
+  assert.equal(fixture.candidateAuthorityHashes.length > 0, true);
+  assert.equal(fixture.candidateAuthorityHashes.every((hash) => hash === run.deliveryAuthority!.authoritySha256), true);
+  assert.equal(fixture.checkedChangePayloads[0]?.version, 2);
+  if (fixture.checkedChangePayloads[0]?.version === 2) {
+    assert.equal(fixture.checkedChangePayloads[0].deliveryAuthoritySha256, run.deliveryAuthority!.authoritySha256);
+  }
   assert.equal(run.cycle, 1);
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(replay, result);
   assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review']);
+});
+
+test('persisted spec authority mismatch is rejected before owner lock, launch, effect, or budget mutation', async () => {
+  const source = await runFixture({ route: 'spec-required' });
+  assert.equal((await source.runner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const state = await source.store.read();
+  const forged = structuredClone(state);
+  const authority = forged.runs[0]!.deliveryAuthority;
+  assert.equal(authority?.kind, 'spec');
+  if (authority?.kind !== 'spec') return;
+  authority.frozenSpec.content = '# Unapproved replacement\n';
+  const beforeBudgets = canonicalJson({
+    cycle: forged.runs[0]!.cycle,
+    reportRepairs: forged.runs[0]!.reportRepairs,
+    transportRetries: forged.runs[0]!.transportRetries,
+    specBudgets: forged.runs[0]!.specDelivery!.budgets,
+  });
+  const bytes = Buffer.from(`${canonicalJson(forged)}\n`);
+  const replay = await runFixture({ rawRunStateBytes: bytes });
+
+  assert.deepEqual(await replay.runner.runIssue({ targetRoot: replay.targetRoot, issueNumber: 42 }), { status: 'state-schema-unsupported' });
+  assert.equal(replay.events.includes('owner-acquire'), false);
+  assert.equal(replay.events.includes('agent'), false);
+  assert.equal(replay.events.some((event) => event.startsWith('effect:')), false);
+  assert.deepEqual(await readFile(replay.statePath), bytes);
+  assert.equal(canonicalJson({
+    cycle: forged.runs[0]!.cycle,
+    reportRepairs: forged.runs[0]!.reportRepairs,
+    transportRetries: forged.runs[0]!.transportRetries,
+    specBudgets: forged.runs[0]!.specDelivery!.budgets,
+  }), beforeBudgets);
 });
 
 test('trusted product answer advances the frozen spec without retriage or a waiting lifecycle', async () => {
@@ -1711,7 +1767,8 @@ async function runFixture(options: FixtureOptions = {}) {
     }
     : inspectedStore;
   const localGit = new LocalGitRunIssueAdapter();
-  const git = traceGit(localGit, events, options);
+  const candidateAuthorityHashes: string[] = [];
+  const git = traceGit(localGit, events, options, candidateAuthorityHashes);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
   let blockedTransitionMutated = false;
   let nextCommentId = 1;
@@ -1728,6 +1785,9 @@ async function runFixture(options: FixtureOptions = {}) {
   let reads = 0;
   let authReads = 0;
   let reviewCalls = 0;
+  const implementationAuthorities: DeliveryAuthorityV1[] = [];
+  const reviewAuthorities: DeliveryAuthorityV1[] = [];
+  const checkedChangePayloads: CheckedChangePayload[] = [];
   const rejectedEffects = new Set<string>();
   const shouldReject = (effect: string) => {
     if (options.rejectEffect !== effect || rejectedEffects.has(effect)) return false;
@@ -1943,7 +2003,8 @@ async function runFixture(options: FixtureOptions = {}) {
       }).run(context, signal),
     },
     implementationAgent: {
-      run: async ({ attemptId, worktreePath: path, onPrepared, onLaunched }) => {
+      run: async ({ attemptId, worktreePath: path, deliveryAuthority, onPrepared, onLaunched }) => {
+        implementationAuthorities.push(structuredClone(deliveryAuthority));
         events.push('agent');
         events.push('agent:implementation');
         await onPrepared?.({
@@ -1978,6 +2039,7 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     implementationReviewer: {
       run: async (input) => {
+        reviewAuthorities.push(structuredClone(input.deliveryAuthority));
         reviewCalls += 1;
         events.push('review:code-review');
         const invocation = {
@@ -2037,7 +2099,7 @@ async function runFixture(options: FixtureOptions = {}) {
         await onLaunched?.({ pid: 24680, processGroupId: 24680, launchedAt: '2026-07-16T12:00:00.000Z' });
         events.push('proof');
         if (recoverOnly) events.push('proof-recover-only');
-        capabilities.verifyAndRead(checkedChange);
+        checkedChangePayloads.push(capabilities.verifyAndRead(checkedChange).payload);
         if (options.proofError) throw options.proofError;
         if (options.proofReject) throw new Error('proof rejected');
         const result = await (options.proof?.(checkedChange) ?? passedProof());
@@ -2113,7 +2175,11 @@ async function runFixture(options: FixtureOptions = {}) {
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };
-  return { runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath, events, evidence, store: rawStore, comments };
+  return {
+    runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath,
+    events, evidence, store: rawStore, comments, implementationAuthorities, reviewAuthorities,
+    candidateAuthorityHashes, checkedChangePayloads,
+  };
 }
 
 function workflowGeneration(packageVersion: string, seed: string) {
@@ -2157,7 +2223,12 @@ function traceStore(
   };
 }
 
-function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: FixtureOptions): RunIssueGit {
+function traceGit(
+  delegate: LocalGitRunIssueAdapter,
+  events: string[],
+  options: FixtureOptions,
+  candidateAuthorityHashes: string[],
+): RunIssueGit {
   const rejected = new Set<string>();
   let createWorktreeRejected = false;
   let inspectWorktreeDiverged = false;
@@ -2172,6 +2243,10 @@ function traceGit(delegate: LocalGitRunIssueAdapter, events: string[], options: 
   return {
     candidateV2: {
       ...delegate.candidateV2,
+      captureAndPin: async (input) => {
+        candidateAuthorityHashes.push(input.boundary.authoritySha256);
+        return delegate.candidateV2.captureAndPin(input);
+      },
       normalizeSharedIndex: async (input) => {
         if (options.candidateNormalizeFailOnce && !candidateNormalizeRejected && events.includes('git:commit')) {
           candidateNormalizeRejected = true;

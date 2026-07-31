@@ -2151,7 +2151,7 @@ export class RunIssue {
         return { result: await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
       }
       return { active: await this.persist(active, {
-        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(receipt, frozen),
+        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(receipt, active.record.specDelivery!),
       }) };
     }
     return { active };
@@ -2310,7 +2310,7 @@ export class RunIssue {
         return { result: await this.terminal(current, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
       }
       return { active: await this.persist(current, {
-        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(current.record.routeReceipt!, frozen),
+        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(current.record.routeReceipt!, current.record.specDelivery!),
       }) };
     }
     if (result.status === 'decision-required') return { result: await this.specQuestionResult(current, result.receipt) };

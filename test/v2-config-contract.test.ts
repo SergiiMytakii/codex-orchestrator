@@ -140,7 +140,7 @@ test('CLI JSON and exit mapping are total over every public runIssue outcome', (
     { result: { status: 'spec-frozen', receipt: {
       version: 1, issueNumber: 42, runId: 'run-42', workflowGenerationSha256: 'a'.repeat(64), revision: 1,
       path: '/state/spec.md', contentSha256: 'b'.repeat(64), revisionSha256: 'c'.repeat(64),
-      reviewReportSha256: 'd'.repeat(64), reviewerSessionId: 'reviewer', receiptSha256: 'e'.repeat(64),
+      reviewReportSha256: 'd'.repeat(64), reviewerAttemptId: 'review-attempt', reviewerSessionId: 'reviewer', receiptSha256: 'e'.repeat(64),
     }, evidencePath: 'evidence/spec.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
