@@ -599,14 +599,12 @@ export class RunIssue {
     return this.persistTerminal(active, {
       status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: commitSha,
     }, 'review-ready', false, {
-      ...(active.record.routeReceipt?.route === 'direct' ? {
-        reviewFeedback: initializeReviewFeedback(
-          active.record.reviewFeedback ?? {
-            version: 1, updateEpoch: 0, consumedSourceIds: [], previousPublishedHeadSha: null,
-            repairRound: 0, activeBatch: null, history: [], verifiedReceipt: null,
-          }, commitSha, [],
-        ),
-      } : {}),
+      reviewFeedback: initializeReviewFeedback(
+        active.record.reviewFeedback ?? {
+          version: 1, updateEpoch: 0, consumedSourceIds: [], previousPublishedHeadSha: null,
+          repairRound: 0, activeBatch: null, history: [], verifiedReceipt: null,
+        }, commitSha, [],
+      ),
     });
   }
 
@@ -913,7 +911,7 @@ export class RunIssue {
     const terminal = starting.record.terminalOutcome;
     const feedback = starting.record.reviewFeedback;
     if (!terminal || terminal.status !== 'review-ready' || !feedback || !this.dependencies.reviewFeedback
-      || starting.record.routeReceipt?.route !== 'direct' || starting.record.directReview?.status !== 'clear') {
+      || starting.record.directReview?.status !== 'clear') {
       return { result: publicOutcome(terminal!) };
     }
     const pullRequest = await this.dependencies.pullRequests.findOpen({

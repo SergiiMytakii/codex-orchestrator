@@ -130,11 +130,12 @@ The daemon uses the same lifecycle as `run`; it does not have a less strict exec
 
 ### Continue from pull-request review feedback
 
-After a direct-delivery run reaches `review-ready`, the daemon also polls issues
-with `agent:review`. A quiet PR remains effect-free. When the same marker-bound,
-same-repository draft PR receives a new unresolved inline thread root or a
-non-empty `CHANGES_REQUESTED` review from a current repository writer or admin,
-the Runner freezes that exact feedback batch and resumes the existing run.
+After a direct or spec-required run reaches `review-ready`, the daemon also
+polls issues with `agent:review`. A quiet PR remains effect-free. When the same
+marker-bound, same-repository draft PR receives a new unresolved inline thread
+root or a non-empty `CHANGES_REQUESTED` review from a current repository writer
+or admin, the Runner freezes that exact feedback batch and resumes the existing
+run without repeating triage or spec work.
 
 The frozen batch enters the same implementation → complete independent review
 → checks → proof loop used by initial delivery. Every repair creates a new

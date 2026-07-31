@@ -801,12 +801,17 @@ test('uninitialized feedback data fails closed without losing the Run', async ()
   assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.previousPublishedHeadSha, null);
 });
 
-test('review-ready replay remains effect-free without an eligible feedback batch and updates the same PR once for a trusted batch', async () => {
-  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none' });
+for (const route of ['direct', 'spec-required'] as const) {
+test(`review-ready ${route} replay remains effect-free and updates the same PR once for trusted feedback`, async () => {
+  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none', route });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(first.status, 'review-ready');
   const initialState = await fixture.store.read();
   const record = initialState.runs[0]!;
+  const frozenAuthority = canonicalJson(record.deliveryAuthority);
+  const initialTriageCalls = fixture.events.filter((event) => event === 'route:triage').length;
+  const initialSpecAuthorCalls = fixture.events.filter((event) => event === 'spec-author').length;
+  const initialSpecReviewCalls = fixture.events.filter((event) => event === 'spec-review').length;
   const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
   assert.equal(record.reviewFeedback?.activeBatch, null);
 
@@ -942,6 +947,10 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   assert.equal(after.cycle, record.cycle);
   assert.equal(after.reviewFeedback?.activeBatch, null);
   assert.equal(after.reviewFeedback?.history.length, 1);
+  assert.equal(canonicalJson(after.deliveryAuthority), frozenAuthority);
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, initialTriageCalls);
+  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, initialSpecAuthorCalls);
+  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, initialSpecReviewCalls);
   assert.equal(prComments.length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
 
@@ -1020,6 +1029,7 @@ test('review-ready replay remains effect-free without an eligible feedback batch
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
 });
+}
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
   const checkGate = deferred<{ status: 'passed'; output: Buffer }>();
