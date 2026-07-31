@@ -29,22 +29,37 @@ behavior in repository `AGENTS.md`, `CONTEXT.md`, ADRs, or local skills.
   proof that cannot isolate the dangerous state.
 
 Prefer direct root implementation for `simple` and ordinary `medium` work. Use
-`$implementation-spec-maker` only for a real execution decision or coordination
-gap. Use `$tickets-orchestrator` only for an approved ticket graph, real delivery
+`$implementation-spec-maker` only for an explicitly requested standalone spec
+or a real execution decision/coordination gap in a non-generated source. Issues
+published by `$to-tickets` bypass it and execute directly or through
+`$tickets-orchestrator`. Use `$tickets-orchestrator` only for an approved ticket graph, real delivery
 dependencies or disjoint parallel slices, or an explicit orchestration request.
 Do not manufacture PRDs, tickets, specs, agents, or review checkpoints from
 file count or generic risk labels.
+
+Before classifying a spec-preparation request as `spec-gap`,
+`authority-blocked`, or `preserve-existing`, read `$implementation-spec-maker`.
+Risk/profile classification alone does not activate it.
+
+When the requested decision is whether repository evidence already answers a
+bounded implementation question, classify it as `evidence-first` only after
+local instructions, code, and tests confirm the target, current and expected
+behavior, and a credible validation command. Then continue through the normal
+simple or medium implementation route without asking for those same details.
+Missing or contradictory evidence is not `evidence-first`.
 
 ## Core Routes
 
 | Situation | Route |
 | --- | --- |
+| Local evidence fully answers a requested implementation-readiness classification | `evidence-first`, then the applicable implementation route |
 | Tiny, clear, low-risk edit | `$small-task-implementer` after its Fit Gate |
 | Clear feature or fix | Apply the TDD Fit Gate; when it fits, use Root + one `$tdd` activation, otherwise affected validation |
-| Missing execution detail | `$implementation-spec-maker` -> artifact review -> `$spec-implementer` |
+| Missing execution detail in a standalone plan/raw issue | `$implementation-spec-maker` -> artifact review -> `$spec-implementer` |
 | Approved implementation spec | `$spec-implementer` |
-| Approved dependency graph or explicit orchestration | `$tickets-orchestrator` |
-| Product discovery or ticket decomposition | `$to-spec`, `$spec-to-tickets`, or `$wayfinder` as applicable; stop before delivery |
+| Approved executable generated ticket | Direct root execution, or `$tickets-orchestrator` for a graph |
+| Approved dependency graph or explicit orchestration | `$tickets-orchestrator` with parent Contract Ledger and cumulative acceptance |
+| Product discovery or ticket decomposition | `$to-spec`, `$spec-to-tickets`, or `$wayfinder`; `$to-tickets` output is the final planning contract; stop before delivery |
 | Explain-only bug | `$bug-root-cause-explainer`; no edits |
 | Confirmed bounded bug fix | Apply the TDD Fit Gate, then `$tdd` + `$code-debugger` when it fits; otherwise `$code-debugger` + affected validation |
 | Hard, flaky, unclear, or performance bug | `$diagnosing-bugs` before the explain/fix route |
@@ -52,9 +67,10 @@ file count or generic risk labels.
 | External multi-source uncertainty | `$research`; narrow documentation lookup stays inline |
 | Commit request | `$commit`; push/PR still require separate authority |
 
-Generated planning artifacts and labels never authorize implementation. One
-deterministic approved ticket may run directly; a graph follows the authorized
-delivery workflow.
+Generated planning artifacts and labels never authorize implementation. After
+separate delivery authority, an approved generated ticket runs directly and a
+graph follows `$tickets-orchestrator`; neither receives a mirror implementation
+spec. If such a ticket is not executable, return a ticket-flow defect.
 
 ## TDD And Review
 

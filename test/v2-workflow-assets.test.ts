@@ -61,7 +61,10 @@ test('workflow eval execution metadata survives generation', async () => {
   const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...shared.path.split('/')), 'utf8')) as {
     cases: Array<Record<string, any>>;
   };
-  assert.equal(value.cases.length, 22);
+  const caseIds = value.cases.map((item) => item.id);
+  assert.equal(caseIds.length > 0, true);
+  assert.equal(new Set(caseIds).size, caseIds.length);
+  assert.equal(caseIds.includes('prd-generated-ticket-skips-spec-maker'), true);
   const approvedSpec = value.cases.find((item) => item.id === 'approved-spec-execution');
   assert.ok(approvedSpec);
   assert.deepEqual(approvedSpec.execution, {

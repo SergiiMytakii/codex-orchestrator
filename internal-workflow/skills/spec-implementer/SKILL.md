@@ -1,6 +1,6 @@
 ---
 name: "spec-implementer"
-description: "Executes approved specs continuously with honest checklist updates, proportional validation, opt-in Git checkpoints, and required review/signoff."
+description: "Execute a separately approved standalone implementation spec continuously with honest checklist updates, proportional validation, opt-in Git checkpoints, and required review/signoff. Do not use for generated to-tickets issues, which execute directly or through tickets-orchestrator."
 ---
 
 # Spec Implementer
@@ -22,6 +22,12 @@ The primary route remains `spec-implementer` whenever an approved spec is the
 execution authority. Do not report `implementation_size`, TDD, a Contract Test
 Ledger, or review as a replacement route; those are execution details inside
 this route.
+
+This route is disjoint from generated ticket delivery. A risk label, file count,
+or multi-file change never routes a `$to-tickets` issue here. Execute those
+issues directly or through `$tickets-orchestrator`; if their authority is
+incomplete, report a ticket-flow defect instead of creating or accepting a
+mirror spec.
 
 Compact and full specs use the same direct phase flow. `compact` describes
 document density, not implementation size or risk. Full mode adds only the
@@ -100,6 +106,17 @@ with a concrete blocker. Use Closure only for critical/high, protected
 trust/data/concurrency/shared-contract impact, or invalidated mandatory
 coverage. Do not restart broad Full review unless the repair actually
 invalidated its coverage.
+
+Before editing a Closure finding that changes observable behavior, apply the
+TDD Fit Gate and, when it fits, activate and read `$tdd` before the first repair
+edit. Existing direct checks, a defect ledger, or the fact that this is a review
+repair do not replace that skill activation.
+
+When a Closure finding is a non-converging repair because it requires a new
+mechanism or another Closure, leave the repository tree unchanged and report
+the blocker only in the final response. Do not patch runtime code, checklists,
+review state, defect ledgers, or other repository records until revised
+authority makes the changed design executable.
 
 ## Stop Conditions
 

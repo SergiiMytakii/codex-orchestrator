@@ -288,6 +288,9 @@ function validateEvalAssertion(value, path) {
   if (value.kind === 'route_equals') {
     keys = ['kind', 'value'];
     if (typeof value.value !== 'string' || value.value.length === 0) throw new Error(`Workflow eval assertion is invalid: ${path}`);
+  } else if (value.kind === 'intended_action_matches') {
+    keys = ['kind', 'pattern'];
+    if (typeof value.pattern !== 'string' || value.pattern.length === 0) throw new Error(`Workflow eval assertion is invalid: ${path}`);
   } else if (['path_exists', 'path_absent'].includes(value.kind)) {
     keys = ['kind', 'path'];
     validateEvalRelativePath(value.path, `Workflow eval assertion path is invalid: ${path}`);
@@ -305,6 +308,12 @@ function validateEvalAssertion(value, path) {
   } else if (['event_present', 'event_absent'].includes(value.kind)) {
     keys = ['kind', 'event', 'value'];
     validateEvalEvent({ event: value.event, value: value.value }, path);
+  } else if (value.kind === 'event_values_equal') {
+    keys = ['kind', 'event', 'values'];
+    if (!['skill_read', 'file_write', 'git_commit', 'git_push', 'subagent_launch', 'subagent_runtime', 'subagent_effort'].includes(value.event)
+      || !Array.isArray(value.values) || !value.values.every((item) => typeof item === 'string')) {
+      throw new Error(`Workflow eval assertion is invalid: ${path}`);
+    }
   } else if (value.kind === 'event_order') {
     keys = ['kind', 'before', 'after'];
     validateEvalEvent(value.before, path);
@@ -320,7 +329,7 @@ function validateEvalAssertion(value, path) {
 }
 
 function validateEvalEvent(value, path) {
-  if (!isRecord(value) || !['skill_read', 'file_write', 'git_commit', 'git_push', 'subagent_launch'].includes(value.event)
+  if (!isRecord(value) || !['skill_read', 'file_write', 'git_commit', 'git_push', 'subagent_launch', 'subagent_runtime', 'subagent_effort'].includes(value.event)
     || typeof value.value !== 'string') throw new Error(`Workflow eval event is invalid: ${path}`);
   const keys = Object.keys(value).sort(compareUtf8);
   if (keys.length !== 2 || keys[0] !== 'event' || keys[1] !== 'value') {

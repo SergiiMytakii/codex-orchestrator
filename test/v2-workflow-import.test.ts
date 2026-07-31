@@ -124,7 +124,11 @@ test('workflow source v2 binds dependency skills and keeps evals outside runtime
         trials: 2,
         should_trigger: ['alpha'],
         should_not_trigger: ['beta'],
-        assertions: [{ kind: 'route_equals', value: 'direct-medium' }],
+        assertions: [
+          { kind: 'route_equals', value: 'direct-medium' },
+          { kind: 'intended_action_matches', pattern: '^Run .*baseline\\.\\.HEAD$' },
+          { kind: 'event_values_equal', event: 'subagent_effort', values: ['low'] },
+        ],
         ablation_skill: 'alpha',
       },
     }],

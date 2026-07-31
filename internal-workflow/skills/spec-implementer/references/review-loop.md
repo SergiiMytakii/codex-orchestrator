@@ -75,6 +75,11 @@ record. Coordinator verification closes ordinary medium/low
 behavior-preserving findings after confirming each repair matches its cited
 failure.
 
+Before editing a Closure finding that changes observable behavior, apply the
+TDD Fit Gate and, when it fits, activate and read `$tdd` before the first repair
+edit. Existing direct checks, a defect ledger, or the fact that this is a review
+repair do not replace that skill activation.
+
 Judge auto-fix risk from the complete repair diff, not one finding in
 isolation. After Full, any repair that adds a public parameter, durable
 transition, retry or flag, owner, or runtime boundary is a substantive
@@ -101,6 +106,11 @@ another Closure, mark it `Blocked: non-converging repair`; do not patch it in
 isolation. Continue only after a revised approved spec or explicit user
 decision resolves the changed design. Never hide an unresolved finding merely
 because the normal review budget ended.
+
+At that terminal repair boundary, leave the repository tree unchanged and
+report the blocker only in the final response. Do not update implementation,
+spec/checklist state, review records, or defect ledgers before revised authority
+is approved; the blocked report is the handoff.
 
 Do not repeat review without a material change in target, evidence, repair, or
 source decision. Stop and surface the actual decision or evidence blocker when

@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Test-driven development for changes that alter observable behavior, have a natural public test seam, and can produce a meaningful failing test before implementation. Use after the global TDD Fit Gate passes, or when the user explicitly requests red-green-refactor, test-first development, or TDD.
+description: Test-driven development and proof selection for observable behavior changes with a natural public seam and a meaningful pre-change failure. Use after the global TDD Fit Gate passes, when choosing targeted proof versus a Contract Test Ledger, or when the user explicitly requests red-green-refactor, test-first development, or TDD.
 ---
 
 # Test-Driven Development
@@ -37,7 +37,7 @@ Read [tests.md](tests.md) when choosing or reviewing test shape. Read [mocking.m
 2. List the prioritized observable behaviors, not implementation steps.
 3. Select the public seam where callers observe each behavior.
 4. Ask the user only when the seam changes the public contract, product intent is unclear, or behavior priorities materially conflict.
-5. Use the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) only when its material-delta and missed-failure gate passes.
+5. Classify proof as `targeted-proof` or `contract-ledger`: use the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) only when both its material-delta and missed-failure conditions pass; otherwise keep targeted proof and do not create a ledger from the contract category alone.
 6. If no natural public seam exists, stop the TDD route. Consult [interface-design.md](interface-design.md) only when changing the interface is itself required by the task.
 
 For UI behavior, define proof at the rendered seam: visible content and order, interaction result, semantics, or screenshot when layout direction or scrolling matters.

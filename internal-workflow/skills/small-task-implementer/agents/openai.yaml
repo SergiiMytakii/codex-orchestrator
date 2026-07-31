@@ -1,6 +1,6 @@
 interface:
   display_name: "Small Task Implementer"
   short_description: "Fast bounded local low-risk code changes"
-  default_prompt: "Use $small-task-implementer to make this small local low-risk change with targeted validation, escalating shared contracts to the direct medium route."
+  default_prompt: "Use $small-task-implementer for this tiny local change; if ticket planning is required, require a directly executable ticket rather than a later spec."
 policy:
   allow_implicit_invocation: true

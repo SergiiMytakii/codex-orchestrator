@@ -116,6 +116,29 @@
       }
     },
     {
+      "id": "prd-generated-ticket-skips-spec-maker",
+      "prompt": "Choose the route and completion gates for the authorized generated ticket graph documented in this repository.",
+      "expected": ["use tickets-orchestrator directly", "preserve inherited parent contracts", "invalidate earlier proof after shared-owner changes", "review the cumulative parent result"],
+      "forbidden": ["create an implementation spec", "route through spec-implementer"],
+      "execution": {
+        "level": "trigger",
+        "fixture": "routing/generated-ticket",
+        "sandbox": "read-only",
+        "trials": 2,
+        "should_trigger": ["tickets-orchestrator"],
+        "should_not_trigger": ["implementation-spec-maker", "spec-implementer"],
+        "assertions": [
+          {"kind": "route_equals", "value": "ticket-graph"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't)\\b[^\\n]*\\bC-RUNNER-1\\b)(?=.*\\b(?:contract|ledger|map|preserve|track|build|construct)\\b[^\\n]*\\bC-RUNNER-1\\b).+$"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't)\\b[^\\n]*\\bC-DAEMON-1\\b)(?=.*\\b(?:contract|ledger|map|preserve|track|build|construct)\\b[^\\n]*\\bC-DAEMON-1\\b).+$"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't)\\b[^\\n]*\\bC-RECOVERY-1\\b)(?=.*\\b(?:contract|ledger|map|preserve|track|build|construct)\\b[^\\n]*\\bC-RECOVERY-1\\b).+$"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't)\\b[^\\n]*\\b(?:invalidate|stale)\\b)(?=.*\\b(?:invalidate|mark|return|reprove)\\b)(?=.*\\bstale\\b).+$"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't)\\b[^\\n]*\\bbaseline\\.\\.HEAD\\b)(?=.*\\b(?:run|perform|launch|review)\\b[^\\n]*\\bbaseline\\.\\.HEAD\\b).+$"},
+          {"kind": "intended_action_matches", "pattern": "(?is)^(?!.*\\b(?:skip|omit|ignore|do not|don't|not required)\\b[^\\n]*\\bfinal HEAD\\b)(?=.*(?:\\b(?:require|prove|reconcile|verify|green)\\b[^\\n]*\\bfinal HEAD\\b|\\bfinal HEAD\\b[^\\n]*\\b(?:require|prove|reconcile|verify|green)\\b)).+$"}
+        ]
+      }
+    },
+    {
       "id": "approved-spec-execution",
       "prompt": "Execute the approved implementation spec in this repository and stop at its stated delivery boundary.",
       "expected": ["use spec-implementer", "follow the approved checklist through observable proof", "update reached checklist items truthfully"],
@@ -289,7 +312,7 @@
     },
     {
       "id": "ledger-protects-retry-contract",
-      "prompt": "Change the payment retry behavior documented in this repository, where a happy-path test could miss duplicate side effects.",
+      "prompt": "Choose proof for the payment retry behavior documented in this repository, where a happy-path test could miss duplicate side effects.",
       "expected": ["create a contract ledger", "name duplicate payment as the missed failure"],
       "forbidden": ["rely on the happy path alone"],
       "execution": {
@@ -391,7 +414,7 @@
     },
     {
       "id": "route-evidence-answers",
-      "prompt": "Implement the tiny change using the exact target, expected value, and validation command already documented in this repository.",
+      "prompt": "Classify whether repository evidence is sufficient to proceed with the tiny change whose exact target, expected value, and validation command are already documented in this repository.",
       "expected": ["use repository evidence", "continue without an obvious clarification question"],
       "forbidden": ["ask for details already present", "create planning artifacts"],
       "execution": {
@@ -417,6 +440,35 @@
         "should_trigger": ["implementation-spec-maker"],
         "should_not_trigger": ["small-task-implementer", "spec-implementer"],
         "assertions": [{"kind": "route_equals", "value": "authority-blocked"}]
+      }
+    },
+    {
+      "id": "explorer-fast-low-effort",
+      "prompt": "Use the configured explorer_fast subagent to trace how render_summary obtains its final label across this repository. Do not inspect the implementation files on the root agent. Wait for the child and report its evidence-backed answer.",
+      "expected": [
+        "launch explorer_fast for the bounded cross-file trace",
+        "wait for the child result",
+        "run the child with effective reasoning effort low"
+      ],
+      "forbidden": [
+        "answer the implementation question on the root agent",
+        "use analyst_deep",
+        "edit repository files"
+      ],
+      "execution": {
+        "level": "behavior",
+        "fixture": "behavior/explorer-fast-runtime",
+        "sandbox": "read-only",
+        "trials": 1,
+        "should_trigger": [],
+        "should_not_trigger": [],
+        "assertions": [
+          {"kind": "route_equals", "value": "codebase-exploration"},
+          {"kind": "event_present", "event": "subagent_launch", "value": "explorer_fast"},
+          {"kind": "event_values_equal", "event": "subagent_runtime", "values": ["explorer_fast"]},
+          {"kind": "event_present", "event": "subagent_effort", "value": "explorer_fast:low"},
+          {"kind": "tree_unchanged"}
+        ]
       }
     },
     {

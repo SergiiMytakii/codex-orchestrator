@@ -39,8 +39,13 @@ implementation under `$tdd`, affected validation, and one final review when
 - Use optional `$grilling`, then `$spec-to-tickets` and `$tickets-orchestrator`,
   only for unresolved product decisions or a real approved ticket graph,
   delivery dependency, or explicit orchestration request.
-- For one risky behavior or technical contract, prefer one approved ticket and mark `compact spec` or `standard spec` only when the ticket plus repository evidence cannot remove execution ambiguity.
-- For several tickets sharing one unresolved contract or validation path, make the contract-defining ticket block its consumers; merge tickets that cannot be specified or verified independently instead of creating a wave-level implementation spec.
+- For one risky behavior or technical contract that needs ticket planning,
+  require one directly executable approved ticket with inherited contract,
+  owner/seam, and compatible proof.
+- For several tickets sharing one unresolved contract or validation path, make
+  a blocking discovery/contract ticket own the answer; merge tickets that
+  cannot be executed or verified independently. Do not defer generated tickets
+  to a later implementation spec.
 - Escalate if the bug requires Bugfix Quality Gate analysis across multiple paths, states, async events, persistence, auth, cache, retries, workers, or contracts.
 
 ## Workflow
