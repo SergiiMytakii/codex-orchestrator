@@ -162,6 +162,9 @@ test('live smoke preflight is authenticated, scratch-only, and exclusively locke
   assert.match(preflight, /codex', \['login', 'status'/u);
   assert.match(preflight, /scratchLockBranch/u);
   assert.match(preflight, /refs\/heads/u);
+  assert.match(preflight, /status', '--porcelain', '--untracked-files=no/u);
+  assert.match(preflight, /clean immutable HEAD/u);
+  assert.match(text, /Source HEAD: \$\{sourceHead\}/u);
 });
 
 test('strict cleanup removes only run-created local resources and requires complete label setup', async () => {

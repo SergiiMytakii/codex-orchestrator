@@ -1,11 +1,20 @@
 # Issue #1246 completion proof
 
-## B0-to-final deletion
+## Historical checkpoint
+
+This document records the exact #1246 checkpoint and is not final evidence for
+#1242. Its former intermediate metrics and partial-suite statement are removed
+to prevent them from being mistaken for final proof. The preserved B0 is
+`7b2a002773dfc3faa87a28c4c5e60641bcb332bf`: 22,704 V2 production LOC and
+4,142 lines in `src/v2/run-issue.ts`. Fresh final metrics, full-suite results,
+owner/deletion evidence, and HEAD-bound smoke evidence belong to #1255.
+
+## B0-to-#1246 deletion
 
 B0 is `7b2a002773dfc3faa87a28c4c5e60641bcb332bf`. The preserved baseline was
 22,704 V2 production LOC and 4,142 lines in `src/v2/run-issue.ts`.
 
-The same final measurements are:
+The #1246 checkpoint measurements were:
 
 ```text
 git ls-files 'src/v2/*.ts' 'src/v2/**/*.ts' | LC_ALL=C sort | xargs wc -l
@@ -15,7 +24,7 @@ wc -l src/v2/run-issue.ts
 3827 src/v2/run-issue.ts
 ```
 
-The graph therefore deletes 1,924 net V2 production lines and 315 `RunIssue`
+At that checkpoint the graph deleted 1,924 net V2 production lines and 315 `RunIssue`
 lines. The B0 production diff is 2,995 insertions and 4,919 deletions. The only
 #1246 production edit is the existing spec-author prompt projection needed to
 carry a trusted answer into the same Run; it adds no owner or lifecycle.
@@ -43,18 +52,15 @@ affected-only mechanism.
 Unsupported state remains effect-free before owner-lock acquisition; after the
 lock, progression requires a fresh authoritative reread.
 
-## Checks and fault matrix
+## Historical checks and fault matrix
 
 - Focused final contract sets: 33/33 live-smoke harness, 50/50 report/schema,
   and 2/2 trusted-answer/same-Run tests passed.
 - Workflow generation tests: 21/21 passed; checked-in workflow verification
   and `git diff --check` passed.
 - Package dry-run produced `codex-orchestrator-2.0.10.tgz` with 288 entries.
-- The one requested full package run passed 325/326. Its sole failure was a
-  test-only forged “next cycle” record that retained the prior observed
-  ActiveAttempt; the fixture was corrected to model a valid interrupted phase,
-  and that exact restart test then passed. The full suite was not repeated per
-  the owner's explicit instruction.
+- Final full-suite evidence is intentionally not claimed by this historical
+  checkpoint; #1255 owns the fresh complete run on the final HEAD.
 
 Across the full and focused sets, the matrix covers launch authorization,
 result adoption, every PendingEffect/CAS boundary, candidate cleanup and

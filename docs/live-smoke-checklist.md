@@ -80,6 +80,8 @@ explicitly model-free and fails if it unexpectedly launches a model.
 ## Required evidence
 
 - Complete report emitted by the smoke command before its temporary root is deleted.
+- Exact clean source HEAD recorded in that report before packing; a dirty tracked
+  source tree is rejected before scratch mutation.
 - Exact packed package and public CLI path.
 - Scenario result and typed failure evidence where applicable.
 - Issue, branch, pull-request, label, candidate-ref/worktree, process, and

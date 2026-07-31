@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Collapsed direct, approved spec-first, product-answer, and trusted PR-feedback
+  delivery onto one Run-owned validation loop with exact Run/ActiveAttempt/
+  PendingEffect recovery, clean state-schema cutover, checked-change authority,
+  and intent-based publication.
+- Bound packed scratch-smoke reports to a clean immutable source HEAD before
+  package creation and retained strict scratch-only cleanup.
+
+### Removed
+- Removed legacy qualification, Full/Closure, operation-specific invocation,
+  separate post-PR progression, compatibility/migration, and duplicate
+  lifecycle ownership paths.
+
 ## [2.0.11] - 2026-07-30
 
 ### Added

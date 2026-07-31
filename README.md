@@ -9,7 +9,7 @@ The package is designed for unattended local execution without giving the Codex 
 Add the configured `agent:auto` label to an open issue, then run the orchestrator. It will choose one of three routes:
 
 - **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, issue-scoped verification checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
-- **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; the Runner freezes the approved revision and returns `spec-frozen`. Implementation is intentionally a separate follow-up run or workflow.
+- **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; after approval, the Runner continues through implementation, complete review, checks, proof, and publication in the same Run. `spec-frozen` is returned only while a revision-bound product answer is still required.
 - **Human decision required:** an independently authored spec found a real product gap. The package returns `spec-frozen`, posts one revision-bound question, and resumes the same Run at the next spec revision after a trusted answer.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.

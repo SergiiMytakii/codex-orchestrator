@@ -53,15 +53,18 @@ async function main() {
   const selected = selectScenarios(options);
   const runId = options.runId ?? new Date().toISOString().replace(/[-:TZ.]/gu, '').slice(0, 14);
   const root = await mkdtemp(join(tmpdir(), `codex-orchestrator-v2-smoke-${runId}-`));
+  const sourceHead = (await runCommand('git', ['-C', sourceRoot, 'rev-parse', 'HEAD'], {
+    timeoutMs: options.timeoutMs,
+  })).stdout.trim();
   const context = {
-    options, runId, root, sourceRoot, repo: options.repo,
+    options, runId, root, sourceRoot, sourceHead, repo: options.repo,
     reportPath: join(root, 'live-smoke-report.md'), modelAuditPath: join(root, 'model-audit.jsonl'),
     orchestratorHome: join(root, 'orchestrator-home'),
     targetRoot: '', cliPath: '', liveCodexPath: '',
     baseConfig: undefined, createdIssues: [], createdPullRequests: [], createdBranches: [],
     baselineLabels: new Set(), createdLabels: [], baselineCandidateRefs: new Set(), baselineWorktrees: new Set(), lockAcquired: false,
   };
-  await appendReport(context, `# V2 live smoke ${runId}\n\nRepository: ${context.repo}\n\nModel: ${liveSmokeModel}\n\n`);
+  await appendReport(context, `# V2 live smoke ${runId}\n\nSource HEAD: ${sourceHead}\n\nRepository: ${context.repo}\n\nModel: ${liveSmokeModel}\n\n`);
   let failed = false;
   try {
     await preflight(context);
@@ -194,6 +197,10 @@ async function preflight(context) {
   await runCommand('gh', ['auth', 'status'], { timeoutMs: context.options.timeoutMs });
   await runCommand('codex', ['login', 'status'], { timeoutMs: context.options.timeoutMs });
   await runCommand('gh', ['repo', 'view', context.repo, '--json', 'nameWithOwner'], { timeoutMs: context.options.timeoutMs });
+  const status = await runCommand('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=no'], {
+    timeoutMs: context.options.timeoutMs,
+  });
+  if (status.stdout.trim()) throw new Error('live smoke source must be a clean immutable HEAD');
 }
 
 async function acquireScratchLock(context) {

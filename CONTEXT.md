@@ -14,6 +14,14 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 
 **Run** — one durable `runIssue` lifecycle for one issue. Direct CLI and daemon discovery create the same kind of Run.
 
+**ActiveAttempt** — the Run's optional operation-neutral owner for one contained
+process and its result/cleanup observations. It does not choose route, phase,
+policy, budget, or publication.
+
+**PendingEffect** — the Run's optional durable intent for one finite local, Git,
+or GitHub effect. Recovery settles its exact postcondition before any next
+effect is authorized.
+
 **Cycle** — one bounded implementation attempt in the Run's existing worktree.
 
 **Validation loop** — the single implementation → complete independent review
@@ -47,6 +55,9 @@ or qualification sub-lifecycle.
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
+- Durable state accepts only the exact `codex-orchestrator.run-state` schema.
+  Absence initializes it; unsupported bytes fail closed without compatibility,
+  migration, backup, dual-write, or progression effects.
 - A spec-question Run resumes only through its matching marker and Trusted
   Answer, creates and independently reviews the next immutable spec revision,
   then continues implementation in the same Run without repeating triage.
