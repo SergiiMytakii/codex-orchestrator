@@ -52,7 +52,6 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(PUBLIC_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
-    'route-ready',
     'spec-frozen',
     'not-eligible',
     'blocked',
@@ -136,7 +135,6 @@ test('V2 accepts a strict optional Runner-owned Android proof recipe and rejects
 test('CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
-    { result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence/route.json' }, exit: 0 },
     { result: { status: 'spec-frozen', receipt: {
       version: 1, issueNumber: 42, runId: 'run-42', workflowGenerationSha256: 'a'.repeat(64), revision: 1,
       path: '/state/spec.md', contentSha256: 'b'.repeat(64), revisionSha256: 'c'.repeat(64),

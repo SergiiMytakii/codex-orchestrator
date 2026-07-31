@@ -48,7 +48,6 @@ export type RouteLifecycle =
   | 'routed'
   | 'implementing'
   | 'spec-authoring'
-  | 'reworking'
   | 'checking'
   | 'proving'
   | 'publishing'
@@ -221,7 +220,7 @@ export function validateRouteTransition(
 }
 
 const ROUTE_LIFECYCLES: RouteLifecycle[] = [
-  'claimed', 'triaging', 'routed', 'implementing', 'spec-authoring', 'reworking', 'checking',
+  'claimed', 'triaging', 'routed', 'implementing', 'spec-authoring', 'checking',
   'proving', 'publishing', 'safe-halt', 'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
 ];
 

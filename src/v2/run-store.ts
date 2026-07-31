@@ -32,7 +32,6 @@ export type Lifecycle =
   | 'routed'
   | 'spec-authoring'
   | 'implementing'
-  | 'reworking'
   | 'checking'
   | 'proving'
   | 'publishing'
@@ -350,7 +349,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
       hasOwn(value, 'specDelivery') ? value.specDelivery as SpecDeliveryV1 : undefined,
     );
   }
-  if (['implementing', 'reworking', 'checking', 'proving', 'publishing', 'review-ready'].includes(value.lifecycle as string)
+  if (['implementing', 'checking', 'proving', 'publishing', 'review-ready'].includes(value.lifecycle as string)
     && hasOwn(value, 'routeReceipt') && !hasOwn(value, 'deliveryAuthority')) {
     throw new Error(`${field}.deliveryAuthority is required for delivery progression`);
   }
@@ -763,7 +762,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }
   if (batch && !feedback.verifiedReceipt
-    && !['implementing', 'reworking', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    && !['implementing', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
     throw new Error(`${field}.reviewFeedback active batch has invalid lifecycle`);
   }
   if (feedback.verifiedReceipt) {
@@ -780,7 +779,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'reworking', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'checking', 'proving', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }
