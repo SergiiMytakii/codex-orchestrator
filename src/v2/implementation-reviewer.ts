@@ -47,7 +47,7 @@ export type ImplementationReviewerResult =
   | { kind: 'completed'; attemptId: string; report: CodeReviewReportV1; artifactSha256: string }
   | { kind: 'transport-failed'; resumable: true }
   | { kind: 'report-invalid'; diagnostic: string; originalReportSha256: string; originalReportBytes: Buffer }
-  | { kind: 'safe-halt'; process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot }; waitForAbsence(): Promise<void> }
+  | { kind: 'safe-halt'; process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot } }
   | { kind: 'cancelled' }
   | { kind: 'internal-error'; code: string };
 
@@ -152,7 +152,7 @@ function mapResult(result: ContainedReportOperationResult): ImplementationReview
     artifactSha256: result.artifactSha256,
   };
   if (result.status === 'retryable') return { kind: 'transport-failed', resumable: true };
-  if (result.status === 'safe-halt') return { kind: 'safe-halt', process: result.process, waitForAbsence: result.waitForAbsence };
+  if (result.status === 'safe-halt') return { kind: 'safe-halt', process: result.process };
   if (result.status === 'cancelled') return { kind: 'cancelled' };
   if (result.status === 'invalid' && result.repairInput) return {
     kind: 'report-invalid',

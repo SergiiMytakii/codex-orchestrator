@@ -158,7 +158,13 @@ export type ImplementationAgentResult =
   | { kind: 'transport-failed'; resumable: boolean }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
-  | { kind: 'safe-halt'; waitForAbsence(): Promise<void> };
+  | { kind: 'safe-halt' };
+
+export interface AttemptCleanupIdentity {
+  runId: string;
+  attemptId: string;
+  resultPath: string;
+}
 
 export interface RunIssueDependencies {
   readConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }>;
@@ -208,7 +214,6 @@ export interface RunIssueDependencies {
   implementationReviewer: {
     run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult>;
   };
-  waitForReviewProcessAbsence(processGroupId: number): Promise<void>;
   processIdentity: {
     host: string;
     bootId: string;
@@ -219,6 +224,7 @@ export interface RunIssueDependencies {
     }>;
   };
   inspectAttemptResult(path: string): Promise<{ bytes: Buffer; sha256: string } | undefined>;
+  observeAttemptCleanup(identity: AttemptCleanupIdentity): Promise<'confirmed' | 'pending'>;
   writeAttemptResult(input: { path: string; bytes: Buffer; sha256: string }): Promise<void>;
   routeCoordinator: {
     run(input: RouteCoordinatorInput & { state: RouteCoordinatorState }): Promise<RouteCoordinatorResult>;
@@ -1252,17 +1258,17 @@ export class RunIssue {
           active = await this.initializeClaimedRun(active, issue);
           issueSnapshot = structuredClone(active.record.issueSnapshot);
         } else {
+          let resumedSafeHalt = false;
           if (active.record.lifecycle === 'safe-halt') {
             const attempt = active.record.activeAttempt;
-            if (!attempt || attempt.stage !== 'launched') return await this.publicationDiverged(active, 'safe-halt-attempt-missing');
-            try { await this.dependencies.waitForReviewProcessAbsence(attempt.process.processGroupId); }
-            catch { return await this.invokedFailure(active, 'safe-halt-process-absence-unconfirmed'); }
-            const observed = observeActiveAttempt(attempt, {
-              leader: 'absent', group: 'absent', result: null, observedAt: this.timestamp(),
-            });
-            active = await this.persist(active, { activeAttempt: observed });
-            active = await this.clearAttempt(active);
+            if (!attempt || (attempt.stage !== 'launched' && attempt.stage !== 'observed')) {
+              return await this.publicationDiverged(active, 'safe-halt-attempt-missing');
+            }
+            const reconciled = await this.reconcilePersistedAttempt(active);
+            if ('status' in reconciled) return reconciled;
+            active = reconciled.active;
             active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+            resumedSafeHalt = true;
           }
           if (active.record.lifecycle === 'publishing') {
             return active.record.reviewFeedback?.activeBatch
@@ -1304,7 +1310,7 @@ export class RunIssue {
               && active.record.directReview.stage === 'review-repair';
             const attemptResultRecovery = active.record.activeAttempt?.stage === 'observed'
               && active.record.activeAttempt.result !== null;
-            if (!transitionedFromSpec && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
+            if (!resumedSafeHalt && !transitionedFromSpec && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
               && !proofRecovery && !directReviewRepair && !attemptResultRecovery) {
               if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
@@ -1492,18 +1498,8 @@ export class RunIssue {
       );
       if (implementation.kind === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt' });
-        while (true) {
-          try {
-            await implementation.waitForAbsence();
-            break;
-          } catch {
-            await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-          }
-        }
-        if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
-          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
-        }
-        return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+        return await this.invokedFailure(active, 'active-attempt-observation-deferred',
+          'The implementation process remains unresolved; the next daemon tick will make one fresh bounded observation.');
       }
       if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
@@ -1551,11 +1547,8 @@ export class RunIssue {
         );
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, { lifecycle: 'safe-halt' });
-          while (true) {
-            try { await implementation.waitForAbsence(); break; }
-            catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
-          }
-          return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+          return await this.invokedFailure(active, 'active-attempt-observation-deferred',
+            'The implementation report-repair process remains unresolved; the next daemon tick will make one fresh bounded observation.');
         }
         if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
         const afterRepair = await this.dependencies.git.snapshot(worktreePath);
@@ -1606,11 +1599,8 @@ export class RunIssue {
         );
         if (implementation.kind === 'safe-halt') {
           active = await this.persist(active, { lifecycle: 'safe-halt' });
-          while (true) {
-            try { await implementation.waitForAbsence(); break; }
-            catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
-          }
-          return await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed');
+          return await this.invokedFailure(active, 'active-attempt-observation-deferred',
+            'The implementation changed-files repair remains unresolved; the next daemon tick will make one fresh bounded observation.');
         }
         if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
         const afterRepair = await this.dependencies.git.snapshot(worktreePath);
@@ -1870,6 +1860,11 @@ export class RunIssue {
         return await this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
       }
       if (proofLaunchFailure) return proofLaunchFailure;
+      if (proof.status === 'safe-halt') {
+        active = await this.persist(active, { lifecycle: 'safe-halt' });
+        return await this.invokedFailure(active, 'active-attempt-observation-deferred',
+          'The acceptance-proof process remains unresolved; the next daemon tick will make one fresh bounded observation.');
+      }
       if (active.record.activeAttempt?.stage === 'launched') {
         active = await this.adoptAttempt(active, sha256(canonicalJson(proof)), proof.status === 'passed' ? { proofReceipt: proof.receipt } : {});
       }
@@ -2080,19 +2075,8 @@ export class RunIssue {
         active = await this.persist(active, {
           lifecycle: 'safe-halt',
         });
-        while (true) {
-          try {
-            await result.waitForAbsence();
-            break;
-          } catch {
-            await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-          }
-        }
-        const after = await this.dependencies.git.snapshot(worktreePath);
-        if (!sameFreshness(result.process.baseline, after)) {
-          return { result: await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'report-operation-worktree-mutated') };
-        }
-        return { result: await this.terminal(active, { status: 'transport-failed', resumable: false }, 'process-quiescence-delayed') };
+        return { result: await this.invokedFailure(active, 'active-attempt-observation-deferred',
+          'The triage process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
       }
       if (result.status === 'cancelled') {
         return { result: await this.terminal(active, { status: 'cancelled' }) };
@@ -2156,6 +2140,11 @@ export class RunIssue {
     const continuation = receipt.route === 'direct'
       ? await this.dependencies.routeContinuations.direct(context)
       : await this.dependencies.routeContinuations.specRequired(context, this.specState(() => active, (next) => { active = next; }), this.signal);
+    if (continuation.status === 'safe-halt') {
+      active = await this.persist(active, { lifecycle: 'safe-halt' });
+      return { result: await this.invokedFailure(active, 'active-attempt-observation-deferred',
+        'The spec process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
+    }
     if (continuation.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
     if (continuation.status === 'blocked') {
       return { result: await this.terminal(active, {
@@ -2346,6 +2335,11 @@ export class RunIssue {
     const result: SpecCoordinatorResult = await this.dependencies.routeContinuations.specRequired(
       context, this.specState(() => current, (next) => { current = next; }), this.signal,
     );
+    if (result.status === 'safe-halt') {
+      current = await this.persist(current, { lifecycle: 'safe-halt' });
+      return { result: await this.invokedFailure(current, 'active-attempt-observation-deferred',
+        'The spec process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
+    }
     if (result.status === 'completed') {
       const frozen = current.record.specDelivery?.frozen;
       if (!frozen) return { result: await this.terminal(current, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
@@ -2723,10 +2717,24 @@ export class RunIssue {
       return active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
     }
     if (attempt.stage === 'observed') {
+      const cleanup = await this.observeSafeHaltCleanup(active);
+      if ('status' in cleanup) return cleanup;
+      active = cleanup.active;
       if (attempt.result) return { active };
-      return active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
+      if (active.record.lifecycle === 'safe-halt') {
+        active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+      }
+      return { active: await this.clearAttempt(active) };
     }
-    const observation = await this.dependencies.processIdentity.observe(attempt.process);
+    let observation;
+    try { observation = await this.dependencies.processIdentity.observe(attempt.process); }
+    catch {
+      return this.invokedFailure(
+        active,
+        'active-attempt-observation-inaccessible',
+        'Process identity observation is inaccessible; ownership remains frozen until a later daemon tick.',
+      );
+    }
     if (!['absent', 'reused'].includes(observation.leader) || observation.group !== 'absent') {
       return this.invokedFailure(
         active,
@@ -2741,7 +2749,38 @@ export class RunIssue {
       observedAt: this.timestamp(),
     });
     active = await this.persist(active, { activeAttempt: observed });
-    return observed.result || active.record.candidateMaterialization ? { active } : { active: await this.clearAttempt(active) };
+    const cleanup = await this.observeSafeHaltCleanup(active);
+    if ('status' in cleanup) return cleanup;
+    active = cleanup.active;
+    if (observed.result) return { active };
+    if (active.record.lifecycle === 'safe-halt') {
+      active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
+    }
+    return { active: await this.clearAttempt(active) };
+  }
+
+  private async observeSafeHaltCleanup(active: ActiveRun): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const attempt = active.record.activeAttempt;
+    if (!attempt || (attempt.stage !== 'observed' && attempt.stage !== 'adopted')) {
+      return this.invokedFailure(active, 'active-attempt-cleanup-observation-invalid');
+    }
+    if (attempt.cleanup === 'confirmed') return { active };
+    let cleanup;
+    try {
+      cleanup = await this.dependencies.observeAttemptCleanup({
+        runId: attempt.runId,
+        attemptId: attempt.attemptId,
+        resultPath: attempt.resultPath,
+      });
+    }
+    catch { cleanup = 'pending' as const; }
+    if (cleanup !== 'confirmed') {
+      return this.invokedFailure(active, 'active-attempt-cleanup-unconfirmed',
+        'Attempt cleanup remains unresolved; ownership and result identity stay frozen until a later daemon tick.');
+    }
+    return { active: await this.persist(active, {
+      activeAttempt: confirmActiveAttemptCleanup(attempt, this.timestamp()),
+    }) };
   }
 
   private async launchAttempt(
@@ -2878,7 +2917,9 @@ export class RunIssue {
       });
     } catch (error) {
       if (error instanceof CheckProcessQuiescenceError) {
-        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'check-process-quiescence-unconfirmed');
+        active = await this.persist(active, { lifecycle: 'safe-halt' });
+        return this.invokedFailure(active, 'active-attempt-observation-deferred',
+          'The configured-check process remains unresolved; the next daemon tick will make one fresh bounded observation.');
       }
       return this.invokedFailure(active, 'configured-check-execution-failed',
       error instanceof Error ? error.message : 'The configured check process did not start or settle. Retry the same run.');
@@ -3286,9 +3327,8 @@ export class RunIssue {
       }
       if (result.kind === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt' });
-        try { await result.waitForAbsence(); }
-        catch { return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-unconfirmed'); }
-        return this.terminal(active, { status: 'transport-failed', resumable: false }, 'direct-review-quiescence-delayed');
+        return this.invokedFailure(active, 'active-attempt-observation-deferred',
+          'The code-review process remains unresolved; the next daemon tick will make one fresh bounded observation.');
       }
       if (result.kind === 'cancelled') return this.terminal(active, { status: 'cancelled' });
       return this.terminal(active, { status: 'internal-error', code: result.code });
@@ -3737,6 +3777,7 @@ class PostEffectStateError extends Error {
 }
 function lifecycleForAttempt(operationId: string): RunRecord['lifecycle'] {
   if (operationId === 'triage') return 'triaging';
+  if (operationId === 'spec-author' || operationId === 'spec-review') return 'spec-authoring';
   if (operationId === 'configured-check') return 'checking';
   if (operationId === 'acceptance-proof') return 'proving';
   return 'implementing';

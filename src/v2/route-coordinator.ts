@@ -15,7 +15,7 @@ export type RouteCoordinatorResult =
   | { status: 'succeeded'; receipt: RouteReceiptV1 }
   | { status: 'repairable'; code: 'triage-artifact-invalid'; findings: string[] }
   | { status: 'retryable'; owner: 'triage'; code: string }
-  | { status: 'safe-halt'; process: Extract<ContainedReportOperationResult, { status: 'safe-halt' }>['process']; waitForAbsence(): Promise<void> }
+  | { status: 'safe-halt'; process: Extract<ContainedReportOperationResult, { status: 'safe-halt' }>['process'] }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string; evidence: string[] };
 

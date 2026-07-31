@@ -35,7 +35,7 @@ or qualification sub-lifecycle.
 
 **Trusted answer** — unedited exact-prefix answer from an identity with current repository WRITE or ADMIN permission, frozen into the Run before the next spec revision and independent review; triage is not repeated.
 
-**Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved.
+**Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved. One daemon tick makes at most one bounded process/result/cleanup observation; unresolved ownership returns a resumable projection and never holds the repository loop.
 
 **Review-ready** — terminal successful handoff after checks, proof, and publication. It does not mean merged.
 

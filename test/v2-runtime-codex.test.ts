@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
-import { resolveCodexExecutable } from '../src/v2/runtime.js';
+import { sha256 } from '../src/v2/containment.js';
+import { observeAttemptReadViewCleanup, resolveCodexExecutable } from '../src/v2/runtime.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 test('runtime resolves the installed Codex executable only from its safe path', async () => {
@@ -28,4 +29,48 @@ test('runtime resolves the installed Codex executable only from its safe path', 
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
   }
+});
+
+test('runtime cleanup removes only the exact canonical attempt read-view', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-runtime-cleanup-'));
+  const canonicalRepository = 'owner/repo';
+  const identity = { runId: 'run-1', attemptId: 'attempt-1' };
+  const attemptRoot = join(root, 'v2', sha256(canonicalRepository), 'runs', identity.runId, 'attempts', identity.attemptId);
+  const readView = join(attemptRoot, 'read-view');
+  await mkdir(readView, { recursive: true });
+  await writeFile(join(readView, 'owned.txt'), 'owned\n');
+
+  assert.equal(await observeAttemptReadViewCleanup({
+    orchestratorHome: root,
+    canonicalRepository,
+    identity: { ...identity, resultPath: join(attemptRoot, 'report.json') },
+  }), 'confirmed');
+  await assert.rejects(realpath(readView));
+});
+
+test('runtime cleanup rejects forged and symlink-redirected attempt roots without deletion', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-runtime-cleanup-forged-'));
+  const canonicalRepository = 'owner/repo';
+  const runtimeRoot = join(root, 'v2', sha256(canonicalRepository));
+  const victimRoot = join(root, 'victim');
+  const victimReadView = join(victimRoot, 'read-view');
+  await mkdir(victimReadView, { recursive: true });
+  await writeFile(join(victimReadView, 'keep.txt'), 'keep\n');
+
+  assert.equal(await observeAttemptReadViewCleanup({
+    orchestratorHome: root,
+    canonicalRepository,
+    identity: { runId: 'run-1', attemptId: 'attempt-1', resultPath: join(victimRoot, 'report.json') },
+  }), 'pending');
+  assert.equal(await readFile(join(victimReadView, 'keep.txt'), 'utf8'), 'keep\n');
+
+  const linkedAttemptRoot = join(runtimeRoot, 'runs', 'run-1', 'attempts', 'attempt-1');
+  await mkdir(dirname(linkedAttemptRoot), { recursive: true });
+  await symlink(victimRoot, linkedAttemptRoot);
+  assert.equal(await observeAttemptReadViewCleanup({
+    orchestratorHome: root,
+    canonicalRepository,
+    identity: { runId: 'run-1', attemptId: 'attempt-1', resultPath: join(linkedAttemptRoot, 'report.json') },
+  }), 'pending');
+  assert.equal(await readFile(join(victimReadView, 'keep.txt'), 'utf8'), 'keep\n');
 });

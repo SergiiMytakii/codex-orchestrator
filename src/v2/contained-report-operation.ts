@@ -41,7 +41,6 @@ export type ContainedReportOperationResult =
   | {
     status: 'safe-halt';
     process: { pid: number; processGroupId: number; startedAt: string; baseline: ReportOnlyWorktreeSnapshot };
-    waitForAbsence(): Promise<void>;
   }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety'; code: string };
@@ -74,7 +73,7 @@ export interface PreparedContainedReportAttempt {
 export type ContainedReportLaunchResult =
   | { status: 'completed'; reportBytes: Buffer }
   | { status: 'retryable'; code: string }
-  | { status: 'safe-halt'; pid: number; processGroupId: number; startedAt: string; waitForAbsence(): Promise<void> }
+  | { status: 'safe-halt'; pid: number; processGroupId: number; startedAt: string }
   | { status: 'cancelled' }
   | { status: 'blocked'; kind: 'external' | 'safety'; code: string };
 
@@ -150,7 +149,6 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
           startedAt: launchResult.startedAt,
           baseline: structuredClone(before),
         },
-        waitForAbsence: launchResult.waitForAbsence,
       };
     }
     return this.finishWithSnapshot(input.worktreePath, before, launchResult, input);

@@ -23,6 +23,7 @@ export type SpecOperationResult<T> =
   | { status: 'completed'; value: T; attemptResultSha256: string; reportSha256?: string }
   | { status: 'decision-required'; value: SpecRevisionV1; decisionGaps: SpecDecisionGapV1[]; question: string; attemptResultSha256: string }
   | { status: 'retryable'; code: string }
+  | { status: 'safe-halt' }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string }
   | { status: 'cancelled' };
 
@@ -52,6 +53,7 @@ export type SpecCoordinatorResult =
   | { status: 'completed'; receipt: FrozenSpecReceiptV1 }
   | { status: 'decision-required'; receipt: FrozenSpecQuestionReceiptV1; evidencePath?: string }
   | { status: 'retryable'; code: string }
+  | { status: 'safe-halt' }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string; evidence: string[] }
   | { status: 'cancelled' };
 
@@ -106,6 +108,7 @@ export class SpecCoordinator {
       const result = author
         ? await this.dependencies.operation.author({ attemptId, context, state: current, mode: mode as 'author'|'repair', recoverOnly, signal, onPrepared, onLaunched })
         : await this.dependencies.operation.review({ attemptId, context, state: current, recoverOnly, signal, onPrepared, onLaunched });
+      if (result.status === 'safe-halt') return result;
       if (result.status === 'retryable') {
         try {
           const owner = author ? 'author' : 'review';

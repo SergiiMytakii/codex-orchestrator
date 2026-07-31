@@ -79,3 +79,30 @@ test('daemon tick observes each frozen issue once and continues after retry and 
     'review-ready',
   ]);
 });
+
+test('an unresolved attempt releases the issue loop so later candidates run and the next tick rediscovers', async () => {
+  let discoveries = 0;
+  const executed: number[] = [];
+  const lastResults = new Map<number, string>();
+  const input = {
+    targetRoot: '/tmp/target',
+    discoverCandidates: async () => {
+      discoveries += 1;
+      return discoveries === 1 ? [issue(1), issue(2)] : [issue(2), issue(3)];
+    },
+    executeRun: async ({ issueNumber }: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> => {
+      executed.push(issueNumber);
+      return issueNumber === 1
+        ? { status: 'transport-failed', resumable: true, evidencePath: 'active-attempt-observation.json' }
+        : { status: 'requeued', reason: 'owner-contention', evidencePath: `owner-${issueNumber}.json` };
+    },
+    write: () => undefined,
+    lastResults,
+  };
+
+  assert.equal(await executeDaemonTick(input), 70);
+  assert.deepEqual(executed, [1, 2]);
+  assert.equal(await executeDaemonTick(input), 0);
+  assert.deepEqual(executed, [1, 2, 2, 3]);
+  assert.equal(discoveries, 2);
+});

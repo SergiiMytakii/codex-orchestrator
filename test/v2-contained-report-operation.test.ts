@@ -144,7 +144,6 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
       pid: 123,
       processGroupId: 123,
       startedAt: '2026-07-17T00:00:00.000Z',
-      waitForAbsence: async () => {},
     }),
   };
   const result = await new InjectedContainedReportOperation(dependencies).run(runInput('triage'));

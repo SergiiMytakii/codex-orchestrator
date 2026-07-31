@@ -13,6 +13,7 @@ import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
 import type { DeliveryAuthorityV1 } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
+import { CheckProcessQuiescenceError } from '../src/v2/issue-check-policy.js';
 import {
   RunIssue,
   OwnerLockContentionError,
@@ -1850,24 +1851,139 @@ test('restart resumes interrupted implementation in the same worktree as the nex
   assert.equal(state.runs[0]?.worktreePath, fixture.worktreePath);
 });
 
-test('safe-halt retains active attempt ownership and owner lock until absence is confirmed', async () => {
-  const absence = deferred<void>();
+test('safe-halt returns after one tick, preserves attempt identity, and retries without semantic spend', async () => {
   const fixture = await runFixture({
-    implementationResult: {
-      kind: 'safe-halt',
-      waitForAbsence: () => absence.promise,
-    },
+    implementationResult: { kind: 'safe-halt' },
   });
-  let settled = false;
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }).finally(() => { settled = true; });
-  await waitFor(() => fixture.events.includes('state:safe-halt:none'));
-  assert.equal(settled, false);
-  assert.equal(fixture.events.includes('owner-release'), false);
-  assert.equal(fixture.events.includes('git:push'), false);
-  absence.resolve();
-  const result = await running;
-  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: false });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const frozen = (await fixture.store.read()).runs[0]!;
+  assert.equal(frozen.lifecycle, 'safe-halt');
+  assert.equal(frozen.activeAttempt?.stage, 'launched');
+  const attemptId = frozen.activeAttempt?.attemptId;
+  assert.equal(frozen.cycle, 1);
   assert.equal(fixture.events.at(-1), 'owner-release');
+  assert.equal(fixture.events.includes('git:push'), false);
+
+  let observations = 0;
+  fixture.dependencies.processIdentity.observe = async () => {
+    observations += 1;
+    return observations === 1
+      ? { leader: 'same' as const, group: 'live' as const }
+      : { leader: 'absent' as const, group: 'absent' as const };
+  };
+  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(second, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const stillFrozen = (await fixture.store.read()).runs[0]!;
+  assert.equal(stillFrozen.activeAttempt?.attemptId, attemptId);
+  assert.equal(stillFrozen.cycle, 1);
+  assert.equal(observations, 1);
+
+  await rm(stillFrozen.activeAttempt!.resultPath, { force: true });
+  fixture.options.implementationResult = undefined;
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), events: fixture.events }));
+  assert.equal(observations, 2);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
+});
+
+test('one bounded safe-halt observation covers every operation family without replacement or budget spend', async () => {
+  const safeImplementation = (): ImplementationAgentResult => ({ kind: 'safe-halt' });
+  const cases: Array<{ name: string; options: FixtureOptions }> = [
+    { name: 'triage', options: { routeSafeHaltOnce: true } },
+    { name: 'spec-author', options: { route: 'spec-required', specAuthorSafeHaltOnce: true } },
+    { name: 'spec-review', options: { route: 'spec-required', specReviewSafeHaltOnce: true } },
+    { name: 'implementation', options: { implementationResults: [safeImplementation()] } },
+    { name: 'report-repair', options: { implementationResults: [
+      { kind: 'completed', report: { version: 0, status: 'bad' } }, safeImplementation(),
+    ] } },
+    { name: 'code-review', options: { reviewSafeHaltOnce: true } },
+    { name: 'configured-check', options: { checkSafeHaltOnce: true } },
+    { name: 'acceptance-proof', options: { proofSafeHaltOnce: true } },
+  ];
+  for (const entry of cases) {
+    const fixture = await runFixture(entry.options);
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
+    const frozen = (await fixture.store.read()).runs[0]!;
+    assert.equal(frozen.lifecycle, 'safe-halt', entry.name);
+    assert.equal(frozen.activeAttempt?.stage, 'launched', entry.name);
+    const exactState = canonicalJson(await fixture.store.read());
+    const attemptId = frozen.activeAttempt.attemptId;
+    let observations = 0;
+    fixture.dependencies.processIdentity.observe = async () => {
+      observations += 1;
+      return observations === 1
+        ? { leader: 'same' as const, group: 'live' as const }
+        : { leader: 'absent' as const, group: 'absent' as const };
+    };
+
+    const live = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(live, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
+    assert.equal(canonicalJson(await fixture.store.read()), exactState, `${entry.name}: live observation mutated Run state`);
+    assert.equal((await fixture.store.read()).runs[0]!.activeAttempt?.attemptId, attemptId, entry.name);
+    assert.equal(observations, 1, entry.name);
+
+    await rm((await fixture.store.read()).runs[0]!.activeAttempt!.resultPath, { force: true });
+    const completed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(completed.status, 'review-ready', `${entry.name}: ${JSON.stringify(completed)}`);
+    assert.equal(observations, 2, entry.name);
+  }
+});
+
+test('safe-halt observation failure is bounded and exact result adoption prevents replacement', async () => {
+  const fixture = await runFixture({ implementationResults: [{ kind: 'safe-halt' }] });
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  const frozenState = canonicalJson(await fixture.store.read());
+  fixture.dependencies.processIdentity.observe = async () => { throw new Error('EPERM'); };
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal(canonicalJson(await fixture.store.read()), frozenState);
+
+  const frozen = (await fixture.store.read()).runs[0]!;
+  const attempt = frozen.activeAttempt!;
+  const report = { version: 1, status: 'completed', summary: 'recovered', changedFiles: ['feature.txt'], residualRisks: [] };
+  const bytes = Buffer.from(canonicalJson(report));
+  await writeFile(join(fixture.worktreePath, 'feature.txt'), 'implemented by unresolved process\n');
+  await fixture.dependencies.writeAttemptResult({ path: attempt.resultPath, bytes, sha256: sha256(bytes) });
+  let processObservations = 0;
+  fixture.dependencies.processIdentity.observe = async () => {
+    processObservations += 1;
+    return { leader: 'reused', group: 'absent' };
+  };
+  let cleanupObservations = 0;
+  fixture.dependencies.observeAttemptCleanup = async () => {
+    cleanupObservations += 1;
+    return cleanupObservations === 1 ? 'pending' : 'confirmed';
+  };
+  let recoveryCalls = 0;
+  fixture.dependencies.implementationAgent.run = async ({ attemptId }) => {
+    recoveryCalls += 1;
+    assert.equal(attemptId, attempt.attemptId);
+    return { kind: 'completed', attemptId, report };
+  };
+
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  const cleanupFrozen = (await fixture.store.read()).runs[0]!.activeAttempt!;
+  assert.equal(cleanupFrozen.stage, 'observed');
+  assert.equal(cleanupFrozen.cleanup, 'pending');
+  assert.equal(cleanupFrozen.attemptId, attempt.attemptId);
+  assert.equal(recoveryCalls, 0);
+
+  const adopted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(adopted.status, 'review-ready', JSON.stringify({ adopted, state: await fixture.store.read(), events: fixture.events }));
+  assert.equal(recoveryCalls, 1);
+  assert.equal(processObservations, 1);
+  assert.equal(cleanupObservations, 2);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
 });
 
 test('cancellation waits for deferred check and proof settlement before terminal state and owner release', async () => {
@@ -1985,6 +2101,12 @@ interface FixtureOptions {
   permissionSequence?: Array<'write' | 'admin' | 'read' | 'throw'>;
   implementationPreparedGate?: Promise<void>;
   implementationBeforePreparedGate?: Promise<void>;
+  routeSafeHaltOnce?: boolean;
+  specAuthorSafeHaltOnce?: boolean;
+  specReviewSafeHaltOnce?: boolean;
+  reviewSafeHaltOnce?: boolean;
+  checkSafeHaltOnce?: boolean;
+  proofSafeHaltOnce?: boolean;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -2164,6 +2286,21 @@ async function runFixture(options: FixtureOptions = {}) {
           assert.notEqual(routedIssue.body, options.issueBodyAfterClaim);
         }
         const expected = await state.read();
+        if (options.routeSafeHaltOnce) {
+          options.routeSafeHaltOnce = false;
+          const attemptId = await state.prepareAttempt('triage', 'initial');
+          await state.launchAttempt(attemptId, 4041, 4041);
+          return {
+            status: 'safe-halt' as const,
+            process: {
+              pid: 4041, processGroupId: 4041, startedAt: '2026-07-16T12:00:00.000Z',
+              baseline: {
+                headSha: baseSha, indexTreeSha: baseSha, trackedContentSha256: '1'.repeat(64),
+                untrackedContentSha256: '2'.repeat(64), worktreeIdentity: 'fixture-route',
+              },
+            },
+          };
+        }
         const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
         const artifact = route === 'spec-required' ? {
           version: 1 as const, status: 'spec-required' as const,
@@ -2243,6 +2380,10 @@ async function runFixture(options: FixtureOptions = {}) {
             const sessionId = delivery.authorSessionId ?? 'author-session';
             await onPrepared({ attemptId, sessionId });
             await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
+            if (options.specAuthorSafeHaltOnce) {
+              options.specAuthorSafeHaltOnce = false;
+              return { status: 'safe-halt' as const };
+            }
             const revision = createSpecRevision({
               revision: delivery.revisions.length + 1, path: `/state/spec-${delivery.revisions.length + 1}.md`, content: '# Frozen spec\n',
               evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
@@ -2268,6 +2409,10 @@ async function runFixture(options: FixtureOptions = {}) {
             const sessionId = delivery.review.reviewer?.sessionId ?? 'review-session';
             await onPrepared({ attemptId, sessionId });
             await onLaunched({ attemptId, sessionId, pid: 702, processGroupId: 702 });
+            if (options.specReviewSafeHaltOnce) {
+              options.specReviewSafeHaltOnce = false;
+              return { status: 'safe-halt' as const };
+            }
             const target = delivery.revisions.at(-1)!;
             return { status: 'completed', attemptResultSha256: 'd'.repeat(64), reportSha256: 'd'.repeat(64), value: {
               version: 1 as const, targetRevision: target.revision, targetSha256: target.revisionSha256,
@@ -2337,6 +2482,19 @@ async function runFixture(options: FixtureOptions = {}) {
         await input.onPrepared(invocation);
         await input.onLaunched({ ...invocation, pid: 4242, processGroupId: 4242 });
         events.push('review:code-review-launched');
+        if (options.reviewSafeHaltOnce) {
+          options.reviewSafeHaltOnce = false;
+          return {
+            kind: 'safe-halt' as const,
+            process: {
+              pid: 4242, processGroupId: 4242, startedAt: '2026-07-16T12:00:00.000Z',
+              baseline: {
+                headSha: baseSha, indexTreeSha: baseSha, trackedContentSha256: '3'.repeat(64),
+                untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'fixture-review',
+              },
+            },
+          };
+        }
         if ((options.reviewMalformedOnce && reviewCalls === 1)
           || (options.reviewMalformedCount ?? 0) > 0) {
           if ((options.reviewMalformedCount ?? 0) > 0) options.reviewMalformedCount!--;
@@ -2362,12 +2520,15 @@ async function runFixture(options: FixtureOptions = {}) {
         };
       },
     },
-    waitForReviewProcessAbsence: async () => { events.push('candidate-process-absence'); },
     checks: {
       supportsLaunchOwnership: true,
       run: async ({ id, onLaunched }) => {
         await onLaunched?.({ pid: 987654, processGroupId: 987654 });
         events.push(id === 'typecheck' ? 'check:typecheck' : `check:changed:${id}`);
+        if (options.checkSafeHaltOnce) {
+          options.checkSafeHaltOnce = false;
+          throw new CheckProcessQuiescenceError(987654);
+        }
         if (options.checkReject) throw new Error('check rejected');
         const fallback: { status: 'passed'; output: Buffer; outputSha256?: string } = {
           status: 'passed', output: Buffer.from('ok'),
@@ -2385,6 +2546,10 @@ async function runFixture(options: FixtureOptions = {}) {
         await beforeAgentLaunch?.();
         await onLaunched?.({ pid: 24680, processGroupId: 24680, launchedAt: '2026-07-16T12:00:00.000Z' });
         events.push('proof');
+        if (options.proofSafeHaltOnce) {
+          options.proofSafeHaltOnce = false;
+          return { status: 'safe-halt' as const };
+        }
         if (recoverOnly) events.push('proof-recover-only');
         checkedChangePayloads.push(capabilities.verifyAndRead(checkedChange).payload);
         if (options.proofError) throw options.proofError;
@@ -2452,6 +2617,10 @@ async function runFixture(options: FixtureOptions = {}) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw error;
       }
+    },
+    observeAttemptCleanup: async () => {
+      events.push('attempt-cleanup-observe');
+      return 'confirmed' as const;
     },
     writeAttemptResult: async ({ path, bytes, sha256: expectedSha256 }) => {
       assert.equal(sha256(bytes), expectedSha256);

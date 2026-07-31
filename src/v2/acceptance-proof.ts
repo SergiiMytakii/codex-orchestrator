@@ -44,6 +44,7 @@ export interface ExternalBlocker {
 
 export type ProofAgentResult =
   | { kind: 'report'; report: unknown; proofPhaseChangedFiles: string[] }
+  | { kind: 'safe-halt' }
   | { kind: 'transport-failed'; resumable: boolean }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' };
@@ -91,6 +92,7 @@ export type SettledProveChangeResult =
 
 export type ProveChangeResult =
   | SettledProveChangeResult
+  | { status: 'safe-halt' }
   | { status: 'transport-failed'; resumable: true }
   | { status: 'report-repair'; reportRepairCount: 1; findings: string[] }
   | {
@@ -256,6 +258,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof was cancelled.'),
       });
     }
+    if (agentResult.kind === 'safe-halt') return { status: 'safe-halt' };
     if (agentResult.kind === 'transport-failed') {
       if (agentResult.resumable && input.transportRetryCount === 0 && await this.isFresh(input.payload, input.materialization)) {
         return { status: 'transport-failed', resumable: true };

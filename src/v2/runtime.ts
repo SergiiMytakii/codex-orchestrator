@@ -34,7 +34,10 @@ import { SpecCoordinator, type SpecDeliveryOperation } from './spec-coordinator.
 import { createSpecRevision, type SpecReviewReportV1 } from './spec-delivery.js';
 import { validateCodeReviewDefects } from './code-review-report.js';
 import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
-import { OwnerLockContentionError, OwnerLockSafetyError, RunIssue, type ImplementationAgentResult, type RunIssueGit } from './run-issue.js';
+import {
+  OwnerLockContentionError, OwnerLockSafetyError, RunIssue,
+  type AttemptCleanupIdentity, type ImplementationAgentResult, type RunIssueGit,
+} from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
 import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity, type ProcessGroupObservation } from './process-identity.js';
 import {
@@ -877,10 +880,7 @@ export class ContainedImplementationAgent {
       };
     } catch (error) {
       if (!(error instanceof ProcessQuiescenceError)) return { kind: 'internal-error' };
-      return {
-        kind: 'safe-halt',
-        waitForAbsence: () => waitForProcessGroupAbsent(error.processGroupId),
-      };
+      return { kind: 'safe-halt' };
     }
   }
 
@@ -1005,9 +1005,31 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         proofPhaseChangedFiles: changedArtifactPaths(before, after),
       };
     } catch (error) {
-      return { kind: 'internal-error' };
+      return error instanceof ProcessQuiescenceError ? { kind: 'safe-halt' } : { kind: 'internal-error' };
     }
   }
+}
+
+export async function observeAttemptReadViewCleanup(input: {
+  orchestratorHome: string;
+  canonicalRepository: string;
+  identity: AttemptCleanupIdentity;
+}): Promise<'confirmed' | 'pending'> {
+  const runtimeRoot = join(resolve(input.orchestratorHome), 'v2', sha256(input.canonicalRepository));
+  const attemptRoot = join(runtimeRoot, 'runs', input.identity.runId, 'attempts', input.identity.attemptId);
+  const expectedResultPath = join(attemptRoot, 'report.json');
+  if (input.identity.resultPath !== expectedResultPath) return 'pending';
+  let canonicalRuntimeRoot;
+  let canonicalAttemptRoot;
+  try { canonicalRuntimeRoot = await realpath(runtimeRoot); }
+  catch (error) { return isErrorCode(error, 'ENOENT') ? 'confirmed' : 'pending'; }
+  try { canonicalAttemptRoot = await realpath(attemptRoot); }
+  catch (error) { return isErrorCode(error, 'ENOENT') ? 'confirmed' : 'pending'; }
+  const expectedRelative = relative(runtimeRoot, attemptRoot);
+  if (!isPathWithin(canonicalRuntimeRoot, canonicalAttemptRoot)
+    || relative(canonicalRuntimeRoot, canonicalAttemptRoot) !== expectedRelative) return 'pending';
+  await rm(join(attemptRoot, 'read-view'), { recursive: true, force: true });
+  return 'confirmed';
 }
 
 export interface V2Runtime {
@@ -1192,10 +1214,6 @@ export function createV2Runtime(input: {
             pid: error.pid,
             processGroupId: error.processGroupId,
             startedAt: now(),
-            waitForAbsence: async () => {
-              await waitForProcessGroupAbsent(error.processGroupId);
-              await rm(readView, { recursive: true, force: true });
-            },
           };
         }
         throw error;
@@ -1280,8 +1298,7 @@ export function createV2Runtime(input: {
         return { status: 'completed', attemptResultSha256: sha256(result.report.bytes), value: revision };
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-author-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-author-process-absence-unconfirmed' }; }
+          return { status: 'safe-halt' };
         }
         return { status: 'retryable', code: 'spec-author-report-invalid' };
       }
@@ -1331,8 +1348,7 @@ export function createV2Runtime(input: {
         return { status: 'completed', value: report, attemptResultSha256: sha256(result.report.bytes), reportSha256: sha256(result.report.bytes) };
       } catch (error) {
         if (error instanceof ProcessQuiescenceError) {
-          try { await waitForProcessGroupAbsent(error.processGroupId); return { status: 'retryable', code: 'spec-review-process-quiescence' }; }
-          catch { return { status: 'blocked', kind: 'safety', code: 'spec-review-process-absence-unconfirmed' }; }
+          return { status: 'safe-halt' };
         }
         return { status: 'retryable', code: 'spec-review-report-invalid' };
       }
@@ -1583,7 +1599,6 @@ export function createV2Runtime(input: {
     },
     implementationAgent,
     implementationReviewer,
-    waitForReviewProcessAbsence: waitForProcessGroupAbsent,
     checks: {
       supportsLaunchOwnership: true,
       run: async ({ source, command, cwd, signal, onLaunched }) => {
@@ -1640,6 +1655,13 @@ export function createV2Runtime(input: {
         if (isErrorCode(error, 'ENOENT')) return undefined;
         throw error;
       }
+    },
+    observeAttemptCleanup: async (attempt) => {
+      return observeAttemptReadViewCleanup({
+        orchestratorHome,
+        canonicalRepository: requireCanonicalRepository(currentConfig),
+        identity: attempt,
+      });
     },
     writeAttemptResult: ({ path, bytes, sha256: expectedSha256 }) => writeExactDurableBytes(path, bytes, expectedSha256),
     attemptResultPath: ({ canonicalRepository, runId, attemptId }) => join(
@@ -2083,18 +2105,6 @@ async function fingerprintDeniedEntry(
     entries.push({ nameSha256: sha256(name), fingerprint: await fingerprintDeniedEntry(join(path, name)) });
   }
   return { kind: 'directory', entries };
-}
-
-async function waitForProcessGroupAbsent(processGroupId: number): Promise<void> {
-  while (true) {
-    try {
-      process.kill(-processGroupId, 0);
-    } catch (error) {
-      if (isErrorCode(error, 'ESRCH')) return;
-      if (!isErrorCode(error, 'EPERM')) throw error;
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
-  }
 }
 
 export async function materializeReportReadView(input: {
