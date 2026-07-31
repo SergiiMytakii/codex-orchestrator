@@ -3,7 +3,7 @@ import { link, lstat, mkdir, open, readFile, readdir, rm, writeFile, chmod } fro
 import { platform } from 'node:os';
 import { join } from 'node:path';
 
-const WAIT_MS = 5_000;
+const WAIT_MS = 60_000;
 const POLL_MS = 25;
 
 export type ImmutableWorkflowPublishStep =
@@ -80,6 +80,7 @@ export async function publishImmutableWorkflow<
       await delay(POLL_MS);
       continue;
     }
+    if (await exists(readyPath)) return resultFromReady(input, readyPath, true);
     owner = input.createOwner(leaf.token, processStartIdentity);
     const recoveryPath = join(input.parent, `${input.identity}.recovery.${leaf.token}`);
     if (await tryLinkRecord(input, `.recovery-candidate-${owner.token}`, recoveryPath, owner)) {

@@ -1599,21 +1599,27 @@ export class RunIssue {
       }
       const implementationAttempt = active.record.activeAttempt;
       if (!implementationAttempt) return await this.terminal(active, { status: 'internal-error', code: 'implementation-attempt-missing' });
-      let implementation = await this.dependencies.implementationAgent.run({
-        operation: 'implementation',
-        attemptId: implementationAttempt.attemptId,
-        runId,
-        worktreePath,
-        issue: publicIssueSnapshot(issueSnapshot),
-        frozenCriteria,
-        deliveryAuthority: active.record.deliveryAuthority!,
-        cycle: active.record.cycle,
-        reworkFindings: active.record.reworkFindings,
-        repairOnly: false,
-        workflowGeneration: active.record.workflowGeneration,
-        signal: this.signal,
-        ...implementationLaunch,
-      });
+      let implementation: Awaited<ReturnType<RunIssueDependencies['implementationAgent']['run']>>;
+      try {
+        implementation = await this.dependencies.implementationAgent.run({
+          operation: 'implementation',
+          attemptId: implementationAttempt.attemptId,
+          runId,
+          worktreePath,
+          issue: publicIssueSnapshot(issueSnapshot),
+          frozenCriteria,
+          deliveryAuthority: active.record.deliveryAuthority!,
+          cycle: active.record.cycle,
+          reworkFindings: active.record.reworkFindings,
+          repairOnly: false,
+          workflowGeneration: active.record.workflowGeneration,
+          signal: this.signal,
+          ...implementationLaunch,
+        });
+      } catch (error) {
+        if (implementationPreparationFailure) return implementationPreparationFailure;
+        throw error;
+      }
       if (implementationPreparationFailure) return implementationPreparationFailure;
       if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
         active, implementation.kind === 'completed' ? implementation.report : implementation,
@@ -1649,21 +1655,26 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:report-repair`);
-        implementation = await this.dependencies.implementationAgent.run({
-          operation: 'implementation',
-          attemptId: active.record.activeAttempt!.attemptId,
-          runId,
-          worktreePath,
-          issue: publicIssueSnapshot(issueSnapshot),
-          frozenCriteria,
-          deliveryAuthority: active.record.deliveryAuthority!,
-          cycle: active.record.cycle,
-          reworkFindings: ['The previous implementation report did not match the generated schema.'],
-          repairOnly: true,
-          workflowGeneration: active.record.workflowGeneration,
-          signal: this.signal,
-          ...implementationLaunch,
-        });
+        try {
+          implementation = await this.dependencies.implementationAgent.run({
+            operation: 'implementation',
+            attemptId: active.record.activeAttempt!.attemptId,
+            runId,
+            worktreePath,
+            issue: publicIssueSnapshot(issueSnapshot),
+            frozenCriteria,
+            deliveryAuthority: active.record.deliveryAuthority!,
+            cycle: active.record.cycle,
+            reworkFindings: ['The previous implementation report did not match the generated schema.'],
+            repairOnly: true,
+            workflowGeneration: active.record.workflowGeneration,
+            signal: this.signal,
+            ...implementationLaunch,
+          });
+        } catch (error) {
+          if (implementationPreparationFailure) return implementationPreparationFailure;
+          throw error;
+        }
         if (implementationPreparationFailure) return implementationPreparationFailure;
         if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
           active, implementation.kind === 'completed' ? implementation.report : implementation,
@@ -1702,21 +1713,26 @@ export class RunIssue {
         const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
         if (repairBlock) return repairBlock;
         active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:changed-files-repair`);
-        implementation = await this.dependencies.implementationAgent.run({
-          operation: 'implementation',
-          attemptId: active.record.activeAttempt!.attemptId,
-          runId,
-          worktreePath,
-          issue: publicIssueSnapshot(issueSnapshot),
-          frozenCriteria,
-          deliveryAuthority: active.record.deliveryAuthority!,
-          cycle: active.record.cycle,
-          reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
-          repairOnly: true,
-          workflowGeneration: active.record.workflowGeneration,
-          signal: this.signal,
-          ...implementationLaunch,
-        });
+        try {
+          implementation = await this.dependencies.implementationAgent.run({
+            operation: 'implementation',
+            attemptId: active.record.activeAttempt!.attemptId,
+            runId,
+            worktreePath,
+            issue: publicIssueSnapshot(issueSnapshot),
+            frozenCriteria,
+            deliveryAuthority: active.record.deliveryAuthority!,
+            cycle: active.record.cycle,
+            reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
+            repairOnly: true,
+            workflowGeneration: active.record.workflowGeneration,
+            signal: this.signal,
+            ...implementationLaunch,
+          });
+        } catch (error) {
+          if (implementationPreparationFailure) return implementationPreparationFailure;
+          throw error;
+        }
         if (implementationPreparationFailure) return implementationPreparationFailure;
         if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
           active, implementation.kind === 'completed' ? implementation.report : implementation,
