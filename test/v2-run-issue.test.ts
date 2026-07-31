@@ -341,9 +341,259 @@ test('trusted product answer advances the frozen spec without retriage or a wait
   });
   const triageCount = fixture.events.filter((event) => event === 'route:triage').length;
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events }));
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, evidence: fixture.evidence }));
   assert.equal(fixture.events.filter((event) => event === 'route:triage').length, triageCount);
   assert.deepEqual(fixture.events.filter((event) => event === 'spec-review'), ['spec-review']);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
+});
+
+test('unordered equivalent answers choose one canonical source and persist sorted duplicate IDs', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push(
+    {
+      id: 'z-20', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+      author: 'writer-z', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+    {
+      id: 'a-10', body: `${first.receipt.answerPrefix}   Use   fixed pricing `, authorAssociation: 'OWNER',
+      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+  );
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const answer = (await fixture.store.read()).runs[0]!.specDelivery!.acceptedAnswers[0]!;
+  assert.equal(answer.canonicalSource.commentId, 'a-10');
+  assert.deepEqual(answer.duplicateCommentIds, ['z-20']);
+  assert.equal(answer.canonicalSource.normalizedAnswer, 'Use fixed pricing');
+  assert.equal(answer.canonicalSource.normalizedSha256, sha256('Use fixed pricing'));
+  assert.equal(answer.question.questionSha256, first.receipt.questionSha256);
+  assert.deepEqual(answer.canonicalSource.permission, { permission: 'write', userId: '10', checkedAt: '2026-07-30T00:00:01.000Z' });
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+});
+
+test('conflicting trusted answers create the next immutable question without retriage or implementation', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true, conflictQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push(
+    {
+      id: 'answer-b', body: `${first.receipt.answerPrefix} Use variable pricing`, authorAssociation: 'OWNER',
+      author: 'writer-b', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+    {
+      id: 'answer-a', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+  );
+  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(second.status, 'spec-frozen');
+  if (second.status !== 'spec-frozen' || !('questionId' in second.receipt)) return;
+  assert.notEqual(second.receipt.questionSha256, first.receipt.questionSha256);
+  assert.equal(second.receipt.decisionGaps[0]?.id, 'pricing-conflict');
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
+  assert.equal((await fixture.store.read()).runs[0]!.specDelivery!.stage, 'question');
+});
+
+test('permission-unverifiable answer observation replays frozen result without state, effect, evidence, or launch changes', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  fixture.options.permissionSequence = ['throw'];
+  const beforeState = canonicalJson(await fixture.store.read());
+  const beforeEvidence = fixture.evidence.length;
+  const beforeEffects = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length;
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
+  assert.equal(fixture.evidence.length, beforeEvidence);
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length, beforeEffects);
+});
+
+test('edited or wrong-marker question anchor replays frozen result without durable effects', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('marker' in first.receipt)) return;
+  const receipt = first.receipt;
+  const question = fixture.comments.find((comment) => comment.body.split('\n')[0] === receipt.marker)!;
+  question.body = question.body.replace(receipt.marker, '<!-- wrong-marker -->');
+  const beforeState = canonicalJson(await fixture.store.read());
+  const beforeEvidence = fixture.evidence.length;
+  const beforeEffects = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length;
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
+  assert.equal(fixture.evidence.length, beforeEvidence);
+  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length, beforeEffects);
+});
+
+test('conflict sources are revalidated before successor author', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true, conflictQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push(
+    {
+      id: 'answer-a', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+    {
+      id: 'answer-b', body: `${first.receipt.answerPrefix} Use variable pricing`, authorAssociation: 'OWNER',
+      author: 'writer-b', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+    },
+  );
+  fixture.options.permissionSequence = ['write', 'write', 'throw'];
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, 1);
+  const conflict = (await fixture.store.read()).runs[0]!.specDelivery!.trustedAnswer!;
+  assert.equal(conflict.accepted, false);
+  assert.deepEqual(conflict.additionalSources.map((source) => source.commentId), ['answer-b']);
+  fixture.comments.find((comment) => comment.id === 'answer-b')!.updatedAt = '2026-07-30T00:00:01.000Z';
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, 1);
+});
+
+test('trusted answer is revalidated before each next spec worker and first implementation launch', async () => {
+  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  fixture.options.permissionSequence = ['write', 'write', 'throw'];
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, 0);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
+  fixture.options.permissionSequence = ['write', 'throw'];
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
+  fixture.options.permissionSequence = ['write'];
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
+});
+
+test('answer mutation after implementing transition is caught before fingerprint, attempt, cycle, or launch', async () => {
+  const gate = deferred<void>();
+  const fixture = await runFixture({
+    route: 'spec-required', specQuestionOnce: true,
+    storeGate: { event: 'state:implementing:none', promise: gate.promise },
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await waitFor(() => fixture.events.includes('store:deferred'));
+  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
+  const eventCount = fixture.events.length;
+  gate.resolve();
+  assert.deepEqual(await running, first);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.cycle, 1);
+  assert.equal(record.activeAttempt, undefined);
+  assert.equal(fixture.events.slice(eventCount).some((event) => event === 'agent' || event.startsWith('git:fingerprint')), false);
+});
+
+test('stale trusted answer freezes prepared implementation resume before state or cycle mutation', async () => {
+  const preparedGate = deferred<void>();
+  const fixture = await runFixture({
+    route: 'spec-required', specQuestionOnce: true, implementationPreparedGate: preparedGate.promise,
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await waitFor(() => fixture.events.includes('agent:prepared-gated'));
+  const prepared = structuredClone((await fixture.store.read()).runs[0]!);
+  assert.equal(prepared.lifecycle, 'implementing');
+  assert.equal(prepared.activeAttempt?.stage, 'prepared');
+  assert.equal(prepared.cycle, 1);
+  preparedGate.reject(new Error('simulated process crash'));
+  assert.equal((await running).status, 'internal-error');
+  const crashed = await fixture.store.read();
+  await fixture.store.compareAndSwap(crashed.generation, { schema: 'codex-orchestrator.run-state', runs: [prepared] });
+  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
+  const beforeState = canonicalJson(await fixture.store.read());
+  const beforeEvents = fixture.events.length;
+
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
+  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
+  assert.equal(fixture.events.slice(beforeEvents).some((event) => event.startsWith('state:')
+    || event.startsWith('git:fingerprint') || event === 'agent'), false);
+});
+
+test('valid prepared implementation resume reuses the existing attempt without advancing cycle', async () => {
+  const preparedGate = deferred<void>();
+  const fixture = await runFixture({
+    route: 'spec-required', specQuestionOnce: true, implementationPreparedGate: preparedGate.promise,
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await waitFor(() => fixture.events.includes('agent:prepared-gated'));
+  const prepared = structuredClone((await fixture.store.read()).runs[0]!);
+  const attemptId = prepared.activeAttempt?.attemptId;
+  assert.equal(prepared.activeAttempt?.stage, 'prepared');
+  preparedGate.reject(new Error('simulated process crash'));
+  assert.equal((await running).status, 'internal-error');
+  const crashed = await fixture.store.read();
+  await fixture.store.compareAndSwap(crashed.generation, { schema: 'codex-orchestrator.run-state', runs: [prepared] });
+  fixture.options.implementationPreparedGate = undefined;
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const completed = (await fixture.store.read()).runs[0]!;
+  assert.equal(completed.cycle, 1);
+  assert.deepEqual(fixture.implementationAttemptIds, [attemptId, attemptId]);
+});
+
+test('trusted answer mutation after durable preparation freezes before implementation process launch', async () => {
+  const beforePrepared = deferred<void>();
+  const fixture = await runFixture({
+    route: 'spec-required', specQuestionOnce: true, implementationBeforePreparedGate: beforePrepared.promise,
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'spec-frozen');
+  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
+  fixture.comments.push({
+    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
+    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
+  });
+  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await waitFor(() => fixture.events.includes('agent:before-prepared-gated'));
+  const preparedState = canonicalJson(await fixture.store.read());
+  assert.equal((await fixture.store.read()).runs[0]!.activeAttempt?.stage, 'prepared');
+  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
+  const eventCount = fixture.events.length;
+  beforePrepared.resolve();
+
+  assert.deepEqual(await running, first);
+  assert.equal(canonicalJson(await fixture.store.read()), preparedState);
+  assert.equal(fixture.events.slice(eventCount).some((event) => event === 'agent:on-launched'
+    || event.startsWith('state:') || event.startsWith('git:fingerprint')), false);
 });
 
 test('edited product answer remains spec-frozen and launches no delivery work', async () => {
@@ -1664,6 +1914,7 @@ interface FixtureOptions {
   route?: 'direct' | 'spec-required';
   routeSequence?: Array<'direct' | 'spec-required'>;
   specQuestionOnce?: boolean;
+  conflictQuestionOnce?: boolean;
   initialLabels?: string[];
   blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
@@ -1721,6 +1972,9 @@ interface FixtureOptions {
   issueBodyAfterClaim?: string;
   expectedTriageIssueBody?: string;
   issueBody?: string;
+  permissionSequence?: Array<'write' | 'admin' | 'read' | 'throw'>;
+  implementationPreparedGate?: Promise<void>;
+  implementationBeforePreparedGate?: Promise<void>;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -1768,6 +2022,7 @@ async function runFixture(options: FixtureOptions = {}) {
     : inspectedStore;
   const localGit = new LocalGitRunIssueAdapter();
   const candidateAuthorityHashes: string[] = [];
+  const implementationAttemptIds: string[] = [];
   const git = traceGit(localGit, events, options, candidateAuthorityHashes);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
   let blockedTransitionMutated = false;
@@ -1869,7 +2124,11 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         if (claim && options.issueBodyAfterClaim) issue.body = options.issueBodyAfterClaim;
       },
-      getRepositoryPermission: async (_login, expectedUserId) => ({ permission: 'write', checkedAt: '2026-07-30T00:00:01.000Z', userId: expectedUserId }),
+      getRepositoryPermission: async (_login, expectedUserId) => {
+        const permission = options.permissionSequence?.shift() ?? 'write';
+        if (permission === 'throw') throw new Error('permission unavailable');
+        return { permission, checkedAt: '2026-07-30T00:00:01.000Z', userId: expectedUserId };
+      },
     },
     pullRequests: {
       findOpen: async () => pullRequest,
@@ -1984,6 +2243,14 @@ async function runFixture(options: FixtureOptions = {}) {
               decisionGaps: [{ id: 'pricing', summary: 'Choose pricing behavior.', evidence: ['issue:42'] }],
               question: 'Which pricing behavior?',
             };
+            if (options.conflictQuestionOnce && delivery.trustedAnswer?.accepted === false) {
+              options.conflictQuestionOnce = false;
+              return {
+                status: 'decision-required', attemptResultSha256: 'c'.repeat(64), value: revision,
+                decisionGaps: [{ id: 'pricing-conflict', summary: 'Resolve conflicting trusted answers.', evidence: ['issue:42'] }],
+                question: 'Which trusted pricing answer should control?',
+              };
+            }
             return { status: 'completed', attemptResultSha256: 'c'.repeat(64), value: revision };
           },
           review: async ({ attemptId, state: delivery, onPrepared, onLaunched }) => {
@@ -2004,16 +2271,26 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     implementationAgent: {
       run: async ({ attemptId, worktreePath: path, deliveryAuthority, onPrepared, onLaunched }) => {
+        implementationAttemptIds.push(attemptId);
         implementationAuthorities.push(structuredClone(deliveryAuthority));
         events.push('agent');
         events.push('agent:implementation');
+        if (options.implementationBeforePreparedGate) {
+          events.push('agent:before-prepared-gated');
+          await options.implementationBeforePreparedGate;
+        }
         await onPrepared?.({
           attemptId,
           reportPath: `/tmp/${attemptId}-report.json`,
           preparedAt: '2026-07-16T12:00:00.000Z',
           baseline: await dependencies.git.snapshot(path),
         });
+        if (options.implementationPreparedGate) {
+          events.push('agent:prepared-gated');
+          await options.implementationPreparedGate;
+        }
         if (!options.skipImplementationLaunchPersistence) {
+          events.push('agent:on-launched');
           await onLaunched?.({
             attemptId, pid: 6060, processGroupId: 6060, launchedAt: '2026-07-16T12:00:01.000Z',
           });
@@ -2179,6 +2456,7 @@ async function runFixture(options: FixtureOptions = {}) {
     runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath,
     events, evidence, store: rawStore, comments, implementationAuthorities, reviewAuthorities,
     candidateAuthorityHashes, checkedChangePayloads,
+    implementationAttemptIds,
   };
 }
 

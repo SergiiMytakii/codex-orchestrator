@@ -1271,11 +1271,13 @@ export class RunIssue {
               ? await this.updateExistingPullRequest(active, config, input.issueNumber)
               : await this.publish(active, config, issueSnapshot, input.issueNumber);
           }
+          let transitionedFromSpec = false;
           if (active.record.lifecycle === 'spec-authoring') {
             if (!await this.authorized(active, config)) return await this.revoked(active);
             const spec = await this.continueSpecRequired(active);
             if ('result' in spec) return spec.result;
             active = spec.active;
+            transitionedFromSpec = active.record.lifecycle === 'implementing';
           }
           if (!['triaging', 'routed', 'implementing', 'reworking', 'checking', 'proving'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
@@ -1283,6 +1285,16 @@ export class RunIssue {
           if (!await this.authorized(active, config)) return await this.revoked(active);
           if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
             if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteInitializationUnrecoverableError();
+            const preparedImplementationRecovery = active.record.lifecycle === 'implementing'
+              && active.record.activeAttempt?.stage === 'prepared'
+              && active.record.activeAttempt.operationId === 'implementation';
+            if (active.record.lifecycle === 'implementing' && active.record.routeReceipt.route === 'spec-required'
+              && (!active.record.activeAttempt || preparedImplementationRecovery) && !active.record.directReview) {
+              const answerTrust = await this.revalidateSpecAnswers(active);
+              if (answerTrust.status === 'frozen') {
+                return frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath);
+              }
+            }
             const reviewRecovery = active.record.lifecycle === 'implementing' && active.record.directReview?.status === 'active'
               && active.record.directReview.stage === 'review';
             const checkRecovery = active.record.lifecycle === 'checking'
@@ -1294,7 +1306,8 @@ export class RunIssue {
               && active.record.directReview.stage === 'review-repair';
             const attemptResultRecovery = active.record.activeAttempt?.stage === 'observed'
               && active.record.activeAttempt.result !== null;
-            if (!reviewRecovery && !checkRecovery && !proofRecovery && !directReviewRepair && !attemptResultRecovery) {
+            if (!transitionedFromSpec && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
+              && !proofRecovery && !directReviewRepair && !attemptResultRecovery) {
               if (this.repairBudgetExhausted(active, config.runner.maxCycles)) {
                 return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
               }
@@ -1405,19 +1418,34 @@ export class RunIssue {
       }
 
       if (!resumeAtChecks) {
+      if (active.record.routeReceipt?.route === 'spec-required'
+        && (!active.record.activeAttempt || active.record.activeAttempt.stage === 'prepared')) {
+        const answerTrust = await this.revalidateSpecAnswers(active);
+        if (answerTrust.status === 'frozen') {
+          return frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath);
+        }
+      }
       const feedbackBatch = active.record.reviewFeedback?.activeBatch;
       const workerBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
       if (workerBlock) return workerBlock;
       const feedbackProjection = feedbackBatch
         ? projectReviewFeedbackBatch(feedbackBatch, active.record.directReview!.targetRevision)
         : undefined;
-      let feedbackImplementationLaunchFailure: RunIssueResult | undefined;
+      let implementationPreparationFailure: RunIssueResult | undefined;
       const implementationLaunch = {
         ...(feedbackBatch ? {
           reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
           reviewFeedback: feedbackProjection!.workerFeedback,
         } : {}),
         onPrepared: async (prepared: { attemptId: string; reportPath: string }) => {
+          const currentActive = active!;
+          if (currentActive.record.routeReceipt?.route === 'spec-required') {
+            const trust = await this.revalidateSpecAnswers(currentActive);
+            if (trust.status === 'frozen') {
+              implementationPreparationFailure = frozenQuestionProjection(trust.question, trust.evidencePath);
+              throw new Error('implementation preparation authorization changed');
+            }
+          }
           if (active!.record.activeAttempt?.attemptId !== prepared.attemptId
             || active!.record.activeAttempt.resultPath !== prepared.reportPath) {
             throw new Error('implementation attempt identity mismatch');
@@ -1427,7 +1455,7 @@ export class RunIssue {
           const currentActive = active!;
           const failure = await this.revalidateFeedbackWorker(currentActive, config, input.issueNumber);
           if (failure) {
-            feedbackImplementationLaunchFailure = failure;
+            implementationPreparationFailure = failure;
             throw new Error('implementation launch authorization changed');
           }
           if (currentActive.record.activeAttempt?.attemptId !== launched.attemptId) throw new Error('implementation launch mismatch');
@@ -1460,7 +1488,7 @@ export class RunIssue {
         workflowGeneration: active.record.workflowGeneration,
         ...implementationLaunch,
       });
-      if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
+      if (implementationPreparationFailure) return implementationPreparationFailure;
       if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
         active, implementation.kind === 'completed' ? implementation.report : implementation,
       );
@@ -1519,7 +1547,7 @@ export class RunIssue {
           workflowGeneration: active.record.workflowGeneration,
           ...implementationLaunch,
         });
-        if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
+        if (implementationPreparationFailure) return implementationPreparationFailure;
         if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
           active, implementation.kind === 'completed' ? implementation.report : implementation,
         );
@@ -1574,7 +1602,7 @@ export class RunIssue {
           workflowGeneration: active.record.workflowGeneration,
           ...implementationLaunch,
         });
-        if (feedbackImplementationLaunchFailure) return feedbackImplementationLaunchFailure;
+        if (implementationPreparationFailure) return implementationPreparationFailure;
         if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
           active, implementation.kind === 'completed' ? implementation.report : implementation,
         );
@@ -2142,14 +2170,15 @@ export class RunIssue {
     if (receipt.route !== 'direct') {
       const specContinuation = continuation as SpecCoordinatorResult;
       if (specContinuation.status === 'decision-required') {
-        return { result: await this.specQuestionResult(active, specContinuation.receipt) };
+        return { result: specContinuation.evidencePath
+          ? frozenQuestionProjection(specContinuation.receipt, specContinuation.evidencePath)
+          : await this.specQuestionResult(active, specContinuation.receipt) };
       }
       if (specContinuation.status !== 'completed') return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
       const frozen = active.record.specDelivery?.frozen;
       if (!frozen) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      if (!await this.acceptedSpecAnswersRemainTrusted(active)) {
-        return { result: await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
-      }
+      const answerTrust = await this.revalidateSpecAnswers(active);
+      if (answerTrust.status === 'frozen') return { result: frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath) };
       return { active: await this.persist(active, {
         lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(receipt, active.record.specDelivery!),
       }) };
@@ -2158,15 +2187,17 @@ export class RunIssue {
   }
 
   private async specQuestionResult(active: ActiveRun, receipt: FrozenSpecQuestionReceiptV1): Promise<RunIssueResult> {
-    const body = [
-      receipt.marker,
-      `Spec revision: ${receipt.revisionSha256}`,
-      `Decision gaps: ${canonicalJson(receipt.decisionGaps)}`,
-      receipt.question,
-      `Reply with: ${receipt.answerPrefix} <answer>`,
-      `Evidence: ${receipt.evidencePath}`,
-    ].join('\n');
+    const body = specQuestionBody(receipt);
     const expected = { kind: 'spec-question-comment' as const, issueNumber: active.record.issueNumber, marker: receipt.marker, bodySha256: sha256(body) };
+    if (!active.record.pendingEffect) {
+      const existing = await this.readIssue(active.record.issueNumber);
+      const existingMatches = existing ? commentsWithMarker(existing, receipt.marker) : [];
+      const stored = active.record.specDelivery?.questionResult;
+      if (existingMatches.length === 1 && sha256(existingMatches[0]!.body) === expected.bodySha256
+        && stored?.questionSha256 === receipt.questionSha256) {
+        return frozenQuestionProjection(receipt, stored.evidencePath);
+      }
+    }
     if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
     if (canonicalJson(active.record.pendingEffect) !== canonicalJson(createPendingEffect(expected))) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
@@ -2185,7 +2216,13 @@ export class RunIssue {
     if (matches.length !== 1 || sha256(matches[0]!.body) !== expected.bodySha256) return this.invokedFailure(active, 'spec-question-comment-unobserved');
     active = await this.confirmEffect(active);
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: receipt.questionSha256 });
-    return { status: 'spec-frozen', receipt: structuredClone(receipt), evidencePath: evidence.path };
+    active = await this.persist(active, {
+      specDelivery: {
+        ...active.record.specDelivery!,
+        questionResult: { questionSha256: receipt.questionSha256, evidenceId: evidence.id, evidencePath: evidence.path },
+      },
+    });
+    return frozenQuestionProjection(receipt, evidence.path);
   }
 
   private async createInitialWorktreeEffect(active: ActiveRun, targetRoot: string): Promise<{ active: ActiveRun } | RunIssueResult> {
@@ -2282,6 +2319,14 @@ export class RunIssue {
         const saved = await this.clearAttempt(readActive());
         writeActive(saved);
       },
+      revalidateBeforeAttempt: async () => {
+        const trust = await this.revalidateSpecAnswers(readActive());
+        return trust.status === 'valid'
+          ? trust
+          : {
+            status: 'frozen' as const, receipt: structuredClone(trust.question), evidencePath: trust.evidencePath,
+          };
+      },
     };
   }
 
@@ -2306,14 +2351,15 @@ export class RunIssue {
     if (result.status === 'completed') {
       const frozen = current.record.specDelivery?.frozen;
       if (!frozen) return { result: await this.terminal(current, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      if (!await this.acceptedSpecAnswersRemainTrusted(current)) {
-        return { result: await this.terminal(current, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-answer-no-longer-trusted') };
-      }
+      const answerTrust = await this.revalidateSpecAnswers(current);
+      if (answerTrust.status === 'frozen') return { result: frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath) };
       return { active: await this.persist(current, {
         lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(current.record.routeReceipt!, current.record.specDelivery!),
       }) };
     }
-    if (result.status === 'decision-required') return { result: await this.specQuestionResult(current, result.receipt) };
+    if (result.status === 'decision-required') return { result: result.evidencePath
+      ? frozenQuestionProjection(result.receipt, result.evidencePath)
+      : await this.specQuestionResult(current, result.receipt) };
     if (result.status === 'cancelled') return { result: await this.terminal(current, { status: 'cancelled' }) };
     if (result.status === 'retryable') return { result: await this.terminal(current, { status: 'transport-failed', resumable: true }, result.code) };
     return { result: await this.terminal(current, { status: 'blocked', kind: result.kind, resumable: result.kind !== 'exhausted' }, result.code) };
@@ -2322,57 +2368,98 @@ export class RunIssue {
   private async observeSpecAnswer(active: ActiveRun): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
     const delivery = active.record.specDelivery!;
     const question = delivery.question!;
+    const questionResult = delivery.questionResult;
+    if (!questionResult) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-question-result-missing' }) };
     const issue = await this.readIssue(active.record.issueNumber);
-    if (!issue) return { result: await this.invokedFailure(active, 'spec-answer-observation-failed') };
-    const questionIndex = issue.comments.findIndex((comment) => comment.body.includes(question.marker));
+    if (!issue) return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
+    const expectedQuestionBody = specQuestionBody(question);
+    const markerMatches = commentsWithMarker(issue, question.marker);
+    if (markerMatches.length !== 1 || markerMatches[0]!.body !== expectedQuestionBody) {
+      return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
+    }
+    const questionIndex = issue.comments.findIndex((comment) => comment.body === expectedQuestionBody);
     const candidates = questionIndex < 0 ? [] : issue.comments.slice(questionIndex + 1)
       .filter((comment) => comment.body.startsWith(question.answerPrefix));
-    const trusted: Array<{ comment: typeof candidates[number]; normalized: string; checkedAt: string }> = [];
+    const trusted: Array<{
+      comment: typeof candidates[number]; normalized: string;
+      permission: { permission: 'write' | 'admin'; userId: string; checkedAt: string };
+    }> = [];
     for (const comment of candidates) {
       if (!comment.id || !comment.author || !comment.authorId || !comment.createdAt || !comment.updatedAt || comment.createdAt !== comment.updatedAt) continue;
       const normalized = comment.body.slice(question.answerPrefix.length).trim().replace(/\s+/gu, ' ');
       if (!normalized || !this.dependencies.issues.getRepositoryPermission) continue;
       let permission;
       try { permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId); }
-      catch { return { result: await this.invokedFailure(active, 'spec-answer-permission-unverifiable') }; }
+      catch { return { result: frozenQuestionProjection(question, questionResult.evidencePath) }; }
       if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) continue;
-      trusted.push({ comment, normalized, checkedAt: permission.checkedAt });
+      trusted.push({
+        comment, normalized,
+        permission: permission as { permission: 'write' | 'admin'; userId: string; checkedAt: string },
+      });
     }
-    if (trusted.length === 0) return { result: await this.specQuestionResult(active, question) };
+    trusted.sort((left, right) => compareStableId(left.comment.id!, right.comment.id!));
+    if (trusted.length === 0) return { result: frozenQuestionProjection(question, questionResult.evidencePath) };
     const hashes = [...new Set(trusted.map((item) => sha256(item.normalized)))];
-    const selected = trusted[0]!;
-    const normalizedAnswer = hashes.length === 1
-      ? selected.normalized
-      : `Conflicting trusted answers: ${hashes.sort().join(',')}`;
+    const sources = trusted.map((item) => ({
+      commentId: item.comment.id!, authorId: item.comment.authorId!, author: item.comment.author!,
+      normalizedAnswer: item.normalized, normalizedSha256: sha256(item.normalized), permission: structuredClone(item.permission),
+      commentCreatedAt: item.comment.createdAt!, commentUpdatedAt: item.comment.updatedAt!,
+    }));
+    const canonicalSource = sources[0]!;
     const answer: TrustedSpecAnswerV1 = {
       accepted: hashes.length === 1,
-      questionSha256: question.questionSha256,
-      commentId: hashes.length === 1 ? selected.comment.id! : trusted.map((item) => item.comment.id).sort().join(','),
-      authorId: selected.comment.authorId!, author: selected.comment.author!, answerPrefix: question.answerPrefix, normalizedAnswer,
-      normalizedSha256: sha256(normalizedAnswer), permissionCheckedAt: selected.checkedAt,
-      commentCreatedAt: selected.comment.createdAt!, commentUpdatedAt: selected.comment.updatedAt!,
+      question: structuredClone(question),
+      frozenResult: { evidenceId: questionResult.evidenceId, evidencePath: questionResult.evidencePath },
+      canonicalSource,
+      duplicateCommentIds: sources.slice(1)
+        .filter((source) => source.normalizedSha256 === canonicalSource.normalizedSha256)
+        .map((source) => source.commentId),
+      additionalSources: sources.slice(1),
     };
     return { active: await this.persist(active, { specDelivery: acceptTrustedSpecAnswer(delivery, answer) }) };
   }
 
-  private async acceptedSpecAnswersRemainTrusted(active: ActiveRun): Promise<boolean> {
-    const answers = active.record.specDelivery?.acceptedAnswers ?? [];
-    if (answers.length === 0) return true;
-    if (!this.dependencies.issues.getRepositoryPermission) return false;
-    const issue = await this.readIssue(active.record.issueNumber);
-    if (!issue) return false;
-    for (const answer of answers) {
-      const comment = issue.comments.find((item) => item.id === answer.commentId);
-      if (!comment?.author || !comment.authorId || comment.author !== answer.author || comment.authorId !== answer.authorId
-        || comment.createdAt !== answer.commentCreatedAt || comment.updatedAt !== answer.commentUpdatedAt
-        || comment.createdAt !== comment.updatedAt || !comment.body.startsWith(answer.answerPrefix)
-        || comment.body.slice(answer.answerPrefix.length).trim().replace(/\s+/gu, ' ') !== answer.normalizedAnswer) return false;
-      try {
-        const permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId);
-        if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) return false;
-      } catch { return false; }
+  private async revalidateSpecAnswers(active: ActiveRun): Promise<
+    { status: 'valid' } | { status: 'frozen'; question: FrozenSpecQuestionReceiptV1; evidencePath: string }
+  > {
+    const delivery = active.record.specDelivery;
+    const answers = [
+      ...(delivery?.acceptedAnswers ?? []),
+      ...(delivery?.trustedAnswer ? [delivery.trustedAnswer] : []),
+    ];
+    if (answers.length === 0) return { status: 'valid' };
+    const fallback = answers.at(-1)!;
+    if (!this.dependencies.issues.getRepositoryPermission) {
+      return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath };
     }
-    return true;
+    let issue;
+    try { issue = await this.readIssue(active.record.issueNumber); }
+    catch { return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath }; }
+    if (!issue) return { status: 'frozen', question: fallback.question, evidencePath: fallback.frozenResult.evidencePath };
+    for (const answer of answers) {
+      const questionMatches = commentsWithMarker(issue, answer.question.marker);
+      if (questionMatches.length !== 1 || questionMatches[0]!.body !== specQuestionBody(answer.question)) {
+        return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
+      }
+      for (const source of [answer.canonicalSource, ...answer.additionalSources]) {
+        const comment = issue.comments.find((item) => item.id === source.commentId);
+        if (!comment?.author || !comment.authorId || comment.author !== source.author || comment.authorId !== source.authorId
+          || comment.createdAt !== source.commentCreatedAt || comment.updatedAt !== source.commentUpdatedAt
+          || comment.createdAt !== comment.updatedAt || !comment.body.startsWith(answer.question.answerPrefix)
+          || comment.body.slice(answer.question.answerPrefix.length).trim().replace(/\s+/gu, ' ') !== source.normalizedAnswer) {
+          return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
+        }
+        try {
+          const permission = await this.dependencies.issues.getRepositoryPermission(comment.author, comment.authorId);
+          if (!['write', 'admin'].includes(permission.permission) || permission.userId !== comment.authorId) {
+            return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
+          }
+        } catch {
+          return { status: 'frozen', question: answer.question, evidencePath: answer.frozenResult.evidencePath };
+        }
+      }
+    }
+    return { status: 'valid' };
   }
 
   private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }> {
@@ -3787,6 +3874,25 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
 
 function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
   return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
+}
+
+function frozenQuestionProjection(receipt: FrozenSpecQuestionReceiptV1, evidencePath: string): RunIssueResult {
+  return { status: 'spec-frozen', receipt: structuredClone(receipt), evidencePath };
+}
+
+function specQuestionBody(receipt: FrozenSpecQuestionReceiptV1): string {
+  return [
+    receipt.marker,
+    `Spec revision: ${receipt.revisionSha256}`,
+    `Decision gaps: ${canonicalJson(receipt.decisionGaps)}`,
+    receipt.question,
+    `Reply with: ${receipt.answerPrefix} <answer>`,
+    `Evidence: ${receipt.evidencePath}`,
+  ].join('\n');
+}
+
+function compareStableId(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sortedUnique(values: string[]): string[] {

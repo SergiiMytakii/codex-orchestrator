@@ -63,18 +63,23 @@ export interface FrozenSpecQuestionReceiptV1 {
   evidencePath: string;
   questionSha256: string;
 }
-export interface TrustedSpecAnswerV1 {
-  accepted: boolean;
-  questionSha256: string;
+export interface TrustedSpecAnswerSourceV1 {
   commentId: string;
   authorId: string;
   author: string;
-  answerPrefix: string;
   normalizedAnswer: string;
   normalizedSha256: string;
-  permissionCheckedAt: string;
+  permission: { permission: 'write' | 'admin'; userId: string; checkedAt: string };
   commentCreatedAt: string;
   commentUpdatedAt: string;
+}
+export interface TrustedSpecAnswerV1 {
+  accepted: boolean;
+  question: FrozenSpecQuestionReceiptV1;
+  frozenResult: { evidenceId: string; evidencePath: string };
+  canonicalSource: TrustedSpecAnswerSourceV1;
+  duplicateCommentIds: string[];
+  additionalSources: TrustedSpecAnswerSourceV1[];
 }
 export interface SpecDeliveryV1 {
   version: 1;
@@ -100,6 +105,7 @@ export interface SpecDeliveryV1 {
   frozen?: FrozenSpecReceiptV1;
   question?: FrozenSpecQuestionReceiptV1;
   trustedAnswer?: TrustedSpecAnswerV1;
+  questionResult?: { questionSha256: string; evidenceId: string; evidencePath: string };
 }
 
 export function createInitialSpecDelivery(input: {
@@ -163,6 +169,7 @@ export function acceptSpecRevision(state: SpecDeliveryV1, revision: SpecRevision
   if (state.stage === 'answer-authoring' && state.trustedAnswer?.accepted) next.acceptedAnswers.push(structuredClone(state.trustedAnswer));
   delete next.question;
   delete next.trustedAnswer;
+  delete next.questionResult;
   return validateSpecDelivery(next);
 }
 
@@ -182,11 +189,15 @@ export function freezeSpecQuestion(state: SpecDeliveryV1, revision: SpecRevision
   const receipt = { ...base, questionSha256: digest(`codex-orchestrator-spec-question-v1\0${canonicalJson(base)}`) };
   const next = { ...structuredClone(state), stage: 'question' as const, revisions: [...state.revisions, validated], question: receipt };
   delete next.trustedAnswer;
+  delete next.questionResult;
   return validateSpecDelivery(next);
 }
 
 export function acceptTrustedSpecAnswer(state: SpecDeliveryV1, answer: TrustedSpecAnswerV1): SpecDeliveryV1 {
-  if (state.stage !== 'question' || !state.question || answer.questionSha256 !== state.question.questionSha256) {
+  if (state.stage !== 'question' || !state.question || !state.questionResult
+    || canonicalJson(answer.question) !== canonicalJson(state.question)
+    || answer.frozenResult.evidenceId !== state.questionResult.evidenceId
+    || answer.frozenResult.evidencePath !== state.questionResult.evidencePath) {
     throw new Error('trusted spec answer correlation mismatch');
   }
   const next = { ...structuredClone(state), stage: 'answer-authoring' as const, trustedAnswer: structuredClone(answer) };
@@ -276,7 +287,7 @@ export function validateFrozenSpecReceipt(value: unknown, state: SpecDeliveryV1)
 }
 
 export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
-  const optional = ['frozen', 'question', 'trustedAnswer'].filter((key) => own(value, key));
+  const optional = ['frozen', 'question', 'trustedAnswer', 'questionResult'].filter((key) => own(value, key));
   exact(value, ['version','issueNumber','runId','workflowGenerationSha256','stage','revisions','acceptedAnswers','authorSessionId','review','budgets',...optional], 'spec delivery');
   if (value.version !== 1) throw new Error('spec delivery version is invalid');
   positive(value.issueNumber, 'issue number'); text(value.runId, 'run ID'); hash(value.workflowGenerationSha256, 'workflow generation hash');
@@ -285,7 +296,17 @@ export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
   let previous: SpecRevisionV1 | null = null;
   for (const revision of value.revisions) previous = validateSpecRevision(revision, previous);
   if (!Array.isArray(value.acceptedAnswers)) throw new Error('accepted spec answers are invalid');
-  for (const answer of value.acceptedAnswers) validateTrustedSpecAnswer(answer);
+  const revisionByHash = new Map(value.revisions.map((revision) => [revision.revisionSha256, revision]));
+  const revisionIndexByHash = new Map(value.revisions.map((revision, index) => [revision.revisionSha256, index]));
+  const allSourceIds = new Set<string>();
+  let priorAnswerRevisionIndex = -1;
+  for (const answer of value.acceptedAnswers) {
+    validateTrustedSpecAnswer(answer, undefined, revisionByHash, allSourceIds);
+    if (!answer.accepted) throw new Error('accepted spec answers contain a conflict receipt');
+    const revisionIndex = revisionIndexByHash.get(answer.question.revisionSha256)!;
+    if (revisionIndex <= priorAnswerRevisionIndex) throw new Error('accepted spec answers are not in revision order');
+    priorAnswerRevisionIndex = revisionIndex;
+  }
   exact(value.budgets, ['author','review','repairCycles'], 'spec budgets');
   for (const owner of ['author','review'] as const) { exact(value.budgets[owner], ['reportRepairs','transportRetries'], `${owner} budget`); for (const key of ['reportRepairs','transportRetries'] as const) if (![0,1].includes(value.budgets[owner][key])) throw new Error('spec budget is invalid'); }
   if (![0,1].includes(value.budgets.repairCycles)) throw new Error('spec repair cycle budget is invalid');
@@ -295,7 +316,17 @@ export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
   if (stage !== 'authoring' && value.revisions.length === 0) throw new Error('spec stage requires a revision');
   if (stage === 'question' || stage === 'answer-authoring') validateSpecQuestion(value.question, value.revisions.at(-1) as SpecRevisionV1);
   else if (own(value, 'question')) throw new Error('non-question spec has question evidence');
-  if (stage === 'answer-authoring') validateTrustedSpecAnswer(value.trustedAnswer, value.question);
+  if (own(value, 'questionResult')) {
+    exact(value.questionResult, ['questionSha256','evidenceId','evidencePath'], 'spec question result');
+    hash(value.questionResult.questionSha256, 'spec question result question hash');
+    text(value.questionResult.evidenceId, 'spec question result evidence ID');
+    text(value.questionResult.evidencePath, 'spec question result evidence path');
+    if (!value.question || value.questionResult.questionSha256 !== value.question.questionSha256) throw new Error('spec question result binding is invalid');
+  }
+  if (stage === 'answer-authoring') {
+    validateTrustedSpecAnswer(value.trustedAnswer, value.question, revisionByHash, allSourceIds);
+    if (!value.questionResult) throw new Error('answer-authoring requires frozen result evidence');
+  }
   else if (own(value, 'trustedAnswer')) throw new Error('non-answering spec has trusted answer');
   if (stage === 'approved' && (!value.review.reviewer || !value.review.acceptedReportSha256)) throw new Error('approved spec is missing review authority');
   if (stage === 'frozen') validateFrozenSpecReceipt(value.frozen, value as unknown as SpecDeliveryV1);
@@ -303,9 +334,12 @@ export function validateSpecDelivery(value: unknown): SpecDeliveryV1 {
   return structuredClone(value as unknown as SpecDeliveryV1);
 }
 
-function validateSpecQuestion(value: unknown, revision: SpecRevisionV1): void {
+function validateSpecQuestion(value: unknown, revision?: SpecRevisionV1): void {
   exact(value, ['version','revisionSha256','decisionGaps','questionId','question','answerPrefix','marker','evidencePath','questionSha256'], 'spec question');
-  if (value.version !== 1 || value.revisionSha256 !== revision.revisionSha256 || value.evidencePath !== revision.path) throw new Error('spec question revision binding is invalid');
+  if (value.version !== 1 || (revision && (value.revisionSha256 !== revision.revisionSha256 || value.evidencePath !== revision.path))) {
+    throw new Error('spec question revision binding is invalid');
+  }
+  hash(value.revisionSha256, 'spec question revision hash');
   text(value.questionId, 'spec question ID'); text(value.question, 'spec question'); text(value.answerPrefix, 'spec answer prefix'); text(value.marker, 'spec question marker');
   if (!Array.isArray(value.decisionGaps) || value.decisionGaps.length === 0) throw new Error('spec decision gaps are invalid');
   for (const gap of value.decisionGaps) {
@@ -313,22 +347,61 @@ function validateSpecQuestion(value: unknown, revision: SpecRevisionV1): void {
     if (!Array.isArray(gap.evidence) || gap.evidence.length === 0) throw new Error('spec gap evidence is invalid');
     for (const item of gap.evidence) text(item, 'spec gap evidence');
   }
-  const expectedId = `q-${revision.revisionSha256.slice(0, 20)}`;
+  const expectedId = `q-${value.revisionSha256.slice(0, 20)}`;
   if (value.questionId !== expectedId || value.answerPrefix !== `Answer ${expectedId}:`
     || value.marker !== `<!-- codex-orchestrator:spec-question:${expectedId} -->`) throw new Error('spec question identity is invalid');
   const { questionSha256, ...base } = value as FrozenSpecQuestionReceiptV1;
   if (questionSha256 !== digest(`codex-orchestrator-spec-question-v1\0${canonicalJson(base)}`)) throw new Error('spec question hash is invalid');
 }
 
-function validateTrustedSpecAnswer(value: unknown, question?: unknown): void {
-  exact(value, ['accepted','questionSha256','commentId','authorId','author','answerPrefix','normalizedAnswer','normalizedSha256','permissionCheckedAt','commentCreatedAt','commentUpdatedAt'], 'trusted spec answer');
+function validateTrustedSpecAnswer(
+  value: unknown,
+  question?: unknown,
+  revisions?: Map<string, SpecRevisionV1>,
+  allSourceIds = new Set<string>(),
+): void {
+  exact(value, ['accepted','question','frozenResult','canonicalSource','duplicateCommentIds','additionalSources'], 'trusted spec answer');
   if (typeof value.accepted !== 'boolean') throw new Error('trusted spec answer acceptance is invalid');
-  text(value.commentId, 'answer comment ID'); text(value.authorId, 'answer author ID'); text(value.author, 'answer author'); text(value.answerPrefix, 'answer prefix'); text(value.normalizedAnswer, 'answer'); text(value.permissionCheckedAt, 'permission checked at'); text(value.commentCreatedAt, 'answer created at'); text(value.commentUpdatedAt, 'answer updated at');
-  if (value.accepted && value.commentCreatedAt !== value.commentUpdatedAt) throw new Error('accepted spec answer was edited');
-  hash(value.normalizedSha256, 'normalized answer hash');
-  if (value.normalizedSha256 !== digest(value.normalizedAnswer as string)) throw new Error('normalized answer hash mismatch');
-  if (question && (value.questionSha256 !== (question as FrozenSpecQuestionReceiptV1).questionSha256
-    || value.answerPrefix !== (question as FrozenSpecQuestionReceiptV1).answerPrefix)) throw new Error('trusted spec answer question mismatch');
+  if (!value.question || typeof value.question !== 'object') throw new Error('trusted spec answer question is invalid');
+  const answerQuestion = value.question as FrozenSpecQuestionReceiptV1;
+  const revision = revisions?.get(answerQuestion.revisionSha256);
+  validateSpecQuestion(answerQuestion, revision);
+  if (revisions && !revision) throw new Error('trusted spec answer revision is not persisted');
+  if (question && canonicalJson(value.question) !== canonicalJson(question)) throw new Error('trusted spec answer question mismatch');
+  exact(value.frozenResult, ['evidenceId','evidencePath'], 'trusted spec answer frozen result');
+  text(value.frozenResult.evidenceId, 'trusted spec answer evidence ID');
+  text(value.frozenResult.evidencePath, 'trusted spec answer evidence path');
+  validateAnswerSource(value.canonicalSource, 'canonical answer source');
+  if (!Array.isArray(value.additionalSources)) throw new Error('trusted spec answer additional sources are invalid');
+  for (const [index, source] of value.additionalSources.entries()) validateAnswerSource(source, `additional answer source ${index}`);
+  const sources = [value.canonicalSource, ...value.additionalSources] as TrustedSpecAnswerSourceV1[];
+  const sourceIds = sources.map((source) => source.commentId);
+  if (sourceIds.some((id, index) => index > 0 && id <= sourceIds[index - 1]!) || new Set(sourceIds).size !== sourceIds.length) {
+    throw new Error('trusted spec answer sources are not canonical');
+  }
+  for (const id of sourceIds) {
+    if (allSourceIds.has(id)) throw new Error('trusted spec answer source is reused');
+    allSourceIds.add(id);
+  }
+  const duplicates = sources.filter((source) => source.normalizedSha256 === value.canonicalSource.normalizedSha256)
+    .slice(1).map((source) => source.commentId);
+  if (!Array.isArray(value.duplicateCommentIds) || canonicalJson(value.duplicateCommentIds) !== canonicalJson(duplicates)) {
+    throw new Error('trusted spec answer duplicate IDs are invalid');
+  }
+  const hasConflicts = sources.some((source) => source.normalizedSha256 !== value.canonicalSource.normalizedSha256);
+  if (value.accepted === hasConflicts) throw new Error('trusted spec answer acceptance does not match sources');
+}
+
+function validateAnswerSource(value: unknown, field: string): void {
+  exact(value, ['commentId','authorId','author','normalizedAnswer','normalizedSha256','permission','commentCreatedAt','commentUpdatedAt'], field);
+  text(value.commentId, `${field} comment ID`); text(value.authorId, `${field} author ID`); text(value.author, `${field} author`);
+  text(value.normalizedAnswer, `${field} normalized answer`); text(value.commentCreatedAt, `${field} created at`); text(value.commentUpdatedAt, `${field} updated at`);
+  if (value.commentCreatedAt !== value.commentUpdatedAt) throw new Error(`${field} was edited`);
+  hash(value.normalizedSha256, `${field} normalized hash`);
+  if (value.normalizedSha256 !== digest(value.normalizedAnswer as string)) throw new Error(`${field} normalized hash mismatch`);
+  exact(value.permission, ['permission','userId','checkedAt'], `${field} permission`);
+  if (!['write','admin'].includes(value.permission.permission as string) || value.permission.userId !== value.authorId) throw new Error(`${field} permission is invalid`);
+  text(value.permission.checkedAt, `${field} permission checked at`);
 }
 
 function mergeFullDefects(state: SpecDeliveryV1, report: SpecReviewReportV1): CodeReviewDefectV1[] {

@@ -14,6 +14,9 @@ export interface SpecDeliveryState {
   launchAttempt(attemptId: string, pid: number, processGroupId: number): Promise<void>;
   adopt(expected: SpecDeliveryV1, next: SpecDeliveryV1, resultSha256: string): Promise<boolean>;
   clearAttempt(): Promise<void>;
+  revalidateBeforeAttempt(state: SpecDeliveryV1): Promise<
+    { status: 'valid' } | { status: 'frozen'; receipt: FrozenSpecQuestionReceiptV1; evidencePath: string }
+  >;
 }
 
 export type SpecOperationResult<T> =
@@ -47,7 +50,7 @@ export interface SpecDeliveryOperation {
 
 export type SpecCoordinatorResult =
   | { status: 'completed'; receipt: FrozenSpecReceiptV1 }
-  | { status: 'decision-required'; receipt: FrozenSpecQuestionReceiptV1 }
+  | { status: 'decision-required'; receipt: FrozenSpecQuestionReceiptV1; evidencePath?: string }
   | { status: 'retryable'; code: string }
   | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; code: string; evidence: string[] }
   | { status: 'cancelled' };
@@ -81,6 +84,10 @@ export class SpecCoordinator {
       }
       const author = current.stage === 'authoring' || current.stage === 'author-repair' || current.stage === 'answer-authoring';
       const mode = author ? (current.stage === 'author-repair' ? 'repair' : 'author') : 'review';
+      const revalidated = await this.dependencies.state.revalidateBeforeAttempt(current);
+      if (revalidated.status === 'frozen') return {
+        status: 'decision-required', receipt: revalidated.receipt, evidencePath: revalidated.evidencePath,
+      };
       const attempt = await this.dependencies.state.prepareAttempt(
         author ? 'spec-author' : 'spec-review',
         `${mode}:${current.revisions.length + 1}:${current.budgets.repairCycles}`,

@@ -62,17 +62,51 @@ test('product decision remains inside spec state and resumes at the next immutab
   assert.equal(waiting.stage, 'question');
   assert.equal(waiting.question?.revisionSha256, revision.revisionSha256);
   assert.match(waiting.question?.answerPrefix ?? '', /^Answer q-/u);
-  const answering = acceptTrustedSpecAnswer(waiting, {
-    accepted: true, questionSha256: waiting.question!.questionSha256, commentId: '1', authorId: '2', author: 'owner', answerPrefix: waiting.question!.answerPrefix,
-    normalizedAnswer: 'Use fixed pricing', normalizedSha256: sha256('Use fixed pricing'), permissionCheckedAt: '2026-07-30T00:00:00.000Z',
-    commentCreatedAt: '2026-07-30T00:00:00.000Z', commentUpdatedAt: '2026-07-30T00:00:00.000Z',
+  const published = validateSpecDelivery({
+    ...waiting,
+    questionResult: { questionSha256: waiting.question!.questionSha256, evidenceId: 'evidence-1', evidencePath: '/evidence/1.json' },
+  });
+  const answering = acceptTrustedSpecAnswer(published, {
+    accepted: true, question: waiting.question!, frozenResult: { evidenceId: 'evidence-1', evidencePath: '/evidence/1.json' },
+    canonicalSource: {
+      commentId: '1', authorId: '2', author: 'owner', normalizedAnswer: 'Use fixed pricing',
+      normalizedSha256: sha256('Use fixed pricing'), permission: { permission: 'write', userId: '2', checkedAt: '2026-07-30T00:00:00.000Z' },
+      commentCreatedAt: '2026-07-30T00:00:00.000Z', commentUpdatedAt: '2026-07-30T00:00:00.000Z',
+    },
+    duplicateCommentIds: [], additionalSources: [],
   });
   assert.equal(answering.stage, 'answer-authoring');
+  const nonCanonical = structuredClone(answering);
+  nonCanonical.trustedAnswer!.additionalSources = [{
+    ...structuredClone(nonCanonical.trustedAnswer!.canonicalSource), commentId: '0', authorId: '3', author: 'other',
+    permission: { permission: 'write', userId: '3', checkedAt: '2026-07-30T00:00:00.000Z' },
+  }];
+  nonCanonical.trustedAnswer!.duplicateCommentIds = ['0'];
+  assert.throws(() => validateSpecDelivery(nonCanonical), /canonical/u);
   const nextRevision = createSpecRevision({
     revision: 2, path: 'docs/spec-2.md', content: '# Complete spec\n', previousRevision: revision,
     evidence: revision.evidence, author: { attemptId: 'author-attempt-2', sessionId: 'author-session' },
   });
-  assert.equal(acceptSpecRevision(answering, nextRevision).stage, 'review');
+  const resumed = acceptSpecRevision(answering, nextRevision);
+  assert.equal(resumed.stage, 'review');
+  const foreignInitial = createInitialSpecDelivery({ issueNumber: 2, runId: 'run-2', workflowGenerationSha256: workflowHash });
+  const foreignRevision = createSpecRevision({
+    revision: 1, path: 'docs/foreign.md', content: '# Foreign\n', previousRevision: null,
+    evidence: [{ path: 'issue:2', sha256: 'f'.repeat(64), description: 'foreign' }],
+    author: { attemptId: 'foreign-attempt', sessionId: 'foreign-session' },
+  });
+  const foreignQuestion = freezeSpecQuestion(foreignInitial, foreignRevision, [{ id: 'foreign', summary: 'Foreign.', evidence: ['issue:2'] }], 'Foreign?').question!;
+  const forged = structuredClone(resumed);
+  forged.acceptedAnswers[0]!.question = foreignQuestion;
+  assert.throws(() => validateSpecDelivery(forged), /not persisted/u);
+  const outOfOrder = structuredClone(resumed);
+  const repeatedRevision = structuredClone(outOfOrder.acceptedAnswers[0]!);
+  repeatedRevision.canonicalSource.commentId = '9';
+  repeatedRevision.canonicalSource.authorId = '9';
+  repeatedRevision.canonicalSource.author = 'later';
+  repeatedRevision.canonicalSource.permission.userId = '9';
+  outOfOrder.acceptedAnswers.push(repeatedRevision);
+  assert.throws(() => validateSpecDelivery(outOfOrder), /revision order/u);
 });
 
 test('coordinator prepares, launches, adopts, and cleans one external active attempt', async () => {
@@ -122,6 +156,7 @@ class MemorySpecState implements SpecDeliveryState {
     this.current = structuredClone(next); this.events.push('adopt'); return true;
   }
   async clearAttempt() { this.events.push('clear'); }
+  async revalidateBeforeAttempt() { return { status: 'valid' as const }; }
 }
 
 function reviewReport(revision: ReturnType<typeof createSpecRevision>, sessionId: string, attemptId = 'review-attempt'): SpecReviewReportV1 {
