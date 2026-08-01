@@ -51,10 +51,13 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.equal(loaded.manifest.operations.implementation.sourceSkill, 'implement');
   assert.equal(loaded.manifest.operations.implementation.files.includes('docs/agents/confidence-rubric.md'), true);
   assert.equal(loaded.manifest.operations.triage.sourceSkill, 'plan');
+  assert.deepEqual(loaded.manifest.skills['bug-root-cause-explainer'].dependencySkills, ['diagnosing-bugs']);
   for (const path of [
     'docs/agents/bug-workflow-routing.md',
     'docs/agents/bugfix-quality-gate.md',
     'docs/agents/confidence-rubric.md',
+    'docs/agents/tool-usage.md',
+    'skills/diagnosing-bugs/SKILL.md',
   ]) assert.equal(loaded.manifest.operations.triage.files.includes(path), true, path);
   assert.equal(loaded.manifest.operations['code-review'].sourceSkill, 'code-review');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);

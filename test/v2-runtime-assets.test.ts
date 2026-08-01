@@ -109,6 +109,29 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   await verifyRuntimeAssetSnapshot(left);
 });
 
+test('triage snapshot carries transitive bug diagnostics and routing document closure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-triage-closure-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const snapshot = await publishRuntimeAssetSnapshot({
+    workflowGeneration,
+    runtimeRoot: join(root, 'runtime'),
+    snapshotRelativePath: 'runs/run-a/attempts/triage/snapshot',
+    operation: 'triage',
+    bootId: 'boot-a',
+  });
+
+  assert.equal(snapshot.skillPaths.includes('skills/diagnosing-bugs/SKILL.md'), true);
+  assert.equal(snapshot.referencedDocumentPaths.includes('docs/agents/tool-usage.md'), true);
+  assert.equal(snapshot.files.some((file) => file.path === 'skills/diagnosing-bugs/SKILL.md'), true);
+  assert.equal(snapshot.files.some((file) => file.path === 'docs/agents/tool-usage.md'), true);
+  await verifyRuntimeAssetSnapshot(snapshot);
+});
+
 test('contained Android proof receives only Runner-prepared evidence and no host mutation authority', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-android-proof-prompt-'));
   const orchestratorHome = join(root, 'orchestrator');
@@ -237,25 +260,20 @@ test('operation snapshot fails closed on tamper, path escape, and undeclared ope
   await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /hash|evidence|drift/iu);
 });
 
-test('operation snapshot rejects self-consistent closures missing mandatory workflow references', async () => {
-  for (const [operation, mandatoryReferences] of Object.entries({
-    implementation: ['docs/agents/confidence-rubric.md'],
-    triage: [
-      'docs/agents/bug-workflow-routing.md',
-      'docs/agents/bugfix-quality-gate.md',
-      'docs/agents/confidence-rubric.md',
-    ],
-  })) {
-    for (const missing of mandatoryReferences) {
-      const snapshot = await manualRuntimeSnapshot(operation, mandatoryReferences);
-      await verifyRuntimeAssetSnapshot(snapshot);
-      await chmod(join(snapshot.snapshotRoot, 'docs', 'agents'), 0o755);
-      await unlink(join(snapshot.snapshotRoot, ...missing.split('/')));
-      await chmod(join(snapshot.snapshotRoot, 'docs', 'agents'), 0o555);
-      snapshot.files = snapshot.files.filter((file) => file.path !== missing);
-      snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
-      await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /mandatory.*reference|closure/iu, `${operation}: ${missing}`);
-    }
+test('operation snapshot rejects self-consistent closures missing derived skills or documents', async () => {
+  const closure = {
+    skillPaths: ['skills/alpha/SKILL.md', 'skills/beta/SKILL.md'],
+    referencedDocumentPaths: ['docs/agents/policy.md', 'docs/agents/tool-usage.md'],
+  };
+  for (const missing of [...closure.skillPaths, ...closure.referencedDocumentPaths]) {
+    const snapshot = await manualRuntimeSnapshot('alpha', closure);
+    await verifyRuntimeAssetSnapshot(snapshot);
+    await chmod(join(snapshot.snapshotRoot, ...missing.split('/').slice(0, -1)), 0o755);
+    await unlink(join(snapshot.snapshotRoot, ...missing.split('/')));
+    await chmod(join(snapshot.snapshotRoot, ...missing.split('/').slice(0, -1)), 0o555);
+    snapshot.files = snapshot.files.filter((file) => file.path !== missing);
+    snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
+    await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /dependency skill|referenced document|closure/iu, missing);
   }
 });
 
@@ -319,7 +337,10 @@ async function spawnResult(file: string, args: string[]): Promise<{ code: number
   });
 }
 
-async function manualRuntimeSnapshot(operation: string, mandatoryReferences: string[]) {
+async function manualRuntimeSnapshot(operation: string, closure: {
+  skillPaths: string[];
+  referencedDocumentPaths: string[];
+}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), `runtime-assets-mandatory-${operation}-`)));
   const runtimeRoot = join(root, 'runtime');
   const snapshotRoot = join(runtimeRoot, 'snapshot');
@@ -327,7 +348,8 @@ async function manualRuntimeSnapshot(operation: string, mandatoryReferences: str
     `operations/${operation}/SKILL.md`,
     `schemas/${operation}.json`,
     'profiles/fixture.toml',
-    ...mandatoryReferences,
+    ...closure.skillPaths,
+    ...closure.referencedDocumentPaths,
   ].sort();
   const files = [];
   for (const path of paths) {
@@ -344,11 +366,15 @@ async function manualRuntimeSnapshot(operation: string, mandatoryReferences: str
       ownerUid: process.getuid!(),
     });
   }
-  for (const directory of [
-    join(snapshotRoot, 'operations', operation), join(snapshotRoot, 'operations'),
-    join(snapshotRoot, 'schemas'), join(snapshotRoot, 'profiles'),
-    join(snapshotRoot, 'docs', 'agents'), join(snapshotRoot, 'docs'), snapshotRoot,
-  ]) await chmod(directory, 0o555);
+  const directories = new Set([snapshotRoot]);
+  for (const path of paths) {
+    let current = snapshotRoot;
+    for (const segment of path.split('/').slice(0, -1)) {
+      current = join(current, segment);
+      directories.add(current);
+    }
+  }
+  for (const directory of [...directories].sort((left, right) => right.length - left.length)) await chmod(directory, 0o555);
   return {
     packageVersion: 'fixture',
     generationHash: 'a'.repeat(64),
@@ -356,6 +382,8 @@ async function manualRuntimeSnapshot(operation: string, mandatoryReferences: str
     runtimeRoot,
     snapshotRoot,
     operationPath: join(snapshotRoot, 'operations', operation, 'SKILL.md'),
+    skillPaths: closure.skillPaths,
+    referencedDocumentPaths: closure.referencedDocumentPaths,
     schemaPath: join(snapshotRoot, 'schemas', `${operation}.json`),
     profilePath: join(snapshotRoot, 'profiles', 'fixture.toml'),
     policy: operation === 'triage'

@@ -15,15 +15,6 @@ import {
 import { publishImmutableWorkflow, type ImmutableWorkflowPublishStep } from './immutable-workflow-publisher.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const MANDATORY_OPERATION_REFERENCES: Readonly<Record<string, readonly string[]>> = {
-  implementation: ['docs/agents/confidence-rubric.md'],
-  triage: [
-    'docs/agents/bug-workflow-routing.md',
-    'docs/agents/bugfix-quality-gate.md',
-    'docs/agents/confidence-rubric.md',
-  ],
-};
-
 export interface RuntimeAssetFileEvidence extends WorkflowFileRecord {
   sealedMode: number;
   ownerUid: number;
@@ -37,6 +28,8 @@ export interface RuntimeAssetSnapshot {
   snapshotRoot: string;
   operationPath: string;
   sourceSkillPath?: string;
+  skillPaths: string[];
+  referencedDocumentPaths: string[];
   schemaPath: string;
   profilePath: string;
   policy: WorkflowOperationPolicy;
@@ -140,9 +133,8 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   const actual = await listFiles(root);
   const expected = snapshot.files.map((file) => file.path);
   if (!same(actual, expected)) throw new Error('runtime asset file closure drift');
-  for (const path of MANDATORY_OPERATION_REFERENCES[snapshot.operation] ?? []) {
-    if (!expected.includes(path)) throw new Error(`runtime asset mandatory reference is missing: ${snapshot.operation}:${path}`);
-  }
+  validateDerivedClosure(snapshot.skillPaths, expected, /^skills\/[a-z][a-z0-9-]*\/SKILL\.md$/u, 'dependency skill');
+  validateDerivedClosure(snapshot.referencedDocumentPaths, expected, /^docs\/agents\/[A-Za-z0-9._/-]+\.md$/u, 'referenced document');
   const current = await evidence(root, snapshot.files);
   if (canonicalJson(current) !== canonicalJson(snapshot.files)) throw new Error('runtime asset evidence drift');
   if (contentDigest(current) !== snapshot.contentSha256) throw new Error('runtime asset content digest drift');
@@ -178,6 +170,8 @@ async function snapshotFromReady(
     snapshotRoot,
     operationPath: remap(operation.entryPath),
     sourceSkillPath: operation.sourceSkillPath ? remap(operation.sourceSkillPath) : undefined,
+    skillPaths: [...operation.skillPaths],
+    referencedDocumentPaths: [...operation.referencedDocumentPaths],
     schemaPath: remap(operation.schemaPath),
     profilePath: remap(operation.profilePath),
     policy: structuredClone(operation.policy),
@@ -188,6 +182,16 @@ async function snapshotFromReady(
   };
   await verifyRuntimeAssetSnapshot(snapshot);
   return snapshot;
+}
+
+function validateDerivedClosure(paths: string[], files: string[], pattern: RegExp, field: string): void {
+  if (!Array.isArray(paths) || paths.some((path, index) => typeof path !== 'string' || !pattern.test(path)
+    || (index > 0 && Buffer.compare(Buffer.from(paths[index - 1]!), Buffer.from(path)) >= 0))) {
+    throw new Error(`runtime asset ${field} closure is invalid`);
+  }
+  for (const path of paths) {
+    if (!files.includes(path)) throw new Error(`runtime asset ${field} is missing: ${path}`);
+  }
 }
 
 async function evidence(root: string, records: Array<Pick<WorkflowFileRecord, 'path' | 'sha256' | 'size'>>): Promise<RuntimeAssetFileEvidence[]> {

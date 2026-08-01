@@ -15,6 +15,9 @@
     "to-tickets"
   ],
   "repositorySkills": ["acceptance-proof"],
+  "skillDependencies": {
+    "bug-root-cause-explainer": ["diagnosing-bugs"]
+  },
   "sharedDocs": [
     "bug-workflow-routing.md",
     "bugfix-quality-gate.md",

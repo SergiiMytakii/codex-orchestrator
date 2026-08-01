@@ -74,7 +74,7 @@ export interface WorkflowManifest {
   sourceFingerprint: string;
   generationHash: string;
   files: WorkflowFileRecord[];
-  skills: Record<string, { entry: string; metadata: string; files: string[] }>;
+  skills: Record<string, { entry: string; metadata: string; dependencySkills: string[]; files: string[] }>;
   profiles: Record<string, string>;
   operations: Record<string, WorkflowOperation>;
   evals: Record<string, { owner: string | null; path: string }>;
@@ -145,6 +145,8 @@ export interface ResolvedWorkflowOperation {
   schemaPath: string;
   profilePath: string;
   sourceSkillPath?: string;
+  skillPaths: string[];
+  referencedDocumentPaths: string[];
   policy: WorkflowOperationPolicy;
   files: WorkflowFileRecord[];
 }
@@ -165,6 +167,10 @@ export async function resolveWorkflowOperation(
   if (operation.sourceSkill && (!sourceSkillPath || !operation.files.includes(sourceSkillPath))) {
     throw new Error(`workflow operation source skill is unavailable: ${operationId}`);
   }
+  const skillIds = collectSkillDependencies(manifest.skills, [
+    ...(operation.sourceSkill ? [operation.sourceSkill] : []),
+    ...operation.dependencySkills,
+  ]);
   return {
     id: operation.id,
     workflowRoot: receipt.generationRoot,
@@ -172,6 +178,8 @@ export async function resolveWorkflowOperation(
     schemaPath: join(receipt.generationRoot, ...operation.outputSchema.split('/')),
     profilePath: join(receipt.generationRoot, ...profile.split('/')),
     sourceSkillPath: sourceSkillPath ? join(receipt.generationRoot, ...sourceSkillPath.split('/')) : undefined,
+    skillPaths: skillIds.map((id) => manifest.skills[id]!.entry).sort(compareUtf8),
+    referencedDocumentPaths: operation.files.filter((path) => path.startsWith('docs/agents/') && path.endsWith('.md')),
     policy: structuredClone(operation.policy),
     files: operation.files.map((path) => structuredClone(manifest.files.find((file) => file.path === path)!)),
   };
@@ -226,6 +234,7 @@ export async function loadPackageWorkflow(packageRootInput: string): Promise<Loa
     bytesByPath.set(file.path, bytes);
   }
   verifyEvalBytes(manifest, bytesByPath);
+  verifyWorkflowClosures(manifest, bytesByPath);
   verifyOperationEntryBindings(manifest, bytesByPath);
   return { manifest, manifestBytes, bytesByPath };
 }
@@ -307,6 +316,7 @@ export async function verifyWorkflowGeneration(receipt: WorkflowGenerationReceip
     bytesByPath.set(file.path, bytes);
   }
   verifyEvalBytes(manifest, bytesByPath);
+  verifyWorkflowClosures(manifest, bytesByPath);
   verifyOperationEntryBindings(manifest, bytesByPath);
   for (const directory of await listDirectories(root)) {
     const info = await lstat(directory);
@@ -421,16 +431,24 @@ function parseManifest(value: unknown): WorkflowManifest {
   }
   if (Object.keys(skills).length === 0) throw new Error('workflow skills inventory is invalid');
   for (const [id, skill] of Object.entries(skills)) {
-    assertExact(skill, ['entry', 'metadata', 'files']);
-    if (typeof skill.entry !== 'string' || typeof skill.metadata !== 'string' || !Array.isArray(skill.files)) {
+    assertExact(skill, ['entry', 'metadata', 'dependencySkills', 'files']);
+    if (typeof skill.entry !== 'string' || typeof skill.metadata !== 'string'
+      || !Array.isArray(skill.dependencySkills) || !Array.isArray(skill.files)) {
       throw new Error(`workflow skill is invalid: ${id}`);
     }
+    validateSortedStrings(skill.dependencySkills, `workflow skill dependency skills: ${id}`);
     validatePathList(skill.files, physical, `workflow skill closure: ${id}`);
     if (!skill.files.includes(skill.entry) || !skill.files.includes(skill.metadata)
       || skill.entry !== `skills/${id}/SKILL.md` || skill.metadata !== `skills/${id}/agents/openai.yaml`) {
       throw new Error(`workflow skill authority is invalid: ${id}`);
     }
   }
+  for (const [id, skill] of Object.entries(skills)) {
+    if (skill.dependencySkills.some((dependency: string) => dependency === id || !(dependency in skills))) {
+      throw new Error(`workflow skill dependency binding is invalid: ${id}`);
+    }
+  }
+  for (const id of Object.keys(skills)) collectSkillDependencies(skills, [id]);
   if (Object.keys(profiles).length === 0) throw new Error('workflow profiles inventory is invalid');
   for (const [id, path] of Object.entries(profiles)) {
     if (typeof path !== 'string' || normalizePath(path) !== path || path !== `profiles/${id}.toml` || !physical.has(path)) {
@@ -465,17 +483,23 @@ function parseManifest(value: unknown): WorkflowManifest {
     }
     if (resources.some((path) => typeof path !== 'string' || !physical.has(path))) throw new Error(`workflow operation resource is invalid: ${id}`);
     if (!(operation.profile in profiles)) throw new Error(`workflow operation profile is invalid: ${id}`);
-    validatePathList(operation.files, physical, `workflow operation closure: ${id}`);
+    const operationFiles = operation.files;
+    validatePathList(operationFiles, physical, `workflow operation closure: ${id}`);
+    const skillIds = collectSkillDependencies(skills, [
+      ...(operation.sourceSkill === null ? [] : [operation.sourceSkill]),
+      ...dependencySkills,
+    ]);
     const required = [
       operation.entry,
       operation.outputSchema,
       profiles[operation.profile],
       ...resources,
-      ...(sourceSkill?.files ?? []),
-      ...dependencySkills.flatMap((skill) => skills[skill]!.files),
+      ...skillIds.flatMap((skill) => skills[skill]!.files),
     ].sort(compareUtf8);
-    if (!same(operation.files, [...new Set(required)].sort(compareUtf8))) throw new Error(`workflow operation closure is invalid: ${id}`);
-    if (operation.files.some((path) => path.includes('/evals/'))) {
+    if (![...new Set(required)].every((path) => operationFiles.includes(path))) {
+      throw new Error(`workflow operation closure is invalid: ${id}`);
+    }
+    if (operationFiles.some((path) => path.includes('/evals/'))) {
       throw new Error(`workflow operation eval isolation is invalid: ${id}`);
     }
     validateOperationPolicy(id, operation.policy);
@@ -491,6 +515,126 @@ function parseManifest(value: unknown): WorkflowManifest {
   }
   if (evalPaths.size === 0) throw new Error('workflow eval inventory is empty');
   return value as unknown as WorkflowManifest;
+}
+
+function verifyWorkflowClosures(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
+  const expectedSkills = new Map<string, string[]>();
+  const visiting = new Set<string>();
+  const deriveSkill = (id: string): string[] => {
+    const cached = expectedSkills.get(id);
+    if (cached) return cached;
+    if (visiting.has(id)) throw new Error(`workflow skill dependency cycle is invalid: ${id}`);
+    const skill = manifest.skills[id];
+    if (!skill) throw new Error(`workflow skill dependency is unavailable: ${id}`);
+    visiting.add(id);
+    const prefix = `skills/${id}/`;
+    const owned = [...bytesByPath.keys()].filter((path) => path.startsWith(prefix) && !path.startsWith(`${prefix}evals/`));
+    verifySkillDependencyBindings(id, skill.dependencySkills, owned, bytesByPath);
+    const roots = [...owned, ...skill.dependencySkills.flatMap(deriveSkill)];
+    const files = [...new Set([...roots, ...referencedWorkflowDocuments(roots, bytesByPath)])].sort(compareUtf8);
+    visiting.delete(id);
+    expectedSkills.set(id, files);
+    if (!same(skill.files, files)) throw new Error(`workflow skill reference closure is invalid: ${id}`);
+    return files;
+  };
+  for (const id of Object.keys(manifest.skills).sort(compareUtf8)) deriveSkill(id);
+
+  for (const [id, operation] of Object.entries(manifest.operations)) {
+    const skillIds = collectSkillDependencies(manifest.skills, [
+      ...(operation.sourceSkill === null ? [] : [operation.sourceSkill]),
+      ...operation.dependencySkills,
+    ]);
+    const roots = [
+      operation.entry,
+      operation.outputSchema,
+      manifest.profiles[operation.profile]!,
+      ...operation.resources,
+      ...skillIds.flatMap((skill) => expectedSkills.get(skill)!),
+    ];
+    const expected = [...new Set([...roots, ...referencedWorkflowDocuments(roots, bytesByPath)])].sort(compareUtf8);
+    if (!same(operation.files, expected)) throw new Error(`workflow operation reference closure is invalid: ${id}`);
+  }
+}
+
+function verifySkillDependencyBindings(
+  id: string,
+  dependencies: string[],
+  owned: string[],
+  bytesByPath: Map<string, Buffer>,
+): void {
+  const referenced = new Set<string>();
+  for (const path of owned) {
+    const bytes = bytesByPath.get(path);
+    if (!bytes || !isTextWorkflowPath(path)) continue;
+    const text = bytes.toString('utf8');
+    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) referenced.add(match[1] ?? match[2]!);
+    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
+      const target = match[1]!;
+      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
+      const resolved = normalizePath(relative('/', resolve('/', dirname(path), target)).split(sep).join('/'));
+      const dependency = resolved.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
+      if (dependency) referenced.add(dependency);
+    }
+  }
+  for (const dependency of dependencies) {
+    if (!referenced.has(dependency)) throw new Error(`workflow skill ${id} does not reference declared dependency ${dependency}`);
+  }
+}
+
+function referencedWorkflowDocuments(seedPaths: string[], bytesByPath: Map<string, Buffer>): string[] {
+  const documents = new Set<string>();
+  const visited = new Set<string>();
+  const queue = [...seedPaths];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const bytes = bytesByPath.get(current);
+    if (!bytes || !isTextWorkflowPath(current)) continue;
+    const text = bytes.toString('utf8');
+    const references = new Set<string>();
+    for (const match of text.matchAll(/(?:docs\/agents\/|\.\.\/(?:\.\.\/)*docs\/agents\/)([A-Za-z0-9._/-]+\.md)/gu)) {
+      references.add(`docs/agents/${normalizePath(match[1]!)}`);
+    }
+    for (const match of text.matchAll(/\]\(([^)#]+\.md)(?:#[^)]+)?\)/gu)) {
+      const target = match[1]!;
+      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
+      const resolved = normalizePath(relative('/', resolve('/', dirname(current), target)).split(sep).join('/'));
+      if (resolved.startsWith('docs/agents/')) references.add(resolved);
+    }
+    for (const referenced of references) {
+      if (!bytesByPath.has(referenced)) throw new Error(`referenced workflow document is missing: ${referenced}`);
+      if (!documents.has(referenced)) {
+        documents.add(referenced);
+        queue.push(referenced);
+      }
+    }
+  }
+  return [...documents].sort(compareUtf8);
+}
+
+function collectSkillDependencies(
+  skills: WorkflowManifest['skills'],
+  roots: string[],
+): string[] {
+  const result = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (id: string): void => {
+    if (result.has(id)) return;
+    if (visiting.has(id)) throw new Error(`workflow skill dependency cycle is invalid: ${id}`);
+    const skill = skills[id];
+    if (!skill) throw new Error(`workflow skill dependency is unavailable: ${id}`);
+    visiting.add(id);
+    for (const dependency of skill.dependencySkills) visit(dependency);
+    visiting.delete(id);
+    result.add(id);
+  };
+  for (const id of roots) visit(id);
+  return [...result].sort(compareUtf8);
+}
+
+function isTextWorkflowPath(path: string): boolean {
+  return /\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(path);
 }
 
 function verifyEvalBytes(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
