@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "skill": "bug-root-cause-explainer",
+  "cases": [
+    {
+      "id": "minimal-path-default",
+      "prompt": "Explain a confirmed local bug whose owner and smallest safe fix are clear.",
+      "expected": ["offer one minimal fix path"],
+      "forbidden": ["invent a structural alternative"]
+    },
+    {
+      "id": "structural-path-needs-ownership-defect",
+      "prompt": "Explain a confirmed bug caused by duplicated ownership across two modules.",
+      "expected": ["offer the minimal path", "add a structural path tied to the proven ownership defect"],
+      "forbidden": ["propose broad architecture cleanup"]
+    }
+  ]
+}

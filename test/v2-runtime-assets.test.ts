@@ -98,7 +98,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   assert.match(left.schemaPath, /schemas\/proof-report-v1\.json$/u);
   assert.equal(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')), false);
   const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
-  assert.equal(profile.name, 'proof_agent');
+  assert.equal(profile.name, 'implementer');
   assert.equal(profile.model, 'gpt-5.6-sol');
   assert.equal(profile.reasoningEffort, 'high');
   await verifyRuntimeAssetSnapshot(left);

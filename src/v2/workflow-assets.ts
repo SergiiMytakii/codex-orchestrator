@@ -23,15 +23,18 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const EXPECTED_OPERATION_BINDINGS: Record<string, {
   sourceSkill: string | null; dependencySkills: string[]; outputSchema: string; profile: string;
 }> = {
-  'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'proof_agent' },
-  'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json', profile: 'reviewer_standard' },
+  'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'implementer' },
+  'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json', profile: 'standards_reviewer' },
   implementation: {
-    sourceSkill: 'agent-auto', dependencySkills: ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'],
-    outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer_standard',
+    sourceSkill: 'implement', dependencySkills: ['diagnosing-bugs', 'tdd'],
+    outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer',
   },
-  'spec-author': { sourceSkill: 'implementation-spec-maker', dependencySkills: [], outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer_standard' },
-  'spec-review': { sourceSkill: 'implementation-spec-review', dependencySkills: [], outputSchema: 'schemas/spec-review-v1.json', profile: 'reviewer_deep' },
-  triage: { sourceSkill: 'triage', dependencySkills: [], outputSchema: 'schemas/triage-route-v1.json', profile: 'analyst_deep' },
+  'spec-author': { sourceSkill: 'to-spec', dependencySkills: [], outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer' },
+  'spec-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/spec-review-v1.json', profile: 'spec_reviewer' },
+  triage: {
+    sourceSkill: 'plan', dependencySkills: ['bug-root-cause-explainer'],
+    outputSchema: 'schemas/triage-route-v1.json', profile: 'explorer',
+  },
 };
 
 export interface WorkflowFileRecord {
@@ -501,9 +504,14 @@ function verifyEvalBytes(manifest: WorkflowManifest, bytesByPath: Map<string, Bu
     if (!isRecord(value) || value.schema_version !== 1 || !Array.isArray(value.cases) || value.cases.length === 0
       || (entry.owner !== null && value.skill !== entry.owner)) throw new Error(`workflow eval contract is invalid: ${id}`);
     for (const item of value.cases) {
-      if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0 || caseIds.has(item.id)
+      const keys = isRecord(item) ? Object.keys(item) : [];
+      if (!isRecord(item) || keys.some((key) => !['id', 'prompt', 'expected', 'forbidden'].includes(key))
+        || !['id', 'prompt', 'expected'].every((key) => key in item)
+        || typeof item.id !== 'string' || item.id.length === 0 || caseIds.has(item.id)
         || typeof item.prompt !== 'string' || item.prompt.length === 0
-        || !evalTextList(item.expected) || !evalTextList(item.forbidden)) throw new Error(`workflow eval case is invalid: ${id}`);
+        || !evalTextList(item.expected) || ('forbidden' in item && !evalTextList(item.forbidden))) {
+        throw new Error(`workflow eval case is invalid: ${id}`);
+      }
       caseIds.add(item.id);
     }
   }

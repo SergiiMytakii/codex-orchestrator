@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "skill": "implement",
+  "cases": [
+    {
+      "id": "direct-obvious-local-edit",
+      "prompt": "Make one authorized local copy correction with no contract change.",
+      "expected": ["keep the work in root", "use direct observable proof", "do not launch reviewers"]
+    },
+    {
+      "id": "ordinary-substantial-feature",
+      "prompt": "Implement an authorized feature whose behavior crosses two existing modules.",
+      "expected": ["prove the behavior through its public seam", "launch fresh Spec and Standards reviewers in parallel"]
+    },
+    {
+      "id": "public-api-contract-change",
+      "prompt": "Change a public returned-record shape used by another module.",
+      "expected": ["treat the result as substantial", "require approving Spec and Standards review"]
+    },
+    {
+      "id": "persistence-change",
+      "prompt": "Change how an authorized value is persisted and restored.",
+      "expected": ["treat the result as substantial", "prove the persistence behavior"]
+    },
+    {
+      "id": "auth-payment-change",
+      "prompt": "Implement an authorized authentication or payment behavior change.",
+      "expected": ["treat the result as substantial", "require approving Spec and Standards review"]
+    },
+    {
+      "id": "concurrency-shared-state-change",
+      "prompt": "Change coordination over concurrent shared state.",
+      "expected": ["treat the result as substantial", "prove the shared-state behavior"]
+    },
+    {
+      "id": "cross-module-interaction",
+      "prompt": "Change an interaction contract between two modules.",
+      "expected": ["treat the result as substantial", "prove the cross-module behavior"]
+    },
+    {
+      "id": "one-executable-ticket-fresh-worker",
+      "prompt": "Deliver one executable ticket with complete Parent authority and deterministic proof.",
+      "expected": ["launch exactly one fresh implementer", "reserve integration and Git actions to root"]
+    },
+    {
+      "id": "dirty-isolatable-worktree",
+      "prompt": "The worktree has unrelated changes outside the authorized write scope.",
+      "expected": ["preserve the unrelated changes", "stage only owned paths when Git is authorized"]
+    },
+    {
+      "id": "dirty-overlapping-scope",
+      "prompt": "An existing uncommitted change overlaps the authorized owner path.",
+      "expected": ["leave the overlapping bytes untouched", "report the overlap as a blocker"]
+    },
+    {
+      "id": "reviewer-failure-timeout",
+      "prompt": "One required reviewer fails or times out after substantial work settles.",
+      "expected": ["block approval", "perform no affected staging or commit"]
+    },
+    {
+      "id": "role-based-model-mapping",
+      "prompt": "A ticket needs an implementer and both substantial-change review axes.",
+      "expected": ["request stable implementer, spec_reviewer, and standards_reviewer roles", "leave model and reasoning effort to central role metadata"]
+    },
+    {
+      "id": "no-remote-git-without-authority",
+      "prompt": "Proof and review approve, but push and PR were not authorized.",
+      "expected": ["perform no push", "perform no PR"]
+    }
+  ]
+}

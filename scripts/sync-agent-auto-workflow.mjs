@@ -8,12 +8,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
 const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v2\0';
 const PRODUCTION_OPERATION_BINDINGS = {
-  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'proof_agent'],
-  'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'reviewer_standard'],
-  implementation: ['agent-auto', ['code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer_standard'],
-  'spec-author': ['implementation-spec-maker', [], 'schemas/spec-author-v1.json', 'implementer_standard'],
-  'spec-review': ['implementation-spec-review', [], 'schemas/spec-review-v1.json', 'reviewer_deep'],
-  triage: ['triage', [], 'schemas/triage-route-v1.json', 'analyst_deep'],
+  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'implementer'],
+  'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'standards_reviewer'],
+  implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer'],
+  'spec-author': ['to-spec', [], 'schemas/spec-author-v1.json', 'implementer'],
+  'spec-review': ['code-review', [], 'schemas/spec-review-v1.json', 'spec_reviewer'],
+  triage: ['plan', ['bug-root-cause-explainer'], 'schemas/triage-route-v1.json', 'explorer'],
 };
 
 const options = parseArgs(process.argv.slice(2));
@@ -238,110 +238,17 @@ function validateEvalEntry(entries, path, owner, allIds) {
   if (!isRecord(value) || value.schema_version !== 1 || !Array.isArray(value.cases) || value.cases.length === 0
     || (owner !== null && value.skill !== owner)) throw new Error(`Workflow eval contract is invalid: ${path}`);
   for (const item of value.cases) {
-    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0 || allIds.has(item.id)
+    const keys = isRecord(item) ? Object.keys(item) : [];
+    if (!isRecord(item) || keys.some((key) => !['id', 'prompt', 'expected', 'forbidden'].includes(key))
+      || !['id', 'prompt', 'expected'].every((key) => key in item)
+      || typeof item.id !== 'string' || item.id.length === 0 || allIds.has(item.id)
       || typeof item.prompt !== 'string' || item.prompt.length === 0
-      || !textList(item.expected) || !textList(item.forbidden)) throw new Error(`Workflow eval case is invalid: ${path}`);
-    if ('execution' in item) validateEvalExecution(item.execution, path);
+      || !textList(item.expected) || ('forbidden' in item && !textList(item.forbidden))) {
+      throw new Error(`Workflow eval case is invalid: ${path}`);
+    }
     allIds.add(item.id);
   }
   return { owner, path };
-}
-
-function validateEvalExecution(value, path) {
-  const keys = ['level', 'fixture', 'sandbox', 'trials', 'should_trigger', 'should_not_trigger', 'assertions'];
-  if (!isRecord(value)) throw new Error(`Workflow eval execution is invalid: ${path}`);
-  const actual = Object.keys(value);
-  const allowed = new Set([...keys, 'ablation_skill']);
-  if (keys.some((key) => !(key in value)) || actual.some((key) => !allowed.has(key))) {
-    throw new Error(`Workflow eval execution has unknown or missing keys: ${path}`);
-  }
-  if (!['trigger', 'behavior', 'end_to_end'].includes(value.level)
-    || !['read-only', 'workspace-write'].includes(value.sandbox)
-    || !Number.isInteger(value.trials) || value.trials < 1 || value.trials > 6
-    || !uniqueEvalSkillList(value.should_trigger) || !uniqueEvalSkillList(value.should_not_trigger)) {
-    throw new Error(`Workflow eval execution is invalid: ${path}`);
-  }
-  const should = new Set(value.should_trigger);
-  const forbidden = new Set(value.should_not_trigger);
-  if ([...should].some((skill) => forbidden.has(skill))
-    || ('ablation_skill' in value && !should.has(value.ablation_skill))) {
-    throw new Error(`Workflow eval execution trigger contract is invalid: ${path}`);
-  }
-  validateEvalRelativePath(value.fixture, `Workflow eval fixture is invalid: ${path}`);
-  if (!Array.isArray(value.assertions) || value.assertions.length === 0) {
-    throw new Error(`Workflow eval assertions are invalid: ${path}`);
-  }
-  for (const assertion of value.assertions) validateEvalAssertion(assertion, path);
-}
-
-function uniqueEvalSkillList(value) {
-  return Array.isArray(value)
-    && value.every((item) => typeof item === 'string' && item.trim().length > 0)
-    && new Set(value).size === value.length;
-}
-
-function validateEvalAssertion(value, path) {
-  if (!isRecord(value) || typeof value.kind !== 'string') {
-    throw new Error(`Workflow eval assertion is invalid: ${path}`);
-  }
-  let keys;
-  if (value.kind === 'route_equals') {
-    keys = ['kind', 'value'];
-    if (typeof value.value !== 'string' || value.value.length === 0) throw new Error(`Workflow eval assertion is invalid: ${path}`);
-  } else if (value.kind === 'intended_action_matches') {
-    keys = ['kind', 'pattern'];
-    if (typeof value.pattern !== 'string' || value.pattern.length === 0) throw new Error(`Workflow eval assertion is invalid: ${path}`);
-  } else if (['path_exists', 'path_absent'].includes(value.kind)) {
-    keys = ['kind', 'path'];
-    validateEvalRelativePath(value.path, `Workflow eval assertion path is invalid: ${path}`);
-  } else if (['file_contains', 'file_not_contains'].includes(value.kind)) {
-    keys = ['kind', 'path', 'text'];
-    validateEvalRelativePath(value.path, `Workflow eval assertion path is invalid: ${path}`);
-    if (typeof value.text !== 'string') throw new Error(`Workflow eval assertion is invalid: ${path}`);
-  } else if (value.kind === 'tree_unchanged') {
-    keys = ['kind'];
-  } else if (value.kind === 'command_exit') {
-    keys = ['kind', 'argv', 'exit_code', 'boundary'];
-    if (!textList(value.argv) || !Number.isInteger(value.exit_code) || typeof value.boundary !== 'boolean') {
-      throw new Error(`Workflow eval assertion is invalid: ${path}`);
-    }
-  } else if (['event_present', 'event_absent'].includes(value.kind)) {
-    keys = ['kind', 'event', 'value'];
-    validateEvalEvent({ event: value.event, value: value.value }, path);
-  } else if (value.kind === 'event_values_equal') {
-    keys = ['kind', 'event', 'values'];
-    if (!['skill_read', 'file_write', 'git_commit', 'git_push', 'subagent_launch', 'subagent_runtime', 'subagent_effort'].includes(value.event)
-      || !Array.isArray(value.values) || !value.values.every((item) => typeof item === 'string')) {
-      throw new Error(`Workflow eval assertion is invalid: ${path}`);
-    }
-  } else if (value.kind === 'event_order') {
-    keys = ['kind', 'before', 'after'];
-    validateEvalEvent(value.before, path);
-    validateEvalEvent(value.after, path);
-  } else {
-    throw new Error(`Workflow eval assertion kind is invalid: ${path}`);
-  }
-  const actual = Object.keys(value).sort(compareUtf8);
-  const expected = keys.sort(compareUtf8);
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error(`Workflow eval assertion has unknown or missing keys: ${path}`);
-  }
-}
-
-function validateEvalEvent(value, path) {
-  if (!isRecord(value) || !['skill_read', 'file_write', 'git_commit', 'git_push', 'subagent_launch', 'subagent_runtime', 'subagent_effort'].includes(value.event)
-    || typeof value.value !== 'string') throw new Error(`Workflow eval event is invalid: ${path}`);
-  const keys = Object.keys(value).sort(compareUtf8);
-  if (keys.length !== 2 || keys[0] !== 'event' || keys[1] !== 'value') {
-    throw new Error(`Workflow eval event has unknown or missing keys: ${path}`);
-  }
-}
-
-function validateEvalRelativePath(value, message) {
-  if (typeof value !== 'string' || !value || value.includes('\\') || value.normalize('NFC') !== value
-    || value.startsWith('/') || value.split('/').some((part) => !part || part === '.' || part === '..')) {
-    throw new Error(message);
-  }
 }
 
 function textList(value) {
@@ -451,10 +358,18 @@ function referencedAgentDocs(text) {
 function adaptText(text, codexHome, adaptations) {
   let output = text;
   for (const adaptation of adaptations) {
-    const from = adaptation.from === '<resolved-codex-home>' ? codexHome : adaptation.from;
+    const from = adaptation.from === '<resolved-codex-home>'
+      ? codexHome
+      : adaptation.from === '<default-codex-home>' ? defaultCodexHome(codexHome) : adaptation.from;
     output = output.split(from).join(adaptation.to);
   }
   return output;
+}
+
+function defaultCodexHome(codexHome) {
+  const marker = `${sep}worktrees${sep}`;
+  const index = codexHome.indexOf(marker);
+  return index === -1 ? codexHome : codexHome.slice(0, index);
 }
 
 async function recheckSources(records) {
@@ -520,7 +435,7 @@ async function recheckExpectedSources(expected) {
 function validateReferences(entries) {
   for (const [path, entry] of entries) {
     if (!/\.(?:md|yaml|yml)$/iu.test(path)) continue;
-    const text = entry.bytes.toString('utf8');
+    const text = entry.bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
     for (const match of text.matchAll(/\]\(([^)#]+\.(?:md|mjs|yaml|yml))(?:#[^)]+)?\)/gu)) {
       const target = match[1];
       if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
@@ -747,6 +662,7 @@ function validateConfig(value) {
   }
   const expected = [
     ['resolved-codex-home', '<resolved-codex-home>', '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT'],
+    ['default-codex-home', '<default-codex-home>', '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT'],
     ['default-codex-skills', '${CODEX_HOME:-$HOME/.codex}/skills', '../../skills'],
     ['codex-home-skills', '$CODEX_HOME/skills', '../../skills'],
     ['default-codex-docs', '${CODEX_HOME:-$HOME/.codex}/docs/agents/', '../../docs/agents/'],

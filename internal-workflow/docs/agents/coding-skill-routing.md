@@ -1,139 +1,106 @@
 # Coding Skill Routing
 
-This file is the normative global route and ownership policy. Keep repository
-commands, domain facts, credentials, deployment assumptions, and product
-behavior in repository `AGENTS.md`, `CONTEXT.md`, ADRs, or local skills.
+This file is the normative global coding route. Repository commands, product
+facts, runtime constraints, and domain language remain in repository policy.
 
-## Ownership
+## Shared Kernel
 
-- Personal skills live only in `../../skills`.
-- `agents/openai.yaml` owns invocation metadata; `agents/*.toml` owns named-role
-  model and effort.
-- A shared rule has one owner. Callers link to it instead of copying its prose.
-- Skill-specific detail belongs in that skill's `references/` and loads only
-  when its branch is active.
-- Root owns the user dialogue, decisions, critical path, integration, and final
-  handoff. A reviewer child owns independent review.
+- **Authority** — perform only the requested outcome and actions authorized by
+  the user, Parent PRD, executable ticket, and repository policy. Planning or
+  publication never authorizes implementation, commit, push, or PR.
+- **Preservation** — preserve unrelated and concurrent work plus user-owned
+  runtimes. Dirty overlapping or unisolatable scope blocks the affected write
+  and commit.
+- **Proof** — claim only the observable outcome proved through the real caller
+  seam. Missing required proof or independent-review approval blocks completion
+  and the affected commit.
 
-## Default Implementation Route
+These principles are checks, not workflow state or durable artifacts.
 
-`medium` is the default for behavior-changing implementation. Use:
+## Main Route
 
-- `simple` only for a tiny local change with one obvious proof;
-- `medium` for a clear coherent outcome with settled authority, one ownership
-  path, and credible affected validation—even across several files, modules,
-  API, persistence, or shared state;
-- `high` only when a sensitive mechanism has both a material failure
-  consequence and an uncertainty amplifier such as unclear ownership,
-  cross-trust effects, non-local recovery, an unproven external contract, or
-  proof that cannot isolate the dangerous state.
+The user-facing coding flow is Plan, Implement, Review.
 
-Prefer direct root implementation for `simple` and ordinary `medium` work. Use
-`$implementation-spec-maker` only for an explicitly requested standalone spec
-or a real execution decision/coordination gap in a non-generated source. Issues
-published by `$to-tickets` bypass it and execute directly or through
-`$tickets-orchestrator`. Use `$tickets-orchestrator` only for an approved ticket graph, real delivery
-dependencies or disjoint parallel slices, or an explicit orchestration request.
-Do not manufacture PRDs, tickets, specs, agents, or review checkpoints from
-file count or generic risk labels.
+- [`$plan`](../../skills/plan/SKILL.md) owns product decisions and multi-ticket
+  planning composition. It is the sole planning-composition entrypoint.
+- [`$implement`](../../skills/implement/SKILL.md) is the single execution owner
+  for clear features, fixes, obvious local edits, and executable tickets.
+- [`$code-review`](../../skills/code-review/SKILL.md) is the direct Review
+  entrypoint.
 
-Before classifying a spec-preparation request as `spec-gap`,
-`authority-blocked`, or `preserve-existing`, read `$implementation-spec-maker`.
-Risk/profile classification alone does not activate it.
+Direct non-ticket work stays in the current root context. Do not create a spec,
+ticket, or worker merely because a change spans files or touches an important
+contract. A real product or ownership decision gap returns to Plan. An approved
+multi-ticket dependency graph routes to `$tickets-orchestrator`; a single
+executable ticket never does.
 
-When the requested decision is whether repository evidence already answers a
-bounded implementation question, classify it as `evidence-first` only after
-local instructions, code, and tests confirm the target, current and expected
-behavior, and a credible validation command. Then continue through the normal
-simple or medium implementation route without asking for those same details.
-Missing or contradictory evidence is not `evidence-first`.
+Diagnosis-only work uses `$bug-root-cause-explainer`. Hard, flaky, unclear, or
+performance bugs use `$diagnosing-bugs` to establish a reliable signal, then
+return to Implement when a fix is authorized. External multi-source uncertainty
+uses `$research`. A requested throwaway logic or UI experiment uses `$prototype`
+to answer one bounded design question, then returns production delivery to
+Implement. Grilling, TDD, to-spec, to-tickets, diagnosis, research, prototype,
+and the graph-only Tickets Orchestrator are internal or side primitives.
+Specialized runtime and platform skills remain side tools and do not compete
+with the main flow.
 
-## Core Routes
+## Implement Context
 
-| Situation | Route |
+- A direct request is implemented by root in the current context.
+- One executable ticket launches exactly one fresh `implementer` child. Root
+  supplies the complete ticket, Parent PRD, applicable repository policy, and
+  bounded write scope; verifies the child identity and completed wait; and
+  remains the only Git owner.
+- Multiple executable tickets are graph work and remain owned by
+  `$tickets-orchestrator`.
+
+Children do not talk to the user, spawn grandchildren, or perform Git actions.
+Root integrates only isolated worker output and never overwrites unrelated work.
+
+## TDD, Proof, And Review
+
+Use [`$tdd`](../../skills/tdd/SKILL.md) where possible: an observable behavior
+change has a natural public seam and a meaningful failing signal can precede
+the implementation. Otherwise use direct proof. Do not manufacture tests for
+docs, copy, formatting, mechanical config, deletion, or an outcome that cannot
+fail meaningfully before the edit.
+
+A change is substantial when its behavior or contract goes beyond an obvious
+local edit. This includes a public API, persistence, auth or payment,
+concurrency or shared state, and cross-module interaction. Substantial settled
+work launches two distinct fresh children in parallel:
+
+- `spec_reviewer` checks the result against the request, issue, or Parent PRD.
+- `standards_reviewer` checks correctness, repository rules, cleanup, and legacy
+  or duplicate ownership.
+
+Both waits must complete and both reviewers must approve the same settled diff.
+Docs, copy, formatting, mechanical config, and an obvious local correction may
+finish with direct proof and no reviewer. Reviewer failure or timeout blocks
+approval; root does not replace independent review with self-review.
+
+Proof and applicable review must approve before staging or commit. Direct and
+single-ticket Implement creates one scoped local commit only when Git authority
+is present and the worktree is isolatable. Explicit Git restrictions override
+that default. Push and PR always require separate authority.
+
+## Stable Roles
+
+Skills request only these stable roles; concrete model and reasoning effort are
+central configuration details:
+
+| Need | Role |
 | --- | --- |
-| Local evidence fully answers a requested implementation-readiness classification | `evidence-first`, then the applicable implementation route |
-| Tiny, clear, low-risk edit | `$small-task-implementer` after its Fit Gate |
-| Clear feature or fix | Apply the TDD Fit Gate; when it fits, use Root + one `$tdd` activation, otherwise affected validation |
-| Missing execution detail in a standalone plan/raw issue | `$implementation-spec-maker` -> artifact review -> `$spec-implementer` |
-| Approved implementation spec | `$spec-implementer` |
-| Approved executable generated ticket | Direct root execution, or `$tickets-orchestrator` for a graph |
-| Approved dependency graph or explicit orchestration | `$tickets-orchestrator` with parent Contract Ledger and cumulative acceptance |
-| Product discovery or ticket decomposition | `$to-spec`, `$spec-to-tickets`, or `$wayfinder`; `$to-tickets` output is the final planning contract; stop before delivery |
-| Explain-only bug | `$bug-root-cause-explainer`; no edits |
-| Confirmed bounded bug fix | Apply the TDD Fit Gate, then `$tdd` + `$code-debugger` when it fits; otherwise `$code-debugger` + affected validation |
-| Hard, flaky, unclear, or performance bug | `$diagnosing-bugs` before the explain/fix route |
-| Review request | `$code-review` in the profile-selected reviewer child |
-| External multi-source uncertainty | `$research`; narrow documentation lookup stays inline |
-| Commit request | `$commit`; push/PR still require separate authority |
+| Root dialogue, integration, and Git ownership | `root` |
+| One isolated executable ticket | `implementer` |
+| Requirement fidelity review | `spec_reviewer` |
+| Correctness and repository-standards review | `standards_reviewer` |
+| Bounded repository exploration | `explorer` |
+| Primary-source external research | `researcher` |
 
-Generated planning artifacts and labels never authorize implementation. After
-separate delivery authority, an approved generated ticket runs directly and a
-graph follows `$tickets-orchestrator`; neither receives a mirror implementation
-spec. If such a ticket is not executable, return a ticket-flow defect.
+## Runtime Safety
 
-## TDD And Review
-
-Apply `$tdd` only when all three Fit Gate conditions hold:
-
-1. The change alters observable behavior.
-2. A natural public seam can prove that behavior.
-3. A new test will fail before the change for the intended behavioral reason.
-
-Otherwise use existing regression tests plus affected validation. Do not invoke
-TDD merely because implementation files change, and do not manufacture RED
-tests for behavior-preserving cleanup, dead-code deletion, documentation, copy,
-formatting, generated assets, package maintenance, simple config, builds, or
-read-only work. For mixed tasks, activate `$tdd` only for the behavioral slice.
-An absence or architecture guard added after cleanup is validation, not a TDD
-cycle.
-
-Review applicability lives in [`review-gates.md`](review-gates.md). Shared
-Full/Closure mechanics live in [`review-protocol.md`](review-protocol.md).
-Artifact review is owned by
-[`implementation-spec-review/references/review-loop.md`](../../skills/implementation-spec-review/references/review-loop.md);
-approved-spec implementation review is owned by
-[`spec-implementer/references/review-loop.md`](../../skills/spec-implementer/references/review-loop.md).
-
-Root never substitutes self-review for a required independent reviewer. Use one
-`reviewer_fast` for `simple`, one `reviewer_standard` for `medium`, and two
-disjoint `reviewer_deep` tracks for `high`. A reviewer Adapter executes inline
-only after it is already inside that assigned child.
-
-## Delegation
-
-Run work inline by default. Delegate only when the user, an invoked skill, or
-repository policy authorizes it and the task benefits from independent review,
-isolated deep analysis, or disjoint implementation ownership.
-
-| Need | Named role |
-| --- | --- |
-| Mechanical inventory | `explorer_quick` |
-| Bounded cross-module trace | `explorer_fast` |
-| Ambiguous architecture, contract, or cause | `analyst_deep` |
-| Primary-source external research | `researcher_standard` |
-| Independent review | `reviewer_fast`, `reviewer_standard`, or `reviewer_deep` by profile |
-| Approved isolated implementation slice | `implementer_standard`; `implementer_deep` only for material uncertainty |
-
-Keep the root critical path local. Use at most two explorers for disjoint
-questions and at most two parallel implementers with disjoint write scopes.
-Children do not conduct user dialogue or spawn grandchildren.
-
-## Validation And Runtime Safety
-
-Use targeted behavior proof plus the smallest affected integration check for
-simple and medium work. Run a full repository suite only when repository policy
-requires it, a broad shared contract cannot be isolated, or the task is `high`.
-
-For Flutter UI, follow [`tool-usage.md`](tool-usage.md): platform QA owns UI
-work and `$flutter-attach-session` is only the attach-safe runtime layer. Treat
-live app, IDE, VM Service, and `flutter run` sessions as user-owned.
-
-Read local evidence before external search: applicable `AGENTS.md`, `CONTEXT.md`,
-ADRs, manifests, lockfiles, tests, scripts, and code owners. Mark missing facts
-unconfirmed rather than inventing them.
-
-Contract-risk implementation uses
-[`contract-test-ledger.md`](contract-test-ledger.md) only for material
-invariants. Long framework lenses, examples, and recipes remain skill-local and
-load on demand.
+For Flutter UI, follow [`tool-usage.md`](tool-usage.md). Treat live app, IDE, VM
+Service, and `flutter run` sessions as user-owned. Use the documented
+non-destructive attach path only after ownership discovery; never replace or
+terminate a user-owned session without explicit authority.

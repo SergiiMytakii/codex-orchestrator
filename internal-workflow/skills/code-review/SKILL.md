@@ -1,323 +1,55 @@
 ---
-name: "code-review"
-description: "Evidence-first review of code, PRs, commits, regressions, or review-and-fix work using correctness and standards/cleanup lenses. Auto-fix only qualifying high-confidence severe issues."
+name: code-review
+description: Direct Review entrypoint for a settled diff. Substantial changes receive distinct fresh Spec and Standards reviewers in parallel.
 ---
 
-# Code Review
-
-This skill performs evidence-based code review. It is not a style pass and not a summary. Treat the change as potentially wrong until independent review tracks fail to break it.
-
-Passing tests, test names, checklists, and implementation reports are inputs,
-not proof. For each material behavior, trace the production path before reading
-its tests, attempt one concrete violating sequence, then verify that the exact
-setup, actions, and assertions reject it. If a fake bypasses the claimed
-boundary or the test stays green, report a finding or verification gap; do not
-approve nominal coverage.
-
-The review always covers two lenses:
-
-- **Correctness reviewer**: bugs, regressions, runtime behavior, security, contracts, caches, concurrency, framework rules, and failure paths.
-- **Spec & standards reviewer**: requested behavior, documented repo standards, architecture fit, duplication, cleanup, and workaround-shaped implementation.
-
-The main agent is the coordinator. It pins the review target, assigns both
-lenses to one reviewer for `simple` and `medium`, and splits them across two
-independent reviewers only for `high`. It verifies the strongest findings,
-applies only safe fixes, and returns a concise findings-first report.
-
-Full review is bounded to the settled diff, its authority, changed owners, and
-callers or contracts with plausible fan-out. `Full` means complete coverage of
-that assigned scope once; it does not mean a repository-wide audit. Do not load
-unrelated modules or activate optional lenses without a diff signal or mandatory
-Review Focus.
-
-## When To Use
-
-Use this skill when the user asks for:
-
-- code review, PR review, commit audit, regression scan, or bug hunt
-- review since a branch, commit, tag, merge-base, or working tree state
-- review and fix of critical or high-severity high-confidence defects
-- framework-focused review such as `NestJS`, `Next.js`, `Flutter`, or `Dart`
-
-For every implementation profile, the spec/standards lens includes bounded
-cleanup for duplication, obsolete paths, workaround branches, and unjustified
-abstractions. High-risk work assigns that lens to its own reviewer in the same
-parallel final wave. A concrete evidenced simplification risk named by the
-user, approved source, or repo policy amplifies this lens inside the same review
-activation; it never creates a separate cleanup gate.
-
-Exception for approved spec execution: follow
-`../spec-implementer/references/review-loop.md`. Intermediate code-review
-checkpoints activate only their assigned Review Focus; final cleanup coverage
-uses the durable Review Plan and canonical Defect Ledger.
-
-## Implementation Review Adapter
-
-When this skill is called from `$spec-implementer`:
-
-- read `../spec-implementer/references/review-loop.md` and the persisted
-  `## Implementation Review State`
-- recheck the scheduled profile against the settled diff; return an
-  underclassified profile to the executor before launching reviewers
-- accept the scheduled mode, session, revision, and lenses after that check
-- pin the target and give reviewers the owner-defined capsule
-- return the usable result and stable defect updates to the executor
-- keep cleanup findings in the spec/standards lineage and canonical Defect Ledger
-
-Do not infer a fresh review loop, choose another mode, or make the owner's
-terminal decision inside this Adapter.
-
-## Progressive References
-
-Read only the references the current review needs:
-
-- Detailed bug classes: `references/bug-classes.md`
-- Cleanup lens method: `references/cleanup-lens.md`
-- Framework lenses for Next.js, NestJS, Flutter, and Dart: `references/framework-lenses.md`
-- Targeted recipes for recurring diff shapes: `references/targeted-recipes.md`
-- Contract test ledger: `../../docs/agents/contract-test-ledger.md`
-- Shared confidence rubric: `../../docs/agents/confidence-rubric.md`
-
-Load `references/framework-lenses.md` when the user names a framework or files/configs strongly imply one. Load `references/targeted-recipes.md` when the diff shape matches them. Load `../../docs/agents/contract-test-ledger.md` only for a material contract delta with a named failure ordinary targeted proof could miss. Load `references/bug-classes.md` for substantial reviews or broad bug hunts.
-Load `references/cleanup-lens.md` when the spec/standards lens is assigned. Use
-its bounded method by default and its amplified method only for a concrete
-evidenced simplification risk supplied as mandatory Review Focus.
-
-## Coordinator Workflow
-
-### 1. Pin The Review Target
-
-Identify exactly what is being reviewed.
-
-- If the user gave a fixed point, use it directly: branch, commit SHA, tag, `main`, `HEAD~5`, etc.
-- If they did not, infer from context:
-  - current uncommitted work: `git diff` plus staged diff if relevant
-  - branch review: `git diff <base>...HEAD`
-  - commit review: `git show <commit>`
-- If there is no safe inference, ask one short question: "Review against which branch or commit?"
-
-Capture:
-
-- `git status --short`
-- diff stat
-- the exact diff command used
-- commit list when reviewing a branch range
-- changed files and nearest related tests/docs
-
-Use three-dot diff for branch/base reviews: `git diff <fixed-point>...HEAD`.
-
-### 2. Discover Spec And Standards
-
-Do this before reviewer tracks so both tracks receive bounded inputs.
-
-Spec sources, in priority order:
-
-1. Issue or PR references in commit messages, branch names, PR metadata, or user prompt.
-2. A spec/PRD/plan path supplied by the user.
-3. Matching files under `docs/`, `specs/`, `.scratch/`, or local issue folders.
-4. If none exists, continue and mark the spec axis as "no spec found" instead of inventing requirements.
-
-Standards sources:
-
-- `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`
-- `CONTEXT.md`, context maps, domain docs, ADRs
-- `STYLE.md`, `STANDARDS.md`, style guides, review checklists
-- `.editorconfig`, ESLint, Biome, Prettier, TypeScript, analyzer, or framework configs
-- relevant test files and existing examples in the touched area
-
-Machine-enforced config matters as context, but do not spend review findings on issues a required formatter/linter would already catch unless the tool is absent or failing.
-
-### 3. Activate Lenses
-
-Before deep review, decide which lenses apply.
-
-- Always activate the general correctness and spec/standards lenses.
-- Always apply bounded cleanup inside spec/standards; amplify it only for a
-  concrete evidenced Review Focus or when the diff adds a flag, helper, or
-  state branch; never from size or risk labels alone.
-- Add framework lenses when explicit or strongly implied by files/configs.
-- Add targeted recipes when the diff shape matches them.
-- If the user, plan, or implementation spec provides `Review Focus`, treat each listed lens, targeted recipe, invariant, and risk as mandatory. Do not replace it with a generic review; report any focus item that cannot be verified as a verification gap.
-- If inference is uncertain, say so and continue with the best-supported review instead of pretending certainty.
-
-Mandatory delta lenses:
-
-- **Contract Delta Review:** If the diff expands a shared contract, enum/status, schema, DTO, permission, capability, token, or scope, search old consumers and report `changed contract -> searched call sites -> risky fallback/default branches -> tests or fix`.
-- **Backend Trust Boundary Review:** If the diff adds a credential, OAuth scope, permission, role-sensitive write, or external capability, verify the backend-side guard. UI controls, query/state flags, and caller intent are not authorization.
-
-Common framework signals:
-
-- **Next.js**: `next.config.*`, `app/**`, `pages/**`, route handlers, server actions, `use server`, `use client`, revalidation APIs.
-- **NestJS**: `@nestjs/*`, controllers, providers, modules, guards, pipes, interceptors, DTOs, `nest-cli.json`.
-- **Flutter**: `pubspec.yaml`, `lib/**`, widgets, navigation, bloc/provider/riverpod/notifiers.
-- **Dart**: `.dart`, `Future`, `Stream`, isolates, generated serializers, null-safety constructs.
-
-### 4. Run Profile-Selected Reviewers
-
-For `simple`, run one `reviewer_fast`; for `medium`, run one
-`reviewer_standard`. Assign that child both correctness and spec/standards
-lenses in one bounded Full review. For `high`, run two `reviewer_deep` children
-in parallel with one disjoint lens each. Invoking `$code-review` authorizes
-these reviewers. Preserve every fulfilled launch handle if a parallel peer
-fails, then close all launched children. Tell every reviewer not to edit or
-revert unrelated work.
-
-Begin every reviewer launch brief with an exact `Assigned role: <role>` line,
-using `reviewer_fast`, `reviewer_standard`, or `reviewer_deep`. Keep that role
-explicit for Full and Closure launches even when the profile or existing
-lineage already implies it; a generic child prompt is not evidence that the
-profile-selected reviewer topology was executed.
-
-A reviewer is launched only after the child-launch tool returns a non-empty
-handle for that brief. Wait only on returned handles, then close every launched
-child. Never treat an intended role, an empty wait, coordinator analysis, or a
-final-answer claim as reviewer execution. If launch is unavailable or returns
-no handle, report the independent review gate as unavailable and do not
-self-review or claim that the reviewer completed.
-
-A recorded reviewer role or lineage from an earlier Full review identifies
-which role must own Closure; it is never a live child handle. Every Closure
-activation must launch a new child in that same role for the current session,
-capture the new non-empty handle, and wait only on that handle.
-
-For spec-driven checkpoints, obey the track assignment in the persisted Review
-Plan instead of automatically launching both default tracks.
-
-Medium is the normal review profile. API, persistence, multiple files, or a
-shared-looking name do not select `high` unless evidence proves both a material
-failure consequence and an uncertainty amplifier.
-
-When already inside an assigned reviewer child, execute its assigned lens set
-inline and return it to root; do not spawn a grandchild.
-If the user forbids delegation, report the independent review gate as waived or
-unavailable according to the parent workflow; root must not self-review inline.
-
-#### Correctness Reviewer Brief
-
-Include the exact diff command or commit under review, changed file list, commit list, active references, any `Review Focus`, and an instruction to read surrounding execution paths.
-
-> Review runtime correctness adversarially. Hunt concrete bugs in control flow, state, async/concurrency, security, auth, contracts, schemas, caching, persistence, UI/API integration, and framework-specific behavior. If a Review Focus is provided, explicitly test the named risks first, such as duplicate side effects, retry/idempotency, ordering, source-of-truth ownership, partial failure, DTO/schema drift, or false user-facing state. For each finding, provide file/line, trigger path, impact, why guards do not prevent it, severity, and confidence. Do not report style nits or generic "needs tests" comments.
-> For bugfixes, check claim boundaries: what changed tests prove, what they do not prove, and whether sibling execution paths can still violate the claimed invariant.
-> When Contract Delta Review applies, follow new values through old consumers and default/fallback branches before trusting local tests. When Backend Trust Boundary Review applies, verify the server-side authorization predicate at the write/callback boundary.
-
-#### Spec & Standards Reviewer Brief
-
-Include the exact diff command or commit under review, spec source path/content or "no spec found", standards source list, changed file list, commit list, any `Review Focus`, and an instruction to cite the spec or standard behind each finding.
-
-> Review the change against the requested work and repo standards. Check missing requirements, partial behavior, scope creep, undocumented contract changes, architecture drift, duplicate source-of-truth logic, dead/legacy branches, and workaround-shaped implementation. If a Review Focus is provided, explicitly verify each named ownership, scope, validation, and invariant risk against the spec. Cite the spec or standard when available. If there is no spec, skip requirement claims and focus on documented standards and architecture evidence.
-> Apply `references/cleanup-lens.md`: use bounded cleanup by default, or the amplified method when a concrete evidenced simplification risk is mandatory Review Focus. Keep cleanup findings in this review's normal Defect Ledger. Do not create a cleanup-only verdict or separate pass.
-
-### 5. Aggregate And Verify
-
-The coordinator must not blindly relay reviewer output.
-
-1. Deduplicate findings across tracks.
-2. Re-read the relevant code for the strongest findings.
-3. Drop findings that lack a concrete trigger path.
-4. Reclassify severity/confidence using `../../docs/agents/confidence-rubric.md` if evidence does not support the label.
-5. For real contract defects that pass the ledger gate, identify the missing or inadequate invariant when TDD/spec evidence is available.
-6. Confirm every mandatory `Review Focus` item and mandatory delta lens was reviewed; if not, report the unverified item as a verification gap.
-7. Confirm that mandatory behavior evidence rejects the concrete violating
-   sequence attempted by the reviewer. Evidence that bypasses its claimed
-   production boundary invalidates that Full coverage.
-8. Decide whether auto-fix is allowed.
-9. Run the narrowest meaningful verification after any fix.
-
-Keep the two axes visible in your own notes, but present the final report by severity unless the user explicitly asked for side-by-side Standards/Spec output.
-
-After repairs, verify medium or low findings through the coordinator's direct
-failure-path check plus affected validation. Launch Closure only for the
-severity, protected-contract, or invalidated-coverage triggers owned by
-`review-protocol.md`. For a scheduled Closure, send the bounded capsule to the
-selected reviewer lineage and return its defect updates.
-
-Treat a repair budget as a limit on waves, never on finding count. Put every
-mutually compatible finding into the same consolidated repair, and retain each
-canonical record until verified or explicitly blocked. When Closure returns
-only ordinary medium/low corrections that stay inside approved behavior and
-add no new mechanism, allow one bounded correction batch with direct
-failure-path checks plus affected validation; do not request another Closure.
-
-## Evidence Standard
-
-A valid finding explains:
-
-- what breaks
-- why it breaks
-- the input, sequence, role, tenant, environment, or timing that triggers it
-- where the defect lives
-- why existing guards do not prevent it
-- severity and confidence
-
-Do not file:
-
-- style nits disguised as correctness issues
-- speculative races without a shared-state path
-- generic "needs tests" comments without a concrete regression risk
-- architecture discomfort without wrong ownership, duplication, leakage, or a regression path
-- performance comments without a hot path or failure mode
-
-## Auto-Fix Policy
-
-Automatically fix only when all are true:
-
-- severity is critical or high
-- confidence is high under `../../docs/agents/confidence-rubric.md`
-- root cause is clear
-- correct fix is narrow and low-risk
-- fix matches local project patterns
-- verification is available, or the edit is obviously safe and syntax-checkable
-
-Evaluate `narrow and low-risk` against the aggregate repair diff, including all
-new parameters, helpers, branches, states, owners, and runtime boundaries—not
-against one finding in isolation. A new flag, helper, or state branch activates
-the amplified cleanup lens and requires explicit `KEEP | SIMPLIFY | REMOVE`
-decisions before auto-fix.
-
-When auto-fixing:
-
-- patch only the bug
-- add/update behavior tests when regression risk is meaningful and the codebase supports it; update a ledger only when its gate passes
-- rerun relevant verification
-- never revert unrelated user changes
-
-Do not auto-fix ambiguous semantics, product decisions, broad refactors, or low-confidence concerns. Report them with evidence.
-
-## Output Contract
-
-For review-only tasks:
-
-1. Findings first, ordered by severity.
-2. File and line references for each finding.
-3. Trigger path, impact, severity, confidence, and evidence.
-4. Open questions, assumptions, or verification gaps.
-5. Short summary only after findings.
-
-For review-and-fix tasks:
-
-1. State which critical or high-severity high-confidence issues were fixed.
-2. Report remaining findings that were not fixed.
-3. Give one short verification note and any blocked checks.
-4. Keep the closing summary user-facing and outcome-based.
-
-If there are no findings, say so clearly and mention residual test or verification gaps.
-
-For spec-driven review checkpoints or final review gates, include a compact review handoff that can feed the executor's Final Risk Handoff: reviewed target, Review Focus status, high/critical findings fixed or remaining, skipped checks, and residual verification gaps. Keep findings first.
-
-If inline review comments are requested, emit one `::code-comment{...}` directive per actionable finding.
-
-## Tooling Defaults
-
-- Use `rg`/`rg --files` for code search.
-- Prefer parallel reads for status, diff, changed files, related modules, tests, repo docs, and standards.
-- Use official docs or Context7 only when a finding depends on version-sensitive framework/library behavior.
-- Run the narrowest meaningful tests first, then required lint/build/analyzer checks for touched areas.
-- Keep raw command output out of the final response unless the user asks for it.
-
-## Decision Defaults
-
-- If the user says "review", default to findings-first review.
-- If the user says "review and fix", auto-fix only critical or high-severity high-confidence issues that satisfy the auto-fix policy.
-- If the user provides a framework focus, explicitly use it.
-- If no focus is provided, infer active lenses from the diff and say when they materially affected findings.
-- Ask clarification only when the correct review target or fix would otherwise be risky or ambiguous.
+# Review
+
+Review the settled change against two independent questions:
+
+- **Spec:** does it implement the authorized request, issue, or Parent PRD
+  completely and without scope drift?
+- **Standards:** is it correct, maintainable, consistent with repository policy,
+  and free of legacy paths, duplicate ownership, compatibility residue, or
+  unnecessary machinery?
+
+## Applicability
+
+Review is required when behavior or contract goes beyond an obvious local edit,
+including public API, persistence, auth/payment, concurrency/shared state, and
+cross-module interaction. Docs, copy, formatting, mechanical config, and an
+obvious local correction may complete with direct proof unless the user asks
+for Review explicitly.
+
+## Process
+
+1. Pin the settled target: the supplied fixed point or the current isolated
+   uncommitted diff. Record changed files, authority, repository policy, and
+   proof already completed.
+2. Launch exactly two distinct fresh children in one parallel wave:
+   - `spec_reviewer` receives the target, authority, changed files, proof, and
+     the complete relevant request/issue/Parent PRD;
+   - `standards_reviewer` receives the same target plus repository policy and a
+     brief to trace correctness, failure paths, cleanup, zero legacy, duplicate
+     ownership, and unnecessary scripts.
+   Begin each brief with its exact stable role line: `Assigned role:
+   spec_reviewer` or `Assigned role: standards_reviewer`.
+3. Capture both non-empty child identities and wait for those same children.
+   A timeout, failed child, missing identity, or incomplete wait blocks approval.
+   Root never substitutes self-review.
+4. Verify every concrete finding against the diff and its trigger path. Root or
+   Implement applies only in-scope repairs, reruns affected proof, and reviews
+   the new settled substantial result with a new parallel pair.
+5. Approval requires both completed reviewers to return `APPROVE` for the same
+   target and no required proof gap. A finding, failure, timeout, or non-approval
+   blocks Review. Review itself does not stage, commit, push, or open a PR.
+
+## Reviewer Output
+
+Each reviewer returns findings first with file/line, concrete trigger or missing
+obligation, impact, and evidence. If there are no findings or verification gaps,
+it ends with `APPROVE`. Otherwise it ends with `BLOCK` and the concrete reason.
+
+The coordinator returns both axes, repaired or remaining findings, proof gaps,
+and `APPROVE` only when both axes approve. Do not create durable review state,
+maps, ledgers, aliases, adapters, or compatibility routes.

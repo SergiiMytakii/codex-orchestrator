@@ -1,6 +1,0 @@
-interface:
-  display_name: "Implementation Spec Maker"
-  short_description: "Create standalone implementation specs"
-  default_prompt: "Use $implementation-spec-maker only for an explicit standalone spec or a proven execution gap in a non-generated source."
-policy:
-  allow_implicit_invocation: true

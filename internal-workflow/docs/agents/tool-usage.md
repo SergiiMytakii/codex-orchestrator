@@ -9,8 +9,8 @@ Local Flutter UI work always uses a platform QA skill plus the runtime ownership
   screenshots, and logcat.
 - iOS Simulator: use `$flutter-ios-debug` for environment/login gates, navigation,
   interaction, screenshots, and visual comparison.
-- Use `$flutter-attach-session` only to discover the runtime owner and perform
-  reload/restart when that session is safe for this agent to control.
+- Use `$flutter-attach-session` to discover the runtime owner and perform
+  reload/restart against the selected live session.
 
 Before any install, launch, attach, reload, restart, terminate, or force-stop:
 
@@ -18,16 +18,21 @@ Before any install, launch, attach, reload, restart, terminate, or force-stop:
    owner, and expected backend/environment.
 2. Treat any live PID, VM Service, IDE debug adapter, `flutter run`, or visible app as
    user-owned state.
-3. If an IDE/debug adapter or machine run owns DevFS, do not create a second attach
-   controller. Use the owning IDE/terminal reload action or ask the user to trigger it.
-   A standalone interactive terminal run is the only exception, and only when
-   discovery marks it attach-safe and the helper receives its confirmed PID.
+3. If an IDE/debug adapter or machine run owns DevFS, use the standing user
+   authorization and pass `--allow-tool-owned` to the helper. Do not ask the user to
+   trigger `r`/`R` manually. Unknown owners remain blocked.
 4. Use `r` for widget/layout/style/rendering changes and `R` for startup state,
    dependency injection, providers, globals, routes, or initialization changes.
-5. For a safely attachable standalone runtime, pass the PID confirmed by
-   `discover --json` as `--expected-pid`; never execute the raw discovered attach command.
+5. Always pass the PID confirmed by `discover --json` as `--expected-pid`; never
+   execute the raw discovered attach command.
 6. Verify that the same PID and expected environment remain after each runtime or
    navigation action.
+
+The bundled `flutter_session_ctl.py` helper is the only allowed reload/restart
+transport. Never activate, open, focus, or automate an IDE for this purpose. Do not
+use IDE menus, Command Palette, keyboard shortcuts, `osascript`, System Events, or
+other GUI automation. If the helper fails or times out, preserve the app process and
+report its exact failure; do not fall back to the IDE.
 
 Requests to inspect, debug, navigate, capture screenshots, or verify UI do not authorize
 build/install, uninstall, app-data clearing, force-stop, process termination, replacement

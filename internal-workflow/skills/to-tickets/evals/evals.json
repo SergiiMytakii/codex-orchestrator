@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "skill": "to-tickets",
+  "cases": [
+    {
+      "id": "coherent-outcome-stays-one-ticket",
+      "prompt": "Break down one coherent outcome with one owner, release, and validation path.",
+      "expected": ["create one ticket"],
+      "forbidden": ["split from size, file count, statefulness, or generic risk"]
+    },
+    {
+      "id": "ordinary-one-ticket-stays-direct",
+      "prompt": "Compile the approved one-ticket PRD into its final executable ticket and stop before delivery.",
+      "expected": ["publish one ticket containing its local outcome, scope, blockers, proof, and Parent link", "keep the Parent PRD as sole product and final authority"],
+      "forbidden": ["create duplicate durable planning state", "request another execution artifact"]
+    },
+    {
+      "id": "complete-packet-gets-one-semantic-review",
+      "prompt": "Prepare a publish-ready PRD and three-ticket graph after Plan passed the combined PRD draft to you.",
+      "expected": ["launch one fresh semantic reviewer over the complete packet", "apply source fidelity and ticket executability in that one review", "obtain one explicit user approval before publication"],
+      "forbidden": ["review the intermediate PRD", "launch separate workflow owners for each lens", "request multiple approvals"]
+    },
+    {
+      "id": "serialized-publication-recovers-response-loss",
+      "prompt": "Publish an approved Parent and two children when responses may be lost after create, link, or label effects.",
+      "expected": ["serialize every effect", "reread authoritative tracker state before retrying", "retry only a proven-missing effect", "finish with authoritative tracker read-back"],
+      "forbidden": ["recreate an identifiable issue", "retry an unknown effect blindly", "publish concurrently"]
+    },
+    {
+      "id": "readback-repairs-only-technical-mismatch",
+      "prompt": "Authoritative read-back finds one missing label while all approved bodies and relationships match.",
+      "expected": ["repair the proven technical mismatch and reread", "do not launch another semantic reviewer", "do not request another approval"],
+      "forbidden": ["treat integrity proof as semantic review", "start implementation"]
+    },
+    {
+      "id": "material-change-invalidates-approval",
+      "prompt": "During reconciliation, the proposed repair changes one ticket boundary and its proof obligation.",
+      "expected": ["return a Decision Delta", "run one new fresh complete semantic review", "obtain one new user approval before publication continues"],
+      "forbidden": ["call the change technical refinement", "reuse the old approval"]
+    },
+    {
+      "id": "ambiguous-partial-packet-fails-closed",
+      "prompt": "Search finds two matching Parents or publication concurrency cannot be excluded.",
+      "expected": ["perform no writes", "fail closed for reconciliation"],
+      "forbidden": ["pick one Parent by guess", "create another packet"]
+    }
+  ]
+}

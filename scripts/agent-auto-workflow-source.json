@@ -1,35 +1,38 @@
 {
   "version": 2,
   "personalSkills": [
-    "code-debugger",
+    "bug-root-cause-explainer",
     "code-review",
     "diagnosing-bugs",
-    "implementation-spec-maker",
-    "implementation-spec-review",
-    "small-task-implementer",
-    "spec-implementer",
+    "grilling",
+    "implement",
+    "plan",
+    "prototype",
+    "research",
     "tdd",
-    "triage"
+    "tickets-orchestrator",
+    "to-spec",
+    "to-tickets"
   ],
-  "repositorySkills": ["acceptance-proof", "agent-auto"],
+  "repositorySkills": ["acceptance-proof"],
   "sharedDocs": [
     "bug-workflow-routing.md",
     "coding-skill-routing.md",
     "confidence-rubric.md",
-    "contract-test-ledger.md",
-    "review-gates.md",
-    "review-protocol.md"
+    "tool-usage.md"
   ],
-  "sharedEvals": ["coding-skill-evals.json"],
+  "sharedEvals": [],
   "profiles": {
-    "analyst_deep": "analyst-deep.toml",
-    "implementer_standard": "implementer-standard.toml",
-    "reviewer_deep": "reviewer-deep.toml",
-    "reviewer_standard": "reviewer-standard.toml"
+    "explorer": "explorer.toml",
+    "implementer": "implementer.toml",
+    "researcher": "researcher.toml",
+    "spec_reviewer": "spec-reviewer.toml",
+    "standards_reviewer": "standards-reviewer.toml"
   },
   "overlayRoot": "scripts/runtime-workflow-overlays",
   "adaptations": [
     { "id": "resolved-codex-home", "from": "<resolved-codex-home>", "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT" },
+    { "id": "default-codex-home", "from": "<default-codex-home>", "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT" },
     { "id": "default-codex-skills", "from": "${CODEX_HOME:-$HOME/.codex}/skills", "to": "../../skills" },
     { "id": "codex-home-skills", "from": "$CODEX_HOME/skills", "to": "../../skills" },
     { "id": "default-codex-docs", "from": "${CODEX_HOME:-$HOME/.codex}/docs/agents/", "to": "../../docs/agents/" },
@@ -42,7 +45,7 @@
       "dependencySkills": [],
       "resources": [],
       "outputSchema": "schemas/proof-report-v1.json",
-      "profile": "proof_agent",
+      "profile": "implementer",
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "worktree",
@@ -60,14 +63,9 @@
       "entry": "operations/code-review/SKILL.md",
       "sourceSkill": "code-review",
       "dependencySkills": [],
-      "resources": [
-        "docs/agents/confidence-rubric.md",
-        "docs/agents/contract-test-ledger.md",
-        "docs/agents/review-gates.md",
-        "docs/agents/review-protocol.md"
-      ],
+      "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/code-review-v1.json",
-      "profile": "reviewer_standard",
+      "profile": "standards_reviewer",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",
@@ -83,17 +81,15 @@
     },
     "implementation": {
       "entry": "operations/implementation/SKILL.md",
-      "sourceSkill": "agent-auto",
-      "dependencySkills": ["code-debugger", "diagnosing-bugs", "small-task-implementer", "tdd"],
+      "sourceSkill": "implement",
+      "dependencySkills": ["diagnosing-bugs", "tdd"],
       "resources": [
         "docs/agents/bug-workflow-routing.md",
         "docs/agents/coding-skill-routing.md",
-        "docs/agents/contract-test-ledger.md",
-        "docs/agents/review-gates.md",
         "docs/agents/tool-usage.md"
       ],
       "outputSchema": "schemas/implementation-report-v1.json",
-      "profile": "implementer_standard",
+      "profile": "implementer",
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "worktree",
@@ -109,14 +105,11 @@
     },
     "spec-author": {
       "entry": "operations/spec-author/SKILL.md",
-      "sourceSkill": "implementation-spec-maker",
+      "sourceSkill": "to-spec",
       "dependencySkills": [],
-      "resources": [
-        "docs/agents/confidence-rubric.md",
-        "docs/agents/contract-test-ledger.md"
-      ],
+      "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/spec-author-v1.json",
-      "profile": "implementer_standard",
+      "profile": "implementer",
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "target-state",
@@ -132,15 +125,11 @@
     },
     "spec-review": {
       "entry": "operations/spec-review/SKILL.md",
-      "sourceSkill": "implementation-spec-review",
+      "sourceSkill": "code-review",
       "dependencySkills": [],
-      "resources": [
-        "docs/agents/confidence-rubric.md",
-        "docs/agents/contract-test-ledger.md",
-        "docs/agents/review-protocol.md"
-      ],
+      "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/spec-review-v1.json",
-      "profile": "reviewer_deep",
+      "profile": "spec_reviewer",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",
@@ -156,11 +145,11 @@
     },
     "triage": {
       "entry": "operations/triage/SKILL.md",
-      "sourceSkill": "triage",
-      "dependencySkills": [],
+      "sourceSkill": "plan",
+      "dependencySkills": ["bug-root-cause-explainer"],
       "resources": ["docs/agents/coding-skill-routing.md"],
       "outputSchema": "schemas/triage-route-v1.json",
-      "profile": "analyst_deep",
+      "profile": "explorer",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",

@@ -1,6 +1,6 @@
 interface:
   display_name: "Test-Driven Development"
-  short_description: "Use TDD only when its behavioral fit gate passes"
-  default_prompt: "Use $tdd to classify targeted proof versus Contract Test Ledger, then run RED to GREEN when the observable-behavior Fit Gate passes."
+  short_description: "Use behavior-first RED to GREEN where possible"
+  default_prompt: "Use $tdd where possible to prove one observable behavior at a time through its natural public seam."
 policy:
   allow_implicit_invocation: true

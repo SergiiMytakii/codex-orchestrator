@@ -16,15 +16,17 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     const consumer = join(root, 'consumer');
     const consumerConfig = join(consumer, '.codex-orchestrator', 'config.json');
     const consumerState = join(consumer, '.codex-orchestrator', 'state', 'sentinel.json');
-    const localAgentSkill = join(consumer, '.codex', 'skills', 'agent-auto', 'SKILL.md');
-    const localProofSkill = join(consumer, '.codex', 'skills', 'acceptance-proof', 'SKILL.md');
+    const localPlanSkill = join(consumer, '.codex', 'skills', 'plan', 'SKILL.md');
+    const localImplementSkill = join(consumer, '.codex', 'skills', 'implement', 'SKILL.md');
+    const localReviewSkill = join(consumer, '.codex', 'skills', 'code-review', 'SKILL.md');
     const consumerGitHubMarker = join(consumer, '.github-state-marker.json');
     await Promise.all([
       mkdir(packDir, { recursive: true }),
       mkdir(dirname(consumerConfig), { recursive: true }),
       mkdir(dirname(consumerState), { recursive: true }),
-      mkdir(dirname(localAgentSkill), { recursive: true }),
-      mkdir(dirname(localProofSkill), { recursive: true }),
+      mkdir(dirname(localPlanSkill), { recursive: true }),
+      mkdir(dirname(localImplementSkill), { recursive: true }),
+      mkdir(dirname(localReviewSkill), { recursive: true }),
     ]);
 
     const consumerPackage = {
@@ -39,8 +41,9 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     await writeFile(join(consumer, '.gitignore'), 'consumer-owned\n');
     await writeFile(consumerConfig, '{"consumer":"config"}\n');
     await writeFile(consumerState, '{"consumer":"state"}\n');
-    await writeFile(localAgentSkill, 'CONFLICTING LOCAL AGENT SKILL\n');
-    await writeFile(localProofSkill, 'CONFLICTING LOCAL PROOF SKILL\n');
+    await writeFile(localPlanSkill, 'CONFLICTING LOCAL PLAN SKILL\n');
+    await writeFile(localImplementSkill, 'CONFLICTING LOCAL IMPLEMENT SKILL\n');
+    await writeFile(localReviewSkill, 'CONFLICTING LOCAL REVIEW SKILL\n');
     await writeFile(consumerGitHubMarker, '{"issues":"unchanged","pullRequests":"unchanged"}\n');
 
     const protectedBefore = await snapshotFiles([
@@ -48,8 +51,9 @@ test('packed install uses one package-owned workflow with empty or conflicting c
       join(consumer, '.gitignore'),
       consumerConfig,
       consumerState,
-      localAgentSkill,
-      localProofSkill,
+      localPlanSkill,
+      localImplementSkill,
+      localReviewSkill,
       consumerGitHubMarker,
     ]);
     const unmanagedBefore = await snapshotUnmanagedTree(consumer);
@@ -57,8 +61,19 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     const packed = await packProject(packDir);
     const packedPaths = packed.files.map((file) => file.path).sort();
     assert.equal(packedPaths.includes('internal-workflow/manifest.json'), true);
-    assert.equal(packedPaths.includes('internal-workflow/skills/agent-auto/SKILL.md'), true);
-    assert.equal(packedPaths.includes('internal-workflow/skills/acceptance-proof/SKILL.md'), true);
+    for (const skill of [
+      'bug-root-cause-explainer', 'code-review', 'diagnosing-bugs', 'grilling', 'implement', 'plan',
+      'prototype', 'research', 'tdd', 'tickets-orchestrator', 'to-spec', 'to-tickets',
+    ]) {
+      assert.equal(packedPaths.includes(`internal-workflow/skills/${skill}/SKILL.md`), true, skill);
+    }
+    for (const removed of [
+      'code-debugger', 'implementation-spec-maker', 'implementation-spec-review', 'small-task-implementer',
+      'spec-implementer', 'spec-to-tickets', 'tickets-breakdown-review', 'triage',
+    ]) {
+      assert.equal(packedPaths.some((path) => path.startsWith(`internal-workflow/skills/${removed}/`)), false, removed);
+    }
+    assert.equal(packedPaths.some((path) => path.startsWith('internal-workflow/evals/')), false);
     assert.equal(packedPaths.some((path) => path.startsWith('internal-skills/')), false);
     assert.equal(packedPaths.includes('dist/src/v2/implementation-report.js'), true);
     assert.equal(packedPaths.includes('dist/src/v2/code-review-report.js'), true);
@@ -74,7 +89,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
 
     await installTarball(consumer, join(packDir, packed.filename));
     const installed = join(consumer, 'node_modules', 'codex-orchestrator');
-    await assertInstalledContract(installed, 'Implement one issue');
+    await assertInstalledContract(installed);
     const compileFixture = join(consumer, 'candidate-contract.mts');
     await writeFile(compileFixture, `
 import { AcceptanceProof, createCheckedChangeCapabilities } from 'codex-orchestrator';
@@ -138,9 +153,9 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
     const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
     const codeReview = await workflowAssets.resolveWorkflowOperation(receipt, 'code-review');
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
-    assert.match(await readFile(implementation.entryPath, 'utf8'), /Implementation Operation/u);
+    assert.match(await readFile(implementation.entryPath, 'utf8'), /Follow packaged \[Implement\]/u);
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
-    assert.match(await readFile(codeReview.entryPath, 'utf8'), /Code Review Operation/u);
+    assert.match(await readFile(codeReview.entryPath, 'utf8'), /independent Standards reviewer/u);
     assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
@@ -165,16 +180,42 @@ async function makeTreeRemovable(root: string): Promise<void> {
   await visit(root);
 }
 
-async function assertInstalledContract(installed: string, agentText: string): Promise<void> {
+async function assertInstalledContract(installed: string): Promise<void> {
   const installedPackage = JSON.parse(await readFile(join(installed, 'package.json'), 'utf8')) as {
     bin?: Record<string, string>;
     scripts?: Record<string, string>;
   };
   assert.deepEqual(installedPackage.bin, { 'codex-orchestrator': 'dist/src/v2/cli.js' });
   assert.equal(installedPackage.scripts?.postinstall, undefined);
-  assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), new RegExp(agentText, 'u'));
-  assert.match(await readFile(join(installed, 'internal-workflow', 'skills', 'acceptance-proof', 'SKILL.md'), 'utf8'), /Independently prove/u);
-  assert.doesNotMatch(await readFile(join(installed, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), /CONFLICTING LOCAL/u);
+  const routing = await readFile(join(installed, 'internal-workflow', 'docs', 'agents', 'coding-skill-routing.md'), 'utf8');
+  assert.match(routing, /user-facing coding flow is Plan, Implement, Review/u);
+  const main = new Map([
+    ['plan', 'Plan'],
+    ['implement', 'Implement'],
+    ['code-review', 'Review'],
+  ]);
+  for (const [skill, display] of main) {
+    const metadata = await readFile(join(installed, 'internal-workflow', 'skills', skill, 'agents', 'openai.yaml'), 'utf8');
+    assert.match(metadata, new RegExp(`display_name: "${display}"`, 'u'));
+    assert.match(metadata, /allow_implicit_invocation: true/u);
+    assert.doesNotMatch(await readFile(join(installed, 'internal-workflow', 'skills', skill, 'SKILL.md'), 'utf8'), /CONFLICTING LOCAL/u);
+  }
+  const graph = await readFile(join(installed, 'internal-workflow', 'skills', 'tickets-orchestrator', 'SKILL.md'), 'utf8');
+  const flatGraph = graph.replace(/\s+/gu, ' ');
+  for (const contract of [
+    'single deterministic ticket routes to `$implement`',
+    'unique fresh `implementer`',
+    'Workers perform no Git action',
+    'clean isolated integration worktree and pinned baseline',
+    'exactly two distinct fresh reviewer children in parallel',
+  ]) assert.match(flatGraph, new RegExp(contract.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu'));
+
+  const manifest = JSON.parse(await readFile(join(installed, 'internal-workflow', 'manifest.json'), 'utf8')) as {
+    profiles: Record<string, string>;
+  };
+  assert.deepEqual(Object.keys(manifest.profiles).sort(), [
+    'explorer', 'implementer', 'researcher', 'spec_reviewer', 'standards_reviewer',
+  ]);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {
     implementationReportOutputSchema: () => Record<string, unknown>;

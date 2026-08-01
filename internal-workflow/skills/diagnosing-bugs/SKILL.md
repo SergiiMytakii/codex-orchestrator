@@ -7,7 +7,7 @@ description: Debug hard, flaky, unclear, or performance bugs through reproduce, 
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-Routing precedence: use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md`. This skill owns the feedback loop; after the loop proves the bug, return to the original intent: diagnosis-only output or implementation through `code-debugger`.
+Routing precedence: use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md`. This skill owns the feedback loop; after the loop proves the bug, return to the original intent: diagnosis-only output or implementation through `implement`.
 
 Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/confidence-rubric.md` when deciding whether a hypothesis, root cause, or fix is high-confidence enough to act on. Low-confidence concerns are questions or verification gaps, not proven causes.
 

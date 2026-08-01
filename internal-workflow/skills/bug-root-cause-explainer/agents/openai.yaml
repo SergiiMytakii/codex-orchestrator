@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bug Root Cause Explainer"
+  short_description: "Investigate a bug before proposing a fix"
+  default_prompt: "Use $bug-root-cause-explainer to investigate the bug, explain the proven cause with concrete references, offer one minimal fix path, and add a structural path only for a proven ownership defect. Wait before changing code."
+
+policy:
+  allow_implicit_invocation: true

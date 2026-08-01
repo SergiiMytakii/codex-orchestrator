@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plan"
+  short_description: "Own product decisions and durable planning composition"
+  default_prompt: "Use $plan to resolve the decision gap or compose the smallest durable PRD and executable ticket packet, then stop before implementation."
+policy:
+  allow_implicit_invocation: true

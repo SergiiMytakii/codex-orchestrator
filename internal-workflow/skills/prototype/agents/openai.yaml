@@ -1,0 +1,6 @@
+interface:
+  display_name: "Prototype"
+  short_description: "Answer one design question with throwaway code"
+  default_prompt: "Use $prototype to build the smallest throwaway logic or UI artifact that answers the user's design question, with no Git actions."
+policy:
+  allow_implicit_invocation: true

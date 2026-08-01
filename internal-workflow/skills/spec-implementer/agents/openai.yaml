@@ -1,6 +1,0 @@
-interface:
-  display_name: "Spec Implementer"
-  short_description: "Execute standalone approved specs"
-  default_prompt: "Use $spec-implementer to execute this separately approved standalone implementation spec; do not use it for generated tickets."
-policy:
-  allow_implicit_invocation: true

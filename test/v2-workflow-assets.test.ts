@@ -31,14 +31,14 @@ test('workflow generation materializes one immutable concurrent winner and survi
   assert.equal(left.generationRoot, right.generationRoot);
   await verifyWorkflowGeneration(left);
 
-  const sourceSkill = join(copiedPackage, 'internal-workflow', 'skills', 'agent-auto', 'SKILL.md');
+  const sourceSkill = join(copiedPackage, 'internal-workflow', 'skills', 'implement', 'SKILL.md');
   await chmod(sourceSkill, 0o644);
   await writeFile(sourceSkill, '# changed package source\n');
   await verifyWorkflowGeneration(left);
-  assert.match(await readFile(join(left.generationRoot, 'skills', 'agent-auto', 'SKILL.md'), 'utf8'), /Implement/u);
+  assert.match(await readFile(join(left.generationRoot, 'skills', 'implement', 'SKILL.md'), 'utf8'), /Implement/u);
 });
 
-test('workflow V2 exposes current operation dependencies and keeps evals out of attempt closures', async () => {
+test('workflow V2 binds the minimal coding flow and keeps static scenarios out of attempt closures', async () => {
   const loaded = await loadPackageWorkflow(packageRoot);
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
@@ -46,82 +46,38 @@ test('workflow V2 exposes current operation dependencies and keeps evals out of 
     'acceptance-proof', 'code-review', 'implementation', 'spec-author', 'spec-review', 'triage',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
-    'code-debugger', 'diagnosing-bugs', 'small-task-implementer', 'tdd',
+    'diagnosing-bugs', 'tdd',
   ]);
+  assert.equal(loaded.manifest.operations.implementation.sourceSkill, 'implement');
+  assert.equal(loaded.manifest.operations.triage.sourceSkill, 'plan');
+  assert.equal(loaded.manifest.operations['code-review'].sourceSkill, 'code-review');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
-  assert.equal('qualification-repair' in loaded.manifest.operations, false);
-  assert.equal(Object.keys(loaded.manifest.evals).length >= 2, true);
+  assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
+    'explorer', 'implementer', 'researcher', 'spec_reviewer', 'standards_reviewer',
+  ]);
 });
 
-test('workflow eval execution metadata survives generation', async () => {
+test('workflow packages only static target scenarios with no live execution metadata', async () => {
   const loaded = await loadPackageWorkflow(packageRoot);
-  const shared = loaded.manifest.evals['shared/coding-skill-evals'];
-  assert.ok(shared);
-  const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...shared.path.split('/')), 'utf8')) as {
-    cases: Array<Record<string, any>>;
-  };
-  const caseIds = value.cases.map((item) => item.id);
-  assert.equal(caseIds.length > 0, true);
-  assert.equal(new Set(caseIds).size, caseIds.length);
-  assert.equal(caseIds.includes('prd-generated-ticket-skips-spec-maker'), true);
-  const approvedSpec = value.cases.find((item) => item.id === 'approved-spec-execution');
-  assert.ok(approvedSpec);
-  assert.deepEqual(approvedSpec.execution, {
-    level: 'end_to_end',
-    fixture: 'end-to-end-approved-spec',
-    sandbox: 'workspace-write',
-    trials: 2,
-    should_trigger: ['spec-implementer', 'tdd'],
-    should_not_trigger: ['implementation-spec-maker', 'tickets-orchestrator'],
-    assertions: [
-      { kind: 'route_equals', value: 'spec-implementer' },
-      { kind: 'file_contains', path: '.eval/red.json', text: '"status": "red"' },
-      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
-      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Implement the greeting' },
-      { kind: 'file_contains', path: 'docs/implementation-specs/approved-greeting.md', text: '- [x] Run the focused test' },
-      { kind: 'event_present', event: 'file_write', value: 'greeting.py' },
-      { kind: 'event_order', before: { event: 'skill_read', value: 'spec-implementer' }, after: { event: 'file_write', value: 'greeting.py' } },
-      { kind: 'event_absent', event: 'git_push', value: 'origin' },
-    ],
-    ablation_skill: 'spec-implementer',
-  });
-  const repairComplexity = value.cases.find((item) => item.id === 'repair-complexity-stops-implementation');
-  assert.ok(repairComplexity);
-  assert.deepEqual(repairComplexity.execution, {
-    level: 'behavior',
-    fixture: 'behavior/repair-complexity-stop',
-    sandbox: 'workspace-write',
-    trials: 2,
-    should_trigger: ['spec-implementer'],
-    should_not_trigger: ['code-debugger', 'implementation-spec-maker', 'tdd'],
-    assertions: [
-      { kind: 'route_equals', value: 'repair-complexity-blocked' },
-      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
-      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
-      { kind: 'tree_unchanged' },
-    ],
-    ablation_skill: 'spec-implementer',
-  });
-  const consolidatedFindings = value.cases.find((item) => item.id === 'repair-findings-consolidated');
-  assert.ok(consolidatedFindings);
-  assert.deepEqual(consolidatedFindings.execution, {
-    level: 'behavior',
-    fixture: 'behavior/repair-findings-consolidated',
-    sandbox: 'workspace-write',
-    trials: 2,
-    should_trigger: ['spec-implementer', 'tdd'],
-    should_not_trigger: ['code-debugger', 'implementation-spec-maker'],
-    assertions: [
-      { kind: 'route_equals', value: 'spec-implementer' },
-      { kind: 'command_exit', argv: ['python3', 'verify_outcome.py'], exit_code: 0, boundary: false },
-      { kind: 'event_present', event: 'file_write', value: 'report_summary.py' },
-      { kind: 'event_present', event: 'file_write', value: '.eval/defect-ledger.json' },
-      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_standard:closure' },
-      { kind: 'event_absent', event: 'subagent_launch', value: 'reviewer_deep' },
-    ],
-    ablation_skill: 'spec-implementer',
-  });
+  assert.equal('shared/coding-skill-evals' in loaded.manifest.evals, false);
+  assert.deepEqual(Object.keys(loaded.manifest.evals).sort(), [
+    'skill/bug-root-cause-explainer',
+    'skill/implement',
+    'skill/plan',
+    'skill/tdd',
+    'skill/tickets-orchestrator',
+    'skill/to-tickets',
+  ]);
+  for (const entry of Object.values(loaded.manifest.evals)) {
+    const value = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', ...entry.path.split('/')), 'utf8')) as {
+      cases: Array<Record<string, unknown>>;
+    };
+    for (const item of value.cases) {
+      assert.equal(Object.keys(item).every((key) => ['expected', 'forbidden', 'id', 'prompt'].includes(key)), true);
+      assert.equal(['expected', 'id', 'prompt'].every((key) => key in item), true);
+    }
+  }
 });
 
 
@@ -177,10 +133,10 @@ test('workflow loader binds exact operation mappings and canonical manifest byte
   const original = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
 
   const rebound = structuredClone(original);
-  rebound.operations.implementation.profile = 'proof_agent';
+  rebound.operations.implementation.profile = 'standards_reviewer';
   rebound.operations.implementation.files = rebound.operations.implementation.files
-    .filter((entry: string) => entry !== 'profiles/implementer_standard.toml')
-    .concat('profiles/proof_agent.toml')
+    .filter((entry: string) => entry !== 'profiles/implementer.toml')
+    .concat('profiles/standards_reviewer.toml')
     .sort();
   rehash(rebound);
   await writeFile(path, `${canonicalJson(rebound)}\n`);

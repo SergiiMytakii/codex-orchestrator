@@ -1,73 +1,33 @@
 ---
 name: tdd
-description: Test-driven development and proof selection for observable behavior changes with a natural public seam and a meaningful pre-change failure. Use after the global TDD Fit Gate passes, when choosing targeted proof versus a Contract Test Ledger, or when the user explicitly requests red-green-refactor, test-first development, or TDD.
+description: Use test-driven development where possible for observable behavior changes with a natural public seam and a meaningful pre-change failure.
 ---
 
 # Test-Driven Development
 
-Use short vertical RED -> GREEN cycles. Make each test prove observable behavior through the same public seam real callers use.
+Use TDD where possible. Work in short vertical RED -> GREEN cycles through the
+same public seam real callers use.
 
-## Fit
+## Contract
 
-Use this skill only when the change alters observable behavior, a natural public
-seam exists, and the pre-change test will fail for the intended behavioral
-reason. If an implicit activation fails this gate, stop the TDD route and use
-existing regression tests plus affected validation. For mixed tasks, apply TDD
-only to the behavioral slice.
+- Lock expected behavior from the authorized request, issue, Parent PRD, or
+  existing product contract.
+- Choose the natural public seam from repository evidence. Ask only when the
+  seam itself changes product behavior or ownership.
+- Write one behavior test and confirm it fails before implementation for the
+  intended observable reason.
+- Add only enough production code to make that test pass, then repeat for the
+  next behavior.
+- Derive expected values independently; do not reproduce the production
+  algorithm in the assertion.
+- Prefer tests that survive internal refactors. Do not test private methods or
+  introduce production indirection solely for mocks.
+- Refactor only after GREEN and only to remove concrete complexity introduced
+  by the change.
 
-Behavior-preserving cleanup, dead-code deletion, documentation, copy,
-formatting, generated assets, package maintenance, simple config, builds, and
-read-only work do not need TDD. Absence and architecture guards added after a
-cleanup are validation, not RED proofs.
+If no natural public seam or meaningful pre-change failure exists, use direct
+observable proof instead. Do not manufacture RED for docs, copy, formatting,
+mechanical config, generated files, deletion, builds, or read-only work.
 
-## Core Contract
-
-- Lock expected behavior from the request, specification, design, bug report, or existing product behavior before changing implementation.
-- Derive expected values from an independent source, never from the production algorithm.
-- Prove RED on the old behavior for the same observable reason the user reported or requested.
-- Add only enough implementation to make the current test pass; do not anticipate later tests.
-- Keep tests stable across behavior-preserving refactors.
-- After sufficient GREEN, stop by default. Refactor only to reduce concrete complexity introduced by the change.
-
-Read [tests.md](tests.md) when choosing or reviewing test shape. Read [mocking.md](mocking.md) before introducing test doubles.
-
-## Before the First RED
-
-1. Read local instructions, domain language, existing tests, and relevant ADRs.
-2. List the prioritized observable behaviors, not implementation steps.
-3. Select the public seam where callers observe each behavior.
-4. Ask the user only when the seam changes the public contract, product intent is unclear, or behavior priorities materially conflict.
-5. Classify proof as `targeted-proof` or `contract-ledger`: use the shared [Contract Test Ledger](../../docs/agents/contract-test-ledger.md) only when both its material-delta and missed-failure conditions pass; otherwise keep targeted proof and do not create a ledger from the contract category alone.
-6. If no natural public seam exists, stop the TDD route. Consult [interface-design.md](interface-design.md) only when changing the interface is itself required by the task.
-
-For UI behavior, define proof at the rendered seam: visible content and order, interaction result, semantics, or screenshot when layout direction or scrolling matters.
-
-## RED -> GREEN Cycle
-
-For each behavior:
-
-1. **RED:** Write one test through the selected seam.
-2. Confirm it fails on current behavior for the expected reason. A passing test or an internal-only failure is not valid RED.
-3. **GREEN:** Add the minimal implementation required for that test.
-4. Run the proof and update the ledger status to `red`, `green`, or `blocked` with the missing seam or evidence.
-
-Keep each cycle to one seam, one behavior, one test, and one minimal implementation. Do not rewrite the test to fit the code. For state, async, lifecycle, retry, cache, or auth defects, include the competing condition when feasible.
-
-Handle reviewer repairs inside the same activation only under [bug workflow routing](../../docs/agents/bug-workflow-routing.md); group related cases by protected invariant.
-
-## After GREEN
-
-GREEN is a valid stopping point. If the current change created concrete local complexity, use [refactoring.md](refactoring.md) and rerun affected tests.
-
-## Cycle Checklist
-
-```text
-[ ] Behavior is proved through the caller's public seam
-[ ] Expected behavior is locked and the expected value is independent
-[ ] RED fails on old behavior for the correct observable reason
-[ ] Test was not fitted to implementation details
-[ ] GREEN uses only the code needed for the current behavior
-[ ] Final outcome and relevant competing condition are proved
-[ ] Contract Test Ledger is current when applicable
-[ ] Any refactor is local and reduces current-change complexity
-```
+Read [tests.md](tests.md) when test shape is uncertain and [mocking.md](mocking.md)
+before introducing test doubles.

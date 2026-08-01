@@ -1,0 +1,6 @@
+interface:
+  display_name: "To Spec"
+  short_description: "Turn context into product authority"
+  default_prompt: "Use $to-spec to synthesize product authority; in Plan combined mode, return the contextual draft so Plan can pass it to $to-tickets."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "skill": "plan",
+  "cases": [
+    {
+      "id": "decision-gap-stays-conversational",
+      "prompt": "Resolve this product ownership choice; no durable handoff or multi-session work is needed.",
+      "expected": ["invoke grilling only as needed to reach shared understanding", "resolve the decision in the current conversation", "do not create a durable artifact"],
+      "forbidden": ["publish tickets", "start implementation"]
+    },
+    {
+      "id": "durable-one-ticket-plan",
+      "prompt": "Plan one durable outcome that needs a future fresh implementation context but no independent second slice.",
+      "expected": ["create the smallest durable PRD and one executable ticket", "keep the Parent PRD as sole product and final authority"],
+      "forbidden": ["split by technical layer", "defer to another planning artifact"]
+    },
+    {
+      "id": "combined-multi-ticket-plan",
+      "prompt": "Turn this multi-session product outcome into a spec and executable tickets.",
+      "expected": ["invoke to-spec in combined mode and keep the draft contextual", "pass the draft directly to to-tickets", "use one fresh semantic reviewer and one approval", "finish with authoritative tracker read-back", "stop before implementation"],
+      "forbidden": ["publish or independently review the intermediate PRD", "launch delivery reviewers"]
+    },
+    {
+      "id": "spec-wording-routes-to-plan",
+      "prompt": "Spec to tickets for this approved outcome, please.",
+      "expected": ["route directly to Plan", "compose to-spec combined mode into to-tickets"],
+      "forbidden": ["invoke a standalone composition skill", "retain a compatibility alias"]
+    }
+  ]
+}

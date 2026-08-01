@@ -1,22 +1,18 @@
 # Implementation Operation
 
-Follow [Agent Auto](../../skills/agent-auto/SKILL.md) as the Runner adapter.
-Use the packaged [coding routing](../../docs/agents/coding-skill-routing.md)
-only for direct implementation, TDD, bug-routing, evidence, and affected
-validation. Read [TDD](../../skills/tdd/SKILL.md) before behavior changes. For
-a confirmed bug use [Code Debugger](../../skills/code-debugger/SKILL.md); use
-[Diagnosing Bugs](../../skills/diagnosing-bugs/SKILL.md) only when a reliable
-failing signal is missing. A tiny task may use
-[Small Task Implementer](../../skills/small-task-implementer/SKILL.md) only
-after its Fit Gate. Apply the declared
-[bug routing](../../docs/agents/bug-workflow-routing.md),
-[contract ledger](../../docs/agents/contract-test-ledger.md),
-[review gate](../../docs/agents/review-gates.md), and
-[tool policy](../../docs/agents/tool-usage.md) only when their branch is active.
+Follow packaged [Implement](../../skills/implement/SKILL.md) for the authorized
+change. Use packaged [coding routing](../../docs/agents/coding-skill-routing.md)
+for the minimal Plan/Implement/Review boundary. Use
+[TDD](../../skills/tdd/SKILL.md) where a natural public seam can fail before the
+change, or direct observable proof otherwise. Use
+[Diagnosing Bugs](../../skills/diagnosing-bugs/SKILL.md) only when the failing
+signal is hard, flaky, unclear, or performance-related. Apply the declared
+[bug routing](../../docs/agents/bug-workflow-routing.md) and
+[tool policy](../../docs/agents/tool-usage.md) only when relevant.
 
 The issue is already authorized for implementation. Do not start planning,
-ticket publication, implementation-spec authoring, independent review, or
-delivery. The Runner owns review, checks, commits, publication, retries, and
+ticket publication, planning, independent review, or delivery. The Runner owns
+review, checks, commits, publication, retries, and
 external state. Never commit, push, publish, mutate GitHub, or expose
 credentials. In the final report, `changedFiles` is the complete current product
 change set across all implementation cycles, not only files touched in this

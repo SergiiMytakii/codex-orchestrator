@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "skill": "tickets-orchestrator",
+  "cases": [
+    {
+      "id": "deterministic-ticket-direct",
+      "prompt": "Deliver one authorized issue whose execution targets and proof are already deterministic.",
+      "expected": ["route the ticket to Implement", "launch exactly one fresh implementer through the single-ticket route"],
+      "forbidden": ["activate tickets-orchestrator", "manufacture a replacement planning layer"]
+    },
+    {
+      "id": "fresh-worker-assignment-and-git-owner",
+      "prompt": "Start two children in an approved graph from a clean isolated integration worktree.",
+      "expected": ["use a unique fresh implementer for every ticket", "include the complete ticket, Parent PRD, repository policy, and bounded write scope", "reserve all Git actions to root"],
+      "forbidden": ["reuse a worker context", "let a worker stage or commit", "implement a full child on root"]
+    },
+    {
+      "id": "dependency-and-overlap-sequencing",
+      "prompt": "Tickets A and B touch the same owner and proof resource; ticket C is natively blocked by B.",
+      "expected": ["sequence A and B", "release C only after B and combined deterministic proof succeed"],
+      "forbidden": ["launch A and B in one wave", "release C from worker narration"]
+    },
+    {
+      "id": "safe-disjoint-wave",
+      "prompt": "Two ready tickets have disjoint owners, write scopes, migrations, generated artifacts, and exclusive proof resources.",
+      "expected": ["launch both fresh workers in one parallel wave", "wait for both workers before root integration"],
+      "forbidden": ["merge ticket boundaries", "let either worker commit"]
+    },
+    {
+      "id": "worker-or-proof-failure-fails-closed",
+      "prompt": "A worker times out or fails and another worker returns stale target-state validation.",
+      "expected": ["create no affected checkpoint commit", "release no successor", "report both blockers"],
+      "forbidden": ["substitute root implementation", "accept inherited legacy tests", "continue from a partial wave"]
+    },
+    {
+      "id": "root-checkpoint-order",
+      "prompt": "A wave completes successfully and its successor is ready.",
+      "expected": ["wait for worker proof", "inspect the integrated diff on root", "run rewritten target-state checks and combined deterministic proof", "commit a scoped root checkpoint naming the Parent and exact ticket issues before releasing the successor"],
+      "forbidden": ["commit from a worker", "release the successor before the checkpoint"]
+    },
+    {
+      "id": "crash-before-checkpoint",
+      "prompt": "Root crashes after combined proof but before the checkpoint commit begins.",
+      "expected": ["reread the worktree and Git", "treat the ticket as uncommitted", "release no successor until the full root gate is repeated"],
+      "forbidden": ["infer a checkpoint from completed proof", "trust worker narration", "skip root diff inspection"]
+    },
+    {
+      "id": "lost-checkpoint-response",
+      "prompt": "The root commit command may have succeeded, but its response was lost.",
+      "expected": ["reread Git before retrying", "accept exactly one scoped checkpoint reachable from the pinned baseline whose message names the Parent and exact tickets"],
+      "forbidden": ["blindly retry the commit", "trust worker narration", "write duplicate durable run state"]
+    },
+    {
+      "id": "interrupted-or-dirty-integration",
+      "prompt": "Root is interrupted during staging and later finds ambiguous uncommitted state overlapping the ticket scope.",
+      "expected": ["leave ambiguous state untouched", "block the affected ticket", "reconstruct only from baseline, tracker, Parent, tickets, Git, and unique root checkpoints"],
+      "forbidden": ["guess ownership", "discard the state", "commit ambiguous bytes", "create duplicate workflow bookkeeping"]
+    },
+    {
+      "id": "cumulative-parent-review-mechanism",
+      "prompt": "All graph checkpoints and deterministic proof are settled at one final revision.",
+      "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch exactly two distinct fresh Spec and Standards reviewers in parallel on the identical revision", "wait for both axis-specific approvals"],
+      "forbidden": ["review only the last child", "accept a generic PASS", "reuse a reviewer context", "create durable review lifecycle state"]
+    },
+    {
+      "id": "failed-final-review-axis",
+      "prompt": "The Spec reviewer approves but the Standards reviewer fails or times out.",
+      "expected": ["block Parent completion", "report the failed Standards axis"],
+      "forbidden": ["average the verdicts", "replace the reviewer with root self-review", "mark the Parent complete"]
+    },
+    {
+      "id": "material-repair-reviews-new-revision",
+      "prompt": "A final reviewer finds a material in-scope defect and root repairs it.",
+      "expected": ["rerun affected target-state and combined deterministic proof", "launch a new parallel Spec and Standards pair on the new identical revision"],
+      "forbidden": ["reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
+    },
+    {
+      "id": "graph-delivery-stops-before-remote-git",
+      "prompt": "All local graph checkpoints and cumulative acceptance approve, but push and PR were not separately authorized.",
+      "expected": ["report local checkpoint state", "perform no push or PR"],
+      "forbidden": ["infer push authority", "open a PR", "mutate the tracker without authority"]
+    }
+  ]
+}
