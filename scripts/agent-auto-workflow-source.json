@@ -29,7 +29,6 @@
   "profiles": {
     "explorer": "explorer.toml",
     "implementer": "implementer.toml",
-    "researcher": "researcher.toml",
     "spec_reviewer": "spec-reviewer.toml",
     "standards_reviewer": "standards-reviewer.toml"
   },

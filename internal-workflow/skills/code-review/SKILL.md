@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Direct Review entrypoint for a settled diff. Substantial changes receive distinct fresh Spec and Standards reviewers in parallel.
+description: Read-only Review entrypoint for a settled diff. Substantial changes receive distinct fresh Spec and Standards reviewers in parallel.
 ---
 
 # Review
@@ -12,6 +12,9 @@ Review the settled change against two independent questions:
 - **Standards:** is it correct, maintainable, consistent with repository policy,
   and free of legacy paths, duplicate ownership, compatibility residue, or
   unnecessary machinery?
+
+Review is inspection-only. It never edits, mutates, or repairs repository state,
+regardless of whether a finding is small or material.
 
 ## Applicability
 
@@ -37,12 +40,17 @@ for Review explicitly.
 3. Capture both non-empty child identities and wait for those same children.
    A timeout, failed child, missing identity, or incomplete wait blocks approval.
    Root never substitutes self-review.
-4. Verify every concrete finding against the diff and its trigger path. Root or
-   Implement applies only in-scope repairs, reruns affected proof, and reviews
-   the new settled substantial result with a new parallel pair.
+4. Verify every concrete finding against the diff and its trigger path, preserve
+   its defect identity, and return it to the caller. Every small or material
+   repair routes through an authorized `$implement` invocation, which retains
+   its complete authority, preservation, proof, applicable fresh Review, and Git
+   lifecycle. If the current request is review-only, report the findings and
+   stop; do not invoke Implement or infer repair authority.
 5. Approval requires both completed reviewers to return `APPROVE` for the same
    target and no required proof gap. A finding, failure, timeout, or non-approval
-   blocks Review. Review itself does not stage, commit, push, or open a PR.
+   blocks Review. After authorized Implement repairs a substantial result, a new
+   parallel reviewer pair reviews the new settled target; no old approval carries
+   forward. Review itself does not edit, stage, commit, push, or open a PR.
 
 ## Reviewer Output
 
@@ -50,6 +58,7 @@ Each reviewer returns findings first with file/line, concrete trigger or missing
 obligation, impact, and evidence. If there are no findings or verification gaps,
 it ends with `APPROVE`. Otherwise it ends with `BLOCK` and the concrete reason.
 
-The coordinator returns both axes, repaired or remaining findings, proof gaps,
-and `APPROVE` only when both axes approve. Do not create durable review state,
-maps, ledgers, aliases, adapters, or compatibility routes.
+The coordinator returns both axes, findings, proof gaps, and `APPROVE` only when
+both axes approve. It reports `BLOCK` for findings without repairing them. Do not
+create durable review state, maps, ledgers, aliases, adapters, or compatibility
+routes.

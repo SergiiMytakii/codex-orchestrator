@@ -100,7 +100,7 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
-    'explorer', 'implementer', 'researcher', 'spec_reviewer', 'standards_reviewer',
+    'explorer', 'implementer', 'spec_reviewer', 'standards_reviewer',
   ]);
 });
 

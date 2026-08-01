@@ -214,7 +214,7 @@ async function assertInstalledContract(installed: string): Promise<void> {
     profiles: Record<string, string>;
   };
   assert.deepEqual(Object.keys(manifest.profiles).sort(), [
-    'explorer', 'implementer', 'researcher', 'spec_reviewer', 'standards_reviewer',
+    'explorer', 'implementer', 'spec_reviewer', 'standards_reviewer',
   ]);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {

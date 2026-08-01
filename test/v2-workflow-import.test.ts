@@ -379,7 +379,6 @@ test('fenced-only skill mention survives sync and verify without becoming a cons
   for (const [target, source] of [
     ['explorer.toml', 'explorer.toml'],
     ['implementer.toml', 'implementer.toml'],
-    ['researcher.toml', 'researcher.toml'],
     ['spec-reviewer.toml', 'spec_reviewer.toml'],
     ['standards-reviewer.toml', 'standards_reviewer.toml'],
   ]) await cp(join(repositoryRoot, 'internal-workflow', 'profiles', source), join(codexHome, 'agents', target));
