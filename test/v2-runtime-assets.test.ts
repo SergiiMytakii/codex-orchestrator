@@ -300,6 +300,7 @@ function androidConfigFixture(): AgentAutoConfig {
       labels: {
         auto: { name: 'agent:auto', color: '000000', description: 'auto' },
         running: { name: 'agent:running', color: '000001', description: 'running' },
+        waitingHuman: { name: 'agent:waiting-human', color: '000004', description: 'waiting' },
         blocked: { name: 'agent:blocked', color: '000002', description: 'blocked' },
         review: { name: 'agent:review', color: '000003', description: 'review' },
       },

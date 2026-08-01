@@ -96,7 +96,7 @@ test('prepare-labels paginates case-insensitively and creates only missing label
   };
   const result = await new Setup(base).execute({ targetRoot: root, operation: 'prepare-labels', dryRun: false });
   assert.deepEqual(result, { status: 'labels-prepared' });
-  assert.deepEqual(created, ['agent:blocked', 'agent:review']);
+  assert.deepEqual(created, ['agent:waiting-human', 'agent:blocked', 'agent:review']);
   assert.deepEqual(effects, ['lock:acquire', 'lock:release']);
 });
 
@@ -112,6 +112,7 @@ test('prepare-labels dry-run reports local and paginated GitHub actions with zer
       { kind: 'write-ignore', path: '.gitignore' },
       { kind: 'write-config', path: '.codex-orchestrator/config.json' },
       { kind: 'create-label', name: 'agent:running' },
+      { kind: 'create-label', name: 'agent:waiting-human' },
       { kind: 'create-label', name: 'agent:blocked' },
       { kind: 'create-label', name: 'agent:review' },
     ],
@@ -130,7 +131,7 @@ test('prepare-labels returns typed partial progress and always releases ownershi
   const result = await new Setup(deps).execute({ targetRoot: root, operation: 'prepare-labels', dryRun: false });
   assert.deepEqual(result, {
     status: 'labels-partial',
-    created: ['agent:auto', 'agent:running'],
+    created: ['agent:auto', 'agent:running', 'agent:waiting-human'],
     missing: ['agent:blocked', 'agent:review'],
     cause: { code: 'github-unavailable', summary: 'GitHub label creation failed.' },
   });
@@ -155,7 +156,7 @@ test('doctor and status return deterministic read-only diagnostics owned by Setu
   await setup.execute({ targetRoot: root, operation: 'configure', dryRun: false });
   effects.length = 0;
   deps.labels.listPage = async () => ({ labels: [
-    { name: 'agent:auto' }, { name: 'agent:running' }, { name: 'agent:blocked' }, { name: 'agent:review' },
+    { name: 'agent:auto' }, { name: 'agent:running' }, { name: 'agent:waiting-human' }, { name: 'agent:blocked' }, { name: 'agent:review' },
   ], nextCursor: undefined });
   for (const operation of ['doctor', 'status'] as const) {
     const result = await setup.execute({ targetRoot: root, operation, dryRun: false });

@@ -1471,8 +1471,10 @@ export function createV2Runtime(input: {
           }
         },
       });
-      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && result.status === 'passed') {
-        const artifacts = result.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
+      const passedOutcome = result.status === 'passed' ? result : result.status === 'cleanup-pending' && result.outcome.status === 'passed'
+        ? result.outcome : undefined;
+      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && passedOutcome) {
+        const artifacts = passedOutcome.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
         const copied = await git.candidateV2.copyProofArtifacts({
           materialization: proofInput.materialization,
           issueWorktreePath,

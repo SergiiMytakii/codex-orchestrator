@@ -65,7 +65,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
       'acceptance-proof', 'atomic-store', 'candidate', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
-      'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
+      'code-review-report', 'contained-report-operation', 'review-data', 'implementation-report', 'implementation-reviewer',
       'proof-report', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
       'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'workflow-assets',
     ]) {

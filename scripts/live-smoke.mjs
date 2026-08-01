@@ -551,9 +551,9 @@ async function runQualityGatesScenario(context, scenario) {
   assertResult(result, { status: 'blocked', kind: 'exhausted' }, scenario);
   const record = await readRunRecord(context, issue.number);
   if (record.cycle !== 5 || record.checks.length !== 0
-    || record.directReview?.targetRevision !== 5
-    || record.directReview.terminalOutcome?.status !== 'blocked'
-    || record.directReview.terminalOutcome.kind !== 'exhausted'
+    || record.reviewData?.targetRevision !== 5
+    || record.terminalOutcome?.status !== 'blocked'
+    || record.terminalOutcome.kind !== 'exhausted'
     || record.reworkFindings.length !== 1
     || !record.reworkFindings[0].startsWith('Check smoke failed:')) {
     throw new Error(`${scenario}: did not exhaust on the fifth configured-check failure`);

@@ -30,6 +30,11 @@ does not select product phase, route, policy, retry, budget, or publication
 sequence. `PendingEffect` owns at most one unfinished finite local, Git, or
 GitHub effect and is settled only after its exact postcondition is observed.
 
+A product decision gap uses the same finite effect model: the exact marker-bound
+question comment settles first, then the exact `agent:waiting-human` label set.
+An accepted trusted answer removes that label before the next spec revision and
+independent review. No waiting lifecycle or retry coordinator exists.
+
 For new direct-route operations, mutable issue-worktree bytes are captured through
 a private Git index into one stable tree. A package-owned synthetic commit pins
 that tree under `refs/codex-orchestrator/candidates/<runId>/<bindingId>`. Review,

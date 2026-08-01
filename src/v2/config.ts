@@ -33,6 +33,7 @@ export interface AgentAutoConfig {
     labels: {
       auto: LabelPolicy;
       running: LabelPolicy;
+      waitingHuman: LabelPolicy;
       blocked: LabelPolicy;
       review: LabelPolicy;
     };
@@ -64,12 +65,12 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
   assertGitHubOwner(value.github.owner, 'config.github.owner');
   assertGitHubRepo(value.github.repo, 'config.github.repo');
   assertNonEmptyString(value.github.baseBranch, 'config.github.baseBranch');
-  assertExactObject(value.github.labels, ['auto', 'running', 'blocked', 'review'], 'config.github.labels');
-  for (const key of ['auto', 'running', 'blocked', 'review'] as const) {
+  assertExactObject(value.github.labels, ['auto', 'running', 'waitingHuman', 'blocked', 'review'], 'config.github.labels');
+  for (const key of ['auto', 'running', 'waitingHuman', 'blocked', 'review'] as const) {
     validateLabel(value.github.labels[key], `config.github.labels.${key}`);
   }
   const labels = value.github.labels as Record<string, LabelPolicy>;
-  const labelNames = ['auto', 'running', 'blocked', 'review']
+  const labelNames = ['auto', 'running', 'waitingHuman', 'blocked', 'review']
     .map((key) => labels[key]!.name);
   if (new Set(labelNames).size !== labelNames.length) throw new Error('config.github.labels names must be distinct');
 

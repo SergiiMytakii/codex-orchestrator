@@ -335,7 +335,11 @@ test('trusted product answer advances the frozen spec without retriage or a wait
   assert.equal(first.status, 'spec-frozen', JSON.stringify(first));
   if (first.status !== 'spec-frozen' || !('questionId' in first.receipt)) return;
   assert.equal((await fixture.store.read()).runs[0]?.specDelivery?.stage, 'question');
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:waiting-human']);
   assert.equal(fixture.events.includes('agent'), false);
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'spec-frozen');
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:waiting-human']);
   fixture.comments.push({
     id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
     author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
@@ -345,6 +349,7 @@ test('trusted product answer advances the frozen spec without retriage or a wait
   assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, evidence: fixture.evidence }));
   assert.equal(fixture.events.filter((event) => event === 'route:triage').length, triageCount);
   assert.deepEqual(fixture.events.filter((event) => event === 'spec-review'), ['spec-review']);
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:review']);
   assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
 });
 
@@ -479,8 +484,9 @@ test('trusted answer is revalidated before each next spec worker and first imple
   assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
   assert.equal(fixture.events.filter((event) => event === 'spec-review').length, 1);
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
-  fixture.options.permissionSequence = ['write'];
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  fixture.options.permissionSequence = Array.from({ length: 16 }, () => 'write');
+  const completedRun = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(completedRun.status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
   assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
 });
@@ -742,8 +748,8 @@ test('malformed code review consumes one durable report-repair bit and retries b
   assert.equal(result.status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
   const record = (await fixture.store.read()).runs[0]!;
-  assert.equal(record.directReview?.review.reportRepairs, 1);
-  assert.equal(record.directReview?.status, 'clear');
+  assert.equal(record.reviewData?.reportRepairs, 1);
+  assert.equal(record.reviewData?.receipt?.verdict, 'approved');
 });
 
 test('code review gets four report-only repairs per target revision', async () => {
@@ -751,7 +757,7 @@ test('code review gets four report-only repairs per target revision', async () =
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 5);
-  assert.equal((await fixture.store.read()).runs[0]?.directReview?.review.reportRepairs, 4);
+  assert.equal((await fixture.store.read()).runs[0]?.reviewData?.reportRepairs, 4);
 });
 
 test('repeated runIssue replays the durable terminal outcome without a second claim or publication', async () => {
@@ -1058,6 +1064,10 @@ test('not eligible and revoked authorization start no implementation or publicat
   assert.equal((await ineligible.runner.runIssue({ targetRoot: ineligible.targetRoot, issueNumber: 42 })).status, 'not-eligible');
   assert.equal(ineligible.events.includes('agent'), false);
 
+  const waitingWithoutRun = await runFixture({ initialLabels: ['agent:auto', 'agent:waiting-human'] });
+  assert.equal((await waitingWithoutRun.runner.runIssue({ targetRoot: waitingWithoutRun.targetRoot, issueNumber: 42 })).status, 'not-eligible');
+  assert.equal(waitingWithoutRun.events.includes('agent'), false);
+
   const revoked = await runFixture({ revokeAtAuthorization: 1 });
   const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
   assert.deepEqual(
@@ -1120,43 +1130,6 @@ test('real old, unknown, malformed, and missing-discriminator state bytes remain
     assert.deepEqual(fixture.evidence, []);
     assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
   }
-});
-
-test('legacy terminal direct review without its discriminator is unsupported before owner lock', async () => {
-  const source = await runFixture({ reviewMalformedCount: 5 });
-  assert.equal((await source.runner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 })).status, 'internal-error');
-  const current = structuredClone(await source.store.read());
-  const run = current.runs[0]!;
-  assert.equal(run.directReview?.terminalCode, 'direct-review-report-malformed');
-  run.directReview!.review.reportRepairs = 1;
-  delete run.activeAttempt;
-  delete run.candidateMaterialization;
-
-  await mkdir(dirname(source.statePath), { recursive: true });
-  await writeFile(source.statePath, `${canonicalJson(current)}\n`);
-  const currentStore = new FileRunRecordWriter(source.statePath);
-  assert.equal((await currentStore.inspect()).status, 'supported');
-  const currentRunner = new RunIssue({ ...source.dependencies, runRecords: currentStore });
-  const currentResult = await currentRunner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 });
-  assert.equal(
-    currentResult.status,
-    'review-ready',
-    JSON.stringify({ currentResult, events: source.events, state: await currentStore.read() }),
-  );
-
-  const { terminalCode: _legacyMissing, ...legacyDirectReview } = run.directReview;
-  run.directReview = legacyDirectReview;
-  const bytes = Buffer.from(`${canonicalJson(current)}\n`);
-  const legacyFixture = await runFixture({ rawRunStateBytes: bytes });
-  assert.deepEqual(
-    await legacyFixture.runner.runIssue({ targetRoot: legacyFixture.targetRoot, issueNumber: 42 }),
-    { status: 'state-schema-unsupported' },
-  );
-  assert.deepEqual(await readFile(legacyFixture.statePath), bytes);
-  assert.deepEqual(await readdir(dirname(legacyFixture.statePath)), ['run-state.json']);
-  assert.equal(legacyFixture.events.includes('owner-acquire'), false);
-  assert.deepEqual(legacyFixture.evidence, []);
-  assert.equal(legacyFixture.events.some((event) => event.startsWith('effect:')), false);
 });
 
 test('a state identity that changes twice after owner lock requeues without effects', async () => {
@@ -1435,7 +1408,8 @@ test('failed checks and proof findings rework the same worktree until review-rea
       ? { status: 'failed', output: Buffer.from('typecheck failed') }
       : { status: 'passed', output: Buffer.from('ok') }),
   });
-  assert.equal((await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const checkResult = await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 });
+  assert.equal(checkResult.status, 'review-ready');
   assert.equal(checkFixture.events.filter((event) => event === 'agent').length, 2);
   assert.equal(checkFixture.events.filter((event) => event === 'review:code-review').length, 2);
   assert.equal((await checkFixture.store.read()).runs[0]?.cycle, 2);
@@ -1803,6 +1777,7 @@ test('post-proof candidate drift opens the next bounded cycle without a terminal
   assert.equal(reopened.cycle, 2);
   assert.equal(reopened.terminalOutcome, undefined);
   assert.equal(reopened.candidateBinding, undefined);
+  assert.equal(reopened.proofExecution, undefined);
   const retried = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(retried.status, 'review-ready', JSON.stringify({ retried, record: (await fixture.store.read()).runs[0], events: fixture.events }));
 });
@@ -1910,7 +1885,7 @@ test('safe-halt returns after one tick, preserves attempt identity, and retries 
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   const frozen = (await fixture.store.read()).runs[0]!;
-  assert.equal(frozen.lifecycle, 'safe-halt');
+  assert.equal(frozen.lifecycle, 'implementing');
   assert.equal(frozen.activeAttempt?.stage, 'launched');
   const attemptId = frozen.activeAttempt?.attemptId;
   assert.equal(frozen.cycle, 1);
@@ -1941,24 +1916,24 @@ test('safe-halt returns after one tick, preserves attempt identity, and retries 
 
 test('one bounded safe-halt observation covers every operation family without replacement or budget spend', async () => {
   const safeImplementation = (): ImplementationAgentResult => ({ kind: 'safe-halt' });
-  const cases: Array<{ name: string; options: FixtureOptions }> = [
-    { name: 'triage', options: { routeSafeHaltOnce: true } },
-    { name: 'spec-author', options: { route: 'spec-required', specAuthorSafeHaltOnce: true } },
-    { name: 'spec-review', options: { route: 'spec-required', specReviewSafeHaltOnce: true } },
-    { name: 'implementation', options: { implementationResults: [safeImplementation()] } },
-    { name: 'report-repair', options: { implementationResults: [
+  const cases: Array<{ name: string; lifecycle: string; options: FixtureOptions }> = [
+    { name: 'triage', lifecycle: 'triaging', options: { routeSafeHaltOnce: true } },
+    { name: 'spec-author', lifecycle: 'spec-authoring', options: { route: 'spec-required', specAuthorSafeHaltOnce: true } },
+    { name: 'spec-review', lifecycle: 'spec-authoring', options: { route: 'spec-required', specReviewSafeHaltOnce: true } },
+    { name: 'implementation', lifecycle: 'implementing', options: { implementationResults: [safeImplementation()] } },
+    { name: 'report-repair', lifecycle: 'implementing', options: { implementationResults: [
       { kind: 'completed', report: { version: 0, status: 'bad' } }, safeImplementation(),
     ] } },
-    { name: 'code-review', options: { reviewSafeHaltOnce: true } },
-    { name: 'configured-check', options: { checkSafeHaltOnce: true } },
-    { name: 'acceptance-proof', options: { proofSafeHaltOnce: true } },
+    { name: 'code-review', lifecycle: 'implementing', options: { reviewSafeHaltOnce: true } },
+    { name: 'configured-check', lifecycle: 'checking', options: { checkSafeHaltOnce: true } },
+    { name: 'acceptance-proof', lifecycle: 'proving', options: { proofSafeHaltOnce: true } },
   ];
   for (const entry of cases) {
     const fixture = await runFixture(entry.options);
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
     const frozen = (await fixture.store.read()).runs[0]!;
-    assert.equal(frozen.lifecycle, 'safe-halt', entry.name);
+    assert.equal(frozen.lifecycle, entry.lifecycle, entry.name);
     assert.equal(frozen.activeAttempt?.stage, 'launched', entry.name);
     const exactState = canonicalJson(await fixture.store.read());
     const attemptId = frozen.activeAttempt.attemptId;
@@ -2177,6 +2152,7 @@ async function runFixture(options: FixtureOptions = {}) {
   await execFileAsync('git', ['-C', targetRoot, 'push', '-u', 'origin', 'main']);
   const baseSha = (await execFileAsync('git', ['-C', targetRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   const events: string[] = [];
+  let reviewSessionSequence = 0;
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
   const config = configFixture();
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
@@ -2659,7 +2635,7 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
-    createReviewSessionId: () => 'code-review-session-1',
+    createReviewSessionId: () => `code-review-session-${++reviewSessionSequence}`,
     processIdentity: {
       host: 'fixture-host', bootId: 'fixture-boot',
       capture: async () => ({ kind: 'unavailable', platform: 'darwin' }),
@@ -2858,6 +2834,7 @@ function configFixture(): AgentAutoConfig {
       labels: {
         auto: label('agent:auto'),
         running: label('agent:running'),
+        waitingHuman: label('agent:waiting-human'),
         blocked: label('agent:blocked'),
         review: label('agent:review'),
       },

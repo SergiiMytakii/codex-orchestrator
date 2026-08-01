@@ -1,6 +1,6 @@
 import type { ProofReceipt } from './proof-report.js';
 import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
-import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
+import { validateReviewData, type ReviewDataV1 } from './review-data.js';
 import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
 import {
   validateRouteExecution,
@@ -35,7 +35,6 @@ export type Lifecycle =
   | 'checking'
   | 'proving'
   | 'publishing'
-  | 'safe-halt'
   | 'review-ready'
   | 'blocked'
   | 'transport-failed'
@@ -51,6 +50,7 @@ export type PendingEffect = EffectIdentity & (
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
   | { kind: 'final-labels'; issueNumber: number; expected: string[] }
+  | { kind: 'spec-waiting-labels'; issueNumber: number; expected: string[] }
   | {
     kind: 'blocked-labels';
     issueNumber: number;
@@ -145,7 +145,7 @@ export interface RunRecord {
   routeExecution?: RouteExecutionV1;
   routeReceipt?: RouteReceiptV1;
   deliveryAuthority?: DeliveryAuthorityV1;
-  directReview?: DirectReviewV1;
+  reviewData?: ReviewDataV1;
   specDelivery?: SpecDeliveryV1;
   reviewFeedback?: ReviewFeedbackRunDataV1;
   changeBindingVersion?: 2;
@@ -304,7 +304,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'routeExecution',
     'routeReceipt',
     'deliveryAuthority',
-    'directReview',
+    'reviewData',
     'specDelivery',
     'reviewFeedback',
     'changeBindingVersion',
@@ -367,17 +367,11 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'pendingEffect')) validatePendingEffect(value.pendingEffect, `${field}.pendingEffect`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
-  if (hasOwn(value, 'directReview')) {
+  if (hasOwn(value, 'reviewData')) {
     if (!hasOwn(value, 'routeReceipt') || !['direct', 'spec-required'].includes((value.routeReceipt as RouteReceiptV1).route)) {
-      throw new Error(`${field}.directReview requires a delivery authority route`);
+      throw new Error(`${field}.reviewData requires a delivery authority route`);
     }
-    validateDirectReview(value.directReview, {
-      lifecycle: value.lifecycle as string,
-      ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
-      ...(hasOwn(value, 'terminalOutcome') && (value.terminalOutcome as RunTerminalOutcome).status === 'internal-error'
-        ? { terminalCode: (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'internal-error' }>).code }
-        : {}),
-    });
+    validateReviewData(value.reviewData);
   }
   if (hasOwn(value, 'specDelivery')) {
     if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'spec-required') {
@@ -436,7 +430,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);
   }
   if (value.lifecycle === 'publishing' && !hasOwn(value, 'proofReceipt')) throw new Error(`${field} publishing requires proofReceipt`);
-  if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
     || ['review-activation-labels', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence'].includes(reviewReadyEffect);
@@ -463,13 +456,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     routeReceipt: value.routeReceipt,
     generationHash: routeGenerationHash,
   });
-}
-
-function directTerminalOutcome(outcome: RunTerminalOutcome): DirectReviewV1['terminalOutcome'] | undefined {
-  if (outcome.status === 'review-ready') return undefined;
-  return outcome.status === 'blocked'
-    ? { status: 'blocked', kind: outcome.kind }
-    : { status: outcome.status };
 }
 
 function validateWorkflowGeneration(value: unknown, field: string): asserts value is WorkflowGenerationReceipt {
@@ -558,7 +544,7 @@ function validatePendingEffect(value: unknown, field: string): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid`);
   const kind = (value as { kind?: unknown }).kind;
   const identity = ['effectId', 'kind'];
-  if (kind === 'claim-labels' || kind === 'final-labels'
+  if (kind === 'claim-labels' || kind === 'final-labels' || kind === 'spec-waiting-labels'
     ) {
     assertExactObject(value, [...identity, 'issueNumber', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -776,7 +762,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }
   if (batch && !feedback.verifiedReceipt
-    && !['implementing', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    && !['implementing', 'checking', 'proving'].includes(run.lifecycle)) {
     throw new Error(`${field}.reviewFeedback active batch has invalid lifecycle`);
   }
   if (feedback.verifiedReceipt) {
@@ -793,7 +779,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'checking', 'proving', 'publishing',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }

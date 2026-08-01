@@ -41,9 +41,14 @@ or qualification sub-lifecycle.
 
 **Spec question** — immutable spec-revision-bound GitHub question published only for a real product decision gap and returned as `spec-frozen`.
 
+The Runner settles the exact question comment and then `agent:waiting-human` as
+two finite `PendingEffect` values. A trusted answer removes the waiting label
+before the next immutable spec revision and independent review; there is no
+waiting lifecycle or retriage route.
+
 **Trusted answer** — unedited exact-prefix answer from an identity with current repository WRITE or ADMIN permission, frozen into the Run before the next spec revision and independent review; triage is not repeated.
 
-**Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved. One daemon tick makes at most one bounded process/result/cleanup observation; unresolved ownership returns a resumable projection and never holds the repository loop.
+**Safe halt** — fail-closed result used when ownership, containment, process quiescence, or effect outcome cannot be proved. The Run keeps its current phase; one daemon tick makes at most one bounded process/result/cleanup observation, and unresolved ownership returns a resumable projection without holding the repository loop.
 
 **Review-ready** — terminal successful handoff after checks, proof, and publication. It does not mean merged.
 

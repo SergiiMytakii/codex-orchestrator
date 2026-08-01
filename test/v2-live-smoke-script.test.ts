@@ -344,7 +344,7 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   assert.match(text, /expected two publishable responsive screenshots/u);
   assert.match(text, /read-only diagnostics mutated the target/u);
   assert.match(text, /did not exhaust on the fifth configured-check failure/u);
-  assert.match(text, /directReview\.terminalOutcome\.kind !== 'exhausted'/u);
+  assert.match(text, /record\.terminalOutcome\.kind !== 'exhausted'/u);
   assert.match(text, /reworkFindings\[0\]\.startsWith\('Check smoke failed:'\)/u);
   assert.match(text, /denied-path-modified/u);
   assert.match(text, /negative scenario published a branch or PR/u);

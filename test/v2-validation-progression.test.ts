@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { DeliveryAuthorityV1 } from '../src/v2/delivery-authority.js';
-import type { DirectReviewV1 } from '../src/v2/direct-delivery.js';
+import type { ReviewDataV1 } from '../src/v2/review-data.js';
 import type { ReviewFeedbackRunDataV1 } from '../src/v2/review-feedback.js';
 import { InMemoryRunRecordWriter, type RunRecord } from '../src/v2/run-store.js';
 import {
@@ -20,11 +20,11 @@ test('direct and spec authority dispatch through the same fixed validation progr
     const implementing = run('implementing', authority);
     assert.equal(nextValidationTransition(implementing, authority).phase, 'implementation');
 
-    implementing.directReview = directReview('review');
+    implementing.reviewData = reviewData(null);
     assert.equal(nextValidationTransition(implementing, authority).phase, 'full-review');
 
     implementing.lifecycle = 'checking';
-    implementing.directReview = { ...implementing.directReview, status: 'clear' };
+    implementing.reviewData = reviewData('approved');
     assert.equal(nextValidationTransition(implementing, authority).phase, 'checks');
 
     implementing.lifecycle = 'proving';
@@ -39,7 +39,7 @@ test('direct and spec authority dispatch through the same fixed validation progr
 test('post-PR feedback changes context but not validation progression ownership', () => {
   const authority = deliveryAuthority('direct');
   const record = run('implementing', authority);
-  record.directReview = directReview('review-repair');
+  record.reviewData = reviewData('approved');
   record.reviewFeedback = reviewFeedback();
 
   assert.deepEqual(nextValidationTransition(record, authority), {
@@ -55,6 +55,21 @@ test('post-PR feedback changes context but not validation progression ownership'
     },
     feedback: { batchId: 'batch-1', repairRound: 1 },
   });
+});
+
+test('Run lifecycle and durable receipt select progression without a nested review state', () => {
+  const authority = deliveryAuthority('direct');
+  const record = run('implementing', authority);
+  record.reviewData = reviewData('needs-work');
+  assert.equal(nextValidationTransition(record, authority).phase, 'implementation');
+
+  record.lifecycle = 'checking';
+  assert.throws(() => nextValidationTransition(record, authority), /approved review receipt/u);
+  record.reviewData = reviewData('approved');
+  assert.equal(nextValidationTransition(record, authority).phase, 'checks');
+
+  record.reviewData = reviewData(null);
+  assert.throws(() => nextValidationTransition(record, authority), /approved review receipt/u);
 });
 
 test('validation progression rejects mismatched authority, pending effects, and non-validation phases', () => {
@@ -90,6 +105,7 @@ test('semantic repair returns one CAS transition without a reworking lifecycle',
     checks: [],
     checkedChangeSha256: undefined,
     proofId: undefined,
+    proofExecution: undefined,
     proofReceipt: undefined,
   });
 });
@@ -177,8 +193,23 @@ function deliveryAuthority(kind: 'direct' | 'spec'): DeliveryAuthorityV1 {
     : { ...base, kind, frozenSpec: {} as Extract<DeliveryAuthorityV1, { kind: 'spec' }>['frozenSpec'] };
 }
 
-function directReview(stage: 'review' | 'review-repair'): DirectReviewV1 {
-  return { status: 'active', stage } as DirectReviewV1;
+function reviewData(receipt: 'approved' | 'needs-work' | null): ReviewDataV1 {
+  return {
+    version: 1,
+    targetRevision: 1,
+    targetFingerprint: 'e'.repeat(64),
+    reviewerSessionId: 'review-session',
+    reportRepairs: 0,
+    transportRetries: 0,
+    coverage: receipt === null ? [] : ['all'],
+    defects: receipt === 'needs-work' ? [{
+      id: 'finding-1', class: 'blocker', severity: 'high', confidence: 'high', status: 'open',
+      invariant: 'works', failure: 'broken', evidence: ['test'], repair: 'fix', affectedTargets: ['src/a.ts'],
+      introducedTargetRevision: 1, statusTargetRevision: 1, supersededBy: null,
+    }] : [],
+    receipt: receipt === null ? null : { verdict: receipt, reportSha256: 'f'.repeat(64) },
+    repairFindings: [],
+  } as unknown as ReviewDataV1;
 }
 
 function reviewFeedback(): ReviewFeedbackRunDataV1 {

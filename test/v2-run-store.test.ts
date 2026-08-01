@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
+import { createInitialReviewData } from '../src/v2/review-data.js';
 import { createDirectDeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
@@ -215,19 +215,19 @@ test('run store persists exact triaging and routed state', async () => {
   await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready' } } as RunRecord])), /route-complete|keys/u);
 });
 
-test('run store persists direct review composites and rejects them on non-direct routes', async () => {
+test('run store persists review data composites and rejects them on non-direct routes', async () => {
   const routed = directRoutedRecord();
-  const directReview = createInitialDirectReview({
+  const reviewData = createInitialReviewData({
     targetFingerprint: '7'.repeat(64), codeReviewerSessionId: 'review-session-1',
   });
   const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   const saved = await writer.compareAndSwap(0, body([{
-    ...routed, lifecycle: 'implementing', directReview,
+    ...routed, lifecycle: 'implementing', reviewData,
     deliveryAuthority: createDirectDeliveryAuthority(routed.routeReceipt!),
   }]));
-  assert.equal((saved.runs[0] as RunRecord & { directReview: typeof directReview }).directReview.stage, 'review');
+  assert.equal((saved.runs[0] as RunRecord & { reviewData: typeof reviewData }).reviewData.receipt, null);
 
-  const invalid = { ...record(), lifecycle: 'implementing' as const, directReview };
+  const invalid = { ...record(), lifecycle: 'implementing' as const, reviewData };
   const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
   await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /direct route|delivery.?authority/u);
 });

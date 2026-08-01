@@ -9,7 +9,7 @@ type CommentEffect = Extract<PendingEffect, {
 }>;
 type LabelsEffect = Extract<PendingEffect, {
   kind: 'claim-labels' | 'final-labels' | 'blocked-labels' | 'review-activation-labels'
-    | 'review-final-labels' | 'review-blocked-labels';
+    | 'review-final-labels' | 'review-blocked-labels' | 'spec-waiting-labels';
 }>;
 type CleanupEffect = Extract<PendingEffect, { kind: 'candidate-pin-release' }>;
 
@@ -54,7 +54,7 @@ export function settleCommentEffect(effect: CommentEffect, adapter: FiniteEffect
 export function settleLabelsEffect(effect: LabelsEffect, adapter: FiniteEffectAdapter): Promise<EffectSettlement> {
   assertEffect(effect, [
     'claim-labels', 'final-labels', 'blocked-labels', 'review-activation-labels',
-    'review-final-labels', 'review-blocked-labels',
+    'review-final-labels', 'review-blocked-labels', 'spec-waiting-labels',
   ], 'labels');
   return settle(adapter);
 }

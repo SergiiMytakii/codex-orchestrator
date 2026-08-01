@@ -51,7 +51,6 @@ export type RouteLifecycle =
   | 'checking'
   | 'proving'
   | 'publishing'
-  | 'safe-halt'
   | 'review-ready'
   | 'blocked'
   | 'transport-failed'
@@ -162,7 +161,6 @@ export function validateRouteStateInvariant(input: {
     if (execution.phase === 'route-complete') throw new Error('triaging route execution cannot be route-complete');
     return;
   }
-  if (input.lifecycle === 'safe-halt' && hasExecution && !hasReceipt) return void validateRouteExecution(input.routeExecution, input.generationHash);
   if (TERMINAL_LIFECYCLES.includes(input.lifecycle) && !hasExecution && !hasReceipt) return;
   if (!hasExecution || !hasReceipt) throw new Error(`${input.lifecycle} route execution and receipt are required as an exact pair`);
   const execution = validateRouteExecution(input.routeExecution, input.generationHash);
@@ -221,7 +219,7 @@ export function validateRouteTransition(
 
 const ROUTE_LIFECYCLES: RouteLifecycle[] = [
   'claimed', 'triaging', 'routed', 'implementing', 'spec-authoring', 'checking',
-  'proving', 'publishing', 'safe-halt', 'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
+  'proving', 'publishing', 'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
 ];
 
 const TERMINAL_LIFECYCLES: RouteLifecycle[] = [

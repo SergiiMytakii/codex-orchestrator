@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { canonicalJson } from './containment.js';
-import type { DirectRepairFindingV1 } from './direct-delivery.js';
+import type { DirectRepairFindingV1 } from './review-data.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;

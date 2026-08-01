@@ -160,6 +160,7 @@ The default labels are:
 | --- | --- |
 | `agent:auto` | The issue is authorized for orchestration. |
 | `agent:running` | A Runner has claimed the issue. |
+| `agent:waiting-human` | A marker-bound product question is waiting for a trusted answer. |
 | `agent:blocked` | The run stopped on an external, safety, or exhausted-budget blocker. |
 | `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 

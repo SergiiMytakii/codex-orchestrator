@@ -16,6 +16,7 @@ function validConfig(): AgentAutoConfig {
       labels: {
         auto: { name: 'agent:auto', color: '1d76db', description: 'Ready for the agent.' },
         running: { name: 'agent:running', color: 'fbca04', description: 'Agent is running.' },
+        waitingHuman: { name: 'agent:waiting-human', color: '5319e7', description: 'Agent is waiting for a trusted product answer.' },
         blocked: { name: 'agent:blocked', color: 'd93f0b', description: 'Agent needs help.' },
         review: { name: 'agent:review', color: '0e8a16', description: 'Ready for review.' },
       },
@@ -64,6 +65,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(Object.values(parsed.github.labels).map((label) => label.name), [
     'agent:auto',
     'agent:running',
+    'agent:waiting-human',
     'agent:blocked',
     'agent:review',
   ]);
