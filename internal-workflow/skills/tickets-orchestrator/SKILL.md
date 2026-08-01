@@ -71,8 +71,12 @@ require separate authority. Tracker writes also require explicit authority.
    a Parent completion claim.
 
 Root may repair only a small integration defect discovered from the integrated
-diff. New behavior, ownership, scope, or ticket boundaries are a Decision Delta
-and stop the graph.
+diff. A material in-scope defect must return to a unique fresh implementer for
+the affected existing ticket under that ticket's original bounded assignment
+and no-Git boundary. Root then integrates the worker result, reruns the affected
+proof, and creates a new scoped checkpoint before final review resumes. New
+behavior, ownership, scope, or ticket boundaries are a Decision Delta and stop
+the graph.
 
 ## Recovery
 
@@ -106,9 +110,12 @@ reviewer children in parallel on the same identical final revision:
 Capture both non-empty identities, complete both waits, and require
 axis-specific findings and `APPROVE` from each. Generic `PASS` without direct
 Parent coverage is rejected. A failed or timed-out axis blocks Parent
-completion. After a material in-scope repair, rerun affected target-state and
-combined deterministic proof, pin the new revision, and launch a new parallel
-pair; no old approval carries forward.
+completion. When either reviewer finds a material in-scope defect, assign the
+affected existing ticket to a unique fresh implementer with no Git authority.
+Root integrates the returned repair, reruns affected target-state and combined
+deterministic proof, creates the scoped checkpoint, pins the new revision, and
+launches a new parallel reviewer pair; no old approval carries forward. Root
+may directly make only a small integration repair.
 
 Deterministic checks may prove this mechanism's contract without counting as a
 real final-review activation. The real activation occurs only for the settled

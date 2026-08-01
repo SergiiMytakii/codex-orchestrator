@@ -7,7 +7,10 @@ facts, runtime constraints, and domain language remain in repository policy.
 
 - **Authority** — perform only the requested outcome and actions authorized by
   the user, Parent PRD, executable ticket, and repository policy. Planning or
-  publication never authorizes implementation, commit, push, or PR.
+  publication never authorizes implementation. Normal direct and single-ticket
+  Implement authority includes one scoped local commit after proof and
+  applicable Review unless user or repository policy explicitly forbids or
+  reserves Git. Push and PR require separate authority.
 - **Preservation** — preserve unrelated and concurrent work plus user-owned
   runtimes. Dirty overlapping or unisolatable scope blocks the affected write
   and commit.
@@ -80,9 +83,10 @@ finish with direct proof and no reviewer. Reviewer failure or timeout blocks
 approval; root does not replace independent review with self-review.
 
 Proof and applicable review must approve before staging or commit. Direct and
-single-ticket Implement creates one scoped local commit only when Git authority
-is present and the worktree is isolatable. Explicit Git restrictions override
-that default. Push and PR always require separate authority.
+single-ticket Implement creates one scoped local commit by default when the
+worktree is isolatable. Explicit user or repository policy that forbids or
+reserves Git overrides that default. Push and PR always require separate
+authority.
 
 ## Stable Roles
 

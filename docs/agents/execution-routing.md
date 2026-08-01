@@ -14,7 +14,7 @@ context unless the user explicitly asks to edit or audit that file.
 
 ## Change routing
 
-- Apply the global TDD Fit Gate in `${CODEX_HOME:-$HOME/.codex}/docs/agents/coding-skill-routing.md`; when it does not fit, use affected regression validation instead.
+- Use TDD where possible when the change has a natural public seam and can produce a meaningful pre-change failure; otherwise use affected regression validation.
 - Import, export, package, or script changes: run typecheck, focused contract tests, and `npm pack --dry-run --json`.
 - Proof changes: run the relevant proof tests and preserve credential, path, freshness, diff, and lease checks.
 - Process or authorization changes: prove the environment allowlist, process-group quiescence, and finite Runner action boundary.

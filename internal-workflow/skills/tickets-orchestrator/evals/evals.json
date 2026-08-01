@@ -70,9 +70,9 @@
     },
     {
       "id": "material-repair-reviews-new-revision",
-      "prompt": "A final reviewer finds a material in-scope defect and root repairs it.",
-      "expected": ["rerun affected target-state and combined deterministic proof", "launch a new parallel Spec and Standards pair on the new identical revision"],
-      "forbidden": ["reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
+      "prompt": "A final reviewer finds a material in-scope defect in affected existing ticket #33.",
+      "expected": ["assign ticket #33 to a unique fresh implementer with no Git authority", "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint", "launch a new distinct fresh parallel Spec and Standards pair on the new identical revision"],
+      "forbidden": ["have root implement the material defect", "reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
     },
     {
       "id": "graph-delivery-stops-before-remote-git",

@@ -11,8 +11,10 @@ create a replacement plan, spec, ticket, workflow state, or compatibility path.
 ## Kernel
 
 - **Authority:** perform only the requested outcome and authorized delivery
-  actions. Tracker publication is not implementation authority. Commit, push,
-  and PR are separate actions; push and PR are never implicit.
+  actions. Tracker publication is not implementation authority. Normal direct
+  and single-ticket Implement authority includes one scoped local commit after
+  proof and applicable Review unless user or repository policy explicitly
+  forbids or reserves Git. Push and PR are separate and never implicit.
 - **Preservation:** read repository policy and current status before edits.
   Preserve unrelated work and user-owned runtimes. Stop on overlapping dirty
   scope or a decision that changes behavior, ownership, or boundaries.
@@ -66,9 +68,10 @@ never activates the graph coordinator.
    Standards reviewers in parallel and wait for both approvals. Obvious local
    work may skip Review.
 7. After proof and every applicable review approve, create one scoped local
-   commit only when Git authority is present and the scope is isolatable. Stage
-   only owned paths and recheck that unrelated dirty paths remain unchanged. If
-   authority reserves Git to another actor, return the proven uncommitted diff.
+   commit for direct and single-ticket Implement when the scope is isolatable.
+   Stage only owned paths and recheck that unrelated dirty paths remain
+   unchanged. If user or repository policy explicitly forbids or reserves Git
+   to another actor, return the proven uncommitted diff.
 
 Missing proof, failed or timed-out review, dirty overlap, or unisolatable scope
 produces no affected staging or commit. Never push or open a PR without separate

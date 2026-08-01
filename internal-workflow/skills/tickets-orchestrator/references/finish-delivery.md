@@ -21,9 +21,14 @@ is current on the final checkpoint.
    both. Their outputs must be axis-specific and tied to the pinned revision.
    Generic `PASS`, a partial wait, reused identity, missing Parent coverage, or
    a failed or timed-out axis blocks Parent completion.
-4. Verify findings against the cumulative diff. For an in-scope material
-   repair, rerun affected target-state checks and combined deterministic proof,
-   pin the new revision, and launch a new parallel pair. Reuse no prior verdict.
+4. Verify findings against the cumulative diff. For a material in-scope defect,
+   assign a unique fresh implementer to the affected existing ticket under its
+   original bounded assignment and explicit no-Git boundary. Root integrates
+   the worker result, reruns affected target-state checks and combined
+   deterministic proof, creates a new scoped checkpoint, pins that revision,
+   and launches a new distinct fresh parallel reviewer pair. Reuse no prior
+   verdict. Root may directly make only a small integration repair; it must not
+   implement a material defect.
 5. Never substitute the last child diff, checkpoint messages, child reports,
    tracker state, or root self-review for these two completed approvals.
 
