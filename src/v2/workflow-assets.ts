@@ -167,10 +167,6 @@ export async function resolveWorkflowOperation(
   if (operation.sourceSkill && (!sourceSkillPath || !operation.files.includes(sourceSkillPath))) {
     throw new Error(`workflow operation source skill is unavailable: ${operationId}`);
   }
-  const skillIds = collectSkillDependencies(manifest.skills, [
-    ...(operation.sourceSkill ? [operation.sourceSkill] : []),
-    ...operation.dependencySkills,
-  ]);
   return {
     id: operation.id,
     workflowRoot: receipt.generationRoot,
@@ -178,7 +174,7 @@ export async function resolveWorkflowOperation(
     schemaPath: join(receipt.generationRoot, ...operation.outputSchema.split('/')),
     profilePath: join(receipt.generationRoot, ...profile.split('/')),
     sourceSkillPath: sourceSkillPath ? join(receipt.generationRoot, ...sourceSkillPath.split('/')) : undefined,
-    skillPaths: skillIds.map((id) => manifest.skills[id]!.entry).sort(compareUtf8),
+    skillPaths: operation.files.filter((path) => /^skills\/[a-z][a-z0-9-]*\/SKILL\.md$/u.test(path)),
     referencedDocumentPaths: operation.files.filter((path) => path.startsWith('docs/agents/') && path.endsWith('.md')),
     policy: structuredClone(operation.policy),
     files: operation.files.map((path) => structuredClone(manifest.files.find((file) => file.path === path)!)),
@@ -518,10 +514,10 @@ function parseManifest(value: unknown): WorkflowManifest {
 }
 
 function verifyWorkflowClosures(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
-  const expectedSkills = new Map<string, string[]>();
+  const expectedSkills: WorkflowManifest['skills'] = {};
   const visiting = new Set<string>();
-  const deriveSkill = (id: string): string[] => {
-    const cached = expectedSkills.get(id);
+  const deriveSkill = (id: string): WorkflowManifest['skills'][string] => {
+    const cached = expectedSkills[id];
     if (cached) return cached;
     if (visiting.has(id)) throw new Error(`workflow skill dependency cycle is invalid: ${id}`);
     const skill = manifest.skills[id];
@@ -530,14 +526,35 @@ function verifyWorkflowClosures(manifest: WorkflowManifest, bytesByPath: Map<str
     const prefix = `skills/${id}/`;
     const owned = [...bytesByPath.keys()].filter((path) => path.startsWith(prefix) && !path.startsWith(`${prefix}evals/`));
     verifySkillDependencyBindings(id, skill.dependencySkills, owned, bytesByPath);
-    const roots = [...owned, ...skill.dependencySkills.flatMap(deriveSkill)];
-    const files = [...new Set([...roots, ...referencedWorkflowDocuments(roots, bytesByPath)])].sort(compareUtf8);
+    const roots = [...owned, ...skill.dependencySkills.flatMap((dependency) => deriveSkill(dependency).files)];
     visiting.delete(id);
-    expectedSkills.set(id, files);
-    if (!same(skill.files, files)) throw new Error(`workflow skill reference closure is invalid: ${id}`);
-    return files;
+    expectedSkills[id] = {
+      entry: skill.entry,
+      metadata: skill.metadata,
+      dependencySkills: [...skill.dependencySkills],
+      files: [...new Set(roots)].sort(compareUtf8),
+    };
+    return expectedSkills[id]!;
   };
   for (const id of Object.keys(manifest.skills).sort(compareUtf8)) deriveSkill(id);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of Object.keys(manifest.skills).sort(compareUtf8)) {
+      const skill = manifest.skills[id]!;
+      const prefix = `skills/${id}/`;
+      const owned = [...bytesByPath.keys()].filter((path) => path.startsWith(prefix) && !path.startsWith(`${prefix}evals/`));
+      const roots = [...owned, ...skill.dependencySkills.flatMap((dependency) => expectedSkills[dependency]!.files)];
+      const files = referencedWorkflowClosure(roots, bytesByPath, expectedSkills);
+      if (!same(expectedSkills[id]!.files, files)) {
+        expectedSkills[id]!.files = files;
+        changed = true;
+      }
+    }
+  }
+  for (const [id, skill] of Object.entries(manifest.skills)) {
+    if (!same(skill.files, expectedSkills[id]!.files)) throw new Error(`workflow skill reference closure is invalid: ${id}`);
+  }
 
   for (const [id, operation] of Object.entries(manifest.operations)) {
     const skillIds = collectSkillDependencies(manifest.skills, [
@@ -549,9 +566,9 @@ function verifyWorkflowClosures(manifest: WorkflowManifest, bytesByPath: Map<str
       operation.outputSchema,
       manifest.profiles[operation.profile]!,
       ...operation.resources,
-      ...skillIds.flatMap((skill) => expectedSkills.get(skill)!),
+      ...skillIds.flatMap((skill) => expectedSkills[skill]!.files),
     ];
-    const expected = [...new Set([...roots, ...referencedWorkflowDocuments(roots, bytesByPath)])].sort(compareUtf8);
+    const expected = referencedWorkflowClosure(roots, bytesByPath, expectedSkills);
     if (!same(operation.files, expected)) throw new Error(`workflow operation reference closure is invalid: ${id}`);
   }
 }
@@ -566,7 +583,7 @@ function verifySkillDependencyBindings(
   for (const path of owned) {
     const bytes = bytesByPath.get(path);
     if (!bytes || !isTextWorkflowPath(path)) continue;
-    const text = bytes.toString('utf8');
+    const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
     for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) referenced.add(match[1] ?? match[2]!);
     for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
       const target = match[1]!;
@@ -581,36 +598,45 @@ function verifySkillDependencyBindings(
   }
 }
 
-function referencedWorkflowDocuments(seedPaths: string[], bytesByPath: Map<string, Buffer>): string[] {
-  const documents = new Set<string>();
-  const visited = new Set<string>();
-  const queue = [...seedPaths];
+function referencedWorkflowClosure(
+  seedPaths: string[],
+  bytesByPath: Map<string, Buffer>,
+  skills: WorkflowManifest['skills'],
+): string[] {
+  const closure = new Set(seedPaths);
+  const queue = [...closure];
   while (queue.length > 0) {
     const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
     const bytes = bytesByPath.get(current);
     if (!bytes || !isTextWorkflowPath(current)) continue;
-    const text = bytes.toString('utf8');
+    const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
     const references = new Set<string>();
-    for (const match of text.matchAll(/(?:docs\/agents\/|\.\.\/(?:\.\.\/)*docs\/agents\/)([A-Za-z0-9._/-]+\.md)/gu)) {
-      references.add(`docs/agents/${normalizePath(match[1]!)}`);
-    }
-    for (const match of text.matchAll(/\]\(([^)#]+\.md)(?:#[^)]+)?\)/gu)) {
+    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
       const target = match[1]!;
       if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const resolved = normalizePath(relative('/', resolve('/', dirname(current), target)).split(sep).join('/'));
-      if (resolved.startsWith('docs/agents/')) references.add(resolved);
+      references.add(normalizePath(relative('/', resolve('/', dirname(current), target)).split(sep).join('/')));
+    }
+    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
+      const skill = skills[match[1] ?? match[2]!];
+      if (skill) for (const path of skill.files) references.add(path);
     }
     for (const referenced of references) {
-      if (!bytesByPath.has(referenced)) throw new Error(`referenced workflow document is missing: ${referenced}`);
-      if (!documents.has(referenced)) {
-        documents.add(referenced);
-        queue.push(referenced);
+      if (!bytesByPath.has(referenced)) throw new Error(`referenced workflow path is missing: ${referenced}`);
+      const referencedSkill = referenced.match(/^skills\/([a-z][a-z0-9-]*)\//u)?.[1];
+      if (referencedSkill && skills[referencedSkill]) {
+        for (const path of skills[referencedSkill]!.files) add(path);
       }
+      add(referenced);
     }
   }
-  return [...documents].sort(compareUtf8);
+  return [...closure].sort(compareUtf8);
+
+  function add(path: string): void {
+    if (!closure.has(path)) {
+      closure.add(path);
+      queue.push(path);
+    }
+  }
 }
 
 function collectSkillDependencies(

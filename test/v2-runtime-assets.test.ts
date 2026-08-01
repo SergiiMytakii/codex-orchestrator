@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
@@ -130,6 +130,51 @@ test('triage snapshot carries transitive bug diagnostics and routing document cl
   assert.equal(snapshot.files.some((file) => file.path === 'skills/diagnosing-bugs/SKILL.md'), true);
   assert.equal(snapshot.files.some((file) => file.path === 'docs/agents/tool-usage.md'), true);
   await verifyRuntimeAssetSnapshot(snapshot);
+});
+
+test('operation snapshots resolve contained references and complete referenced skill closures', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-reference-closure-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const manifest = JSON.parse(await readFile(join(packageRoot, 'internal-workflow', 'manifest.json'), 'utf8')) as {
+    operations: Record<string, unknown>;
+    skills: Record<string, { entry: string; files: string[] }>;
+  };
+
+  for (const operation of Object.keys(manifest.operations)) {
+    const snapshot = await publishRuntimeAssetSnapshot({
+      workflowGeneration,
+      runtimeRoot: join(root, 'runtime'),
+      snapshotRelativePath: `runs/run-a/attempts/${operation}/snapshot`,
+      operation,
+      bootId: 'boot-a',
+    });
+    const files = new Set(snapshot.files.map((file) => file.path));
+    for (const file of snapshot.files) {
+      if (!/\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(file.path)) continue;
+      const text = (await readFile(join(snapshot.snapshotRoot, ...file.path.split('/')), 'utf8'))
+        .replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+      for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
+        const target = match[1]!;
+        if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
+        const resolved = posix.normalize(posix.join(posix.dirname(file.path), target));
+        assert.equal(files.has(resolved), true, `${operation}: unresolved ${file.path} -> ${target}`);
+      }
+      for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
+        const skillId = match[1] ?? match[2]!;
+        const skill = manifest.skills[skillId];
+        if (!skill) continue;
+        for (const path of skill.files) {
+          assert.equal(files.has(path), true, `${operation}: incomplete referenced skill ${skillId}: ${path}`);
+        }
+      }
+    }
+    await verifyRuntimeAssetSnapshot(snapshot);
+  }
 });
 
 test('contained Android proof receives only Runner-prepared evidence and no host mutation authority', async () => {

@@ -138,6 +138,7 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   const current = await evidence(root, snapshot.files);
   if (canonicalJson(current) !== canonicalJson(snapshot.files)) throw new Error('runtime asset evidence drift');
   if (contentDigest(current) !== snapshot.contentSha256) throw new Error('runtime asset content digest drift');
+  await verifyContainedReferences(root, expected, snapshot.skillPaths);
   for (const [path, expectedPath] of [
     [snapshot.operationPath, `operations/${snapshot.operation}/SKILL.md`],
     [snapshot.schemaPath, snapshot.files.find((file) => resolve(root, ...file.path.split('/')) === resolve(snapshot.schemaPath))?.path],
@@ -189,9 +190,38 @@ function validateDerivedClosure(paths: string[], files: string[], pattern: RegEx
     || (index > 0 && Buffer.compare(Buffer.from(paths[index - 1]!), Buffer.from(path)) >= 0))) {
     throw new Error(`runtime asset ${field} closure is invalid`);
   }
-  for (const path of paths) {
-    if (!files.includes(path)) throw new Error(`runtime asset ${field} is missing: ${path}`);
+  const derived = files.filter((path) => pattern.test(path));
+  if (!same(paths, derived)) throw new Error(`runtime asset ${field} closure is invalid`);
+}
+
+async function verifyContainedReferences(root: string, files: string[], skillPaths: string[]): Promise<void> {
+  const available = new Set(files);
+  const skillIds = new Set(skillPaths.map((path) => path.split('/')[1]!));
+  for (const path of files) {
+    if (!/\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(path)) continue;
+    const text = (await readRegular(join(root, ...path.split('/')))).toString('utf8')
+      .replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
+      const target = match[1]!;
+      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
+      const referenced = normalizeWorkflowReference(path, target);
+      if (!available.has(referenced)) throw new Error(`runtime asset referenced workflow path is missing: ${referenced}`);
+      const referencedSkill = referenced.match(/^skills\/([a-z][a-z0-9-]*)\//u)?.[1];
+      if (referencedSkill && !skillIds.has(referencedSkill)) {
+        throw new Error(`runtime asset referenced skill closure is missing: ${referencedSkill}`);
+      }
+    }
   }
+}
+
+function normalizeWorkflowReference(source: string, target: string): string {
+  if (!target || target.includes('\\')) throw new Error('runtime asset workflow reference is invalid');
+  const path = posix.normalize(posix.join(posix.dirname(source), target));
+  if (!path || posix.isAbsolute(path) || path === '..' || path.startsWith('../')
+    || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+    throw new Error('runtime asset workflow reference escapes snapshot');
+  }
+  return path;
 }
 
 async function evidence(root: string, records: Array<Pick<WorkflowFileRecord, 'path' | 'sha256' | 'size'>>): Promise<RuntimeAssetFileEvidence[]> {

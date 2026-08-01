@@ -103,12 +103,12 @@ test('workflow source v2 derives transitive skill and referenced document closur
   const repoRoot = join(root, 'repo');
   const outputRoot = join(root, 'output');
   const configPath = join(repoRoot, 'source.json');
-  for (const skill of ['alpha', 'beta', 'gamma']) {
+  for (const skill of ['alpha', 'beta', 'delta', 'gamma']) {
     await mkdir(join(codexHome, 'skills', skill, 'agents'), { recursive: true });
     await mkdir(join(codexHome, 'skills', skill, 'evals'), { recursive: true });
     await writeFile(join(codexHome, 'skills', skill, 'SKILL.md'), skill === 'beta'
       ? '# beta\n\nUse `gamma` and [dependency policy](../../docs/agents/dependency.md).\n'
-      : `# ${skill}\n`);
+      : skill === 'delta' ? '# delta\n\nRead [details](references/details.md).\n' : `# ${skill}\n`);
     await writeFile(join(codexHome, 'skills', skill, 'agents', 'openai.yaml'), `interface:\n  display_name: ${skill}\n`);
     await writeFile(join(codexHome, 'skills', skill, 'evals', 'evals.json'), `${JSON.stringify({
       schema_version: 1,
@@ -116,11 +116,13 @@ test('workflow source v2 derives transitive skill and referenced document closur
       cases: [{ id: `${skill}-case`, prompt: `Use ${skill}.`, expected: [`used ${skill}`], forbidden: [`ignored ${skill}`] }],
     })}\n`);
   }
+  await mkdir(join(codexHome, 'skills', 'delta', 'references'));
+  await writeFile(join(codexHome, 'skills', 'delta', 'references', 'details.md'), '# Delta details\n');
   await mkdir(join(codexHome, 'docs', 'agents'), { recursive: true });
   await mkdir(join(codexHome, 'agents'), { recursive: true });
   await mkdir(join(repoRoot, 'overlays', 'operations', 'alpha'), { recursive: true });
   await mkdir(join(repoRoot, 'overlays', 'schemas'), { recursive: true });
-  await writeFile(join(codexHome, 'docs', 'agents', 'routing.md'), '# Routing\n\nSee [beta](../../skills/beta/SKILL.md).\n');
+  await writeFile(join(codexHome, 'docs', 'agents', 'routing.md'), '# Routing\n\nSee [beta](../../skills/beta/SKILL.md) and [delta](../../skills/delta/SKILL.md).\n');
   await writeFile(join(codexHome, 'docs', 'agents', 'dependency.md'), '# Dependency policy\n\nSee [tool usage](tool-usage.md).\n');
   await writeFile(join(codexHome, 'docs', 'agents', 'tool-usage.md'), '# Tool usage\n');
   const sharedEvalPath = join(codexHome, 'docs', 'agents', 'coding-skill-evals.json');
@@ -142,9 +144,9 @@ test('workflow source v2 derives transitive skill and referenced document closur
   await writeFile(join(repoRoot, 'overlays', 'schemas', 'alpha.json'), '{}\n');
   await writeFile(configPath, `${JSON.stringify({
     version: 2,
-    personalSkills: ['alpha', 'beta', 'gamma'],
+    personalSkills: ['alpha', 'beta', 'delta', 'gamma'],
     repositorySkills: [],
-    skillDependencies: { alpha: [], beta: ['gamma'], gamma: [] },
+    skillDependencies: { alpha: [], beta: ['gamma'], delta: [], gamma: [] },
     sharedDocs: ['routing.md'],
     sharedEvals: ['coding-skill-evals.json'],
     profiles: { explorer: 'explorer.toml' },
@@ -177,6 +179,8 @@ test('workflow source v2 derives transitive skill and referenced document closur
   assert.deepEqual(manifest.operations.alpha.dependencySkills, ['beta']);
   assert.deepEqual(manifest.skills.beta.dependencySkills, ['gamma']);
   assert.equal(manifest.operations.alpha.files.includes('skills/beta/SKILL.md'), true);
+  assert.equal(manifest.operations.alpha.files.includes('skills/delta/SKILL.md'), true);
+  assert.equal(manifest.operations.alpha.files.includes('skills/delta/references/details.md'), true);
   assert.equal(manifest.operations.alpha.files.includes('skills/gamma/SKILL.md'), true);
   assert.equal(manifest.skills.beta.files.includes('docs/agents/dependency.md'), true);
   assert.equal(manifest.skills.beta.files.includes('docs/agents/tool-usage.md'), true);
@@ -188,6 +192,7 @@ test('workflow source v2 derives transitive skill and referenced document closur
     'evals/coding-skill-evals.json',
     'skills/alpha/evals/evals.json',
     'skills/beta/evals/evals.json',
+    'skills/delta/evals/evals.json',
     'skills/gamma/evals/evals.json',
   ]);
   assert.equal(await readFile(join(outputRoot, 'evals', 'coding-skill-evals.json'), 'utf8'), sharedEvalBytes);
@@ -212,6 +217,16 @@ test('workflow source v2 derives transitive skill and referenced document closur
   rehashV2Manifest(missingTransitiveSkill);
   await writeFile(join(outputRoot, 'manifest.json'), `${canonicalJson(missingTransitiveSkill)}\n`);
   await assert.rejects(execFileAsync(process.execPath, [script, 'verify', '--output-root', outputRoot]), /skill reference closure/iu);
+  await execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
+    '--config', configPath, '--output-root', outputRoot]);
+
+  const missingReferencedSkill = structuredClone(manifest);
+  const deltaFiles = new Set<string>(missingReferencedSkill.skills.delta.files);
+  missingReferencedSkill.operations.alpha.files = missingReferencedSkill.operations.alpha.files
+    .filter((path: string) => !deltaFiles.has(path));
+  rehashV2Manifest(missingReferencedSkill);
+  await writeFile(join(outputRoot, 'manifest.json'), `${canonicalJson(missingReferencedSkill)}\n`);
+  await assert.rejects(execFileAsync(process.execPath, [script, 'verify', '--output-root', outputRoot]), /operation closure/iu);
   await execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
     '--config', configPath, '--output-root', outputRoot]);
 
@@ -317,9 +332,10 @@ test('workflow sync rejects config replacement after the initial authority read'
   });
   await waitForPath(markerPath);
   await rename(replacementPath, configPath);
+  const rejected = assert.rejects(sync, /Source changed during workflow import.*source\.json/iu);
   await writeFile(releasePath, 'continue\n');
 
-  await assert.rejects(sync, /Source changed during workflow import.*source\.json/iu);
+  await rejected;
   await assert.rejects(lstat(outputRoot), { code: 'ENOENT' });
 });
 
