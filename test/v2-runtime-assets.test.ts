@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, posix } from 'node:path';
+import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
@@ -11,6 +11,7 @@ import { ContainedProofAgent, materializeReportReadView } from '../src/v2/runtim
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
 import {
+  extractContainedWorkflowReferences,
   materializeWorkflowGeneration,
   parseWorkflowExecutionProfile,
   sealedWorkflowContentSha256,
@@ -126,9 +127,38 @@ test('triage snapshot carries transitive bug diagnostics and routing document cl
   });
 
   assert.equal(snapshot.skillPaths.includes('skills/diagnosing-bugs/SKILL.md'), true);
-  assert.equal(snapshot.referencedDocumentPaths.includes('docs/agents/tool-usage.md'), true);
+  for (const path of [
+    'docs/agents/bug-workflow-routing.md',
+    'docs/agents/bugfix-quality-gate.md',
+    'docs/agents/confidence-rubric.md',
+    'docs/agents/tool-usage.md',
+  ]) assert.equal(snapshot.referencedDocumentPaths.includes(path), true, path);
   assert.equal(snapshot.files.some((file) => file.path === 'skills/diagnosing-bugs/SKILL.md'), true);
   assert.equal(snapshot.files.some((file) => file.path === 'docs/agents/tool-usage.md'), true);
+  await verifyRuntimeAssetSnapshot(snapshot);
+});
+
+test('implementation snapshot carries the bug workflow documents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-implementation-closure-'));
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot,
+    runtimeRoot: join(root, 'orchestrator'),
+    packageVersion: '2.0.1',
+    bootId: 'boot-a',
+  });
+  const snapshot = await publishRuntimeAssetSnapshot({
+    workflowGeneration,
+    runtimeRoot: join(root, 'runtime'),
+    snapshotRelativePath: 'runs/run-a/attempts/implementation/snapshot',
+    operation: 'implementation',
+    bootId: 'boot-a',
+  });
+
+  for (const path of [
+    'docs/agents/bug-workflow-routing.md',
+    'docs/agents/bugfix-quality-gate.md',
+    'docs/agents/confidence-rubric.md',
+  ]) assert.equal(snapshot.referencedDocumentPaths.includes(path), true, path);
   await verifyRuntimeAssetSnapshot(snapshot);
 });
 
@@ -156,13 +186,9 @@ test('operation snapshots resolve contained references and complete referenced s
     const files = new Set(snapshot.files.map((file) => file.path));
     for (const file of snapshot.files) {
       if (!/\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(file.path)) continue;
-      const text = (await readFile(join(snapshot.snapshotRoot, ...file.path.split('/')), 'utf8'))
-        .replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-      for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-        const target = match[1]!;
-        if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-        const resolved = posix.normalize(posix.join(posix.dirname(file.path), target));
-        assert.equal(files.has(resolved), true, `${operation}: unresolved ${file.path} -> ${target}`);
+      const text = await readFile(join(snapshot.snapshotRoot, ...file.path.split('/')), 'utf8');
+      for (const referenced of extractContainedWorkflowReferences(file.path, text)) {
+        assert.equal(files.has(referenced), true, `${operation}: unresolved ${file.path} -> ${referenced}`);
       }
       for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
         const skillId = match[1] ?? match[2]!;
@@ -322,6 +348,78 @@ test('operation snapshot rejects self-consistent closures missing derived skills
   }
 });
 
+test('runtime verifier rejects removal of Markdown, inline, and workflow-root references', async () => {
+  const referencedDocumentPaths = [
+    'docs/agents/inline.md',
+    'docs/agents/markdown.md',
+    'docs/agents/root.md',
+  ];
+  const operationText = [
+    '[markdown](../../docs/agents/markdown.md)',
+    'Apply `../../docs/agents/inline.md`.',
+    'Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/root.md`.',
+    '',
+  ].join('\n');
+  for (const missing of referencedDocumentPaths) {
+    const snapshot = await manualRuntimeSnapshot('alpha', {
+      skillPaths: [],
+      referencedDocumentPaths,
+    }, operationText);
+    await verifyRuntimeAssetSnapshot(snapshot);
+    const absolute = join(snapshot.snapshotRoot, ...missing.split('/'));
+    await chmod(join(absolute, '..'), 0o755);
+    await unlink(absolute);
+    await chmod(join(absolute, '..'), 0o555);
+    snapshot.files = snapshot.files.filter((file) => file.path !== missing);
+    snapshot.referencedDocumentPaths = snapshot.referencedDocumentPaths.filter((path) => path !== missing);
+    snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
+
+    await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /referenced workflow path is missing/iu, missing);
+  }
+});
+
+test('operation snapshot rejects self-consistent removal of referenced bug workflow documents', async () => {
+  const affected = {
+    implementation: [
+      'docs/agents/bug-workflow-routing.md',
+      'docs/agents/bugfix-quality-gate.md',
+      'docs/agents/confidence-rubric.md',
+    ],
+    triage: [
+      'docs/agents/bug-workflow-routing.md',
+      'docs/agents/bugfix-quality-gate.md',
+      'docs/agents/confidence-rubric.md',
+    ],
+  } as const;
+  for (const [operation, paths] of Object.entries(affected)) {
+    for (const missing of paths) {
+      const root = await mkdtemp(join(tmpdir(), `runtime-assets-${operation}-tamper-`));
+      const workflowGeneration = await materializeWorkflowGeneration({
+        packageRoot,
+        runtimeRoot: join(root, 'orchestrator'),
+        packageVersion: '2.0.1',
+        bootId: 'boot-a',
+      });
+      const snapshot = await publishRuntimeAssetSnapshot({
+        workflowGeneration,
+        runtimeRoot: join(root, 'runtime'),
+        snapshotRelativePath: `runs/run-a/attempts/${operation}/snapshot`,
+        operation,
+        bootId: 'boot-a',
+      });
+      const absolute = join(snapshot.snapshotRoot, ...missing.split('/'));
+      await chmod(join(absolute, '..'), 0o755);
+      await unlink(absolute);
+      await chmod(join(absolute, '..'), 0o555);
+      snapshot.files = snapshot.files.filter((file) => file.path !== missing);
+      snapshot.referencedDocumentPaths = snapshot.referencedDocumentPaths.filter((path) => path !== missing);
+      snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
+
+      await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /referenced workflow path is missing/iu, `${operation}: ${missing}`);
+    }
+  }
+});
+
 test('operation snapshot rejects a runtime root below a symlinked ancestor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-assets-ancestor-symlink-'));
   const workflowGeneration = await materializeWorkflowGeneration({
@@ -385,7 +483,7 @@ async function spawnResult(file: string, args: string[]): Promise<{ code: number
 async function manualRuntimeSnapshot(operation: string, closure: {
   skillPaths: string[];
   referencedDocumentPaths: string[];
-}) {
+}, operationText?: string) {
   const root = await realpath(await mkdtemp(join(tmpdir(), `runtime-assets-mandatory-${operation}-`)));
   const runtimeRoot = join(root, 'runtime');
   const snapshotRoot = join(runtimeRoot, 'snapshot');
@@ -400,7 +498,9 @@ async function manualRuntimeSnapshot(operation: string, closure: {
   for (const path of paths) {
     const absolute = join(snapshotRoot, ...path.split('/'));
     await mkdir(join(absolute, '..'), { recursive: true, mode: 0o755 });
-    const bytes = Buffer.from(`${path}\n`);
+    const bytes = Buffer.from(path === `operations/${operation}/SKILL.md` && operationText !== undefined
+      ? operationText
+      : `${path}\n`);
     await writeFile(absolute, bytes, { mode: 0o444 });
     files.push({
       path,

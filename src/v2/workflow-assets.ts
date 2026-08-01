@@ -11,7 +11,7 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 
 import { publishImmutableWorkflow, type ImmutableWorkflowPublishStep } from './immutable-workflow-publisher.js';
 
@@ -585,10 +585,7 @@ function verifySkillDependencyBindings(
     if (!bytes || !isTextWorkflowPath(path)) continue;
     const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
     for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) referenced.add(match[1] ?? match[2]!);
-    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1]!;
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const resolved = normalizePath(relative('/', resolve('/', dirname(path), target)).split(sep).join('/'));
+    for (const resolved of extractContainedWorkflowReferences(path, text)) {
       const dependency = resolved.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
       if (dependency) referenced.add(dependency);
     }
@@ -610,12 +607,7 @@ function referencedWorkflowClosure(
     const bytes = bytesByPath.get(current);
     if (!bytes || !isTextWorkflowPath(current)) continue;
     const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    const references = new Set<string>();
-    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1]!;
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      references.add(normalizePath(relative('/', resolve('/', dirname(current), target)).split(sep).join('/')));
-    }
+    const references = new Set(extractContainedWorkflowReferences(current, text));
     for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
       const skill = skills[match[1] ?? match[2]!];
       if (skill) for (const path of skill.files) references.add(path);
@@ -663,6 +655,40 @@ function isTextWorkflowPath(path: string): boolean {
   return /\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(path);
 }
 
+export function extractContainedWorkflowReferences(source: string, text: string): string[] {
+  const content = text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+  const targets: string[] = [];
+  for (const match of content.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) targets.push(match[1]!);
+  for (const match of content.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
+    targets.push(match[1]!);
+  }
+  for (const match of content.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
+    targets.push(`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/${match[1]!}`);
+  }
+  const references = new Set<string>();
+  for (const target of targets) {
+    const normalized = normalizeWorkflowReference(source, target);
+    if (normalized) references.add(normalized);
+  }
+  return [...references].sort(compareUtf8);
+}
+
+function normalizeWorkflowReference(source: string, target: string): string | undefined {
+  if (!target || target.includes('\\')) throw new Error(`invalid workflow reference in ${source}: ${target}`);
+  const workflowRoot = '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/';
+  let path: string;
+  if (target.startsWith(workflowRoot)) path = posix.normalize(target.slice(workflowRoot.length));
+  else {
+    if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) return undefined;
+    path = posix.normalize(posix.join(posix.dirname(source), target));
+  }
+  if (!path || posix.isAbsolute(path) || path === '..' || path.startsWith('../')
+    || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+    throw new Error(`workflow reference escapes root in ${source}: ${target}`);
+  }
+  return normalizePath(path);
+}
+
 function verifyEvalBytes(manifest: WorkflowManifest, bytesByPath: Map<string, Buffer>): void {
   const caseIds = new Set<string>();
   for (const [id, entry] of Object.entries(manifest.evals)) {
@@ -691,12 +717,7 @@ function verifyOperationEntryBindings(manifest: WorkflowManifest, bytesByPath: M
   for (const [id, operation] of Object.entries(manifest.operations)) {
     const entryBytes = bytesByPath.get(operation.entry);
     if (!entryBytes) throw new Error(`workflow operation entry bytes are missing: ${id}`);
-    const linked = new Set<string>();
-    for (const match of entryBytes.toString('utf8').matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1]!;
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      linked.add(normalizePath(relative('/', resolve('/', dirname(operation.entry), target)).split(sep).join('/')));
-    }
+    const linked = new Set(extractContainedWorkflowReferences(operation.entry, entryBytes.toString('utf8')));
     const required = [
       ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, manifest.skills[operation.sourceSkill]!.entry]]),
       ...operation.dependencySkills.map((skill) => [skill, manifest.skills[skill]!.entry]),

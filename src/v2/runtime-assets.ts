@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, stat, writeFile } from 'n
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 
 import {
+  extractContainedWorkflowReferences,
   resolveWorkflowOperation,
   sealedWorkflowContentSha256,
   sealedWorkflowMode,
@@ -199,12 +200,8 @@ async function verifyContainedReferences(root: string, files: string[], skillPat
   const skillIds = new Set(skillPaths.map((path) => path.split('/')[1]!));
   for (const path of files) {
     if (!/\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(path)) continue;
-    const text = (await readRegular(join(root, ...path.split('/')))).toString('utf8')
-      .replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1]!;
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const referenced = normalizeWorkflowReference(path, target);
+    const text = (await readRegular(join(root, ...path.split('/')))).toString('utf8');
+    for (const referenced of extractContainedWorkflowReferences(path, text)) {
       if (!available.has(referenced)) throw new Error(`runtime asset referenced workflow path is missing: ${referenced}`);
       const referencedSkill = referenced.match(/^skills\/([a-z][a-z0-9-]*)\//u)?.[1];
       if (referencedSkill && !skillIds.has(referencedSkill)) {
@@ -212,16 +209,6 @@ async function verifyContainedReferences(root: string, files: string[], skillPat
       }
     }
   }
-}
-
-function normalizeWorkflowReference(source: string, target: string): string {
-  if (!target || target.includes('\\')) throw new Error('runtime asset workflow reference is invalid');
-  const path = posix.normalize(posix.join(posix.dirname(source), target));
-  if (!path || posix.isAbsolute(path) || path === '..' || path.startsWith('../')
-    || path.split('/').some((part) => !part || part === '.' || part === '..')) {
-    throw new Error('runtime asset workflow reference escapes snapshot');
-  }
-  return path;
 }
 
 async function evidence(root: string, records: Array<Pick<WorkflowFileRecord, 'path' | 'sha256' | 'size'>>): Promise<RuntimeAssetFileEvidence[]> {

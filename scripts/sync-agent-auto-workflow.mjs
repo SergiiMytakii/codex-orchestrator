@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
@@ -395,33 +395,26 @@ async function collectSharedDocs(initial, codexHome, entries) {
   const root = join(codexHome, 'docs', 'agents');
   const queued = new Set(initial.map(normalizePath));
   const queue = [...queued];
-  const seedTexts = [...entries.values()].filter((entry) => isText('x.md')).map((entry) => entry.bytes.toString('utf8'));
-  for (const text of seedTexts) for (const path of referencedAgentDocs(text)) enqueue(path);
+  for (const [source, entry] of entries) {
+    if (!isText(source)) continue;
+    for (const path of extractContainedWorkflowReferences(source, entry.bytes.toString('utf8'))) enqueueAgentDoc(path);
+  }
   while (queue.length > 0) {
     const current = queue.shift();
     const path = await requireContainedFile(join(root, ...current.split('/')), root);
     const text = await readFile(path, 'utf8');
-    for (const match of text.matchAll(/\]\(([^)#]+\.md)(?:#[^)]+)?\)/gu)) {
-      const target = match[1];
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const absolute = resolve(dirname(path), target);
-      if (absolute === root || !absolute.startsWith(`${root}${sep}`)) continue;
-      const resolved = normalizePath(relative(root, absolute).split(sep).join('/'));
-      enqueue(resolved);
-    }
+    for (const referenced of extractContainedWorkflowReferences(`docs/agents/${current}`, text)) enqueueAgentDoc(referenced);
   }
   return [...queued].sort(compareUtf8);
+
+  function enqueueAgentDoc(path) {
+    if (path.startsWith('docs/agents/') && path.endsWith('.md')) enqueue(path.slice('docs/agents/'.length));
+  }
 
   function enqueue(path) {
     const normalized = normalizePath(path);
     if (!queued.has(normalized)) { queued.add(normalized); queue.push(normalized); }
   }
-}
-
-function referencedAgentDocs(text) {
-  const result = [];
-  for (const match of text.matchAll(/(?:docs\/agents\/|\.\.\/(?:\.\.\/)*docs\/agents\/)([A-Za-z0-9._/-]+\.md)/gu)) result.push(match[1]);
-  return result;
 }
 
 function referencedWorkflowClosure(seedPaths, entries, skills) {
@@ -431,13 +424,8 @@ function referencedWorkflowClosure(seedPaths, entries, skills) {
     const current = queue.shift();
     const entry = entries.get(current);
     if (!entry || !isText(current)) continue;
-    const text = entry.bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    const referenced = new Set();
-    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1];
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      referenced.add(normalizePath(relative('/', resolve('/', dirname(current), target)).split(sep).join('/')));
-    }
+    const text = entry.bytes.toString('utf8');
+    const referenced = new Set(extractContainedWorkflowReferences(current, text));
     for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
       const skill = skills[match[1] ?? match[2]];
       if (skill) for (const path of skill.files) referenced.add(path);
@@ -459,6 +447,40 @@ function referencedWorkflowClosure(seedPaths, entries, skills) {
       queue.push(path);
     }
   }
+}
+
+function extractContainedWorkflowReferences(source, text) {
+  const content = text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+  const targets = [];
+  for (const match of content.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) targets.push(match[1]);
+  for (const match of content.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
+    targets.push(match[1]);
+  }
+  for (const match of content.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
+    targets.push(`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/${match[1]}`);
+  }
+  const references = new Set();
+  for (const target of targets) {
+    const normalized = normalizeWorkflowReference(source, target);
+    if (normalized) references.add(normalized);
+  }
+  return [...references].sort(compareUtf8);
+}
+
+function normalizeWorkflowReference(source, target) {
+  if (!target || target.includes('\\')) throw new Error(`Invalid workflow reference in ${source}: ${target}`);
+  const workflowRoot = '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/';
+  let path;
+  if (target.startsWith(workflowRoot)) path = posix.normalize(target.slice(workflowRoot.length));
+  else {
+    if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) return undefined;
+    path = posix.normalize(posix.join(posix.dirname(source), target));
+  }
+  if (!path || posix.isAbsolute(path) || path === '..' || path.startsWith('../')
+    || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+    throw new Error(`Workflow reference escapes root in ${source}: ${target}`);
+  }
+  return normalizePath(path);
 }
 
 function adaptText(text, codexHome, adaptations) {
@@ -541,12 +563,8 @@ async function recheckExpectedSources(expected) {
 function validateReferences(entries) {
   for (const [path, entry] of entries) {
     if (!/\.(?:md|yaml|yml)$/iu.test(path)) continue;
-    const text = entry.bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    for (const match of text.matchAll(/\]\(([^)#]+\.(?:md|mjs|yaml|yml))(?:#[^)]+)?\)/gu)) {
-      const target = match[1];
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const resolved = normalizePath(relative('/', resolve('/', dirname(path), target)).split(sep).join('/'));
-      if (!entries.has(resolved)) throw new Error(`Broken packaged reference in ${path}: ${target}`);
+    for (const resolved of extractContainedWorkflowReferences(path, entry.bytes.toString('utf8'))) {
+      if (!entries.has(resolved)) throw new Error(`Broken packaged reference in ${path}: ${resolved}`);
     }
   }
 }

@@ -7,12 +7,38 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import {
+  extractContainedWorkflowReferences,
   loadPackageWorkflow,
   materializeWorkflowGeneration,
   verifyWorkflowGeneration,
 } from '../src/v2/workflow-assets.js';
 
 const packageRoot = join(import.meta.dirname, '..', '..');
+
+test('workflow reference extraction recognizes supported forms and rejects root escape', () => {
+  const source = 'skills/alpha/SKILL.md';
+  assert.deepEqual(extractContainedWorkflowReferences(source, [
+    '[markdown](../../docs/agents/markdown.md#details)',
+    'Apply `../../docs/agents/inline.md`.',
+    'Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/root.md`.',
+    '[external](https://example.invalid/external.md)',
+    '```md',
+    '`../../../ignored-fenced.md`',
+    '```',
+  ].join('\n')), [
+    'docs/agents/inline.md',
+    'docs/agents/markdown.md',
+    'docs/agents/root.md',
+  ]);
+  assert.throws(
+    () => extractContainedWorkflowReferences(source, '`../../../outside.md`'),
+    /escapes root/iu,
+  );
+  assert.throws(
+    () => extractContainedWorkflowReferences(source, '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/../outside.md'),
+    /escapes root/iu,
+  );
+});
 
 test('workflow generation materializes one immutable concurrent winner and survives package source mutation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-'));
@@ -49,14 +75,18 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
     'diagnosing-bugs', 'tdd',
   ]);
   assert.equal(loaded.manifest.operations.implementation.sourceSkill, 'implement');
-  assert.equal(loaded.manifest.operations.implementation.files.includes('docs/agents/confidence-rubric.md'), false);
+  for (const path of [
+    'docs/agents/bug-workflow-routing.md',
+    'docs/agents/bugfix-quality-gate.md',
+    'docs/agents/confidence-rubric.md',
+  ]) assert.equal(loaded.manifest.operations.implementation.files.includes(path), true, path);
   assert.equal(loaded.manifest.operations.triage.sourceSkill, 'plan');
   assert.deepEqual(loaded.manifest.skills['bug-root-cause-explainer'].dependencySkills, ['diagnosing-bugs']);
   for (const path of [
     'docs/agents/bug-workflow-routing.md',
     'docs/agents/bugfix-quality-gate.md',
     'docs/agents/confidence-rubric.md',
-  ]) assert.equal(loaded.manifest.operations.triage.files.includes(path), false, path);
+  ]) assert.equal(loaded.manifest.operations.triage.files.includes(path), true, path);
   for (const path of [
     'docs/agents/tool-usage.md',
     'skills/diagnosing-bugs/SKILL.md',
@@ -134,6 +164,42 @@ test('workflow loader rejects canonically rehashed V2 bytes whose adapter omits 
   await writeFile(manifestPath, `${canonicalJson(manifest)}\n`);
 
   await assert.rejects(loadPackageWorkflow(copiedPackage), /does not reference declared dependency tdd/iu);
+});
+
+test('workflow loader rejects canonically rehashed production closures missing bug workflow documents', async () => {
+  const affected = {
+    implementation: [
+      'docs/agents/bug-workflow-routing.md',
+      'docs/agents/bugfix-quality-gate.md',
+      'docs/agents/confidence-rubric.md',
+    ],
+    triage: [
+      'docs/agents/bug-workflow-routing.md',
+      'docs/agents/bugfix-quality-gate.md',
+      'docs/agents/confidence-rubric.md',
+    ],
+  } as const;
+  for (const [operation, paths] of Object.entries(affected)) {
+    for (const missing of paths) {
+      const root = await mkdtemp(join(tmpdir(), `workflow-assets-${operation}-closure-`));
+      const copiedPackage = join(root, 'package');
+      const workflowRoot = join(copiedPackage, 'internal-workflow');
+      await cp(join(packageRoot, 'internal-workflow'), workflowRoot, { recursive: true });
+      await loadPackageWorkflow(copiedPackage);
+      const manifestPath = join(workflowRoot, 'manifest.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, any>;
+      manifest.operations[operation].files = manifest.operations[operation].files
+        .filter((path: string) => path !== missing);
+      rehashV2Manifest(manifest);
+      await writeFile(manifestPath, `${canonicalJson(manifest)}\n`);
+
+      await assert.rejects(
+        loadPackageWorkflow(copiedPackage),
+        new RegExp(`workflow operation closure is invalid: ${operation}`, 'iu'),
+        `${operation}: ${missing}`,
+      );
+    }
+  }
 });
 
 test('workflow loader binds exact operation mappings and canonical manifest bytes', async () => {
@@ -249,6 +315,10 @@ function rehashV2File(manifest: Record<string, any>, path: string, bytes: Buffer
   file.sha256 = createHash('sha256').update(bytes).digest('hex');
   manifest.sourceFingerprint = createHash('sha256')
     .update(Buffer.from(`codex-orchestrator-workflow-source-v2\0${canonicalJson({ files: manifest.files })}`)).digest('hex');
+  rehashV2Manifest(manifest);
+}
+
+function rehashV2Manifest(manifest: Record<string, any>): void {
   manifest.generationHash = '';
   manifest.generationHash = createHash('sha256')
     .update(Buffer.from(`codex-orchestrator-workflow-generation-v2\0${canonicalJson(manifest)}`)).digest('hex');

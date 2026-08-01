@@ -107,7 +107,14 @@ test('workflow source v2 derives transitive skill and referenced document closur
     await mkdir(join(codexHome, 'skills', skill, 'agents'), { recursive: true });
     await mkdir(join(codexHome, 'skills', skill, 'evals'), { recursive: true });
     await writeFile(join(codexHome, 'skills', skill, 'SKILL.md'), skill === 'beta'
-      ? '# beta\n\nUse `gamma` and [dependency policy](../../docs/agents/dependency.md).\n'
+      ? [
+        '# beta',
+        '',
+        'Use `gamma` and [dependency policy](../../docs/agents/dependency.md).',
+        'Apply `../../docs/agents/bugfix-quality-gate.md` and',
+        '`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/confidence-rubric.md`.',
+        '',
+      ].join('\n')
       : skill === 'delta' ? '# delta\n\nRead [details](references/details.md).\n' : `# ${skill}\n`);
     await writeFile(join(codexHome, 'skills', skill, 'agents', 'openai.yaml'), `interface:\n  display_name: ${skill}\n`);
     await writeFile(join(codexHome, 'skills', skill, 'evals', 'evals.json'), `${JSON.stringify({
@@ -125,6 +132,8 @@ test('workflow source v2 derives transitive skill and referenced document closur
   await writeFile(join(codexHome, 'docs', 'agents', 'routing.md'), '# Routing\n\nSee [beta](../../skills/beta/SKILL.md) and [delta](../../skills/delta/SKILL.md).\n');
   await writeFile(join(codexHome, 'docs', 'agents', 'dependency.md'), '# Dependency policy\n\nSee [tool usage](tool-usage.md).\n');
   await writeFile(join(codexHome, 'docs', 'agents', 'tool-usage.md'), '# Tool usage\n');
+  await writeFile(join(codexHome, 'docs', 'agents', 'bugfix-quality-gate.md'), '# Bugfix quality gate\n');
+  await writeFile(join(codexHome, 'docs', 'agents', 'confidence-rubric.md'), '# Confidence rubric\n');
   const sharedEvalPath = join(codexHome, 'docs', 'agents', 'coding-skill-evals.json');
   const sharedEval = {
     schema_version: 1,
@@ -184,8 +193,12 @@ test('workflow source v2 derives transitive skill and referenced document closur
   assert.equal(manifest.operations.alpha.files.includes('skills/gamma/SKILL.md'), true);
   assert.equal(manifest.skills.beta.files.includes('docs/agents/dependency.md'), true);
   assert.equal(manifest.skills.beta.files.includes('docs/agents/tool-usage.md'), true);
+  assert.equal(manifest.skills.beta.files.includes('docs/agents/bugfix-quality-gate.md'), true);
+  assert.equal(manifest.skills.beta.files.includes('docs/agents/confidence-rubric.md'), true);
   assert.equal(manifest.operations.alpha.files.includes('docs/agents/dependency.md'), true);
   assert.equal(manifest.operations.alpha.files.includes('docs/agents/tool-usage.md'), true);
+  assert.equal(manifest.operations.alpha.files.includes('docs/agents/bugfix-quality-gate.md'), true);
+  assert.equal(manifest.operations.alpha.files.includes('docs/agents/confidence-rubric.md'), true);
   assert.equal(manifest.operations.alpha.files.includes('docs/agents/routing.md'), true);
   assert.equal(manifest.operations.alpha.files.some((path: string) => path.includes('/evals/')), false);
   assert.deepEqual(Object.values(manifest.evals).map((entry: any) => entry.path).sort(), [
