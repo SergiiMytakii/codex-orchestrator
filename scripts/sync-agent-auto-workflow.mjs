@@ -165,12 +165,11 @@ async function buildExpected(input) {
   validateNoAmbientPaths(entries, codexHome);
 
   const skills = {};
-  const sharedDocFiles = [...entries.keys()].filter((path) => path.startsWith('docs/agents/')).sort(compareUtf8);
   for (const skill of [...config.repositorySkills, ...config.personalSkills].sort(compareUtf8)) {
     const prefix = `skills/${skill}/`;
     const owned = [...entries.keys()].filter((path) => path.startsWith(prefix)
       && !path.startsWith(`${prefix}evals/`));
-    const files = owned.sort(compareUtf8);
+    const files = [...new Set([...owned, ...referencedWorkflowDocs(owned, entries)])].sort(compareUtf8);
     const entry = `${prefix}SKILL.md`;
     const metadata = `${prefix}agents/openai.yaml`;
     if (!entries.has(entry) || !entries.has(metadata)) throw new Error(`Skill ${skill} is missing SKILL.md or agents/openai.yaml.`);
@@ -355,6 +354,25 @@ function referencedAgentDocs(text) {
   return result;
 }
 
+function referencedWorkflowDocs(seedPaths, entries) {
+  const documents = new Set();
+  const visited = new Set();
+  const queue = [...seedPaths];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const entry = entries.get(current);
+    if (!entry || !isText(current)) continue;
+    for (const referenced of referencedAgentDocs(entry.bytes.toString('utf8'))) {
+      const path = `docs/agents/${normalizePath(referenced)}`;
+      if (!entries.has(path)) throw new Error(`Referenced workflow document is missing: ${path}`);
+      if (!documents.has(path)) { documents.add(path); queue.push(path); }
+    }
+  }
+  return [...documents].sort(compareUtf8);
+}
+
 function adaptText(text, codexHome, adaptations) {
   let output = text;
   for (const adaptation of adaptations) {
@@ -517,6 +535,10 @@ function validateGeneratedAuthority(manifest, physical, tree) {
     if (skill.entry !== `skills/${id}/SKILL.md` || skill.metadata !== `skills/${id}/agents/openai.yaml`) throw new Error(`Workflow skill binding is invalid: ${id}`);
     validateClosure(skill.files, physical, `skill ${id}`);
     if (!skill.files.includes(skill.entry) || !skill.files.includes(skill.metadata)) throw new Error(`Workflow skill closure is invalid: ${id}`);
+    const prefix = `skills/${id}/`;
+    const owned = [...tree.keys()].filter((path) => path.startsWith(prefix) && !path.startsWith(`${prefix}evals/`));
+    const expected = [...new Set([...owned, ...referencedWorkflowDocs(owned, tree)])].sort(compareUtf8);
+    if (canonicalJson(skill.files) !== canonicalJson(expected)) throw new Error(`Workflow skill reference closure is invalid: ${id}`);
   }
   for (const [id, path] of Object.entries(manifest.profiles)) {
     if (path !== `profiles/${id}.toml` || !physical.has(path)) throw new Error(`Workflow profile binding is invalid: ${id}`);

@@ -17,6 +17,7 @@
   "repositorySkills": ["acceptance-proof"],
   "sharedDocs": [
     "bug-workflow-routing.md",
+    "bugfix-quality-gate.md",
     "coding-skill-routing.md",
     "confidence-rubric.md",
     "tool-usage.md"

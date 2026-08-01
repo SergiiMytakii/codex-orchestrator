@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -49,6 +49,9 @@ test('builds the exact contained argv and allowlisted process environment withou
     assert.equal(captured?.args.some((arg) => arg.includes('skills.include_instructions=false')), true);
     assert.equal(captured?.args.some((arg) => arg.includes('features.apps=false')), true);
     assert.equal(captured?.args.some((arg) => arg.includes('web_search="disabled"')), true);
+    assert.equal(captured?.args.includes(
+      `shell_environment_policy.set.CODEX_ORCHESTRATOR_WORKFLOW_ROOT=${JSON.stringify(dirname(dirname(fixture.schemaPath)))}`,
+    ), true);
     assert.equal(captured?.args.some((arg) => /collab|spawn_agent|multi_agent/iu.test(arg)), false);
     assert.deepEqual(Object.keys(captured?.env ?? {}).sort(), ['CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']);
     assert.equal(Object.values(captured?.env ?? {}).includes('ambient-secret'), false);
@@ -476,13 +479,15 @@ async function withRunFixture(
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-process-'));
   try {
-    const schemaPath = join(root, 'schema.json');
+    const schemaPath = join(root, 'snapshot', 'schemas', 'schema.json');
     const reportPath = join(root, 'report.json');
     const toolHome = join(root, 'tool-home');
     const attemptTmp = join(root, 'tmp');
     const parentCodexHome = join(root, 'parent-codex-home');
     const safePath = '/usr/bin:/bin';
-    await Promise.all([mkdir(toolHome), mkdir(attemptTmp), mkdir(parentCodexHome)]);
+    await Promise.all([
+      mkdir(dirname(schemaPath), { recursive: true }), mkdir(toolHome), mkdir(attemptTmp), mkdir(parentCodexHome),
+    ]);
     await writeFile(schemaPath, '{}\n');
     const parentEnv: NodeJS.ProcessEnv = {
       HOME: join(root, 'parent-home'),

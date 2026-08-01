@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,7 +10,12 @@ import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/
 import { ContainedProofAgent, materializeReportReadView } from '../src/v2/runtime.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
-import { materializeWorkflowGeneration, parseWorkflowExecutionProfile } from '../src/v2/workflow-assets.js';
+import {
+  materializeWorkflowGeneration,
+  parseWorkflowExecutionProfile,
+  sealedWorkflowContentSha256,
+  type WorkflowFileRecord,
+} from '../src/v2/workflow-assets.js';
 
 const packageRoot = join(import.meta.dirname, '..', '..');
 const execFileAsync = promisify(execFile);
@@ -232,6 +237,28 @@ test('operation snapshot fails closed on tamper, path escape, and undeclared ope
   await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /hash|evidence|drift/iu);
 });
 
+test('operation snapshot rejects self-consistent closures missing mandatory workflow references', async () => {
+  for (const [operation, mandatoryReferences] of Object.entries({
+    implementation: ['docs/agents/confidence-rubric.md'],
+    triage: [
+      'docs/agents/bug-workflow-routing.md',
+      'docs/agents/bugfix-quality-gate.md',
+      'docs/agents/confidence-rubric.md',
+    ],
+  })) {
+    for (const missing of mandatoryReferences) {
+      const snapshot = await manualRuntimeSnapshot(operation, mandatoryReferences);
+      await verifyRuntimeAssetSnapshot(snapshot);
+      await chmod(join(snapshot.snapshotRoot, 'docs', 'agents'), 0o755);
+      await unlink(join(snapshot.snapshotRoot, ...missing.split('/')));
+      await chmod(join(snapshot.snapshotRoot, 'docs', 'agents'), 0o555);
+      snapshot.files = snapshot.files.filter((file) => file.path !== missing);
+      snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
+      await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /mandatory.*reference|closure/iu, `${operation}: ${missing}`);
+    }
+  }
+});
+
 test('operation snapshot rejects a runtime root below a symlinked ancestor', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-assets-ancestor-symlink-'));
   const workflowGeneration = await materializeWorkflowGeneration({
@@ -290,6 +317,67 @@ async function spawnResult(file: string, args: string[]): Promise<{ code: number
     child.once('error', rejectExit);
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
+}
+
+async function manualRuntimeSnapshot(operation: string, mandatoryReferences: string[]) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), `runtime-assets-mandatory-${operation}-`)));
+  const runtimeRoot = join(root, 'runtime');
+  const snapshotRoot = join(runtimeRoot, 'snapshot');
+  const paths = [
+    `operations/${operation}/SKILL.md`,
+    `schemas/${operation}.json`,
+    'profiles/fixture.toml',
+    ...mandatoryReferences,
+  ].sort();
+  const files = [];
+  for (const path of paths) {
+    const absolute = join(snapshotRoot, ...path.split('/'));
+    await mkdir(join(absolute, '..'), { recursive: true, mode: 0o755 });
+    const bytes = Buffer.from(`${path}\n`);
+    await writeFile(absolute, bytes, { mode: 0o444 });
+    files.push({
+      path,
+      mode: 0o644,
+      size: bytes.length,
+      sha256: sha256(bytes),
+      sealedMode: 0o444,
+      ownerUid: process.getuid!(),
+    });
+  }
+  for (const directory of [
+    join(snapshotRoot, 'operations', operation), join(snapshotRoot, 'operations'),
+    join(snapshotRoot, 'schemas'), join(snapshotRoot, 'profiles'),
+    join(snapshotRoot, 'docs', 'agents'), join(snapshotRoot, 'docs'), snapshotRoot,
+  ]) await chmod(directory, 0o555);
+  return {
+    packageVersion: 'fixture',
+    generationHash: 'a'.repeat(64),
+    operation,
+    runtimeRoot,
+    snapshotRoot,
+    operationPath: join(snapshotRoot, 'operations', operation, 'SKILL.md'),
+    schemaPath: join(snapshotRoot, 'schemas', `${operation}.json`),
+    profilePath: join(snapshotRoot, 'profiles', 'fixture.toml'),
+    policy: operation === 'triage'
+      ? {
+        sandboxMode: 'read-only' as const, cwdClass: 'worktree' as const, worktreeAccess: 'read-only' as const,
+        writableRootClasses: [], runnerPostcondition: 'report-only' as const, network: 'deny' as const,
+        networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false as const,
+      }
+      : {
+        sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
+        writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const, network: 'deny' as const,
+        networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false as const,
+      },
+    ownerUid: process.getuid!(),
+    files: files as Array<WorkflowFileRecord & { sealedMode: number; ownerUid: number }>,
+    contentSha256: runtimeContentSha256(files),
+    reused: false,
+  };
+}
+
+function runtimeContentSha256(files: Array<{ path: string; sealedMode: number; size: number; sha256: string }>): string {
+  return sealedWorkflowContentSha256(files.map(({ path, sealedMode, size, sha256 }) => ({ path, sealedMode, size, sha256 })));
 }
 
 function androidConfigFixture(): AgentAutoConfig {

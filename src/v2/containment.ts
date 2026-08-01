@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
@@ -68,6 +69,8 @@ export function buildContainmentCodexArgs(input: {
     `shell_environment_policy.set.PATH=${tomlString(input.safePath)}`,
     '-c',
     `shell_environment_policy.set.TMPDIR=${tomlString(input.tmpDir)}`,
+    '-c',
+    `shell_environment_policy.set.CODEX_ORCHESTRATOR_WORKFLOW_ROOT=${tomlString(dirname(dirname(input.schemaPath)))}`,
     '-c',
     'shell_environment_policy.set.LANG="C.UTF-8"',
     '-c',

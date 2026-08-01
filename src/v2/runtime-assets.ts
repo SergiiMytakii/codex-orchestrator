@@ -15,6 +15,14 @@ import {
 import { publishImmutableWorkflow, type ImmutableWorkflowPublishStep } from './immutable-workflow-publisher.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const MANDATORY_OPERATION_REFERENCES: Readonly<Record<string, readonly string[]>> = {
+  implementation: ['docs/agents/confidence-rubric.md'],
+  triage: [
+    'docs/agents/bug-workflow-routing.md',
+    'docs/agents/bugfix-quality-gate.md',
+    'docs/agents/confidence-rubric.md',
+  ],
+};
 
 export interface RuntimeAssetFileEvidence extends WorkflowFileRecord {
   sealedMode: number;
@@ -132,6 +140,9 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
   const actual = await listFiles(root);
   const expected = snapshot.files.map((file) => file.path);
   if (!same(actual, expected)) throw new Error('runtime asset file closure drift');
+  for (const path of MANDATORY_OPERATION_REFERENCES[snapshot.operation] ?? []) {
+    if (!expected.includes(path)) throw new Error(`runtime asset mandatory reference is missing: ${snapshot.operation}:${path}`);
+  }
   const current = await evidence(root, snapshot.files);
   if (canonicalJson(current) !== canonicalJson(snapshot.files)) throw new Error('runtime asset evidence drift');
   if (contentDigest(current) !== snapshot.contentSha256) throw new Error('runtime asset content digest drift');
