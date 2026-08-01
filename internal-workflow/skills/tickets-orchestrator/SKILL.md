@@ -87,6 +87,20 @@ records. Rebuild a lost ledger from authoritative sources and confirmed Git.
    releasing successors. A proven checkpoint is an integration boundary, not
    a Parent completion claim.
 
+A multi-repository wave settles checkpoints per repository but releases as one
+unit. If settlement stops after one or more repository checkpoints are
+confirmed, retain those earlier commits; do not roll them back, rewrite them,
+or duplicate them to simulate an atomic wave. Reconstruct every affected
+repository from Git. For a repository with no confirmed checkpoint, classify
+the checkpoint as not yet created, not as a failed checkpoint commit. In that
+repository's isolated integration worktree, revalidate intact authorized work
+or assign a unique fresh implementer to recreate missing work under the
+original ticket boundary. Root then reruns affected target-state checks and the
+combined deterministic proof across every repository range and creates only
+the missing scoped checkpoint. Release no successor until every repository
+checkpoint in the wave is confirmed and that combined proof is current. Keep
+all settlement state only in the ephemeral repository-keyed ledger.
+
 Root may repair only a small integration defect discovered from the integrated
 diff. A material in-scope defect must return to a unique fresh implementer for
 the affected existing ticket under that ticket's original bounded assignment
@@ -104,12 +118,14 @@ state. Put a uniquely rediscovered checkpoint SHA in both its ordered checkpoint
 sequence and `recovery_commits`; do not create a recovery-only commit.
 
 If a checkpoint command result is lost, reread Git in the affected repository
-before any retry. Accept recovery only when exactly one reachable scoped commit
+before any retry. Accept recovery when exactly one reachable scoped commit
 after that repository's baseline has the expected Parent-and-ticket message and
-matching diff. Zero or multiple matches, unexpected commits, uncertain
-ownership, or ambiguous uncommitted or staged state fail closed. Leave
-uncertain bytes untouched, create no affected checkpoint, and release no
-successor.
+matching diff. Multiple matches, unexpected commits, uncertain ownership, or
+ambiguous uncommitted or staged state fail closed. When no matching commit
+exists and Git confirms that no checkpoint was created, mark that repository
+checkpoint not yet created and resume the per-repository settlement path; do
+not describe it as a failed checkpoint commit. Leave uncertain bytes untouched
+and release no successor until the whole wave settles.
 
 ## Final Parent acceptance
 

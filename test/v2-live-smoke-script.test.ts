@@ -363,8 +363,11 @@ test('fixture happy paths normalize proof semantics after real model invocation'
   assert.match(text, /checks: \[\], artifacts: \[\], findings: \[\], residualRisks: \[\]/u);
 });
 
-test('implementation operation defines changedFiles as the cumulative run change set', async () => {
+test('implementation operation resumes Implement after diagnosis and defines cumulative changedFiles', async () => {
   const operation = await readFile(fileURLToPath(new URL('../../scripts/runtime-workflow-overlays/operations/implementation/SKILL.md', import.meta.url)), 'utf8');
+  assert.match(operation, /Diagnosing Bugs is a side procedure of the enclosing\s+Implement procedure, not a terminal response/isu);
+  assert.match(operation, /Return its reproduction and\s+root-cause evidence to that same Implement procedure, then continue the\s+authorized fix through TDD or other regression proof and post-fix verification/isu);
+  assert.match(operation, /Do not emit the Diagnosing Bugs output contract;\s+finish by emitting the non-empty implementation report/isu);
   assert.match(operation, /changedFiles.*complete current product\s+change set across all implementation cycles/isu);
 });
 

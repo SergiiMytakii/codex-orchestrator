@@ -2,8 +2,9 @@
 
 ## Fail-closed conditions
 
-Create no affected checkpoint and release no successor when any of these is
-true:
+Create no new checkpoint in an unsettled repository and release no successor
+when any of these is true. Retain any earlier repository checkpoint already
+confirmed for a partially settled multi-repository wave:
 
 - Parent authority, a ticket body, native blocker state, repository policy,
   owner, write scope, exclusion, or deterministic proof is missing or
@@ -35,9 +36,16 @@ After a lost checkpoint response, reread Git in the affected repository before
 any retry. Recover only one commit reachable from that repository's pinned
 baseline with the expected Parent-and-ticket message and exact authorized
 scope. Append that SHA to the matching in-memory checkpoint sequence and
-`recovery_commits`; never create a recovery-only commit. No match or more than
-one match blocks the ticket. Leave ambiguous staged or unstaged bytes untouched;
-do not guess, discard, stage, commit, or release a successor.
+`recovery_commits`; never create a recovery-only commit. More than one match
+blocks the ticket. If no match exists and Git confirms no checkpoint was
+created, classify that repository checkpoint as not yet created, not as a
+failed checkpoint commit. Preserve confirmed checkpoints in the other
+repositories, then revalidate intact authorized work or recreate missing work
+through a unique fresh implementer in the affected isolated integration
+worktree. Root reruns affected checks and combined proof and creates only the
+missing checkpoint. Leave ambiguous staged or unstaged bytes untouched; do not
+guess, discard, stage, commit, or release a successor. No successor is released
+until every repository checkpoint and the combined deterministic proof settle.
 
 ## Completion standard
 

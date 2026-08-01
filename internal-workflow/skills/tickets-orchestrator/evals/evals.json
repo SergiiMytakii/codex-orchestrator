@@ -63,6 +63,12 @@
       "forbidden": ["create a recovery-only commit", "recover from worker narration", "write a ledger file"]
     },
     {
+      "id": "multi-repository-wave-partial-checkpoint-settlement",
+      "prompt": "A two-repository wave passes proof. Root confirms the checkpoint in repository A, but settlement is interrupted before repository B has a checkpoint; Git later confirms that B has no matching commit and its work may be missing.",
+      "expected": ["retain repository A's confirmed earlier checkpoint", "reconstruct both repository entries from Git and classify repository B's checkpoint as not yet created rather than a failed checkpoint commit", "revalidate intact repository B work or recreate missing work through a unique fresh implementer in B's isolated integration worktree", "rerun combined deterministic proof across every repository range and create only B's missing scoped checkpoint", "release no successor until every repository checkpoint and combined proof settle"],
+      "forbidden": ["roll back or rewrite repository A's confirmed commit", "duplicate repository A's checkpoint", "release a successor from repository A alone", "persist settlement state"]
+    },
+    {
       "id": "interrupted-or-dirty-integration",
       "prompt": "Root is interrupted during staging and later finds ambiguous uncommitted state overlapping the ticket scope.",
       "expected": ["leave ambiguous state untouched", "block the affected ticket", "reconstruct only from baseline, tracker, Parent, tickets, Git, and unique root checkpoints"],
