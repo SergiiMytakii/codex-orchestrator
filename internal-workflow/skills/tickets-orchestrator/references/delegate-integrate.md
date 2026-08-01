@@ -18,8 +18,11 @@ the child on the worker's behalf.
 ## Frontier and waves
 
 Build readiness from authoritative native blockers and the current root
-checkpoints. A successor stays blocked until its prerequisites have a confirmed
-checkpoint and current combined proof.
+checkpoints. Before scheduling, resolve every ticket to one stable repository
+key and use only that repository's in-memory integration-worktree, baseline,
+and checkpoint entry. A successor stays blocked until its prerequisites have a
+confirmed checkpoint in the correct repository entries and current combined
+proof across every affected repository range.
 
 Tickets may share one wave only when their owners, write scopes, public seams,
 proof resources, migrations, generated artifacts, and source-of-truth
@@ -35,16 +38,24 @@ then successor release.
 After every wave, root:
 
 1. verifies each worker identity, completed wait, report, and local proof;
-2. inspects the complete integrated diff and status without discarding
-   unrelated or ambiguous work;
+2. inspects the complete integrated diff and status in every affected
+   repository-keyed integration worktree without discarding unrelated or
+   ambiguous work;
 3. confirms every changed file belongs to exactly one authorized child scope;
 4. runs only the rewritten targeted coordinator checks and the smallest
    affected combined deterministic check on settled bytes;
 5. creates no checkpoint and releases no successor on any failure or stale
    result; and
-6. after all gates pass, creates one scoped root checkpoint whose message names
-   the Parent and exact child or wave issues, confirms it from Git, and only
-   then recalculates the frontier.
+6. after all gates pass, creates one scoped root checkpoint in each affected
+   repository whose message names the Parent and exact child or wave issues,
+   confirms each from Git, appends each SHA to the matching in-memory checkpoint
+   sequence, and only then recalculates the frontier.
+
+Proof briefs must name the repository key, integration worktree, baseline,
+current checkpoint, and exact range being exercised. Never combine bytes from
+different repositories into an implied single Git range. The coordinator may
+aggregate proof outcomes in memory, but must not persist the integration ledger
+or create bookkeeping commits.
 
 Root may make a small integration-only repair after diff inspection and must
 rerun affected proof. A change to product behavior, ownership, scope, or ticket

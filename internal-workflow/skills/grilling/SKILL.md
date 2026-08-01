@@ -7,8 +7,7 @@ description: Grill the user about a plan, decision, or idea against codebase evi
 
 Run the interactive session on root. Root owns every user-facing question,
 recommendation, wait for feedback, and accepted decision; never delegate or
-impersonate the conversation through a child agent. The configured root route
-is `gpt-5.6-sol` with medium reasoning effort.
+impersonate the conversation through a child agent.
 
 Use `explorer` only for bounded read-only evidence gathering when the answer
 depends on a cross-module execution path. The child returns evidence to root and never contacts

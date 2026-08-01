@@ -1,15 +1,15 @@
 ---
 name: diagnosing-bugs
-description: Debug hard, flaky, unclear, or performance bugs through reproduce, minimize, hypothesize, instrument, fix, and regression-test. Trigger for nondeterministic failures, unclear breakage, or performance regressions.
+description: Diagnose hard, flaky, unclear, or performance bugs through reproduction, minimisation, ranked hypotheses, and targeted instrumentation. Stop after proving the root cause and hand the proven signal to Implement; do not fix the bug.
 ---
 
 # Diagnosing Bugs
 
-A discipline for hard bugs. Skip phases only when explicitly justified.
+A diagnosis-only discipline for hard bugs. Skip phases only when explicitly justified.
 
-Routing precedence: use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md`. This skill owns the feedback loop; after the loop proves the bug, return to the original intent: diagnosis-only output or implementation through `implement`.
+Routing precedence: use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md`. This skill owns reproduction and root-cause proof. It never owns the regression test, fix, post-fix verification, commit, or PR lifecycle. Once the cause is proven, hand the reproducible signal and evidence to `implement` and stop.
 
-Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/confidence-rubric.md` when deciding whether a hypothesis, root cause, or fix is high-confidence enough to act on. Low-confidence concerns are questions or verification gaps, not proven causes.
+Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/confidence-rubric.md` when deciding whether a hypothesis or root cause is high-confidence enough to report or hand off. Low-confidence concerns are questions or verification gaps, not proven causes.
 
 When exploring the codebase, read `CONTEXT.md` (if it exists) to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
 
@@ -21,7 +21,7 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 
 ### Ways to construct one — try them in roughly this order
 
-1. **Failing test** at whatever seam reaches the bug — unit, integration, e2e.
+1. **Existing failing test** at whatever seam reaches the bug — unit, integration, e2e. Do not turn the repro into a new durable regression test in this skill.
 2. **Curl / HTTP script** against a running dev server.
 3. **CLI invocation** with a fixture input, diffing stdout against a known-good snapshot.
 4. **Headless browser script** (Playwright / Puppeteer) — drives the UI, asserts on DOM/console/network.
@@ -32,7 +32,7 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with `scripts/hitl-loop.template.sh` so the loop is still structured. Captured output feeds back to you.
 
-Build the right feedback loop, and the bug is 90% fixed.
+Build the right feedback loop, and most of the diagnostic uncertainty is gone.
 
 ### Tighten the loop
 
@@ -56,7 +56,7 @@ Stop and say so explicitly. List what you tried. Ask the user for: (a) access to
 
 Phase 1 is done when the loop is **tight** and **red-capable**: you can name **one command** — a script path, a test invocation, a curl — that you have **already run at least once** (paste the invocation and its output), and that is:
 
-- [ ] **Red-capable** — it drives the actual bug code path and asserts the **user's exact symptom**, so it can go red on this bug and green once fixed. Not "runs without erroring" — it must be able to _catch this specific bug_.
+- [ ] **Red-capable** — it drives the actual bug code path and asserts the **user's exact symptom**, producing a signal that `implement` can later use for red/green proof. Not "runs without erroring" — it must be able to _catch this specific bug_.
 - [ ] **Deterministic** — same verdict every run (flaky bugs: a pinned, high reproduction rate, per above).
 - [ ] **Fast** — seconds, not minutes.
 - [ ] **Agent-runnable** — you can run it unattended; a human in the loop only via `scripts/hitl-loop.template.sh`.
@@ -69,15 +69,15 @@ Run the loop. Watch it go red — the bug appears.
 
 Confirm:
 
-- [ ] The loop produces the failure mode the **user** described — not a different failure that happens to be nearby. Wrong bug = wrong fix.
+- [ ] The loop produces the failure mode the **user** described — not a different failure that happens to be nearby. Wrong bug = wrong diagnosis.
 - [ ] The failure is reproducible across multiple runs (or, for non-deterministic bugs, reproducible at a high enough rate to debug against).
-- [ ] You have captured the exact symptom (error message, wrong output, slow timing) so later phases can verify the fix actually addresses it.
+- [ ] You have captured the exact symptom (error message, wrong output, slow timing) so later phases can prove what produces it.
 
 ### Minimise
 
 Once it's red, shrink the repro to the **smallest scenario that still goes red**. Cut inputs, callers, config, data, and steps **one at a time**, re-running the loop after each cut — keep only what's load-bearing for the failure.
 
-Why bother: a minimal repro shrinks the hypothesis space in Phase 3 (fewer moving parts left to suspect) and becomes the clean regression test in Phase 5.
+Why bother: a minimal repro shrinks the hypothesis space in Phase 3 and gives `implement` a precise signal to preserve while fixing the bug.
 
 Done when **every remaining element is load-bearing** — removing any one of them makes the loop go green.
 
@@ -107,32 +107,52 @@ Tool preference:
 
 **Tag every debug log** with a unique prefix, e.g. `[DEBUG-a4f2]`. Cleanup at the end becomes a single grep. Untagged logs survive; tagged logs die.
 
-**Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, fix second.
+**Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, isolate the cause second.
 
-## Phase 5 — Fix + regression test
+## Phase 5 — Prove the root cause and hand off
 
-Write the regression test **before the fix** — but only if there is a **correct seam** for it.
+Prove the winning hypothesis against the tight loop before reporting it as the root cause:
 
-A correct seam is one where the test exercises the **real bug pattern** as it occurs at the call site. If the only available seam is too shallow (single-caller test when the bug needs multiple callers, unit test that can't replicate the chain that triggered the bug), a regression test there gives false confidence.
+1. Name the exact trigger, owning code path, and mechanism that produces the observed symptom.
+2. Show the probe result that confirmed the winning prediction and the result that ruled out the strongest alternative.
+3. Re-run the unchanged repro after removing or disabling the probe. It must still produce the original symptom; a probe-induced failure is not proof.
+4. Classify confidence with the confidence rubric. If an assumption still changes the conclusion, report the remaining verification gap instead of claiming a proven cause.
+5. Remove all `[DEBUG-...]` instrumentation and delete throwaway prototypes unless the user explicitly authorized a diagnostic artifact to remain.
 
-**If no correct seam exists, that itself is the finding.** Note it. The codebase architecture is preventing the bug from being locked down. Flag this for the next phase.
+Then stop. Do not author a regression test, apply or recommend a speculative patch, run post-fix checks, commit, push, open a PR, or update a tracker. Hand `implement`:
 
-If a correct seam exists:
+- the exact reproduction command and captured failing signal;
+- the minimal load-bearing scenario;
+- the proven trigger, owner, mechanism, and supporting probe evidence;
+- the strongest alternative ruled out and how it was falsified;
+- any missing seam, environment dependency, or residual uncertainty that constrains implementation proof.
 
-1. Turn the minimised repro into a failing test at that seam.
-2. Watch it fail.
-3. Apply the fix.
-4. Watch it pass.
-5. Re-run the Phase 1 feedback loop against the original (un-minimised) scenario.
+If the root cause is not proven, do not hand off a guess as implementation input. Return the best red-capable signal, tested hypotheses, and the concrete evidence or access still required.
 
-## Phase 6 — Cleanup + post-mortem
+## Output Contract
 
-Required before declaring done:
+Use this shape when reporting back:
 
-- [ ] Original repro no longer reproduces (re-run the Phase 1 loop)
-- [ ] Regression test passes (or absence of seam is documented)
-- [ ] All `[DEBUG-...]` instrumentation removed (`grep` the prefix)
-- [ ] Throwaway prototypes deleted (or moved to a clearly-marked debug location)
-- [ ] The hypothesis that turned out correct is stated in the commit / PR message — so the next debugger learns
+```md
+## Reproduction
 
-**Then ask: what would have prevented this bug?** If the answer involves architectural change (no good test seam, tangled callers, hidden coupling) hand off to the `$improve-codebase-architecture` skill with the specifics. Make the recommendation **after** the fix is in, not before — you have more information now than when you started.
+- Command: `<exact command already run>`
+- Signal: <captured symptom and repeatability>
+- Minimal scenario: <load-bearing inputs, state, and steps>
+
+## Proven root cause
+
+- Trigger: <what activates the bug>
+- Owner: `<path>` — `<function or method>`
+- Mechanism: <how the owner produces the symptom>
+- Evidence: <confirming probe and falsified alternative>
+- Confidence: <high, medium, or low, with any remaining gap>
+
+## Implement handoff
+
+- Preserve this signal: <reproduction command and expected failing verdict>
+- Constraints: <proof seam, environment dependency, or residual uncertainty>
+- Next owner: `implement`
+```
+
+When the cause is not proven, replace `Proven root cause` and `Implement handoff` with `Blocked diagnosis`; list tested hypotheses and the exact missing evidence. Do not route implementation from an unproven diagnosis.

@@ -27,6 +27,12 @@
       "forbidden": ["merge ticket boundaries", "let either worker commit"]
     },
     {
+      "id": "repository-keyed-in-memory-scheduling",
+      "prompt": "An approved graph spans two repositories with separate integration worktrees and baselines.",
+      "expected": ["keep an in-memory ledger keyed by stable repository identity", "schedule each ticket only against its repository integration worktree, baseline, and checkpoints", "keep proof ranges separate per repository"],
+      "forbidden": ["key state by worker identity", "imply one Git range across repositories", "persist workflow state"]
+    },
+    {
       "id": "worker-or-proof-failure-fails-closed",
       "prompt": "A worker times out or fails and another worker returns stale target-state validation.",
       "expected": ["create no affected checkpoint commit", "release no successor", "report both blockers"],
@@ -51,6 +57,12 @@
       "forbidden": ["blindly retry the commit", "trust worker narration", "write duplicate durable run state"]
     },
     {
+      "id": "repository-keyed-recovery-commit",
+      "prompt": "The in-memory ledger is lost after a checkpoint response disappears in one repository of a two-repository graph.",
+      "expected": ["rebuild repository entries from authoritative sources and Git", "record the uniquely rediscovered SHA in that repository checkpoint sequence and recovery_commits", "release successors only from the reconstructed repository-scoped checkpoint"],
+      "forbidden": ["create a recovery-only commit", "recover from worker narration", "write a ledger file"]
+    },
+    {
       "id": "interrupted-or-dirty-integration",
       "prompt": "Root is interrupted during staging and later finds ambiguous uncommitted state overlapping the ticket scope.",
       "expected": ["leave ambiguous state untouched", "block the affected ticket", "reconstruct only from baseline, tracker, Parent, tickets, Git, and unique root checkpoints"],
@@ -61,6 +73,12 @@
       "prompt": "All graph checkpoints and deterministic proof are settled at one final revision.",
       "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch exactly two distinct fresh Spec and Standards reviewers in parallel on the identical revision", "wait for both axis-specific approvals"],
       "forbidden": ["review only the last child", "accept a generic PASS", "reuse a reviewer context", "create durable review lifecycle state"]
+    },
+    {
+      "id": "repository-ranges-in-proof-review-and-handoff",
+      "prompt": "A two-repository graph is ready for final proof, reviewer briefs, and handoff.",
+      "expected": ["pin an exact baseline..final range for each repository", "give both reviewers the identical repository-keyed baselines, final checkpoints, ranges, and proof", "report each integration worktree, checkpoint and recovery commit, and final range in handoff"],
+      "forbidden": ["review only one repository", "give reviewers different range maps", "persist the in-memory ledger as handoff state"]
     },
     {
       "id": "failed-final-review-axis",

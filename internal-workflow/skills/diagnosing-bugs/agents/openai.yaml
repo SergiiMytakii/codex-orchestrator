@@ -1,6 +1,6 @@
 interface:
   display_name: "Diagnosing Bugs"
-  short_description: "Run a disciplined hard-bug investigation loop"
-  default_prompt: "Use $diagnosing-bugs to reproduce, minimise, diagnose, and verify this difficult bug."
+  short_description: "Prove hard-bug root causes before implementation"
+  default_prompt: "Use $diagnosing-bugs to reproduce and minimise this difficult bug, prove its root cause with targeted evidence, hand the proven signal to $implement, and stop before any regression test or fix."
 policy:
   allow_implicit_invocation: true
