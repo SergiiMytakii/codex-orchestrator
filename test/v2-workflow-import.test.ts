@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+
+import { loadPackageWorkflow } from '../src/v2/workflow-assets.js';
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = import.meta.dirname.endsWith(`${sep}dist${sep}test`)
@@ -281,6 +283,119 @@ test('workflow source v2 derives transitive skill and referenced document closur
   })}\n`);
   await assert.rejects(execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
     '--config', configPath, '--output-root', outputRoot]), /eval case is invalid/iu);
+});
+
+test('workflow sync accepts every skill binding reference form in skills and operations', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'workflow-import-bindings-'));
+  const codexHome = join(root, 'codex-home');
+  const repoRoot = join(root, 'repo');
+  const outputRoot = join(root, 'output');
+  const configPath = join(repoRoot, 'source.json');
+  for (const skill of ['alpha', 'beta']) {
+    await mkdir(join(codexHome, 'skills', skill, 'agents'), { recursive: true });
+    await writeFile(join(codexHome, 'skills', skill, 'agents', 'openai.yaml'), `interface:\n  display_name: ${skill}\n`);
+  }
+  await writeFile(join(codexHome, 'skills', 'beta', 'SKILL.md'), '# Beta\n');
+  await mkdir(join(codexHome, 'docs', 'agents'), { recursive: true });
+  await writeFile(join(codexHome, 'docs', 'agents', 'policy.md'), '# Policy\n');
+  await mkdir(join(codexHome, 'agents'), { recursive: true });
+  await writeFile(join(codexHome, 'agents', 'explorer.toml'), 'name = "explorer"\nsandbox_mode = "read-only"\n');
+  await mkdir(join(repoRoot, 'overlays', 'operations', 'alpha'), { recursive: true });
+  await mkdir(join(repoRoot, 'overlays', 'schemas'), { recursive: true });
+  await writeFile(join(repoRoot, 'overlays', 'schemas', 'alpha.json'), '{}\n');
+  await writeFile(configPath, `${JSON.stringify({
+    version: 2,
+    personalSkills: ['alpha', 'beta'],
+    repositorySkills: [],
+    skillDependencies: { alpha: ['beta'], beta: [] },
+    sharedDocs: ['policy.md'],
+    sharedEvals: [],
+    profiles: { explorer: 'explorer.toml' },
+    overlayRoot: 'overlays',
+    adaptations: [
+      { id: 'resolved-codex-home', from: '<resolved-codex-home>', to: '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT' },
+      { id: 'default-codex-home', from: '<default-codex-home>', to: '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT' },
+      { id: 'default-codex-skills', from: '${CODEX_HOME:-$HOME/.codex}/skills', to: '../../skills' },
+      { id: 'codex-home-skills', from: '$CODEX_HOME/skills', to: '../../skills' },
+      { id: 'default-codex-docs', from: '${CODEX_HOME:-$HOME/.codex}/docs/agents/', to: '../../docs/agents/' },
+      { id: 'codex-home-docs', from: '$CODEX_HOME/docs/agents/', to: '../../docs/agents/' },
+    ],
+    operations: {
+      alpha: {
+        entry: 'operations/alpha/SKILL.md', sourceSkill: 'alpha', dependencySkills: ['beta'],
+        resources: ['docs/agents/policy.md'], outputSchema: 'schemas/alpha.json', profile: 'explorer',
+        policy: {
+          sandboxMode: 'read-only', cwdClass: 'worktree', worktreeAccess: 'read-only', writableRootClasses: [],
+          runnerPostcondition: 'report-only', network: 'deny', networkHosts: [], mcpTools: [],
+          approvalCeiling: 'never', externalWrite: false,
+        },
+      },
+    },
+  }, null, 2)}\n`);
+
+  const forms = [
+    { id: 'bare', skill: '$beta', operation: '$beta' },
+    {
+      id: 'markdown-angle-title',
+      skill: '[beta](<../beta/SKILL.md#usage> "Beta skill")',
+      operation: '[beta](<../../skills/beta/SKILL.md#usage> "Beta operation")',
+    },
+    { id: 'inline-relative', skill: '`../beta/SKILL.md#usage`', operation: '`../../skills/beta/SKILL.md#usage`' },
+    {
+      id: 'workflow-root',
+      skill: '`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/skills/beta/SKILL.md#usage`',
+      operation: '`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/skills/beta/SKILL.md#usage`',
+    },
+  ];
+  for (const form of forms) {
+    await t.test(form.id, async () => {
+      await writeFile(join(codexHome, 'skills', 'alpha', 'SKILL.md'), `# Alpha\n\nUse ${form.skill}.\n`);
+      await writeFile(join(repoRoot, 'overlays', 'operations', 'alpha', 'SKILL.md'), [
+        '# Alpha operation',
+        '',
+        `Use $alpha and ${form.operation}.`,
+        'Apply [policy](<../../docs/agents/policy.md#rules> "Policy title").',
+        '',
+      ].join('\n'));
+      await execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
+        '--config', configPath, '--output-root', outputRoot]);
+      await execFileAsync(process.execPath, [script, 'verify', '--output-root', outputRoot]);
+      const manifest = JSON.parse(await readFile(join(outputRoot, 'manifest.json'), 'utf8')) as Record<string, any>;
+      assert.equal(manifest.skills.alpha.files.includes('skills/beta/SKILL.md'), true);
+      assert.equal(manifest.operations.alpha.files.includes('skills/beta/SKILL.md'), true);
+      assert.equal(manifest.operations.alpha.files.includes('docs/agents/policy.md'), true);
+    });
+  }
+});
+
+test('fenced-only skill mention survives sync and verify without becoming a consumer dependency', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workflow-import-fenced-consumer-'));
+  const codexHome = join(root, 'codex-home');
+  const repoRoot = join(root, 'package');
+  const outputRoot = join(repoRoot, 'internal-workflow');
+  await cp(join(repositoryRoot, 'internal-workflow', 'skills'), join(codexHome, 'skills'), { recursive: true });
+  await cp(join(repositoryRoot, 'internal-workflow', 'docs'), join(codexHome, 'docs'), { recursive: true });
+  await mkdir(join(codexHome, 'agents'), { recursive: true });
+  for (const [target, source] of [
+    ['explorer.toml', 'explorer.toml'],
+    ['implementer.toml', 'implementer.toml'],
+    ['researcher.toml', 'researcher.toml'],
+    ['spec-reviewer.toml', 'spec_reviewer.toml'],
+    ['standards-reviewer.toml', 'standards_reviewer.toml'],
+  ]) await cp(join(repositoryRoot, 'internal-workflow', 'profiles', source), join(codexHome, 'agents', target));
+  await cp(join(repositoryRoot, 'internal-skills'), join(repoRoot, 'internal-skills'), { recursive: true });
+  await cp(join(repositoryRoot, 'scripts'), join(repoRoot, 'scripts'), { recursive: true });
+  const operationPath = join(repoRoot, 'scripts', 'runtime-workflow-overlays', 'operations', 'acceptance-proof', 'SKILL.md');
+  await writeFile(operationPath, `${await readFile(operationPath, 'utf8')}\n\`\`\`md\nUse \`$tdd\` or [TDD](../../skills/tdd/SKILL.md) in this example.\n\`\`\`\n`);
+
+  const configPath = join(repoRoot, 'scripts', 'agent-auto-workflow-source.json');
+  await execFileAsync(process.execPath, [script, 'sync', '--codex-home', codexHome, '--repo-root', repoRoot,
+    '--config', configPath, '--output-root', outputRoot]);
+  await execFileAsync(process.execPath, [script, 'verify', '--output-root', outputRoot]);
+  const manifest = JSON.parse(await readFile(join(outputRoot, 'manifest.json'), 'utf8')) as Record<string, any>;
+  assert.equal(manifest.operations['acceptance-proof'].files.some((path: string) => path.startsWith('skills/tdd/')), false);
+  const loaded = await loadPackageWorkflow(repoRoot);
+  assert.equal(loaded.manifest.generationHash, manifest.generationHash);
 });
 
 test('workflow sync rejects config replacement after the initial authority read', async () => {

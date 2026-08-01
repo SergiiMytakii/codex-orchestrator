@@ -378,6 +378,38 @@ test('runtime verifier rejects removal of Markdown, inline, and workflow-root re
   }
 });
 
+test('runtime verifier applies every skill binding form and ignores fenced examples', async (t) => {
+  const forms = [
+    '$beta',
+    '[beta](<../../skills/beta/SKILL.md#usage> "Beta title")',
+    '`../../skills/beta/SKILL.md#usage`',
+    '`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/skills/beta/SKILL.md#usage`',
+  ];
+  for (const [index, reference] of forms.entries()) {
+    await t.test(`form-${index + 1}`, async () => {
+      const snapshot = await manualRuntimeSnapshot('alpha', {
+        skillPaths: ['skills/beta/SKILL.md'],
+        referencedDocumentPaths: [],
+      }, `${reference}\n`);
+      await verifyRuntimeAssetSnapshot(snapshot);
+      const skill = join(snapshot.snapshotRoot, 'skills', 'beta', 'SKILL.md');
+      await chmod(join(skill, '..'), 0o755);
+      await unlink(skill);
+      await chmod(join(skill, '..'), 0o555);
+      snapshot.files = snapshot.files.filter((file) => file.path !== 'skills/beta/SKILL.md');
+      snapshot.skillPaths = [];
+      snapshot.contentSha256 = runtimeContentSha256(snapshot.files);
+      await assert.rejects(verifyRuntimeAssetSnapshot(snapshot), /referenced (?:workflow path|skill closure) is missing/iu);
+    });
+  }
+
+  const fenced = await manualRuntimeSnapshot('alpha', {
+    skillPaths: [],
+    referencedDocumentPaths: [],
+  }, '```md\nUse `$beta` or [beta](../../skills/beta/SKILL.md).\n```\n');
+  await verifyRuntimeAssetSnapshot(fenced);
+});
+
 test('operation snapshot rejects self-consistent removal of referenced bug workflow documents', async () => {
   const affected = {
     implementation: [
@@ -492,6 +524,7 @@ async function manualRuntimeSnapshot(operation: string, closure: {
     `schemas/${operation}.json`,
     'profiles/fixture.toml',
     ...closure.skillPaths,
+    ...closure.skillPaths.map((path) => path.replace(/\/SKILL\.md$/u, '/agents/openai.yaml')),
     ...closure.referencedDocumentPaths,
   ].sort();
   const files = [];

@@ -4,7 +4,6 @@ import { chmod, lstat, mkdir, open, readdir, realpath, stat, writeFile } from 'n
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 
 import {
-  extractContainedWorkflowReferences,
   resolveWorkflowOperation,
   sealedWorkflowContentSha256,
   sealedWorkflowMode,
@@ -198,17 +197,83 @@ function validateDerivedClosure(paths: string[], files: string[], pattern: RegEx
 async function verifyContainedReferences(root: string, files: string[], skillPaths: string[]): Promise<void> {
   const available = new Set(files);
   const skillIds = new Set(skillPaths.map((path) => path.split('/')[1]!));
+  const knownSkillIds = new Set(files.flatMap((path) => {
+    const skill = path.match(/^skills\/([a-z][a-z0-9-]*)\//u)?.[1];
+    return skill ? [skill] : [];
+  }));
   for (const path of files) {
     if (!/\.(?:md|json|yaml|yml|toml|mjs|txt)$/iu.test(path)) continue;
     const text = (await readRegular(join(root, ...path.split('/')))).toString('utf8');
-    for (const referenced of extractContainedWorkflowReferences(path, text)) {
+    const semantics = extractRuntimeWorkflowReferenceSemantics(path, text);
+    for (const referenced of semantics.paths) {
       if (!available.has(referenced)) throw new Error(`runtime asset referenced workflow path is missing: ${referenced}`);
       const referencedSkill = referenced.match(/^skills\/([a-z][a-z0-9-]*)\//u)?.[1];
       if (referencedSkill && !skillIds.has(referencedSkill)) {
         throw new Error(`runtime asset referenced skill closure is missing: ${referencedSkill}`);
       }
     }
+    for (const referencedSkill of semantics.skillIds) {
+      if (knownSkillIds.has(referencedSkill) && !skillIds.has(referencedSkill)) {
+        throw new Error(`runtime asset referenced skill closure is missing: ${referencedSkill}`);
+      }
+    }
   }
+}
+
+function extractRuntimeWorkflowReferenceSemantics(source: string, text: string): { paths: string[]; skillIds: string[] } {
+  const content = withoutFencedCode(text);
+  const targets: string[] = [];
+  const referenceContent = content.replace(
+    /\]\(\s*(?:<([^<>\r\n]+)>|([^\s<>\r\n)]+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?[ \t]*\)/gu,
+    (_link, angleDestination: string | undefined, plainDestination: string | undefined) => {
+      const destination = withoutFragment(angleDestination ?? plainDestination!);
+      if (destination) targets.push(destination);
+      return ']()';
+    },
+  );
+  for (const match of referenceContent.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
+    targets.push(match[1]!);
+  }
+  for (const match of referenceContent.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
+    targets.push(`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/${match[1]!}`);
+  }
+  const references = new Set<string>();
+  for (const target of targets) {
+    const normalized = normalizeRuntimeWorkflowReference(source, target);
+    if (normalized) references.add(normalized);
+  }
+  const skillIds = new Set<string>();
+  for (const match of referenceContent.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) skillIds.add(match[1] ?? match[2]!);
+  for (const path of references) {
+    const skill = path.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
+    if (skill) skillIds.add(skill);
+  }
+  return { paths: [...references].sort(compareUtf8), skillIds: [...skillIds].sort(compareUtf8) };
+}
+
+function withoutFencedCode(text: string): string {
+  return text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+}
+
+function withoutFragment(target: string): string {
+  const index = target.indexOf('#');
+  return index === -1 ? target : target.slice(0, index);
+}
+
+function normalizeRuntimeWorkflowReference(source: string, target: string): string | undefined {
+  if (!target || target.includes('\\')) throw new Error(`invalid runtime workflow reference in ${source}: ${target}`);
+  const workflowRoot = '$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/';
+  let path: string;
+  if (target.startsWith(workflowRoot)) path = posix.normalize(target.slice(workflowRoot.length));
+  else {
+    if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) return undefined;
+    path = posix.normalize(posix.join(posix.dirname(source), target));
+  }
+  if (!path || posix.isAbsolute(path) || path === '..' || path.startsWith('../')
+    || path.split('/').some((part) => !part || part === '.' || part === '..')) {
+    throw new Error(`runtime workflow reference escapes root in ${source}: ${target}`);
+  }
+  return path.normalize('NFC').replaceAll('\\', '/');
 }
 
 async function evidence(root: string, records: Array<Pick<WorkflowFileRecord, 'path' | 'sha256' | 'size'>>): Promise<RuntimeAssetFileEvidence[]> {

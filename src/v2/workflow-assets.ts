@@ -583,12 +583,8 @@ function verifySkillDependencyBindings(
   for (const path of owned) {
     const bytes = bytesByPath.get(path);
     if (!bytes || !isTextWorkflowPath(path)) continue;
-    const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) referenced.add(match[1] ?? match[2]!);
-    for (const resolved of extractContainedWorkflowReferences(path, text)) {
-      const dependency = resolved.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
-      if (dependency) referenced.add(dependency);
-    }
+    const semantics = extractWorkflowReferenceSemantics(path, bytes.toString('utf8'));
+    for (const dependency of semantics.skillIds) referenced.add(dependency);
   }
   for (const dependency of dependencies) {
     if (!referenced.has(dependency)) throw new Error(`workflow skill ${id} does not reference declared dependency ${dependency}`);
@@ -606,10 +602,10 @@ function referencedWorkflowClosure(
     const current = queue.shift()!;
     const bytes = bytesByPath.get(current);
     if (!bytes || !isTextWorkflowPath(current)) continue;
-    const text = bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    const references = new Set(extractContainedWorkflowReferences(current, text));
-    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
-      const skill = skills[match[1] ?? match[2]!];
+    const semantics = extractWorkflowReferenceSemantics(current, bytes.toString('utf8'));
+    const references = new Set(semantics.paths);
+    for (const skillId of semantics.skillIds) {
+      const skill = skills[skillId];
       if (skill) for (const path of skill.files) references.add(path);
     }
     for (const referenced of references) {
@@ -656,13 +652,24 @@ function isTextWorkflowPath(path: string): boolean {
 }
 
 export function extractContainedWorkflowReferences(source: string, text: string): string[] {
-  const content = text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+  return extractWorkflowReferenceSemantics(source, text).paths;
+}
+
+function extractWorkflowReferenceSemantics(source: string, text: string): { paths: string[]; skillIds: string[] } {
+  const content = withoutFencedCode(text);
   const targets: string[] = [];
-  for (const match of content.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) targets.push(match[1]!);
-  for (const match of content.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
+  const referenceContent = content.replace(
+    /\]\(\s*(?:<([^<>\r\n]+)>|([^\s<>\r\n)]+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?[ \t]*\)/gu,
+    (_link, angleDestination: string | undefined, plainDestination: string | undefined) => {
+      const destination = withoutFragment(angleDestination ?? plainDestination!);
+      if (destination) targets.push(destination);
+      return ']()';
+    },
+  );
+  for (const match of referenceContent.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
     targets.push(match[1]!);
   }
-  for (const match of content.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
+  for (const match of referenceContent.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
     targets.push(`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/${match[1]!}`);
   }
   const references = new Set<string>();
@@ -670,7 +677,22 @@ export function extractContainedWorkflowReferences(source: string, text: string)
     const normalized = normalizeWorkflowReference(source, target);
     if (normalized) references.add(normalized);
   }
-  return [...references].sort(compareUtf8);
+  const skillIds = new Set<string>();
+  for (const match of referenceContent.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) skillIds.add(match[1] ?? match[2]!);
+  for (const path of references) {
+    const skill = path.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
+    if (skill) skillIds.add(skill);
+  }
+  return { paths: [...references].sort(compareUtf8), skillIds: [...skillIds].sort(compareUtf8) };
+}
+
+function withoutFencedCode(text: string): string {
+  return text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+}
+
+function withoutFragment(target: string): string {
+  const index = target.indexOf('#');
+  return index === -1 ? target : target.slice(0, index);
 }
 
 function normalizeWorkflowReference(source: string, target: string): string | undefined {
@@ -717,14 +739,16 @@ function verifyOperationEntryBindings(manifest: WorkflowManifest, bytesByPath: M
   for (const [id, operation] of Object.entries(manifest.operations)) {
     const entryBytes = bytesByPath.get(operation.entry);
     if (!entryBytes) throw new Error(`workflow operation entry bytes are missing: ${id}`);
-    const linked = new Set(extractContainedWorkflowReferences(operation.entry, entryBytes.toString('utf8')));
+    const linked = extractWorkflowReferenceSemantics(operation.entry, entryBytes.toString('utf8'));
     const required = [
-      ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, manifest.skills[operation.sourceSkill]!.entry]]),
-      ...operation.dependencySkills.map((skill) => [skill, manifest.skills[skill]!.entry]),
-      ...operation.resources.map((path) => [path, path]),
+      ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, manifest.skills[operation.sourceSkill]!.entry, true] as const]),
+      ...operation.dependencySkills.map((skill) => [skill, manifest.skills[skill]!.entry, true] as const),
+      ...operation.resources.map((path) => [path, path, false] as const),
     ];
-    for (const [name, path] of required) {
-      if (!linked.has(path)) throw new Error(`workflow operation ${id} does not reference declared dependency ${name}`);
+    for (const [name, path, isSkill] of required) {
+      if (!linked.paths.includes(path) && !(isSkill && linked.skillIds.includes(name))) {
+        throw new Error(`workflow operation ${id} does not reference declared dependency ${name}`);
+      }
     }
   }
 }

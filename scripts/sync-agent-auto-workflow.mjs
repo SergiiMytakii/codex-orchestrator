@@ -268,15 +268,8 @@ function validateSkillDependencyBindings(id, definition, entries) {
   for (const path of definition.owned) {
     const entry = entries.get(path);
     if (!entry || !isText(path)) continue;
-    const text = entry.bytes.toString('utf8').replace(/```[^\n]*\n[\s\S]*?```/gu, '');
-    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) referenced.add(match[1] ?? match[2]);
-    for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-      const target = match[1];
-      if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-      const resolved = normalizePath(relative('/', resolve('/', dirname(path), target)).split(sep).join('/'));
-      const skill = resolved.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
-      if (skill) referenced.add(skill);
-    }
+    const semantics = extractWorkflowReferenceSemantics(path, entry.bytes.toString('utf8'));
+    for (const skill of semantics.skillIds) referenced.add(skill);
   }
   for (const dependency of definition.dependencySkills) {
     if (!referenced.has(dependency)) throw new Error(`Skill ${id} does not reference declared dependency ${dependency}.`);
@@ -327,20 +320,16 @@ function textList(value) {
 function validateOperationEntryBindings(id, operation, entries, skills) {
   const entry = entries.get(operation.entry);
   if (!entry) throw new Error(`Operation ${id} entry is missing.`);
-  const linked = new Set();
-  const text = entry.bytes.toString('utf8');
-  for (const match of text.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) {
-    const target = match[1];
-    if (/^[a-z]+:/iu.test(target) || target.startsWith('/')) continue;
-    linked.add(normalizePath(relative('/', resolve('/', dirname(operation.entry), target)).split(sep).join('/')));
-  }
+  const linked = extractWorkflowReferenceSemantics(operation.entry, entry.bytes.toString('utf8'));
   const required = [
-    ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, skills[operation.sourceSkill].entry]]),
-    ...operation.dependencySkills.map((skill) => [skill, skills[skill].entry]),
-    ...operation.resources.map((path) => [path, path]),
+    ...(operation.sourceSkill === null ? [] : [[operation.sourceSkill, skills[operation.sourceSkill].entry, true]]),
+    ...operation.dependencySkills.map((skill) => [skill, skills[skill].entry, true]),
+    ...operation.resources.map((path) => [path, path, false]),
   ];
-  for (const [name, path] of required) {
-    if (!linked.has(path)) throw new Error(`Operation ${id} does not reference declared dependency ${name}.`);
+  for (const [name, path, isSkill] of required) {
+    if (!linked.paths.includes(path) && !(isSkill && linked.skillIds.includes(name))) {
+      throw new Error(`Operation ${id} does not reference declared dependency ${name}.`);
+    }
   }
 }
 
@@ -424,10 +413,10 @@ function referencedWorkflowClosure(seedPaths, entries, skills) {
     const current = queue.shift();
     const entry = entries.get(current);
     if (!entry || !isText(current)) continue;
-    const text = entry.bytes.toString('utf8');
-    const referenced = new Set(extractContainedWorkflowReferences(current, text));
-    for (const match of text.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) {
-      const skill = skills[match[1] ?? match[2]];
+    const semantics = extractWorkflowReferenceSemantics(current, entry.bytes.toString('utf8'));
+    const referenced = new Set(semantics.paths);
+    for (const skillId of semantics.skillIds) {
+      const skill = skills[skillId];
       if (skill) for (const path of skill.files) referenced.add(path);
     }
     for (const path of referenced) {
@@ -450,13 +439,24 @@ function referencedWorkflowClosure(seedPaths, entries, skills) {
 }
 
 function extractContainedWorkflowReferences(source, text) {
-  const content = text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+  return extractWorkflowReferenceSemantics(source, text).paths;
+}
+
+function extractWorkflowReferenceSemantics(source, text) {
+  const content = withoutFencedCode(text);
   const targets = [];
-  for (const match of content.matchAll(/\]\(([^)#]+)(?:#[^)]+)?\)/gu)) targets.push(match[1]);
-  for (const match of content.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
+  const referenceContent = content.replace(
+    /\]\(\s*(?:<([^<>\r\n]+)>|([^\s<>\r\n)]+))(?:[ \t]+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^()\r\n]*\)))?[ \t]*\)/gu,
+    (_link, angleDestination, plainDestination) => {
+      const destination = withoutFragment(angleDestination ?? plainDestination);
+      if (destination) targets.push(destination);
+      return ']()';
+    },
+  );
+  for (const match of referenceContent.matchAll(/(?:^|[\s`"'(])((?:\.{1,2}\/)+(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))(?=$|[\s`"'),.;:#])/gmu)) {
     targets.push(match[1]);
   }
-  for (const match of content.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
+  for (const match of referenceContent.matchAll(/\$CODEX_ORCHESTRATOR_WORKFLOW_ROOT\/((?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+\.(?:md|json|yaml|yml|toml|mjs|txt))/gu)) {
     targets.push(`$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/${match[1]}`);
   }
   const references = new Set();
@@ -464,7 +464,22 @@ function extractContainedWorkflowReferences(source, text) {
     const normalized = normalizeWorkflowReference(source, target);
     if (normalized) references.add(normalized);
   }
-  return [...references].sort(compareUtf8);
+  const skillIds = new Set();
+  for (const match of referenceContent.matchAll(/`([a-z][a-z0-9-]*)`|\$([a-z][a-z0-9-]*)/gu)) skillIds.add(match[1] ?? match[2]);
+  for (const path of references) {
+    const skill = path.match(/^skills\/([a-z][a-z0-9-]*)\/SKILL\.md$/u)?.[1];
+    if (skill) skillIds.add(skill);
+  }
+  return { paths: [...references].sort(compareUtf8), skillIds: [...skillIds].sort(compareUtf8) };
+}
+
+function withoutFencedCode(text) {
+  return text.replace(/```[^\n]*\n[\s\S]*?```/gu, '');
+}
+
+function withoutFragment(target) {
+  const index = target.indexOf('#');
+  return index === -1 ? target : target.slice(0, index);
 }
 
 function normalizeWorkflowReference(source, target) {

@@ -19,6 +19,9 @@ test('workflow reference extraction recognizes supported forms and rejects root 
   const source = 'skills/alpha/SKILL.md';
   assert.deepEqual(extractContainedWorkflowReferences(source, [
     '[markdown](../../docs/agents/markdown.md#details)',
+    '[angle](<../../docs/agents/angle.md#details> "Angle title")',
+    '[titled](../../docs/agents/titled.md#details "../../docs/agents/title-is-not-a-destination.md")',
+    '[fragment only](#details "Local section")',
     'Apply `../../docs/agents/inline.md`.',
     'Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/root.md`.',
     '[external](https://example.invalid/external.md)',
@@ -26,9 +29,11 @@ test('workflow reference extraction recognizes supported forms and rejects root 
     '`../../../ignored-fenced.md`',
     '```',
   ].join('\n')), [
+    'docs/agents/angle.md',
     'docs/agents/inline.md',
     'docs/agents/markdown.md',
     'docs/agents/root.md',
+    'docs/agents/titled.md',
   ]);
   assert.throws(
     () => extractContainedWorkflowReferences(source, '`../../../outside.md`'),
@@ -97,6 +102,32 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
     'explorer', 'implementer', 'researcher', 'spec_reviewer', 'standards_reviewer',
   ]);
+});
+
+test('workflow loader accepts all skill and resource binding reference forms', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workflow-assets-reference-bindings-'));
+  const copiedPackage = join(root, 'package');
+  await cp(join(packageRoot, 'internal-workflow'), join(copiedPackage, 'internal-workflow'), { recursive: true });
+  const manifestPath = join(copiedPackage, 'internal-workflow', 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, any>;
+  const operationPath = 'operations/implementation/SKILL.md';
+  const operationBytes = Buffer.from([
+    '# Implementation operation fixture',
+    '',
+    'Use `$implement`.',
+    'Use [TDD](<../../skills/tdd/SKILL.md#fit> "TDD title").',
+    'Use `../../skills/diagnosing-bugs/SKILL.md#workflow`.',
+    'Apply `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md#fixes`.',
+    'Apply [coding routing](<../../docs/agents/coding-skill-routing.md#flow> "Routing title").',
+    'Apply `../../docs/agents/tool-usage.md#tools`.',
+    '',
+  ].join('\n'));
+  await writeFile(join(copiedPackage, 'internal-workflow', ...operationPath.split('/')), operationBytes);
+  rehashV2File(manifest, operationPath, operationBytes);
+  await writeFile(manifestPath, `${canonicalJson(manifest)}\n`);
+
+  const loaded = await loadPackageWorkflow(copiedPackage);
+  assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
 });
 
 test('workflow packages only static target scenarios with no live execution metadata', async () => {
