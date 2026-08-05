@@ -37,9 +37,10 @@ export interface FrozenCriterion {
 }
 
 export interface ExternalBlocker {
-  kind: 'credential' | 'tool' | 'service' | 'product-decision';
+  kind: 'credential' | 'tool' | 'service' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
   summary: string;
   attempted: string[];
+  resumable: boolean;
 }
 
 export type ProofAgentResult =
@@ -94,7 +95,7 @@ export type ProveChangeResult =
   | SettledProveChangeResult
   | { status: 'safe-halt' }
   | { status: 'transport-failed'; resumable: true }
-  | { status: 'report-repair'; reportRepairCount: 1; findings: string[] }
+  | { status: 'report-repair'; reportRepairCount: number; findings: string[] }
   | {
       status: 'cleanup-pending';
       outcome: SettledProveChangeResult;
@@ -239,7 +240,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         runnerPreparedArtifactPaths: [...(input.runnerPreparedArtifactPaths ?? [])],
         runnerPreparedArtifactSha256: { ...(input.runnerPreparedArtifactSha256 ?? {}) },
         runnerPreparationWarnings: [...(input.runnerPreparationWarnings ?? [])],
-        repairOnly: input.reportRepairCount === 1,
+        repairOnly: input.reportRepairCount > 0,
         repairFindings: [...input.reportRepairFindings],
         workflowGeneration: input.workflowGeneration ? structuredClone(input.workflowGeneration) : undefined,
         signal: this.dependencies.signal ?? new AbortController().signal,
@@ -260,7 +261,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     }
     if (agentResult.kind === 'safe-halt') return { status: 'safe-halt' };
     if (agentResult.kind === 'transport-failed') {
-      if (agentResult.resumable && input.transportRetryCount === 0 && await this.isFresh(input.payload, input.materialization)) {
+      if (agentResult.resumable && await this.isFresh(input.payload, input.materialization)) {
         return { status: 'transport-failed', resumable: true };
       }
       return this.settle(input.proofId, {
@@ -289,8 +290,8 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         if (!report.residualRisks.includes(warning) && report.residualRisks.length < 256) report.residualRisks.push(warning);
       }
     } catch (error) {
-      if (input.reportRepairCount === 0 && await this.isFresh(input.payload, input.materialization)) {
-        return { status: 'report-repair', reportRepairCount: 1, findings: [proofReportRepairDiagnostic(error)] };
+      if (await this.isFresh(input.payload, input.materialization)) {
+        return { status: 'report-repair', reportRepairCount: input.reportRepairCount + 1, findings: [proofReportRepairDiagnostic(error)] };
       }
       return this.settle(input.proofId, {
         status: 'internal-error',
@@ -597,10 +598,10 @@ function validateSemanticState(value: {
   reportRepairCount: number;
   reportRepairFindings: string[];
 }): void {
-  if (!Number.isSafeInteger(value.transportRetryCount) || value.transportRetryCount < 0 || value.transportRetryCount > 1) {
+  if (!Number.isSafeInteger(value.transportRetryCount) || value.transportRetryCount < 0) {
     throw new Error('transportRetryCount is invalid');
   }
-  if (!Number.isSafeInteger(value.reportRepairCount) || value.reportRepairCount < 0 || value.reportRepairCount > 1) {
+  if (!Number.isSafeInteger(value.reportRepairCount) || value.reportRepairCount < 0) {
     throw new Error('reportRepairCount is invalid');
   }
   if (!Array.isArray(value.reportRepairFindings) || value.reportRepairFindings.length > 256) {

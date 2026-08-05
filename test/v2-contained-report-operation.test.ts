@@ -28,15 +28,6 @@ const readOnlyPolicy: WorkflowOperationPolicy = {
   approvalCeiling: 'never',
   externalWrite: false,
 };
-const directArtifact = {
-  version: 1,
-  status: 'direct',
-  inspectedEvidence: [{ kind: 'issue', location: '#1', summary: 'Read the issue.' }],
-  assumptions: [],
-  direct: { summary: 'Small change.', behaviors: ['Change behavior.'], verification: ['Run test.'] },
-  specRequired: null,
-  blocker: null,
-};
 const codeReviewArtifact = {
   version: 1,
   operation: 'code-review',
@@ -49,20 +40,6 @@ const codeReviewArtifact = {
   reviewerSessionId: 'reviewer-session-1',
   repairFindingOutcomes: [],
 };
-
-test('report-only launcher returns validated triage payload with the exact domain-separated hash', async () => {
-  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact }, null, 2)));
-
-  const result = await fixture.operation.run(runInput('triage'));
-
-  assert.deepEqual(result, {
-    status: 'completed',
-    attemptId: 'attempt-1',
-    validatedPayload: directArtifact,
-    artifactSha256: '5b88bb5dffd931030fe91e2cbe95b0c07cb6fa789b002ad76ac8fd23dc2288fa',
-  });
-  assert.deepEqual(fixture.events, ['snapshot', 'prepare:triage', 'launch:triage', 'snapshot']);
-});
 
 test('implementation reviewer persists prepared and launched identity before accepting a correlated report', async () => {
   const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
@@ -110,11 +87,11 @@ test('implementation reviewer rejects missing launch persistence and stale corre
 
 test('invalid payload returns validation findings without retaining raw payload bytes', async () => {
   const secret = 'raw-secret-that-must-not-survive';
-  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({
-    report: { ...directArtifact, status: secret },
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({
+    report: { ...codeReviewArtifact, status: secret },
   })));
 
-  const result = await fixture.operation.run(runInput('triage'));
+  const result = await fixture.operation.run(reviewInput());
 
   assert.equal(result.status, 'invalid');
   if (result.status !== 'invalid') return;
@@ -125,11 +102,11 @@ test('invalid payload returns validation findings without retaining raw payload 
 });
 
 test('credential-bearing report bytes are rejected before payload adoption', async () => {
-  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({
-    report: directArtifact,
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({
+    report: codeReviewArtifact,
     access_token: 'credential-material-12345',
   })));
-  const result = await fixture.operation.run(runInput('triage'));
+  const result = await fixture.operation.run(reviewInput());
   assert.equal(result.status, 'invalid');
   assert.equal(JSON.stringify(result).includes('credential-material-12345'), false);
 });
@@ -138,7 +115,7 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
   const baseline = stableSnapshot();
   const dependencies: ContainedReportOperationDependencies = {
     snapshot: async () => structuredClone(baseline),
-    prepare: async () => ({ operation: 'triage', generationHash, policy: readOnlyPolicy }),
+    prepare: async () => ({ operation: 'code-review', generationHash, policy: readOnlyPolicy }),
     launch: async () => ({
       status: 'safe-halt',
       pid: 123,
@@ -146,45 +123,45 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
       startedAt: '2026-07-17T00:00:00.000Z',
     }),
   };
-  const result = await new InjectedContainedReportOperation(dependencies).run(runInput('triage'));
+  const result = await new InjectedContainedReportOperation(dependencies).run(reviewInput());
   assert.equal(result.status, 'safe-halt');
   if (result.status !== 'safe-halt') return;
   assert.deepEqual(result.process.baseline, baseline);
 });
 
 test('launcher blocks authority or generation drift before starting the process', async () => {
-  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact })), {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
     prepared: {
-      operation: 'triage',
+      operation: 'code-review',
       generationHash: 'd'.repeat(64),
       policy: { ...readOnlyPolicy, mcpTools: ['github'] },
     },
   });
 
-  const result = await fixture.operation.run(runInput('triage'));
+  const result = await fixture.operation.run(reviewInput());
 
   assert.deepEqual(result, {
     status: 'blocked', kind: 'safety', code: 'report-operation-authority-drift',
   });
-  assert.deepEqual(fixture.events, ['snapshot', 'prepare:triage', 'snapshot']);
+  assert.deepEqual(fixture.events, ['snapshot', 'prepare:code-review', 'snapshot']);
 });
 
 test('launcher blocks a completed report when any before/after worktree fingerprint differs', async () => {
-  const fixture = operationFixture('triage', Buffer.from(JSON.stringify({ report: directArtifact })), {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
     snapshots: [
       { ...stableSnapshot() },
       { ...stableSnapshot(), trackedContentSha256: 'changed' },
     ],
   });
 
-  const result = await fixture.operation.run(runInput('triage'));
+  const result = await fixture.operation.run(reviewInput());
 
   assert.deepEqual(result, {
     status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated',
   });
 });
 
-function runInput(operation: 'triage' | 'code-review') {
+function runInput(operation: 'code-review') {
   return {
     operation,
     attemptId: 'attempt-1',
@@ -196,8 +173,23 @@ function runInput(operation: 'triage' | 'code-review') {
   };
 }
 
+function reviewInput() {
+  return {
+    ...runInput('code-review'),
+    reviewContext: {
+      operation: 'code-review' as const,
+      targetRevision: 1,
+      targetFingerprint: 'd'.repeat(64),
+      reviewerSessionId: 'reviewer-session-1',
+      previousFindingIds: [],
+    },
+    onPrepared: async () => {},
+    onLaunched: async () => {},
+  };
+}
+
 function operationFixture(
-  operation: 'triage' | 'code-review',
+  operation: 'code-review',
   reportBytes: Buffer,
   options: {
     prepared?: PreparedContainedReportAttempt;

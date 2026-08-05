@@ -377,7 +377,6 @@ test('fenced-only skill mention survives sync and verify without becoming a cons
   await cp(join(repositoryRoot, 'internal-workflow', 'docs'), join(codexHome, 'docs'), { recursive: true });
   await mkdir(join(codexHome, 'agents'), { recursive: true });
   for (const [target, source] of [
-    ['explorer.toml', 'explorer.toml'],
     ['implementer.toml', 'implementer.toml'],
     ['standards-reviewer.toml', 'standards_reviewer.toml'],
   ]) await cp(join(repositoryRoot, 'internal-workflow', 'profiles', source), join(codexHome, 'agents', target));

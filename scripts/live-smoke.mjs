@@ -17,8 +17,6 @@ const cleanupModes = new Set(['delete', 'close']);
 
 const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
-  ['spec-first', runSpecFirstScenario],
-  ['product-question', runProductQuestionScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
   ['commit-policy', runCommitPolicyScenario],
   ['incomplete-progress-rework', runReviewReadyScenario],
@@ -29,18 +27,17 @@ const scenarioDefinitions = new Map([
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
-  ['quality-gates', runQualityGatesScenario],
   ['safety-negative', runSafetyNegativeScenario],
 ]);
 
 const scenarioProfiles = new Map([
   ['core-release', [
-    'package-install', 'spec-first', 'product-question', 'review-feedback-continuation',
+    'package-install', 'review-feedback-continuation',
   ]],
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
+    'acceptance-proof-negative', 'review-feedback-continuation',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
@@ -248,6 +245,27 @@ export function parseNpmPackOutput(stdout) {
   throw new Error('npm pack did not return a JSON array');
 }
 
+export async function continueRepairReady(runOnce, options = {}) {
+  const maxContinuations = options.maxContinuations ?? 8;
+  if (!Number.isSafeInteger(maxContinuations) || maxContinuations < 0) {
+    throw new Error('live-smoke maxContinuations must be a non-negative integer');
+  }
+  let result = await runOnce();
+  for (let continuation = 0; isResumableRunResult(result) && continuation < maxContinuations; continuation += 1) {
+    result = await runOnce();
+  }
+  if (isResumableRunResult(result)) {
+    throw new Error(`live-smoke continuation exceeded ${maxContinuations} bounded runs`);
+  }
+  return result;
+}
+
+function isResumableRunResult(result) {
+  return result?.status === 'repair-ready'
+    || (result?.status === 'transport-failed' && result.resumable === true)
+    || (result?.status === 'blocked' && result.kind === 'external' && result.resumable === true);
+}
+
 async function prepareTarget(context) {
   const target = join(context.root, 'target');
   const branch = await defaultBranch(context.repo);
@@ -274,7 +292,7 @@ async function configureTarget(context, overrides = {}) {
 async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
+  const result = await continueRepairReady(() => runIssue(context, issue.number));
   if (result.status !== 'review-ready') {
     const failedRecord = await readRunRecord(context, issue.number);
     const terminalCode = failedRecord.terminalOutcome?.code ?? 'none';
@@ -362,7 +380,7 @@ async function assertReworkCycle(context, issueNumber) {
 async function runReviewFeedbackContinuationScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
-  const initial = await runIssue(context, issue.number);
+  const initial = await continueRepairReady(() => runIssue(context, issue.number));
   assertResult(initial, { status: 'review-ready' }, scenario);
   const publication = await recordPublication(context, issue.number);
   const initialRecord = await readRunRecord(context, issue.number);
@@ -379,7 +397,7 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
     'followed by one LF newline.',
   ].join(' '));
   await assertReviewFeedbackObservable(context, issue.number, publication.number, publication.headSha, initialRecord);
-  const updated = await runDaemonOnce(context, issue.number);
+  const updated = await continueRepairReady(() => runDaemonOnce(context, issue.number));
   if (updated.status !== 'review-ready') await throwResultWithEvidence(context, updated, scenario);
   assertResult(updated, { status: 'review-ready' }, scenario);
 
@@ -453,39 +471,6 @@ async function runPackageInstallScenario(context, scenario) {
   finally { context.cliPath = packedCliPath; }
 }
 
-async function runSpecFirstScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
-  if (result.status !== 'review-ready') await throwResultWithEvidence(context, result, scenario);
-  assertResult(result, { status: 'review-ready' }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  if (record.routeReceipt?.route !== 'spec-required' || record.specDelivery?.stage !== 'frozen'
-    || !record.specDelivery.frozen || !record.checkedChangeSha256 || !record.proofId) {
-    throw new Error(`${scenario}: approved spec was not implemented and proved in the same Run`);
-  }
-  await recordPublication(context, issue.number);
-}
-
-async function runProductQuestionScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const frozen = await runIssue(context, issue.number);
-  assertResult(frozen, { status: 'spec-frozen' }, scenario);
-  if (!frozen.receipt?.answerPrefix) throw new Error(`${scenario}: frozen question has no exact answer prefix`);
-  const viewer = JSON.parse((await runCommand('gh', ['api', 'user'], { timeoutMs: context.options.timeoutMs })).stdout);
-  await runCommand('gh', ['issue', 'comment', String(issue.number), '--repo', context.repo,
-    '--body', `${frozen.receipt.answerPrefix} Use the bounded fixture behavior exactly.`], { timeoutMs: context.options.timeoutMs });
-  if (!viewer?.login) throw new Error(`${scenario}: authenticated owner identity is unavailable`);
-  const completed = await runIssue(context, issue.number);
-  assertResult(completed, { status: 'review-ready' }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  if (record.specDelivery?.acceptedAnswers?.length !== 1 || record.specDelivery.stage !== 'frozen') {
-    throw new Error(`${scenario}: trusted answer was not frozen into the same Run`);
-  }
-  await recordPublication(context, issue.number);
-}
-
 async function throwResultWithEvidence(context, result, scenario) {
   let evidence = null;
   if (typeof result.evidencePath === 'string') {
@@ -544,23 +529,6 @@ async function runAcceptanceProofNegativeScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runQualityGatesScenario(context, scenario) {
-  await configureTarget(context, { failingCheck: true });
-  const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
-  assertResult(result, { status: 'blocked', kind: 'exhausted' }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  if (record.cycle !== 5 || record.checks.length !== 0
-    || record.directReview?.targetRevision !== 5
-    || record.directReview.terminalOutcome?.status !== 'blocked'
-    || record.directReview.terminalOutcome.kind !== 'exhausted'
-    || record.reworkFindings.length !== 1
-    || !record.reworkFindings[0].startsWith('Check smoke failed:')) {
-    throw new Error(`${scenario}: did not exhaust on the fifth configured-check failure`);
-  }
-  await assertNoPublication(context, issue.number, scenario);
-}
-
 async function runSafetyNegativeScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
@@ -595,9 +563,13 @@ async function runIssue(context, issueNumber) {
     cwd: context.targetRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 21, 70, 130],
     env: liveSmokeEnv(context),
   });
-  const envelope = parseExactEnvelope(command.stdout, 'codex-orchestrator.agent-auto-run-result');
-  const expectedExit = { 'review-ready': 0, 'spec-frozen': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
-  if (expectedExit === undefined || command.status !== expectedExit) throw new Error('typed run result and process exit disagree');
+  return parseRunIssueEnvelope(command.stdout, command.status);
+}
+
+export function parseRunIssueEnvelope(stdout, exitStatus) {
+  const envelope = parseExactEnvelope(stdout, 'codex-orchestrator.agent-auto-run-result');
+  const expectedExit = { 'review-ready': 0, 'repair-ready': 0, blocked: 20, 'not-eligible': 21, 'transport-failed': 70, cancelled: 130, 'internal-error': 70 }[envelope.result.status];
+  if (expectedExit === undefined || exitStatus !== expectedExit) throw new Error('typed run result and process exit disagree');
   return envelope.result;
 }
 
@@ -820,9 +792,6 @@ function forward(prompt) {
     ?? 'unknown';
   const operation = prompt.includes('Independently prove issue') ? 'proof'
     : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
-      : prompt.includes('/spec-author/') ? 'spec-author'
-        : prompt.includes('/spec-review/') ? 'spec-review'
-      : prompt.includes('/triage/') ? 'triage'
         : 'implementation';
   if (scenario === 'incomplete-progress-rework' && operation === 'implementation') {
     const marker = gitPath('v2-live-smoke-incomplete');
@@ -861,9 +830,6 @@ function forward(prompt) {
       if (code === 0 && !administrative) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
         if (operation === 'code-review') normalizeCodeReview(reportPath, prompt);
-        if (operation === 'triage' && (scenario === 'spec-first' || scenario === 'product-question')) normalizeSpecTriage(reportPath);
-        if (operation === 'spec-author') normalizeSpecAuthor(reportPath, prompt, scenario);
-        if (operation === 'spec-review') normalizeSpecReview(reportPath, prompt);
         if (operation === 'implementation' && scenario === 'review-feedback-continuation') {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
@@ -878,52 +844,19 @@ function forward(prompt) {
 function normalizeCodeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
-  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
+  const target = capsule.target?.current ?? {};
+  const previousDefects = capsule.target?.repairPatch === null
+    ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
+  const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
   const report = {
-    version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
+    targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
-    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
     repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   };
   writeFileSync(reportPath, JSON.stringify({ report }));
-}
-
-function normalizeSpecTriage(reportPath) {
-  writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, status: 'spec-required',
-    inspectedEvidence: [{ kind: 'issue', location: 'live-smoke issue', summary: 'The fixture requests an approved spec before delivery.' }],
-    assumptions: [], direct: null,
-    specRequired: { summary: 'Specify the bounded fixture.', complexityReasons: ['Exercise durable spec delivery.'], specMode: 'compact', reviewFocus: ['acceptance', 'determinism'] },
-    blocker: null,
-  } }));
-}
-
-function normalizeSpecAuthor(reportPath, prompt, scenario) {
-  const specPath = prompt.match(/only to (.+)\. Return that exact absolute path/u)?.[1];
-  if (!specPath) throw new Error('missing spec revision path');
-  const answered = prompt.includes('"trustedAnswer":{');
-  const decisionRequired = scenario === 'product-question' && !answered;
-  const content = '# Live smoke implementation spec\\n\\nCreate and prove the two bounded scenario marker files.\\n';
-  mkdirSync(dirname(specPath), { recursive: true });
-  writeFileSync(specPath, content);
-  writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, status: decisionRequired ? 'decision-required' : 'ready', specPath,
-    specSha256: createHash('sha256').update(content).digest('hex'), summary: 'Bounded fixture spec authored.', blockers: [],
-    decisionGaps: decisionRequired ? [{ id: 'fixture-behavior', summary: 'Confirm the bounded fixture behavior.', evidence: ['Issue acceptance criteria.'] }] : [],
-    question: decisionRequired ? 'Which bounded fixture behavior should be used?' : null,
-  } }));
-}
-
-function normalizeSpecReview(reportPath, prompt) {
-  const sessionId = prompt.match(/Reviewer session ID: ([^.\\n]+)/u)?.[1];
-  if (!sessionId) throw new Error('missing spec reviewer session');
-  writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, verdict: 'approved',
-    coverage: ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation'],
-    defects: [], reviewerSessionId: sessionId, acceptedRisks: [],
-  } }));
 }
 
 function normalizeReviewFeedbackImplementation(reportPath, prompt) {
@@ -972,7 +905,7 @@ function applyFault(scenario, operation, prompt) {
       version: 1, status: 'external-block', decision: { mode: 'non-visual', targets: [] },
       criteria: criteria.map((item) => ({ id: item.id, status: 'unknown', confidence: 'low', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'External proof dependency is unavailable.' })),
       checks: [], artifacts: [], findings: [], residualRisks: [],
-      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'] },
+      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'], resumable: false },
     }); return;
   }
   if (scenario === 'acceptance-proof-rework') {
@@ -997,7 +930,7 @@ function applyFault(scenario, operation, prompt) {
     return;
   }
   if ([
-    'package-install', 'spec-first', 'product-question', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
+    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
     'authoritative-candidate-publication', 'acceptance-proof-rework',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
@@ -1095,31 +1028,23 @@ process.stdin.on('end', () => {
   const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'authoritative-candidate-publication';
   mkdirSync(dirname(reportPath), { recursive: true });
-  if (prompt.includes('/triage/')) writeTriage(reportPath);
-  else if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
+  if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
   else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
   else writeImplementation(marker, reportPath, prompt);
 });
 
-function writeTriage(reportPath) {
-  writeAgentReport(reportPath, {
-    version: 1, status: 'direct',
-    inspectedEvidence: [{ kind: 'issue', location: 'live-smoke issue', summary: 'Synthetic live-smoke delivery fixture.' }],
-    assumptions: [],
-    direct: { summary: 'Deliver the bounded live-smoke fixture.', behaviors: ['Create the scenario marker.'], verification: ['Run the scenario proof.'] },
-    specRequired: null, awaitingUser: null, blocker: null,
-  });
-}
-
 function writeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
-  const previous = [...(capsule.defects ?? []), ...(capsule.fixedRepairFindings ?? [])];
+  const target = capsule.target?.current ?? {};
+  const previousDefects = capsule.target?.repairPatch === null
+    ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
+  const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
   writeAgentReport(reportPath, {
-    version: 1, operation: capsule.operation, targetRevision: capsule.targetRevision,
-    targetFingerprint: capsule.targetFingerprint, verdict: 'approved',
+    version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
+    targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
-    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: capsule.targetRevision })),
+    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
     repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   });
@@ -1158,7 +1083,7 @@ function writeProof(scenario, criteria, reportPath, prompt) {
       version: 1, status: 'external-block', decision: { mode: 'non-visual', targets: [] },
       criteria: criteria.map((item) => ({ id: item.id, status: 'unknown', confidence: 'low', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'External proof dependency is unavailable.' })),
       checks: [], artifacts: [], findings: [], residualRisks: [],
-      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'] },
+      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'], resumable: false },
     }); return;
   }
   if (scenario === 'acceptance-proof-rework') {
@@ -1463,20 +1388,11 @@ async function selfTestFakeAgent() {
       || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
       throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
     }
-    const triagePath = join(root, 'triage.json');
-    await runCommand(fakePath, ['exec', '--output-last-message', triagePath], {
-      cwd: root,
-      stdin: 'Follow the exact operation at /operations/triage/SKILL.md.\n',
-    });
-    const triage = JSON.parse(await readFile(triagePath, 'utf8')).report;
-    if (triage.version !== 1 || triage.status !== 'direct' || triage.direct?.behaviors?.length !== 1) {
-      throw new Error(`fake triage report contract failed: ${JSON.stringify(triage)}`);
-    }
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {
-      operation: 'code-review', reviewerSessionId: 'review-session-1', targetRevision: 1,
-      targetFingerprint: 'a'.repeat(64), reviewFocus: ['correctness'],
-      defects: [], fixedRepairFindings: [],
+      operation: 'code-review', reviewerSessionId: 'review-session-1',
+      target: { current: { targetRevision: 1, targetFingerprint: 'a'.repeat(64), candidateTreeSha: 'b'.repeat(40) }, previous: null, repairPatch: null },
+      reviewFocus: ['correctness'], defects: [], repairFindings: [],
     };
     await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {
       cwd: root,
@@ -1484,7 +1400,7 @@ async function selfTestFakeAgent() {
     });
     const review = JSON.parse(await readFile(reviewPath, 'utf8')).report;
     if (review.operation !== 'code-review' || review.verdict !== 'approved'
-      || review.targetFingerprint !== reviewCapsule.targetFingerprint || review.coverage?.[0] !== 'correctness') {
+      || review.targetFingerprint !== reviewCapsule.target.current.targetFingerprint || review.coverage?.[0] !== 'correctness') {
       throw new Error('fake code review report contract failed');
     }
     const proofPath = join(root, 'proof.json');

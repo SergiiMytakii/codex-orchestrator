@@ -14,7 +14,7 @@ import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command
 import { RunnerAndroidProofController } from './android-proof-runner.js';
 import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
-import type { DeliveryAuthorityV1 } from './delivery-authority.js';
+import type { DeliveryAuthority } from './delivery-authority.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
 import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
@@ -29,11 +29,6 @@ import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
 import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
-import { RouteCoordinator } from './route-coordinator.js';
-import { SpecCoordinator, type SpecDeliveryOperation } from './spec-coordinator.js';
-import { createSpecRevision, type SpecReviewReportV1 } from './spec-delivery.js';
-import { validateCodeReviewDefects } from './code-review-report.js';
-import { hashRouteDecision, validateRouteReceipt, type RouteReceiptV1 } from './route-decision.js';
 import {
   OwnerLockContentionError, OwnerLockSafetyError, RunIssue,
   type AttemptCleanupIdentity, type ImplementationAgentResult, type RunIssueGit,
@@ -530,6 +525,14 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     return this.worktrees.listChangedFiles(worktreePath);
   }
 
+  async diffTrees(worktreePath: string, previousTreeSha: string, candidateTreeSha: string): Promise<{ changedFiles: string[]; patch: string }> {
+    const [names, patch] = await Promise.all([
+      this.git(['-C', worktreePath, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', previousTreeSha, candidateTreeSha], { maxOutputBytes: 1024 * 1024 }),
+      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--'], { maxOutputBytes: 1024 * 1024 }),
+    ]);
+    return { changedFiles: names.split('\0').filter(Boolean).sort(), patch };
+  }
+
   listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]> {
     return this.worktrees.listChangedFilesIgnoringUntrackedRoot(worktreePath, ignoredRoot);
   }
@@ -796,7 +799,7 @@ export class ContainedImplementationAgent {
     worktreePath: string;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
-    deliveryAuthority: DeliveryAuthorityV1;
+    deliveryAuthority: DeliveryAuthority;
     cycle: number;
     reworkFindings: string[];
     repairOnly: boolean;
@@ -869,7 +872,7 @@ export class ContainedImplementationAgent {
         }),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
+      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
         return { kind: 'transport-failed', resumable: true };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
@@ -994,7 +997,7 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         }),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
+      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
         return { kind: 'transport-failed', resumable: true };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
@@ -1036,6 +1039,21 @@ export interface V2Runtime {
   runIssue(input: { targetRoot: string; issueNumber: number }): ReturnType<RunIssue['runIssue']>;
   abort(): void;
   dispose(): void;
+}
+
+export function selectedConfiguredCheckPolicySha256(
+  selectedChecks: Array<{ id: string; command: string }>,
+  configuredAuthority: Record<string, string>,
+): string {
+  const selected: Record<string, string> = {};
+  for (const check of selectedChecks) {
+    if (Object.prototype.hasOwnProperty.call(selected, check.id)
+      || configuredAuthority[check.id] !== check.command) {
+      throw new CandidateProofInspectionError('selected check no longer matches current configured authority');
+    }
+    selected[check.id] = check.command;
+  }
+  return sha256(canonicalJson(selected));
 }
 
 export async function resolveCodexExecutable(command: string, safePath: string): Promise<string> {
@@ -1222,7 +1240,7 @@ export function createV2Runtime(input: {
       }
       if (result.kind === 'cancelled') return { status: 'cancelled' as const };
       if (result.kind === 'launch-gate-failed') {
-        return { status: 'blocked' as const, kind: 'safety' as const, code: 'review-operation-launch-persistence-failed' };
+        return { status: 'retryable' as const, code: 'review-operation-launch-gate-failed' };
       }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
         return { status: 'retryable' as const, code: `report-operation-${result.kind}` };
@@ -1236,125 +1254,6 @@ export function createV2Runtime(input: {
   const implementationReviewer = new ContainedImplementationReviewer({
     operation: reportOperation,
   });
-  const specOperation: SpecDeliveryOperation = {
-    author: async ({ attemptId, context, state, mode, recoverOnly, signal, onPrepared, onLaunched }) => {
-      const sessionId = state.authorSessionId ?? attemptId;
-      let attempt;
-      try {
-        attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-author', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        const revisionPath = join(dirname(attempt.reportPath), `revision-${state.revisions.length + 1}.md`);
-        if (!recoverOnly) await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath, revisionPath });
-        const config = requireConfig(currentConfig);
-        const result = recoverOnly
-          ? { kind: 'completed' as const, report: { kind: 'available' as const, bytes: await readRegularFile(attempt.reportPath) } }
-          : await containedProcess.run({
-          codexPath: config.codex.command, cwd: dirname(attempt.reportPath), schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
-            `The immutable workflow root is ${attempt.workflowRoot}.`,
-            `Author mode: ${mode}. Issue authority: ${canonicalJson(context.issue)}.`,
-            `Frozen criteria: ${canonicalJson(context.frozenCriteria)}.`,
-            `Prior revisions, accepted answers, and review state: ${canonicalJson({
-              revisions: state.revisions,
-              acceptedAnswers: state.acceptedAnswers,
-              trustedAnswer: state.trustedAnswer ?? null,
-              review: state.review,
-            })}.`,
-            `Write the complete new immutable revision only to ${revisionPath}. Return that exact absolute path and its SHA-256 in the report.`,
-            'Do not modify the product worktree, prior revisions, external state, or any .env file.',
-          ].join('\n'),
-          }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-author-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-author-report-invalid' };
-        const report = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (!['ready', 'decision-required'].includes(report.status as string) || report.specPath !== revisionPath || report.specSha256 === null) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        const content = await readRegularFile(revisionPath);
-        if (report.specSha256 !== sha256(content)) return { status: 'retryable', code: 'spec-author-report-invalid' };
-        const previous = state.revisions.at(-1) ?? null;
-        const revision = createSpecRevision({
-          revision: state.revisions.length + 1, path: revisionPath, content: content.toString('utf8'),
-          evidence: [{ path: context.issue.url, sha256: sha256(canonicalJson(context.issue)), description: 'Frozen issue authority' }],
-          author: { attemptId, sessionId }, previousRevision: previous,
-        });
-        if (report.status === 'decision-required') {
-          if (!Array.isArray(report.decisionGaps) || report.decisionGaps.length === 0 || typeof report.question !== 'string' || report.question.length === 0) {
-            return { status: 'retryable', code: 'spec-author-report-invalid' };
-          }
-          return {
-            status: 'decision-required', value: revision, decisionGaps: report.decisionGaps as Array<{ id: string; summary: string; evidence: string[] }>,
-            question: report.question, attemptResultSha256: sha256(result.report.bytes),
-          };
-        }
-        return { status: 'completed', attemptResultSha256: sha256(result.report.bytes), value: revision };
-      } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          return { status: 'safe-halt' };
-        }
-        return { status: 'retryable', code: 'spec-author-report-invalid' };
-      }
-    },
-    review: async ({ attemptId, context, state, recoverOnly, signal, onPrepared, onLaunched }) => {
-      const sessionId = state.review.reviewer?.sessionId ?? attemptId;
-      try {
-        const attempt = await prepareContainedAttempt({
-          orchestratorHome, canonicalRepository: requireCanonicalRepository(currentConfig), runId: context.runId,
-          attemptId, operationId: 'spec-review', workflowGeneration: context.workflowGeneration, bootId: input.bootId,
-        });
-        if (!recoverOnly) await onPrepared({ attemptId, sessionId, reportPath: attempt.reportPath });
-        const config = requireConfig(currentConfig);
-        const result = recoverOnly
-          ? { kind: 'completed' as const, report: { kind: 'available' as const, bytes: await readRegularFile(attempt.reportPath) } }
-          : await containedProcess.run({
-          codexPath: config.codex.command, cwd: context.worktreePath, schemaPath: attempt.schemaPath,
-          reportPath: attempt.reportPath, toolHome: attempt.toolHome, tmpDir: attempt.tmpDir,
-          safePath: requireRuntimeString(input.safePath, 'safePath'), parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-          parentEnv: process.env, timeoutMs: config.codex.timeoutMs, idleTimeoutMs: config.codex.idleTimeoutMs,
-          operationPolicy: attempt.policy, executionProfile: attempt.profile,
-          onSpawned: ({ pid, processGroupId }) => onLaunched({ attemptId, sessionId, pid, processGroupId }),
-          prompt: [
-            `Package profile instructions: ${attempt.profile.developerInstructions}`,
-            `Follow the exact operation at ${attempt.operationPath}.`,
-            `Reviewer session ID: ${sessionId}. Perform a complete independent review.`,
-            `Issue authority and frozen criteria: ${canonicalJson({ issue: context.issue, frozenCriteria: context.frozenCriteria })}.`,
-            `Immutable spec delivery state: ${canonicalJson(state)}.`,
-            'Return only the package spec-review report. Do not edit files or external state.',
-          ].join('\n'),
-          }, signal);
-        if (result.kind === 'cancelled') return { status: 'cancelled' };
-        if (['spawn-failed','transport-failed','timeout','idle-timeout'].includes(result.kind)) return { status: 'retryable', code: `spec-review-${result.kind}` };
-        if (result.kind !== 'completed' || result.report.kind !== 'available') return { status: 'retryable', code: 'spec-review-report-invalid' };
-        const raw = decodeAgentReportForValidation(result.report.bytes) as Record<string, unknown>;
-        if (raw.reviewerSessionId !== sessionId || !Array.isArray(raw.coverage) || !Array.isArray(raw.defects)
-          || !Array.isArray(raw.acceptedRisks)
-          || !['approved','needs-work','rejected'].includes(raw.verdict as string)) return { status: 'retryable', code: 'spec-review-report-invalid' };
-        const target = state.revisions.at(-1)!;
-        const defects = validateCodeReviewDefects(raw.defects, target.revision);
-        const report: SpecReviewReportV1 = {
-          version: 1, targetRevision: target.revision, targetSha256: target.revisionSha256,
-          verdict: raw.verdict as SpecReviewReportV1['verdict'], reviewer: { attemptId, sessionId },
-          coverage: raw.coverage as string[], defects,
-          acceptedRisks: [],
-        };
-        return { status: 'completed', value: report, attemptResultSha256: sha256(result.report.bytes), reportSha256: sha256(result.report.bytes) };
-      } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          return { status: 'safe-halt' };
-        }
-        return { status: 'retryable', code: 'spec-review-report-invalid' };
-      }
-    },
-  };
-
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
     const bytes = await readRegularFile(join(targetRoot, '.codex-orchestrator', 'config.json'));
@@ -1410,7 +1309,10 @@ export function createV2Runtime(input: {
         checkedChangeReader: capabilities,
         proofAgent,
         inspectFreshness: async (payload, materialization) => {
-          const checkPolicySha256 = sha256(canonicalJson(resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks));
+          const checkPolicySha256 = selectedConfiguredCheckPolicySha256(
+            payload.checks,
+            resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks,
+          );
           if (payload.version === 1) return {
             ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
               ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
@@ -1571,32 +1473,6 @@ export function createV2Runtime(input: {
     },
     reviewFeedback: new ReviewFeedbackObserver({ pullRequests: input.pullRequests, issues: input.issues, now }),
     git,
-    routeCoordinator: {
-      run: ({ state, ...routeInput }) => new RouteCoordinator({
-        state,
-        operation: reportOperation,
-        now,
-        createReceipt: ({ artifact, triage, decidedAt }) => {
-          if (artifact.status === 'blocked') throw new Error('blocked triage cannot create a route receipt');
-          const receipt: RouteReceiptV1 = {
-            version: 1,
-            route: artifact.status,
-            triage,
-            review: null,
-            artifact,
-            decisionSha256: '',
-            decidedAt,
-            assumptions: [...artifact.assumptions],
-          };
-          receipt.decisionSha256 = hashRouteDecision(receipt);
-          return validateRouteReceipt(receipt, triage.generationHash);
-        },
-      }).run(routeInput),
-    },
-    routeContinuations: {
-      direct: async () => ({ status: 'completed' }),
-      specRequired: (context, state, signal) => new SpecCoordinator({ state, operation: specOperation }).run(context, signal),
-    },
     implementationAgent,
     implementationReviewer,
     checks: {
@@ -1980,7 +1856,7 @@ async function prepareContainedAttempt(input: {
   canonicalRepository: string;
   runId: string;
   attemptId: string;
-  operationId: 'implementation' | 'acceptance-proof' | 'triage' | 'code-review' | 'spec-author' | 'spec-review';
+  operationId: 'implementation' | 'acceptance-proof' | 'code-review';
   workflowGeneration: WorkflowGenerationReceipt;
   bootId: string;
 }): Promise<{
@@ -2003,8 +1879,7 @@ async function prepareContainedAttempt(input: {
     operation: input.operationId,
     bootId: input.bootId,
   });
-  const reportOnly = input.operationId === 'triage'
-    || input.operationId === 'code-review' || input.operationId === 'spec-review';
+  const reportOnly = input.operationId === 'code-review';
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'
       || snapshot.policy.worktreeAccess !== 'read-only'

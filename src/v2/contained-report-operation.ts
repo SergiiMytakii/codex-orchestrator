@@ -5,8 +5,6 @@ import {
   validateCodeReviewReport,
   type CodeReviewValidationContext,
 } from './code-review-report.js';
-import { hashTriageArtifact } from './route-decision.js';
-import { validateTriageRoute } from './triage-route.js';
 import type {
   WorkflowExecutionProfile,
   WorkflowGenerationReceipt,
@@ -19,7 +17,7 @@ const POLICY_KEYS = [
   'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
 ] as const;
 
-export type ContainedReportOperationId = 'triage' | 'code-review';
+export type ContainedReportOperationId = 'code-review';
 
 export interface ContainedReportOperationInput {
   operation: ContainedReportOperationId;
@@ -199,7 +197,7 @@ function hasExactReadOnlyAuthority(
     && policy.externalWrite === false;
 }
 
-function validateCompletedReport(
+export function validateCompletedReport(
   operation: ContainedReportOperationId,
   attemptId: string,
   reportBytes: Buffer,
@@ -207,23 +205,15 @@ function validateCompletedReport(
 ): ContainedReportOperationResult {
   const rawText = reportBytes.toString('utf8');
   const repairable = Buffer.from(rawText, 'utf8').equals(reportBytes)
-    && !containsCredentialEvidence(rawText)
-    && reportBytes.length <= 1024 * 1024;
+    && !containsCredentialEvidence(rawText);
   try {
     if (!Buffer.from(rawText, 'utf8').equals(reportBytes) || containsCredentialEvidence(rawText)) {
       throw new Error('report payload contains forbidden credential material');
     }
     const decoded = decodeAgentReportForValidation(reportBytes);
-    let validatedPayload: unknown;
-    let artifactSha256: string;
-    if (operation === 'triage') {
-      validatedPayload = validateTriageRoute(decoded);
-      artifactSha256 = hashTriageArtifact(validatedPayload);
-    } else {
-      const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
-      validatedPayload = reviewReport;
-      artifactSha256 = hashCodeReviewReport(reviewReport);
-    }
+    const reviewReport = inputReview(operation, inputReviewContext(reviewContext), decoded);
+    const validatedPayload: unknown = reviewReport;
+    const artifactSha256 = hashCodeReviewReport(reviewReport);
     return {
       status: 'completed',
       attemptId,

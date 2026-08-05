@@ -22,12 +22,12 @@ policy, budget, or publication.
 or GitHub effect. Recovery settles its exact postcondition before any next
 effect is authorized.
 
-**Cycle** — one bounded implementation attempt in the Run's existing worktree.
+**Cycle** — one semantic implementation revision in the Run's existing worktree. Its number is durable correlation data, not an exhaustion budget.
 
-**Validation loop** — the single implementation → complete independent review
-→ checks → proof sequence used for both initial delivery and frozen trusted PR
-feedback. Repair creates a new candidate and complete review; it has no Closure
-or qualification sub-lifecycle.
+**Validation progression** — the single implementation → affected checks →
+Acceptance Proof → Review → publication sequence used for initial delivery and
+trusted PR feedback. Initial Review is complete. Isolatable repairs receive a
+targeted Review of their delta and direct impact cone while untouched approval is preserved.
 
 **Checked Change** — nominal capability binding exact repository, Git, content, worktree, check, package, and proof-schema state after checks pass.
 
@@ -38,10 +38,6 @@ or qualification sub-lifecycle.
 **Runner-owned action** — finite operation such as publication, issue mutation, durable ownership, or device leasing that an Agent cannot perform with inherited credentials.
 
 **Resumable intent** — durable record written before an effect and reconciled against its postcondition after restart.
-
-**Spec question** — immutable spec-revision-bound GitHub question published only for a real product decision gap and returned as `spec-frozen`.
-
-**Trusted answer** — unedited exact-prefix answer from an identity with current repository WRITE or ADMIN permission, frozen into the Run before the next spec revision and independent review; triage is not repeated.
 
 **Safe halt** — fail-closed state used when ownership, containment, process quiescence, or effect outcome cannot be proved. One daemon tick makes at most one bounded process/result/cleanup observation; unresolved ownership returns a resumable projection and never holds the repository loop.
 
@@ -58,9 +54,6 @@ or qualification sub-lifecycle.
 - Durable state accepts only the exact `codex-orchestrator.run-state` schema.
   Absence initializes it; unsupported bytes fail closed without compatibility,
   migration, backup, dual-write, or progression effects.
-- A spec-question Run resumes only through its matching marker and Trusted
-  Answer, creates and independently reviews the next immutable spec revision,
-  then continues implementation in the same Run without repeating triage.
-- Trusted PR feedback is frozen as Run data with an update epoch and at most
-  three semantic rounds; it does not own a second lifecycle.
-- Five failed implementation cycles exhaust the Run without publication.
+- Plan, specification composition, ticket slicing, and graph coordination remain external owners.
+- Trusted PR feedback is frozen as Run data with an update epoch and uses the same targeted repair progression; it does not own a second lifecycle or round budget.
+- Transport, timeout, report-format, launch, observation, and tooling failures return resumable issue-local outcomes and do not consume semantic repair authority.

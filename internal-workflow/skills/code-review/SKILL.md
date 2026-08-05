@@ -62,8 +62,11 @@ for Review explicitly.
    defects from judgement calls. Begin the brief with `Assigned role:
    standards_reviewer`.
 3. Capture its non-empty child identity and wait for that same child.
-   A timeout, failed child, missing identity, or incomplete wait blocks approval.
-   Root never substitutes self-review.
+   An empty bounded wait means wait again, not failure. Silence is not a hang;
+   request status only without interruption. Never interrupt, terminate, close,
+   or replace an active reviewer to accelerate it. Only user cancellation or a
+   terminal child failure permits stopping. An interrupted review blocks and is
+   not code approval; root never substitutes self-review.
 4. Verify every finding against the review target and its trigger path, preserve its
    defect identity, and classify it with the threshold above. Return
    observations separately and consolidate every blocker from the review into
@@ -75,12 +78,13 @@ for Review explicitly.
    If the current request is review-only, report the findings and stop; do not
    invoke Implement or infer repair authority.
 5. Approval requires the completed reviewer to return `APPROVE` for the target
-   with no blocker or required-proof gap. Initial approval covers the
+   with no blocker or required-proof gap. A non-terminal polling timeout means
+   wait again. Initial approval covers the
    complete settled result; targeted repair approval covers the delta and its
    impact cone while preserving approval for untouched scope. Review may
-   approve while reporting non-blocking observations. A failed or timed-out
-   child, missing identity, incomplete wait, or non-approval blocks Review;
-   root does not replace it with self-review.
+   approve while reporting non-blocking observations. Missing identity,
+   terminal failure, interruption, incomplete final wait, or non-approval
+   blocks Review; root does not replace it with self-review.
 6. Review performs one reviewer invocation and returns its result.
    Review remains read-only: it does not repair, start another reviewer,
    edit, stage, commit, push, or open a PR.

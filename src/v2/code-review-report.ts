@@ -4,7 +4,6 @@ import { canonicalJson } from './containment.js';
 import { agentReportEnvelopeSchema } from './report-envelope.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
-const MAX_ITEMS = 256;
 const MAX_TEXT = 16 * 1024;
 
 export type ReviewOperation = 'code-review';
@@ -53,6 +52,7 @@ export interface CodeReviewValidationContext {
   targetFingerprint: string;
   reviewerSessionId: string;
   previousFindingIds?: string[];
+  requiredCoverage?: string[];
 }
 
 export function hashCodeReviewReport(report: CodeReviewReportV1): string {
@@ -70,6 +70,7 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
   assertSha256(value.targetFingerprint, 'code review report.targetFingerprint');
   if (!['approved', 'needs-work', 'rejected'].includes(value.verdict as string)) throw new Error('code review report.verdict is invalid');
   const coverage = sortedUniqueStrings(value.coverage, 'code review report.coverage');
+  const requiredCoverage = sortedUniqueStrings(context.requiredCoverage ?? [], 'required review coverage');
   const residualRisks = sortedUniqueStrings(value.residualRisks, 'code review report.residualRisks');
   assertText(value.reviewerSessionId, 'code review report.reviewerSessionId');
   if (value.operation !== context.operation || value.targetRevision !== context.targetRevision
@@ -85,6 +86,14 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
     && defect.status !== 'verified' && defect.status !== 'superseded');
   if (value.verdict === 'approved' && (unresolved || repairFindingOutcomes.some((outcome) => outcome.status === 'reopened'))) {
     throw new Error('approved review has unresolved defects or repair findings');
+  }
+  if (value.verdict === 'approved' && requiredCoverage.some((item) => !coverage.includes(item))) {
+    throw new Error('approved review is missing required coverage');
+  }
+  if (value.verdict === 'needs-work'
+    && !defects.some((defect) => defect.status === 'open' || defect.status === 'reopened')
+    && !repairFindingOutcomes.some((outcome) => outcome.status === 'reopened')) {
+    throw new Error('needs-work review requires an open or reopened defect or repair finding');
   }
   return {
     ...(structuredClone(value) as unknown as CodeReviewReportV1),
@@ -102,7 +111,7 @@ export function validateCodeReviewDefects(value: unknown, targetRevision: number
 
 export function codeReviewReportOutputSchema(): Record<string, unknown> {
   const text = { type: 'string', minLength: 1, maxLength: MAX_TEXT };
-  const stringList = { type: 'array', maxItems: MAX_ITEMS, items: text };
+  const stringList = { type: 'array', items: text };
   const defect = {
     type: 'object', additionalProperties: false,
     required: [
@@ -134,11 +143,11 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
       targetFingerprint: { type: 'string', pattern: '^[0-9a-f]{64}$' },
       verdict: { type: 'string', enum: ['approved', 'needs-work', 'rejected'] },
       coverage: stringList,
-      defects: { type: 'array', maxItems: MAX_ITEMS, items: defect },
+      defects: { type: 'array', items: defect },
       residualRisks: stringList,
       reviewerSessionId: text,
       repairFindingOutcomes: {
-        type: 'array', maxItems: MAX_ITEMS,
+        type: 'array',
         items: {
           type: 'object', additionalProperties: false, required: ['id', 'status'],
           properties: { id: text, status: { type: 'string', enum: ['verified', 'reopened'] } },
@@ -150,7 +159,7 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
 }
 
 function validateDefects(value: unknown, targetRevision: number): CodeReviewDefectV1[] {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) throw new Error('code review report.defects is invalid');
+  if (!Array.isArray(value)) throw new Error('code review report.defects is invalid');
   const defects = value.map((item, index) => {
     assertExactObject(item, [
       'id', 'class', 'severity', 'confidence', 'status', 'invariant', 'failure', 'evidence', 'repair',
@@ -194,7 +203,7 @@ function validateSupersession(defects: CodeReviewDefectV1[]): void {
 }
 
 function validateRepairFindingOutcomes(value: unknown): RepairFindingOutcomeV1[] {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) throw new Error('repair finding outcomes are invalid');
+  if (!Array.isArray(value)) throw new Error('repair finding outcomes are invalid');
   const output = value.map((item, index) => {
     assertExactObject(item, ['id', 'status'], `repair finding outcome[${index}]`);
     assertText(item.id, 'repair finding outcome.id');
@@ -207,7 +216,7 @@ function validateRepairFindingOutcomes(value: unknown): RepairFindingOutcomeV1[]
 }
 
 function sortedUniqueStrings(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.length > MAX_ITEMS) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${field} is invalid`);
   for (const item of value) assertText(item, `${field} entry`);
   const output = [...value as string[]].sort();
   assertUnique(output, field);

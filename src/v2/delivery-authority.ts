@@ -1,74 +1,65 @@
 import { canonicalJson, sha256 } from './containment.js';
-import type { RouteReceiptV1 } from './route-decision.js';
-import { validateSpecDelivery, type FrozenSpecReceiptV1, type SpecDeliveryV1 } from './spec-delivery.js';
 
-interface DeliveryAuthorityBaseV1 {
-  version: 1;
-  routeDecisionSha256: string;
+export interface DeliveryAuthorityV2 {
+  version: 2;
+  kind: 'issue';
+  issueNumber: number;
+  issueUrl: string;
+  issueSnapshotSha256: string;
+  authorizationLabel: string;
   sourceSha256: string;
   authoritySha256: string;
 }
 
-export type DeliveryAuthorityV1 =
-  | DeliveryAuthorityBaseV1 & { kind: 'direct' }
-  | DeliveryAuthorityBaseV1 & {
-    kind: 'spec';
-    frozenSpec: {
-      content: string;
-      contentSha256: string;
-      revision: number;
-      revisionSha256: string;
-      approvalReceipt: FrozenSpecReceiptV1;
-    };
-  };
+export type DeliveryAuthority = DeliveryAuthorityV2;
 
-export function createDirectDeliveryAuthority(receipt: RouteReceiptV1): DeliveryAuthorityV1 {
-  if (receipt.route !== 'direct') throw new Error('direct delivery authority requires direct route');
-  return withHash({
-    version: 1 as const, kind: 'direct' as const,
-    routeDecisionSha256: receipt.decisionSha256, sourceSha256: receipt.decisionSha256,
-  });
-}
-
-export function createSpecDeliveryAuthority(receipt: RouteReceiptV1, spec: SpecDeliveryV1): DeliveryAuthorityV1 {
-  if (receipt.route !== 'spec-required') throw new Error('spec delivery authority requires spec route');
-  const validated = validateSpecDelivery(spec);
-  if (validated.stage !== 'frozen' || !validated.frozen) throw new Error('spec delivery authority requires frozen spec');
-  const revision = validated.revisions.at(-1)!;
+export function createIssueDeliveryAuthority(input: {
+  issueNumber: number;
+  issueUrl: string;
+  title: string;
+  body: string;
+  authorizationLabel: string;
+}): DeliveryAuthorityV2 {
+  if (!Number.isSafeInteger(input.issueNumber) || input.issueNumber < 1) throw new Error('issue delivery authority number is invalid');
+  for (const [field, value] of Object.entries({ issueUrl: input.issueUrl, title: input.title, authorizationLabel: input.authorizationLabel })) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`issue delivery authority ${field} is invalid`);
+  }
+  if (typeof input.body !== 'string') throw new Error('issue delivery authority body is invalid');
+  const issueSnapshotSha256 = sha256(canonicalJson({
+    number: input.issueNumber,
+    url: input.issueUrl,
+    title: input.title,
+    body: input.body,
+  }));
   const payload = {
-    version: 1 as const,
-    kind: 'spec' as const,
-    routeDecisionSha256: receipt.decisionSha256,
-    sourceSha256: validated.frozen.receiptSha256,
-    frozenSpec: {
-      content: revision.content,
-      contentSha256: revision.contentSha256,
-      revision: revision.revision,
-      revisionSha256: revision.revisionSha256,
-      approvalReceipt: structuredClone(validated.frozen),
-    },
+    version: 2 as const,
+    kind: 'issue' as const,
+    issueNumber: input.issueNumber,
+    issueUrl: input.issueUrl,
+    issueSnapshotSha256,
+    authorizationLabel: input.authorizationLabel,
+    sourceSha256: issueSnapshotSha256,
   };
-  return withHash(payload);
+  return { ...payload, authoritySha256: authorityHash(payload) };
 }
 
-export function validateDeliveryAuthority(value: unknown, receipt: RouteReceiptV1, spec?: SpecDeliveryV1): DeliveryAuthorityV1 {
+export function validateDeliveryAuthority(value: unknown, input: {
+  issueNumber: number;
+  issueUrl: string;
+  title: string;
+  body: string;
+  authorizationLabel: string;
+}): DeliveryAuthorityV2 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('delivery authority is invalid');
-  const authority = value as DeliveryAuthorityV1;
-  const expectedKeys = authority.kind === 'spec'
-    ? 'authoritySha256,frozenSpec,kind,routeDecisionSha256,sourceSha256,version'
-    : 'authoritySha256,kind,routeDecisionSha256,sourceSha256,version';
-  if (Object.keys(authority).sort().join(',') !== expectedKeys
-    || authority.version !== 1 || !['direct', 'spec'].includes(authority.kind)
-    || !/^[0-9a-f]{64}$/u.test(authority.routeDecisionSha256)
-    || !/^[0-9a-f]{64}$/u.test(authority.sourceSha256)
-    || !/^[0-9a-f]{64}$/u.test(authority.authoritySha256)) throw new Error('delivery authority is invalid');
-  const expected = receipt.route === 'direct'
-    ? createDirectDeliveryAuthority(receipt)
-    : spec?.stage === 'frozen' && spec.frozen ? createSpecDeliveryAuthority(receipt, spec) : undefined;
-  if (!expected || canonicalJson(expected) !== canonicalJson(authority)) throw new Error('delivery authority binding mismatch');
-  return structuredClone(authority);
+  const authority = value as Record<string, unknown>;
+  const keys = Object.keys(authority).sort().join(',');
+  if (keys !== 'authoritySha256,authorizationLabel,issueNumber,issueSnapshotSha256,issueUrl,kind,sourceSha256,version'
+    || authority.version !== 2 || authority.kind !== 'issue') throw new Error('delivery authority is invalid');
+  const expected = createIssueDeliveryAuthority(input);
+  if (canonicalJson(expected) !== canonicalJson(value)) throw new Error('delivery authority binding mismatch');
+  return structuredClone(expected);
 }
 
-function withHash<T extends Omit<DeliveryAuthorityV1, 'authoritySha256'>>(payload: T): T & { authoritySha256: string } {
-  return { ...payload, authoritySha256: sha256(`codex-orchestrator-delivery-authority-v1\0${canonicalJson(payload)}`) };
+function authorityHash(payload: Omit<DeliveryAuthorityV2, 'authoritySha256'>): string {
+  return sha256(`codex-orchestrator-issue-delivery-authority-v2\0${canonicalJson(payload)}`);
 }

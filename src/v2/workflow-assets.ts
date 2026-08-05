@@ -29,12 +29,6 @@ const EXPECTED_OPERATION_BINDINGS: Record<string, {
     sourceSkill: 'implement', dependencySkills: ['diagnosing-bugs', 'tdd'],
     outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer',
   },
-  'spec-author': { sourceSkill: 'to-spec', dependencySkills: [], outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer' },
-  'spec-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/spec-review-v1.json', profile: 'standards_reviewer' },
-  triage: {
-    sourceSkill: 'plan', dependencySkills: ['bug-root-cause-explainer'],
-    outputSchema: 'schemas/triage-route-v1.json', profile: 'explorer',
-  },
 };
 
 export interface WorkflowFileRecord {
@@ -46,10 +40,10 @@ export interface WorkflowFileRecord {
 
 export interface WorkflowOperationPolicy {
   sandboxMode: 'read-only' | 'workspace-write';
-  cwdClass: 'worktree' | 'target-state';
+  cwdClass: 'worktree';
   worktreeAccess: 'read-only' | 'write';
-  writableRootClasses: Array<'worktree' | 'target-state'>;
-  runnerPostcondition: 'report-only' | 'change-set' | 'proof-only' | 'spec-only';
+  writableRootClasses: Array<'worktree'>;
+  runnerPostcondition: 'report-only' | 'change-set' | 'proof-only';
   network: 'deny';
   networkHosts: string[];
   mcpTools: string[];
@@ -778,9 +772,7 @@ function validateOperationPolicy(id: string, value: Record<string, unknown>): vo
     ? ['workspace-write', 'worktree', 'write', 'worktree', 'change-set']
     : id === 'acceptance-proof'
       ? ['workspace-write', 'worktree', 'write', 'worktree', 'proof-only']
-      : id === 'spec-author'
-        ? ['workspace-write', 'target-state', 'write', 'target-state', 'spec-only']
-        : ['read-only', 'worktree', 'read-only', '', 'report-only'];
+      : ['read-only', 'worktree', 'read-only', '', 'report-only'];
   const roots = Array.isArray(value.writableRootClasses) ? value.writableRootClasses.join(',') : '<invalid>';
   const actual = [value.sandboxMode, value.cwdClass, value.worktreeAccess, roots, value.runnerPostcondition];
   if (!same(actual.map(String), expected)) throw new Error(`workflow operation policy is invalid: ${id}`);

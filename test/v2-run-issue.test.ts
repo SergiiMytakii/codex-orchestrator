@@ -11,7 +11,7 @@ import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import type { DeliveryAuthorityV1 } from '../src/v2/delivery-authority.js';
+import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import { CheckProcessQuiescenceError } from '../src/v2/issue-check-policy.js';
 import {
@@ -30,9 +30,6 @@ import {
   type RunStateInspection,
 } from '../src/v2/run-store.js';
 import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
-import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
-import { SpecCoordinator } from '../src/v2/spec-coordinator.js';
-import { createSpecRevision } from '../src/v2/spec-delivery.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackRunData, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 import { mkdtemp } from './mission-test-temp.js';
@@ -257,369 +254,10 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
   assert.deepEqual(await adapter.candidateV2.inspectPin(binding), { kind: 'ok', value: 'missing' });
 });
 
-test('spec-required route freezes independently reviewed authority and implements it in the same run', async () => {
-  const fixture = await runFixture({ route: 'spec-required' });
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, state: await fixture.store.read() }));
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
-  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review']);
-  const run = (await fixture.store.read()).runs[0]!;
-  assert.equal(run.lifecycle, 'review-ready');
-  assert.equal(run.specDelivery?.stage, 'frozen');
-  assert.equal(run.deliveryAuthority?.kind, 'spec');
-  assert.equal(run.deliveryAuthority?.sourceSha256, run.specDelivery?.frozen?.receiptSha256);
-  assert.equal(fixture.implementationAuthorities.length, 1);
-  assert.equal(fixture.reviewAuthorities.length, 1);
-  assert.deepEqual(fixture.implementationAuthorities[0], run.deliveryAuthority);
-  assert.deepEqual(fixture.reviewAuthorities[0], run.deliveryAuthority);
-  if (run.deliveryAuthority?.kind === 'spec') {
-    assert.equal(run.deliveryAuthority.frozenSpec.content, '# Frozen spec\n');
-    assert.deepEqual(run.deliveryAuthority.frozenSpec.approvalReceipt, run.specDelivery?.frozen);
-  }
-  const downstream = JSON.stringify({
-    candidateBinding: run.candidateBinding,
-    checks: run.checks,
-    checkedChangeSha256: run.checkedChangeSha256,
-    proofReceipt: run.proofReceipt,
-    pendingEffect: run.pendingEffect,
-    terminalOutcome: run.terminalOutcome,
-  });
-  assert.equal(downstream.includes('# Frozen spec'), false);
-  assert.equal(downstream.includes('approvalReceipt'), false);
-  assert.equal(fixture.candidateAuthorityHashes.length > 0, true);
-  assert.equal(fixture.candidateAuthorityHashes.every((hash) => hash === run.deliveryAuthority!.authoritySha256), true);
-  assert.equal(fixture.checkedChangePayloads[0]?.version, 2);
-  if (fixture.checkedChangePayloads[0]?.version === 2) {
-    assert.equal(fixture.checkedChangePayloads[0].deliveryAuthoritySha256, run.deliveryAuthority!.authoritySha256);
-  }
-  assert.equal(run.cycle, 1);
-  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(replay, result);
-  assert.deepEqual(fixture.events.filter((event) => event.startsWith('spec-')), ['spec-author', 'spec-review']);
-});
-
-test('persisted spec authority mismatch is rejected before owner lock, launch, effect, or budget mutation', async () => {
-  const source = await runFixture({ route: 'spec-required' });
-  assert.equal((await source.runner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  const state = await source.store.read();
-  const forged = structuredClone(state);
-  const authority = forged.runs[0]!.deliveryAuthority;
-  assert.equal(authority?.kind, 'spec');
-  if (authority?.kind !== 'spec') return;
-  authority.frozenSpec.content = '# Unapproved replacement\n';
-  const beforeBudgets = canonicalJson({
-    cycle: forged.runs[0]!.cycle,
-    reportRepairs: forged.runs[0]!.reportRepairs,
-    transportRetries: forged.runs[0]!.transportRetries,
-    specBudgets: forged.runs[0]!.specDelivery!.budgets,
-  });
-  const bytes = Buffer.from(`${canonicalJson(forged)}\n`);
-  const replay = await runFixture({ rawRunStateBytes: bytes });
-
-  assert.deepEqual(await replay.runner.runIssue({ targetRoot: replay.targetRoot, issueNumber: 42 }), { status: 'state-schema-unsupported' });
-  assert.equal(replay.events.includes('owner-acquire'), false);
-  assert.equal(replay.events.includes('agent'), false);
-  assert.equal(replay.events.some((event) => event.startsWith('effect:')), false);
-  assert.deepEqual(await readFile(replay.statePath), bytes);
-  assert.equal(canonicalJson({
-    cycle: forged.runs[0]!.cycle,
-    reportRepairs: forged.runs[0]!.reportRepairs,
-    transportRetries: forged.runs[0]!.transportRetries,
-    specBudgets: forged.runs[0]!.specDelivery!.budgets,
-  }), beforeBudgets);
-});
-
-test('trusted product answer advances the frozen spec without retriage or a waiting lifecycle', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen', JSON.stringify(first));
-  if (first.status !== 'spec-frozen' || !('questionId' in first.receipt)) return;
-  assert.equal((await fixture.store.read()).runs[0]?.specDelivery?.stage, 'question');
-  assert.equal(fixture.events.includes('agent'), false);
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  const triageCount = fixture.events.filter((event) => event === 'route:triage').length;
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events, evidence: fixture.evidence }));
-  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, triageCount);
-  assert.deepEqual(fixture.events.filter((event) => event === 'spec-review'), ['spec-review']);
-  assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
-});
-
-test('unordered equivalent answers choose one canonical source and persist sorted duplicate IDs', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push(
-    {
-      id: 'z-20', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-      author: 'writer-z', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-    {
-      id: 'a-10', body: `${first.receipt.answerPrefix}   Use   fixed pricing `, authorAssociation: 'OWNER',
-      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-  );
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  const answer = (await fixture.store.read()).runs[0]!.specDelivery!.acceptedAnswers[0]!;
-  assert.equal(answer.canonicalSource.commentId, 'a-10');
-  assert.deepEqual(answer.duplicateCommentIds, ['z-20']);
-  assert.equal(answer.canonicalSource.normalizedAnswer, 'Use fixed pricing');
-  assert.equal(answer.canonicalSource.normalizedSha256, sha256('Use fixed pricing'));
-  assert.equal(answer.question.questionSha256, first.receipt.questionSha256);
-  assert.deepEqual(answer.canonicalSource.permission, { permission: 'write', userId: '10', checkedAt: '2026-07-30T00:00:01.000Z' });
-  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
-});
-
-test('conflicting trusted answers create the next immutable question without retriage or implementation', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true, conflictQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push(
-    {
-      id: 'answer-b', body: `${first.receipt.answerPrefix} Use variable pricing`, authorAssociation: 'OWNER',
-      author: 'writer-b', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-    {
-      id: 'answer-a', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-  );
-  const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(second.status, 'spec-frozen');
-  if (second.status !== 'spec-frozen' || !('questionId' in second.receipt)) return;
-  assert.notEqual(second.receipt.questionSha256, first.receipt.questionSha256);
-  assert.equal(second.receipt.decisionGaps[0]?.id, 'pricing-conflict');
-  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
-  assert.equal((await fixture.store.read()).runs[0]!.specDelivery!.stage, 'question');
-});
-
-test('permission-unverifiable answer observation replays frozen result without state, effect, evidence, or launch changes', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  fixture.options.permissionSequence = ['throw'];
-  const beforeState = canonicalJson(await fixture.store.read());
-  const beforeEvidence = fixture.evidence.length;
-  const beforeEffects = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length;
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
-  assert.equal(fixture.evidence.length, beforeEvidence);
-  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length, beforeEffects);
-});
-
-test('edited or wrong-marker question anchor replays frozen result without durable effects', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('marker' in first.receipt)) return;
-  const receipt = first.receipt;
-  const question = fixture.comments.find((comment) => comment.body.split('\n')[0] === receipt.marker)!;
-  question.body = question.body.replace(receipt.marker, '<!-- wrong-marker -->');
-  const beforeState = canonicalJson(await fixture.store.read());
-  const beforeEvidence = fixture.evidence.length;
-  const beforeEffects = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length;
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
-  assert.equal(fixture.evidence.length, beforeEvidence);
-  assert.equal(fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('state:') || event === 'agent').length, beforeEffects);
-});
-
-test('conflict sources are revalidated before successor author', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true, conflictQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push(
-    {
-      id: 'answer-a', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-      author: 'writer-a', authorId: '10', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-    {
-      id: 'answer-b', body: `${first.receipt.answerPrefix} Use variable pricing`, authorAssociation: 'OWNER',
-      author: 'writer-b', authorId: '20', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-    },
-  );
-  fixture.options.permissionSequence = ['write', 'write', 'throw'];
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, 1);
-  const conflict = (await fixture.store.read()).runs[0]!.specDelivery!.trustedAnswer!;
-  assert.equal(conflict.accepted, false);
-  assert.deepEqual(conflict.additionalSources.map((source) => source.commentId), ['answer-b']);
-  fixture.comments.find((comment) => comment.id === 'answer-b')!.updatedAt = '2026-07-30T00:00:01.000Z';
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, 1);
-});
-
-test('trusted answer is revalidated before each next spec worker and first implementation launch', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  fixture.options.permissionSequence = ['write', 'write', 'throw'];
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, 0);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
-  fixture.options.permissionSequence = ['write', 'throw'];
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, 1);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 0);
-  fixture.options.permissionSequence = ['write'];
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
-  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, 1);
-});
-
-test('answer mutation after implementing transition is caught before fingerprint, attempt, cycle, or launch', async () => {
-  const gate = deferred<void>();
-  const fixture = await runFixture({
-    route: 'spec-required', specQuestionOnce: true,
-    storeGate: { event: 'state:implementing:none', promise: gate.promise },
-  });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  await waitFor(() => fixture.events.includes('store:deferred'));
-  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
-  const eventCount = fixture.events.length;
-  gate.resolve();
-  assert.deepEqual(await running, first);
-  const record = (await fixture.store.read()).runs[0]!;
-  assert.equal(record.cycle, 1);
-  assert.equal(record.activeAttempt, undefined);
-  assert.equal(fixture.events.slice(eventCount).some((event) => event === 'agent' || event.startsWith('git:fingerprint')), false);
-});
-
-test('stale trusted answer freezes prepared implementation resume before state or cycle mutation', async () => {
-  const preparedGate = deferred<void>();
-  const fixture = await runFixture({
-    route: 'spec-required', specQuestionOnce: true, implementationPreparedGate: preparedGate.promise,
-  });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  await waitFor(() => fixture.events.includes('agent:prepared-gated'));
-  const prepared = structuredClone((await fixture.store.read()).runs[0]!);
-  assert.equal(prepared.lifecycle, 'implementing');
-  assert.equal(prepared.activeAttempt?.stage, 'prepared');
-  assert.equal(prepared.cycle, 1);
-  preparedGate.reject(new Error('simulated process crash'));
-  assert.equal((await running).status, 'internal-error');
-  const crashed = await fixture.store.read();
-  await fixture.store.compareAndSwap(crashed.generation, { schema: 'codex-orchestrator.run-state', runs: [prepared] });
-  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
-  const beforeState = canonicalJson(await fixture.store.read());
-  const beforeEvents = fixture.events.length;
-
-  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), first);
-  assert.equal(canonicalJson(await fixture.store.read()), beforeState);
-  assert.equal(fixture.events.slice(beforeEvents).some((event) => event.startsWith('state:')
-    || event.startsWith('git:fingerprint') || event === 'agent'), false);
-});
-
-test('valid prepared implementation resume reuses the existing attempt without advancing cycle', async () => {
-  const preparedGate = deferred<void>();
-  const fixture = await runFixture({
-    route: 'spec-required', specQuestionOnce: true, implementationPreparedGate: preparedGate.promise,
-  });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  await waitFor(() => fixture.events.includes('agent:prepared-gated'));
-  const prepared = structuredClone((await fixture.store.read()).runs[0]!);
-  const attemptId = prepared.activeAttempt?.attemptId;
-  assert.equal(prepared.activeAttempt?.stage, 'prepared');
-  preparedGate.reject(new Error('simulated process crash'));
-  assert.equal((await running).status, 'internal-error');
-  const crashed = await fixture.store.read();
-  await fixture.store.compareAndSwap(crashed.generation, { schema: 'codex-orchestrator.run-state', runs: [prepared] });
-  fixture.options.implementationPreparedGate = undefined;
-
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  const completed = (await fixture.store.read()).runs[0]!;
-  assert.equal(completed.cycle, 1);
-  assert.deepEqual(fixture.implementationAttemptIds, [attemptId, attemptId]);
-});
-
-test('trusted answer mutation after durable preparation freezes before implementation process launch', async () => {
-  const beforePrepared = deferred<void>();
-  const fixture = await runFixture({
-    route: 'spec-required', specQuestionOnce: true, implementationBeforePreparedGate: beforePrepared.promise,
-  });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'answer-1', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'writer', authorId: '42', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z',
-  });
-  const running = fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  await waitFor(() => fixture.events.includes('agent:before-prepared-gated'));
-  const preparedState = canonicalJson(await fixture.store.read());
-  assert.equal((await fixture.store.read()).runs[0]!.activeAttempt?.stage, 'prepared');
-  fixture.comments.find((comment) => comment.id === 'answer-1')!.updatedAt = '2026-07-30T00:00:01.000Z';
-  const eventCount = fixture.events.length;
-  beforePrepared.resolve();
-
-  assert.deepEqual(await running, first);
-  assert.equal(canonicalJson(await fixture.store.read()), preparedState);
-  assert.equal(fixture.events.slice(eventCount).some((event) => event === 'agent:on-launched'
-    || event.startsWith('state:') || event.startsWith('git:fingerprint')), false);
-});
-
-test('edited product answer remains spec-frozen and launches no delivery work', async () => {
-  const fixture = await runFixture({ route: 'spec-required', specQuestionOnce: true });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(first.status, 'spec-frozen');
-  if (first.status !== 'spec-frozen' || !('answerPrefix' in first.receipt)) return;
-  fixture.comments.push({
-    id: 'edited-answer', body: `${first.receipt.answerPrefix} Use fixed pricing`, authorAssociation: 'OWNER',
-    author: 'owner', authorId: 'owner-id', createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:01.000Z',
-  });
-  const before = fixture.events.length;
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'spec-frozen');
-  assert.equal(fixture.events.slice(before).some((event) => event === 'agent' || event.startsWith('spec-review:')), false);
-});
-
 test('known live owner contention requeues before labels or state', async () => {
   const fixture = await runFixture({ ownerContention: true });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'requeued');
   assert.equal(fixture.events.some((event) => event.startsWith('effect:') || event.startsWith('state:')), false);
-});
-
-test('agent:auto remains authorization when the running status label disappears after claim', async () => {
-  const fixture = await runFixture({ dropRunningDuringRoute: true });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
 });
 
 test('runner commit preserves the checked pre-proof index and leaves proof artifacts untracked', async () => {
@@ -660,17 +298,15 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
     'effect:claim-comment',
     'state:claimed:claim-labels',
     'effect:claim-labels',
-    'state:triaging:none',
-    'route:triage',
-    'state:routed:none',
     'state:implementing:none',
-    'route:direct',
     'issue-read:authorize',
     'agent',
     'state:checking:none',
     'check:typecheck',
     'state:proving:none',
     'proof',
+    'state:reviewing:none',
+    'review:code-review',
     'state:publishing:none',
     'state:publishing:initial-commit',
     'issue-read:authorize',
@@ -712,12 +348,35 @@ test('direct run executes issue-scoped verification checks instead of repository
   ]);
 });
 
-test('invalid issue Verification blocks before any configured or scoped check runs', async () => {
-  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+test('invalid issue Verification is an exact semantic blocker and replays without duplicate work', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned', rejectStoreEvent: 'state:blocked:none' });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
   assert.equal(fixture.events.some((event) => event.startsWith('check:')), false);
-  assert.equal((await fixture.store.read()).runs[0]?.terminalOutcome, undefined);
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'decision-delta', resumable: false,
+  });
+  assert.equal(result.status === 'blocked' && result.blocker?.kind, 'decision-delta');
+  assert.match(result.status === 'blocked' ? result.blocker?.reviewerRejectionDetail ?? '' : '', /Verification/u);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+});
+
+test('rejected initial Review preserves exact decision evidence across restart', async () => {
+  const fixture = await runFixture({ reviewRejectedOnce: true, rejectStoreEvent: 'state:blocked:none' });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
+  const reviews = fixture.events.filter((event) => event === 'review:code-review').length;
+  const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'decision-delta', resumable: false,
+  });
+  assert.match(replayed.status === 'blocked' ? replayed.blocker?.summary ?? '' : '', /rejected revision 1/u);
+  assert.match(replayed.status === 'blocked' ? replayed.blocker?.reviewerRejectionDetail ?? '' : '', /unauthorized ownership expansion/u);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, reviews);
 });
 
 test('a check launch failure is resumable without consuming an implementation cycle', async () => {
@@ -736,22 +395,62 @@ test('a check launch failure is resumable without consuming an implementation cy
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
 });
 
-test('malformed code review consumes one durable report-repair bit and retries before checks', async () => {
+test('settled pre-launch check, proof, and Review failures clear prepared execution for the next bounded invocation', async () => {
+  const cases: Array<{ name: string; options: FixtureOptions; launchedEvent: string }> = [
+    { name: 'configured check', options: { checkPreLaunchRejectOnce: true }, launchedEvent: 'check:typecheck' },
+    { name: 'Acceptance Proof', options: { proofPreLaunchRejectOnce: true }, launchedEvent: 'proof' },
+    { name: 'Review', options: { reviewPreLaunchTransportOnce: true }, launchedEvent: 'review:code-review-launched' },
+  ];
+  for (const entry of cases) {
+    const fixture = await runFixture(entry.options);
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
+    const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(second.status, 'review-ready', `${entry.name}: ${JSON.stringify({ second, state: await fixture.store.read(), events: fixture.events })}`);
+    assert.equal(fixture.events.filter((event) => event === entry.launchedEvent).length, 1, entry.name);
+    assert.equal(fixture.events.filter((event) => event === 'agent').length, 1, entry.name);
+  }
+});
+
+test('malformed code review returns one bounded resumable outcome before retrying the same candidate', async () => {
   const fixture = await runFixture({ reviewMalformedOnce: true });
+  const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 1);
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
+  assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true]);
+  assert.equal(fixture.reviewReportRepairInputs[1]?.hash, sha256(Buffer.from('{"report":{"version":1}}')));
+  assert.deepEqual(fixture.reviewReportRepairInputs[1]?.bytes, Buffer.from('{"report":{"version":1}}'));
   const record = (await fixture.store.read()).runs[0]!;
   assert.equal(record.directReview?.review.reportRepairs, 1);
   assert.equal(record.directReview?.status, 'clear');
 });
 
-test('code review gets four report-only repairs per target revision', async () => {
-  const fixture = await runFixture({ reviewMalformedCount: 4 });
+test('sixth malformed code review remains resumable without semantic exhaustion', async () => {
+  const fixture = await runFixture({ reviewMalformedCount: 6 });
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  }
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 5);
-  assert.equal((await fixture.store.read()).runs[0]?.directReview?.review.reportRepairs, 4);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 7);
+  assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true, true, true, true, true, true]);
+  for (const correction of fixture.reviewReportRepairInputs.slice(1)) {
+    assert.deepEqual(correction.bytes, Buffer.from('{"report":{"version":1}}'));
+  }
+  assert.equal((await fixture.store.read()).runs[0]?.directReview?.review.reportRepairs, 6);
+});
+
+test('incoherent needs-work is repaired report-only instead of reaching terminal state', async () => {
+  const fixture = await runFixture({ reviewIncoherentNeedsWorkOnce: true });
+  const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true]);
+  assert.equal((await fixture.store.read()).runs[0]?.directReview?.status, 'clear');
 });
 
 test('repeated runIssue replays the durable terminal outcome without a second claim or publication', async () => {
@@ -802,17 +501,14 @@ test('uninitialized feedback data fails closed without losing the Run', async ()
   assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.previousPublishedHeadSha, null);
 });
 
-for (const route of ['direct', 'spec-required'] as const) {
-test(`review-ready ${route} replay remains effect-free and updates the same PR once for trusted feedback`, async () => {
-  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none', route });
+test('review-ready replay remains effect-free and updates the same PR once for trusted feedback', async () => {
+  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none' });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(first.status, 'review-ready');
+  fixture.dependencies.git.diffTrees = async () => { throw new Error('published previous tree unavailable'); };
   const initialState = await fixture.store.read();
   const record = initialState.runs[0]!;
   const frozenAuthority = canonicalJson(record.deliveryAuthority);
-  const initialTriageCalls = fixture.events.filter((event) => event === 'route:triage').length;
-  const initialSpecAuthorCalls = fixture.events.filter((event) => event === 'spec-author').length;
-  const initialSpecReviewCalls = fixture.events.filter((event) => event === 'spec-review').length;
   const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
   assert.equal(record.reviewFeedback?.activeBatch, null);
 
@@ -910,7 +606,7 @@ test(`review-ready ${route} replay remains effect-free and updates the same PR o
 
   const continuationStart = fixture.events.length;
   const transient = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(transient, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(transient, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, JSON.stringify({ transient, evidence: fixture.evidence, state: await fixture.store.read(), events: fixture.events }));
   const interruptedPublication = (await fixture.store.read()).runs[0]!;
   assert.equal(interruptedPublication.reviewFeedback?.verifiedReceipt?.batchId, batch.batchId);
   assert.equal(interruptedPublication.pendingEffect?.kind, 'review-update-push');
@@ -949,10 +645,8 @@ test(`review-ready ${route} replay remains effect-free and updates the same PR o
   assert.equal(after.reviewFeedback?.activeBatch, null);
   assert.equal(after.reviewFeedback?.history.length, 1);
   assert.equal(canonicalJson(after.deliveryAuthority), frozenAuthority);
-  assert.equal(fixture.events.filter((event) => event === 'route:triage').length, initialTriageCalls);
-  assert.equal(fixture.events.filter((event) => event === 'spec-author').length, initialSpecAuthorCalls);
-  assert.equal(fixture.events.filter((event) => event === 'spec-review').length, initialSpecReviewCalls);
   assert.equal(prComments.length, 1);
+  assert.match(prComments[0]!.body, /Complete independent review/u);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
 
   const effectsBeforeReplay = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length;
@@ -1030,7 +724,6 @@ test(`review-ready ${route} replay remains effect-free and updates the same PR o
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
 });
-}
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
   const checkGate = deferred<{ status: 'passed'; output: Buffer }>();
@@ -1051,6 +744,216 @@ test('deferred check and proof prevent every later publication effect and termin
   proofGate.resolve(passedProof());
   const result = await running;
   assert.equal(result.status, 'review-ready', `${JSON.stringify(result)}\n${fixture.events.join('\n')}`);
+});
+
+test('four trusted post-PR feedback batches update the same Run and PR through fresh reviewed proof', async () => {
+  const fixture = await runFixture();
+  const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(initial.status, 'review-ready');
+  if (initial.status !== 'review-ready') throw new Error('initial publication failed');
+  const pullRequestUrl = initial.pullRequestUrl;
+  const firstRecord = (await fixture.store.read()).runs[0]!;
+  const runId = firstRecord.runId;
+  const branchName = firstRecord.branchName;
+  const prComments: Array<{ id: string; body: string }> = [];
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: pullRequestUrl, body: `<!-- codex-orchestrator:run:${runId}:pr -->\n\nCloses #42`,
+    number: 1, nodeId: 'PR_1',
+    headSha: (await fixture.dependencies.git.getRemoteBranchSha(fixture.worktreePath, branchName))!,
+  });
+  fixture.dependencies.pullRequests.listConversationComments = async () => structuredClone(prComments);
+  fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => {
+    const comment = { id: String(prComments.length + 1), body };
+    prComments.push(comment);
+    return comment;
+  };
+  let implementationRound = 0;
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      implementationRound += 1;
+      const baseline = await fixture.dependencies.git.snapshot(worktreePath);
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:00:00.000Z', baseline });
+      await onLaunched?.({ attemptId, pid: 7000 + implementationRound, processGroupId: 7000 + implementationRound, launchedAt: '2026-07-16T12:00:01.000Z' });
+      fixture.events.push('feedback-implementation');
+      await writeFile(join(worktreePath, 'feature.txt'), `trusted feedback repair ${implementationRound}\n`);
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'completed', summary: `feedback ${implementationRound} repaired`, changedFiles: ['feature.txt'], residualRisks: [],
+      } };
+    },
+  };
+
+  const reviewerSessions = new Set<string>();
+  for (let round = 1; round <= 4; round += 1) {
+    const before = (await fixture.store.read()).runs[0]!;
+    const oldHead = before.reviewFeedback!.previousPublishedHeadSha!;
+    const batch = createFrozenReviewFeedbackBatch({
+      runId, canonicalRepository: before.canonicalRepository,
+      pullRequest: {
+        nodeId: 'PR_1', number: 1, headSha: oldHead, headRefName: branchName,
+        baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${runId}:pr -->`,
+      },
+      priorPublishedHeadSha: oldHead,
+      sources: [{
+        sourceId: `pr-thread:T_${round}`, kind: 'thread', sourceUrl: `https://example.invalid/pull/1#discussion_r${round}`,
+        path: 'feature.txt', line: 1, body: `Trusted repair ${round}`,
+        bodySha256: hashReviewFeedbackText(`Trusted repair ${round}`), snapshotSha256: hashReviewFeedbackSnapshot({ round }),
+        threadState: { isResolved: false, isOutdated: false }, commitSha: oldHead,
+        sourceCreatedAt: `2026-07-16T12:0${round}:00.000Z`, sourceUpdatedAt: `2026-07-16T12:0${round}:00.000Z`,
+        author: { login: 'writer', userId: '42' },
+        permission: { permission: 'write', userId: '42', checkedAt: `2026-07-16T12:0${round}:00.000Z` },
+      }],
+      frozenAt: `2026-07-16T12:0${round}:00.000Z`,
+    });
+    let offered = false;
+    fixture.dependencies.reviewFeedback = {
+      observeAndFreeze: async () => {
+        if (!offered) { offered = true; return { status: 'frozen', batch }; }
+        return { status: 'none', observedHeadSha: await fixture.dependencies.git.getHead(fixture.worktreePath), eligibleSourceIds: [] };
+      },
+      revalidate: async ({ expectedHeadSha }: { expectedHeadSha: string }) => ({ status: 'valid', observedHeadSha: expectedHeadSha }),
+    } as unknown as ReviewFeedbackObserver;
+    await fixture.dependencies.issues.setLabels(42, ['agent:review']);
+    const eventStart = fixture.events.length;
+    const reviewInputStart = fixture.reviewInputs.length;
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'review-ready', JSON.stringify({ round, result, state: await fixture.store.read(), events: fixture.events.slice(eventStart) }));
+    if (result.status !== 'review-ready') throw new Error(`feedback round ${round} did not publish`);
+    assert.match(result.pullRequestUrl, /\/pull\/1$/u);
+    const after = (await fixture.store.read()).runs[0]!;
+    assert.equal(after.runId, runId);
+    assert.equal(after.reviewFeedback?.history.length, round);
+    assert.equal(after.reviewFeedback?.history.at(-1)?.kind, 'published');
+    assert.equal(fixture.events.slice(eventStart).filter((event) => event === 'feedback-implementation').length, 1);
+    assert.equal(fixture.events.slice(eventStart).filter((event) => event === 'proof').length, 1);
+    assert.equal(fixture.events.slice(eventStart).filter((event) => event === 'review:code-review').length, 1);
+    assert.equal(fixture.events.slice(eventStart).filter((event) => event === 'git:commit').length, 1);
+    assert.equal(fixture.events.slice(eventStart).filter((event) => event === 'git:push').length, 1);
+    const reviewInput = fixture.reviewInputs[reviewInputStart];
+    assert.ok(reviewInput);
+    assert.match(reviewInput.repairPatch, /diff --git a\/feature\.txt b\/feature\.txt/u);
+    assert.match(reviewInput.repairPatch, new RegExp(`trusted feedback repair ${round}`, 'u'));
+    assert.deepEqual(reviewInput.checks.map((check: { id: string }) => check.id), ['typecheck']);
+    assert.equal(reviewerSessions.has(reviewInput.reviewerSessionId), false);
+    reviewerSessions.add(reviewInput.reviewerSessionId);
+    const newHead = after.reviewFeedback!.previousPublishedHeadSha!;
+    assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..${newHead}`])).stdout.trim(), '1');
+    assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-parse', `${newHead}^`])).stdout.trim(), oldHead);
+  }
+  assert.equal(implementationRound, 4);
+  assert.equal(reviewerSessions.size, 4);
+  assert.equal(prComments.every((comment) => comment.body.includes('Targeted independent review')), true);
+});
+
+test('trusted feedback preserves exact Implement, Proof, and rejected Review blockers across outcome-evidence replay', async () => {
+  for (const phase of ['implementation', 'proof', 'review'] as const) {
+    const expectedKind = phase === 'implementation' ? 'decision-delta' as const
+      : phase === 'proof' ? 'out-of-scope' as const : 'authority-boundary' as const;
+    const blocker = {
+      kind: expectedKind,
+      summary: `${phase} requires issue-local authority`,
+      attempted: [`inspected ${phase} feedback authority`],
+      resumable: false,
+      reviewerRejectionDetail: `Reviewer rejected expanding ${phase} scope.`,
+    };
+    const fixtureOptions: FixtureOptions = { rejectStoreEvent: 'state:blocked:none' };
+    const fixture = await runFixture(fixtureOptions);
+    const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(initial.status, 'review-ready');
+    if (initial.status !== 'review-ready') throw new Error('initial publication failed');
+    const record = (await fixture.store.read()).runs[0]!;
+    const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
+    fixture.dependencies.pullRequests.findOpen = async () => ({
+      url: initial.pullRequestUrl,
+      body: `<!-- codex-orchestrator:run:${record.runId}:pr -->\n\nCloses #42`,
+      number: 1, nodeId: 'PR_1', headSha: oldHead,
+    });
+    const batch = createFrozenReviewFeedbackBatch({
+      runId: record.runId, canonicalRepository: record.canonicalRepository,
+      pullRequest: {
+        nodeId: 'PR_1', number: 1, headSha: oldHead, headRefName: record.branchName,
+        baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
+      },
+      priorPublishedHeadSha: oldHead,
+      sources: [{
+        sourceId: `pr-thread:${phase}`, kind: 'thread', sourceUrl: `https://example.invalid/pull/1#${phase}`,
+        path: 'feature.txt', line: 1, body: `${phase} feedback`,
+        bodySha256: hashReviewFeedbackText(`${phase} feedback`), snapshotSha256: hashReviewFeedbackSnapshot({ phase }),
+        threadState: { isResolved: false, isOutdated: false }, commitSha: oldHead,
+        sourceCreatedAt: '2026-07-16T12:10:00.000Z', sourceUpdatedAt: '2026-07-16T12:10:00.000Z',
+        author: { login: 'writer', userId: '42' },
+        permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:10:00.000Z' },
+      }],
+      frozenAt: '2026-07-16T12:10:00.000Z',
+    });
+    let offered = false;
+    fixture.dependencies.reviewFeedback = {
+      observeAndFreeze: async () => {
+        if (!offered) { offered = true; return { status: 'frozen', batch }; }
+        return { status: 'none', observedHeadSha: await fixture.dependencies.git.getHead(fixture.worktreePath), eligibleSourceIds: [] };
+      },
+      revalidate: async ({ expectedHeadSha }: { expectedHeadSha: string }) => ({ status: 'valid', observedHeadSha: expectedHeadSha }),
+    } as unknown as ReviewFeedbackObserver;
+    if (phase === 'implementation') {
+      fixture.dependencies.implementationAgent = {
+        run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onLaunched?.({ attemptId, pid: 8181, processGroupId: 8181, launchedAt: '2026-07-16T12:10:01.000Z' });
+          fixture.events.push('feedback-blocker-work');
+          return { kind: 'completed', attemptId, report: { version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker } };
+        },
+      };
+    } else if (phase === 'proof') {
+      fixture.dependencies.implementationAgent = {
+        run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onLaunched?.({ attemptId, pid: 8182, processGroupId: 8182, launchedAt: '2026-07-16T12:10:01.000Z' });
+          await writeFile(join(worktreePath, 'feature.txt'), 'proof feedback repair\n');
+          return { kind: 'completed', attemptId, report: { version: 1, status: 'completed', summary: 'repair ready for proof', changedFiles: ['feature.txt'], residualRisks: [] } };
+        },
+      };
+      fixture.dependencies.proof.proveChange = async ({ beforeAgentLaunch, onLaunched }) => {
+        await beforeAgentLaunch?.();
+        await onLaunched?.({ pid: 8282, processGroupId: 8282, launchedAt: '2026-07-16T12:10:01.000Z' });
+        fixture.events.push('feedback-blocker-work');
+        return { status: 'external-block', blocker, receipt: receipt() };
+      };
+    } else {
+      fixtureOptions.reviewRejectedAlways = true;
+      fixture.dependencies.implementationAgent = {
+        run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onLaunched?.({ attemptId, pid: 8183, processGroupId: 8183, launchedAt: '2026-07-16T12:10:01.000Z' });
+          fixture.events.push('feedback-blocker-work');
+          await writeFile(join(worktreePath, 'feature.txt'), 'review feedback repair\n');
+          return { kind: 'completed', attemptId, report: { version: 1, status: 'completed', summary: 'repair ready for review', changedFiles: ['feature.txt'], residualRisks: [] } };
+        },
+      };
+    }
+    await fixture.dependencies.issues.setLabels(42, ['agent:review']);
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true },
+      JSON.stringify({ phase, first, state: await fixture.store.read(), events: fixture.events }));
+    if (phase === 'review') {
+      assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
+      const rejected = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+      assert.deepEqual(pick(rejected, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, phase);
+    }
+    assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence', phase);
+    const workCalls = fixture.events.filter((event) => event === 'feedback-blocker-work').length;
+    const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    if (phase === 'review') {
+      assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable']), {
+        status: 'blocked', kind: expectedKind, resumable: false,
+      }, phase);
+      assert.match(replayed.status === 'blocked' ? replayed.blocker?.reviewerRejectionDetail ?? '' : '', /unauthorized ownership expansion/u);
+    } else {
+      assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable', 'blocker']), {
+        status: 'blocked', kind: blocker.kind, resumable: false, blocker,
+      }, phase);
+    }
+    assert.equal(fixture.events.filter((event) => event === 'feedback-blocker-work').length, workCalls, phase);
+    assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.history.at(-1)?.kind, `blocked-${expectedKind}`, phase);
+  }
 });
 
 test('not eligible and revoked authorization start no implementation or publication', async () => {
@@ -1122,43 +1025,6 @@ test('real old, unknown, malformed, and missing-discriminator state bytes remain
   }
 });
 
-test('legacy terminal direct review without its discriminator is unsupported before owner lock', async () => {
-  const source = await runFixture({ reviewMalformedCount: 5 });
-  assert.equal((await source.runner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 })).status, 'internal-error');
-  const current = structuredClone(await source.store.read());
-  const run = current.runs[0]!;
-  assert.equal(run.directReview?.terminalCode, 'direct-review-report-malformed');
-  run.directReview!.review.reportRepairs = 1;
-  delete run.activeAttempt;
-  delete run.candidateMaterialization;
-
-  await mkdir(dirname(source.statePath), { recursive: true });
-  await writeFile(source.statePath, `${canonicalJson(current)}\n`);
-  const currentStore = new FileRunRecordWriter(source.statePath);
-  assert.equal((await currentStore.inspect()).status, 'supported');
-  const currentRunner = new RunIssue({ ...source.dependencies, runRecords: currentStore });
-  const currentResult = await currentRunner.runIssue({ targetRoot: source.targetRoot, issueNumber: 42 });
-  assert.equal(
-    currentResult.status,
-    'review-ready',
-    JSON.stringify({ currentResult, events: source.events, state: await currentStore.read() }),
-  );
-
-  const { terminalCode: _legacyMissing, ...legacyDirectReview } = run.directReview;
-  run.directReview = legacyDirectReview;
-  const bytes = Buffer.from(`${canonicalJson(current)}\n`);
-  const legacyFixture = await runFixture({ rawRunStateBytes: bytes });
-  assert.deepEqual(
-    await legacyFixture.runner.runIssue({ targetRoot: legacyFixture.targetRoot, issueNumber: 42 }),
-    { status: 'state-schema-unsupported' },
-  );
-  assert.deepEqual(await readFile(legacyFixture.statePath), bytes);
-  assert.deepEqual(await readdir(dirname(legacyFixture.statePath)), ['run-state.json']);
-  assert.equal(legacyFixture.events.includes('owner-acquire'), false);
-  assert.deepEqual(legacyFixture.evidence, []);
-  assert.equal(legacyFixture.events.some((event) => event.startsWith('effect:')), false);
-});
-
 test('a state identity that changes twice after owner lock requeues without effects', async () => {
   const fixture = await runFixture({ stateInspections: [
     { status: 'absent', rawSha256: null },
@@ -1177,13 +1043,13 @@ test('a state identity that changes twice after owner lock requeues without effe
   assert.equal(fixture.events.some((event) => event.startsWith('effect:')), false);
 });
 
-test('claimed initialization verifies the pinned workflow generation before triage', async () => {
+test('claimed initialization verifies the pinned workflow generation before implementation', async () => {
   const fixture = await runFixture({ workflowVerificationReject: true });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
     status: 'blocked', kind: 'safety', resumable: false,
   });
-  assert.equal(fixture.events.includes('route:triage'), false);
+  assert.equal(fixture.events.includes('agent'), false);
 });
 
 test('worktree creation failure is diagnostic and resumes the claimed run', async () => {
@@ -1248,21 +1114,6 @@ test('diverged claimed worktree remains correctable instead of becoming terminal
   assert.equal((await fixture.store.read()).runs[0]!.runId, claimed.runId);
 });
 
-test('triage receives persisted issue comments and authorization is rechecked after routing', async () => {
-  const comments = [{ body: 'Product owner clarification.', authorAssociation: 'OWNER' }];
-  const visible = await runFixture({ initialComments: comments, expectedTriageComment: comments[0]!.body });
-  assert.equal((await visible.runner.runIssue({ targetRoot: visible.targetRoot, issueNumber: 42 })).status, 'review-ready');
-
-  const revoked = await runFixture({ revokeDuringRoute: true });
-  const result = await revoked.runner.runIssue({ targetRoot: revoked.targetRoot, issueNumber: 42 });
-  assert.deepEqual(
-    pick(result, ['status', 'kind']),
-    { status: 'blocked', kind: 'safety' },
-    JSON.stringify({ result, evidence: revoked.evidence, events: revoked.events, state: await revoked.store.read() }),
-  );
-  assert.equal(revoked.events.includes('agent'), false);
-});
-
 test('historical claim markers do not revoke a newly claimed run', async () => {
   const historicalClaim = [
     '<!-- codex-orchestrator:run:11111111-1111-4111-8111-111111111111:claim -->',
@@ -1315,88 +1166,6 @@ test('a pre-upgrade snapshot without comment ids accepts only a live claim that 
   );
 });
 
-test('a competing claim marker added during routing revokes the current run', async () => {
-  const fixture = await runFixture({ competingClaimDuringRoute: true });
-
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-
-  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
-  assert.equal(fixture.events.includes('agent'), false);
-});
-
-test('a competing claim observed after claiming blocks before triage launches', async () => {
-  const fixture = await runFixture({ competingClaimAfterClaim: true });
-
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-
-  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
-  assert.equal(fixture.events.includes('route:triage'), false);
-});
-
-test('triage receives an ordinary comment posted after the initial issue read', async () => {
-  const lateComment = 'Clarification posted while the claim was being established.';
-  const fixture = await runFixture({
-    ordinaryCommentAfterClaim: lateComment,
-    expectedTriageComment: lateComment,
-  });
-
-  assert.equal(
-    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
-    'review-ready',
-  );
-});
-
-test('pre-triage comment refresh preserves the frozen issue body', async () => {
-  const frozenBody = '## Acceptance Criteria\n- The behavior works.';
-  const mutatedBody = '## Acceptance Criteria\n- Replace the frozen contract.';
-  const fixture = await runFixture({
-    issueBodyAfterClaim: mutatedBody,
-    expectedTriageIssueBody: frozenBody,
-  });
-
-  assert.equal(
-    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status,
-    'review-ready',
-  );
-  assert.equal(fixture.events.includes('route:triage'), true);
-});
-
-test('a malformed duplicate of the current claim marker revokes the run', async () => {
-  const fixture = await runFixture({ malformedCurrentClaimDuringRoute: true });
-
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-
-  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
-  assert.equal(fixture.events.includes('agent'), false);
-});
-
-test('reposting a deleted historical claim under a new comment id revokes the run', async () => {
-  const historicalClaim = [
-    '<!-- codex-orchestrator:run:11111111-1111-4111-8111-111111111111:claim -->',
-    'codex-orchestrator claimed #42 for branch codex/issue-42',
-  ].join('\n');
-  const fixture = await runFixture({
-    initialComments: [{ id: 'historical-claim', body: historicalClaim, authorAssociation: 'COLLABORATOR' }],
-    replaceHistoricalClaimDuringRoute: true,
-  });
-
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-
-  assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'safety' });
-  assert.equal(fixture.events.includes('agent'), false);
-});
-
-test('claimed initialization refreshes comments that arrived before restart', async () => {
-  const options: FixtureOptions = { rejectEffect: 'claim-comment' };
-  const fixture = await runFixture(options);
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const lateComment = 'Clarification added while the claim was interrupted.';
-  await fixture.dependencies.issues.postComment(42, lateComment);
-  options.expectedTriageComment = lateComment;
-
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-});
-
 test('agent-authored commit and proof external block map without publication', async () => {
   const cases: Array<{
     name: string;
@@ -1406,7 +1175,7 @@ test('agent-authored commit and proof external block map without publication', a
     { name: 'agent commit', options: { agentCommit: true }, expected: { status: 'blocked', kind: 'safety' } },
     {
       name: 'proof external',
-      options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }) },
+      options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }) },
       expected: { status: 'blocked', kind: 'external' },
     },
   ];
@@ -1435,9 +1204,10 @@ test('failed checks and proof findings rework the same worktree until review-rea
       ? { status: 'failed', output: Buffer.from('typecheck failed') }
       : { status: 'passed', output: Buffer.from('ok') }),
   });
+  assert.equal((await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
   assert.equal((await checkFixture.runner.runIssue({ targetRoot: checkFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(checkFixture.events.filter((event) => event === 'agent').length, 2);
-  assert.equal(checkFixture.events.filter((event) => event === 'review:code-review').length, 2);
+  assert.equal(checkFixture.events.filter((event) => event === 'review:code-review').length, 1);
   assert.equal((await checkFixture.store.read()).runs[0]?.cycle, 2);
 
   let proofCalls = 0;
@@ -1446,33 +1216,225 @@ test('failed checks and proof findings rework the same worktree until review-rea
       ? { status: 'needs-rework', findings: ['fix acceptance behavior'], receipt: receipt() }
       : passedProof()),
   });
+  assert.equal((await proofFixture.runner.runIssue({ targetRoot: proofFixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
   assert.equal((await proofFixture.runner.runIssue({ targetRoot: proofFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(proofFixture.events.filter((event) => event === 'agent').length, 2);
-  assert.equal(proofFixture.events.filter((event) => event === 'review:code-review').length, 2);
+  assert.equal(proofFixture.events.filter((event) => event === 'review:code-review').length, 1);
   assert.equal(proofFixture.events.filter((event) => event === 'proof').length, 2);
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
 });
 
-test('the fifth failed implementation cycle exhausts without publication', async () => {
+test('sixth in-scope repair continues the same Run without semantic exhaustion', async () => {
+  let checkCalls = 0;
   const fixture = await runFixture({
-    check: async () => ({ status: 'failed', output: Buffer.from('still failing') }),
+    check: async () => (++checkCalls <= 6
+      ? { status: 'failed', output: Buffer.from(`still failing ${checkCalls}`) }
+      : { status: 'passed', output: Buffer.from('fixed') }),
   });
+  for (let repair = 1; repair <= 6; repair += 1) {
+    const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(deferred, ['status', 'source']), { status: 'repair-ready', source: 'check' });
+    assert.equal(fixture.events.includes('git:push'), false);
+  }
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'exhausted', resumable: true });
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 5);
-  assert.equal(fixture.events.includes('git:push'), false);
-  assert.equal((await fixture.store.read()).runs[0]?.cycle, 5);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 7);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 7);
 });
 
-test('ordinary external safety and exhausted terminals publish the blocked issue status', async () => {
-  const cases: Array<{ name: string; options: FixtureOptions; kind: 'external' | 'safety' | 'exhausted' }> = [
+test('review blockers form one targeted repair batch bound to fresh affected proof', async () => {
+  const fixture = await runFixture({
+    reviewNeedsWorkOnce: true,
+    reviewAffectedTargets: ['check:typecheck', 'criterion:ac-001', 'contract:correctness', 'src/a.ts'],
+    configuredChecks: { typecheck: 'npm run typecheck', lint: 'npm run lint' },
+    issueBody: '## Acceptance Criteria\n- feature.txt implements the behavior.\n- Unrelated documentation remains stable.',
+  });
+  const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(deferred, ['status', 'source']), { status: 'repair-ready', source: 'review' },
+    JSON.stringify({ deferred, evidence: fixture.evidence, state: await fixture.store.read(), events: fixture.events }));
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, state: await fixture.store.read() }));
+  assert.equal(fixture.reviewInputs.length, 2);
+  const [initial, repair] = fixture.reviewInputs;
+  assert.equal(initial.repairPatch, null);
+  assert.equal(initial.previousTarget, null);
+  assert.deepEqual(initial.reviewFocus, [
+    'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
+    'repository-standards', 'requirements', 'tests', 'zero-legacy',
+  ]);
+  assert.match(repair.repairPatch, /diff --git a\/feature\.txt b\/feature\.txt/u);
+  assert.match(repair.repairPatch, /implemented repair/u);
+  assert.equal(repair.previousTarget?.targetRevision, 1);
+  assert.deepEqual(repair.repairFindings, []);
+  assert.deepEqual(repair.checks.map((check: { id: string }) => check.id), ['typecheck']);
+  assert.equal(repair.checkedChangeSha256.length, 64);
+  assert.equal(repair.proofReceipt.proofId, 'proof-1');
+  assert.equal(repair.currentTreeSha.length, 40);
+  assert.notEqual(initial.reviewerSessionId, repair.reviewerSessionId);
+  assert.equal(initial.implementationAttemptId, repair.implementationAttemptId);
+});
+
+test('check and proof blockers join the active review repair batch with exact source impact', async () => {
+  for (const phase of ['check', 'proof'] as const) {
+    let checkCalls = 0;
+    let proofCalls = 0;
+    const fixture = await runFixture({
+      reviewNeedsWorkOnce: true,
+      ...(phase === 'check' ? {
+        check: async () => (++checkCalls === 2
+          ? { status: 'failed' as const, output: Buffer.from('repair check failed') }
+          : { status: 'passed' as const, output: Buffer.from('ok') }),
+      } : {
+        proof: async () => (++proofCalls === 2
+          ? { status: 'needs-rework' as const, findings: ['repair proof failed'], receipt: receipt() }
+          : passedProof()),
+      }),
+    });
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready', phase);
+    const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(blocked, ['status', 'source']), { status: 'repair-ready', source: phase }, phase);
+    const active = (await fixture.store.read()).runs[0]!.directReview!;
+    assert.equal(active.stage, 'review-repair', phase);
+    const added = active.repairFindings.find((finding) => finding.provenance === phase);
+    assert.ok(added, phase);
+    assert.match(added.sourceId, phase === 'check' ? /^check:typecheck:/u : /^proof:proof-1:/u, phase);
+    assert.deepEqual(added.affectedContracts, [phase === 'check' ? 'configured-checks' : 'acceptance-proof'], phase);
+    assert.equal(active.review.defects.some((finding) => finding.id === 'finding-1'), true, phase);
+  }
+});
+
+test('repair review remains targeted while checks and criteria conservatively use full coverage', async () => {
+  const fixture = await runFixture({
+    reviewNeedsWorkOnce: true,
+    reviewAffectedTargets: ['typecheck', 'ac-001', 'correctness', 'src/a.ts'],
+    issueBody: '## Acceptance Criteria\n- The primary behavior works.\n- The secondary behavior remains correct.',
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const repair = fixture.reviewInputs[1];
+  assert.notEqual(repair.repairPatch, null);
+  assert.equal(repair.previousTarget?.targetRevision, 1);
+  assert.deepEqual(repair.frozenCriteria.map((criterion: { id: string }) => criterion.id), ['ac-001', 'ac-002']);
+  assert.deepEqual(repair.checks.map((check: { id: string }) => check.id), ['typecheck']);
+});
+
+test('targeted out-of-cone finding reruns full proof and complete Review for the same target', async () => {
+  const fixture = await runFixture({
+    reviewNeedsWorkOnce: true,
+    reviewOutOfConeOnTargetedOnce: true,
+    reviewAffectedTargets: ['check:typecheck', 'contract:correctness', 'path:feature.txt'],
+    configuredChecks: { typecheck: 'npm run typecheck', lint: 'npm run lint' },
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+  const fallback = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(fallback, ['status', 'resumable']), { status: 'transport-failed', resumable: true },
+    JSON.stringify({ fallback, reviewInputs: fixture.reviewInputs, events: fixture.events }));
+  const fallbackState = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(fallbackState.checks, []);
+  assert.equal(fallbackState.proofReceipt, undefined);
+  assert.notEqual(fallbackState.directReview?.previousTarget, null);
+  const completed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(completed.status, 'review-ready', JSON.stringify({ completed, state: await fixture.store.read() }));
+
+  assert.equal(fixture.reviewInputs.length, 3);
+  const targeted = fixture.reviewInputs[1]!;
+  const complete = fixture.reviewInputs[2]!;
+  assert.notEqual(targeted.repairPatch, null);
+  assert.equal(complete.repairPatch, null);
+  assert.equal(complete.targetRevision, targeted.targetRevision);
+  assert.equal(complete.targetFingerprint, targeted.targetFingerprint);
+  assert.deepEqual(complete.previousTarget, targeted.previousTarget);
+  assert.notEqual(complete.reviewerSessionId, targeted.reviewerSessionId);
+  assert.deepEqual(targeted.checks.map((check: { id: string }) => check.id), ['typecheck']);
+  assert.deepEqual(complete.checks.map((check: { id: string }) => check.id).sort(), ['lint', 'typecheck']);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2, JSON.stringify(fixture.events));
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 3, JSON.stringify(fixture.events));
+  assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 3, JSON.stringify(fixture.events));
+  assert.equal(fixture.events.filter((event) => event === 'check:changed:lint').length, 2, JSON.stringify(fixture.events));
+});
+
+test('one in-cone target cannot hide another out-of-cone target from complete fallback', async () => {
+  const fixture = await runFixture({
+    reviewNeedsWorkOnce: true,
+    reviewOutOfConeOnTargetedOnce: true,
+    reviewOutOfConeAffectedTargets: ['path:feature.txt', 'path:unrelated.ts'],
+    reviewAffectedTargets: ['contract:correctness', 'path:feature.txt'],
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const completed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(completed.status, 'review-ready', JSON.stringify({ completed, state: await fixture.store.read(), events: fixture.events }));
+  assert.equal(fixture.reviewInputs.length, 3);
+  assert.notEqual(fixture.reviewInputs[1]?.repairPatch, null);
+  assert.equal(fixture.reviewInputs[2]?.repairPatch, null);
+  assert.deepEqual(fixture.reviewInputs[2]?.previousTarget, fixture.reviewInputs[1]?.previousTarget);
+});
+
+test('approved targeted Review with an open out-of-cone improvement expands to complete validation', async () => {
+  const fixture = await runFixture({
+    reviewNeedsWorkOnce: true,
+    reviewOutOfConeOnTargetedOnce: true,
+    reviewOutOfConeApproved: true,
+    reviewAffectedTargets: ['check:typecheck', 'contract:correctness', 'path:feature.txt'],
+    configuredChecks: { typecheck: 'npm run typecheck', lint: 'npm run lint' },
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+  assert.deepEqual(
+    pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true },
+  );
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.reviewInputs.length, 3);
+  assert.notEqual(fixture.reviewInputs[1]?.repairPatch, null);
+  assert.equal(fixture.reviewInputs[2]?.repairPatch, null);
+  assert.deepEqual(fixture.reviewInputs[2]?.previousTarget, fixture.reviewInputs[1]?.previousTarget);
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 3);
+});
+
+test('repair review falls back to complete only when the exact tree delta cannot be isolated', async () => {
+  const fixture = await runFixture({ reviewNeedsWorkOnce: true, diffTreesUnisolatable: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.reviewInputs[1]?.repairPatch, null);
+  assert.deepEqual(fixture.reviewInputs[1]?.checks.map((check: { id: string }) => check.id), ['typecheck']);
+});
+
+test('unsafe, oversized, or denied ephemeral repair patches fall back to complete Review', async () => {
+  const cases = [
+    {
+      name: 'secret evidence',
+      diffTreeOverride: { changedFiles: ['feature.txt'], patch: 'diff --git a/feature.txt b/feature.txt\n+access_token=credential-material-12345\n' },
+    },
+    {
+      name: 'oversized patch',
+      diffTreeOverride: { changedFiles: ['feature.txt'], patch: `diff --git a/feature.txt b/feature.txt\n+${'x'.repeat(1024 * 1024)}` },
+    },
+    {
+      name: 'denied path', denyReadPaths: ['secrets/**'],
+      diffTreeOverride: { changedFiles: ['secrets/value.txt'], patch: 'diff --git a/secrets/value.txt b/secrets/value.txt\n-old\n+new\n' },
+    },
+  ];
+  for (const entry of cases) {
+    const fixture = await runFixture({
+      reviewNeedsWorkOnce: true, diffTreeOverride: entry.diffTreeOverride, denyReadPaths: entry.denyReadPaths,
+      configuredChecks: { lint: 'npm run lint', typecheck: 'npm run typecheck' },
+    });
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready', entry.name);
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready', entry.name);
+    assert.equal(fixture.reviewInputs[1]?.repairPatch, null, entry.name);
+    assert.deepEqual(fixture.reviewInputs[1]?.checks.map((check: { id: string }) => check.id).sort(), ['lint', 'typecheck'], entry.name);
+  }
+});
+
+test('ordinary external and safety terminals publish the blocked issue status', async () => {
+  const cases: Array<{ name: string; options: FixtureOptions; kind: 'external' | 'safety' }> = [
     {
       name: 'external proof blocker',
-      options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }) },
+      options: { proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }) },
       kind: 'external',
     },
     { name: 'safety blocker', options: { agentCommit: true }, kind: 'safety' },
-    { name: 'exhausted checks', options: { check: async () => ({ status: 'failed', output: Buffer.from('still failing') }) }, kind: 'exhausted' },
   ];
   for (const entry of cases) {
     const fixture = await runFixture(entry.options);
@@ -1482,10 +1444,90 @@ test('ordinary external safety and exhausted terminals publish the blocked issue
   }
 });
 
+test('issue-local authority blockers preserve their exact evidence-bearing public shape', async () => {
+  for (const kind of ['decision-delta', 'out-of-scope', 'authority-boundary'] as const) {
+    const blocker = {
+      kind,
+      summary: `${kind} requires issue-local resolution`,
+      attempted: ['inspected frozen issue authority', 'checked the authorized change set'],
+      resumable: false,
+      reviewerRejectionDetail: 'The requested resolution is outside the executable authority.',
+    };
+    const fixture = await runFixture({
+      implementationResult: {
+        kind: 'completed',
+        report: { version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker },
+      },
+    });
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(result, ['status', 'kind', 'resumable', 'blocker']), {
+      status: 'blocked', kind, resumable: false, blocker,
+    });
+    assert.deepEqual((await fixture.store.read()).runs[0]?.terminalOutcome, result);
+  }
+});
+
+test('authority blocker outcome evidence replays exact detail after the terminal state write fails', async () => {
+  for (const kind of ['decision-delta', 'out-of-scope', 'authority-boundary'] as const) {
+    const blocker = {
+      kind,
+      summary: `${kind} remains outside issue authority`,
+      attempted: ['inspected issue authority', 'inspected reviewer rejection'],
+      resumable: false,
+      reviewerRejectionDetail: 'Reviewer rejected expanding the authorized scope.',
+    };
+    const fixture = await runFixture({
+      rejectStoreEvent: 'state:blocked:none',
+      implementationResult: {
+        kind: 'completed',
+        report: { version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker },
+      },
+    });
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
+    const workCalls = fixture.events.filter((event) => event === 'agent').length;
+    const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+
+    const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable', 'blocker']), {
+      status: 'blocked', kind, resumable: false, blocker,
+    });
+    assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+    assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
+  }
+});
+
+test('temporary proof service unavailability resumes the same Run without duplicate implementation or publication', async () => {
+  let proofCalls = 0;
+  const fixture = await runFixture({
+    proof: async () => {
+      proofCalls += 1;
+      return proofCalls === 1
+        ? { status: 'external-block', blocker: {
+          kind: 'service', summary: 'proof service is temporarily unavailable', attempted: ['bounded status probe'], resumable: true,
+        }, receipt: receipt() }
+        : passedProof();
+    },
+  });
+  const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const paused = (await fixture.store.read()).runs[0]!;
+  assert.equal(paused.terminalOutcome, undefined);
+  assert.equal(paused.lifecycle, 'proving');
+  assert.equal(fixture.events.at(-1), 'owner-release');
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), events: fixture.events }));
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 2);
+  assert.equal(fixture.events.filter((event) => event === 'git:push').length, 1);
+});
+
 test('blocked label delivery resumes from its durable pendingEffect without rerunning work', async () => {
   const fixture = await runFixture({
     rejectEffect: 'labels',
-    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(
@@ -1505,7 +1547,7 @@ test('blocked label delivery resumes from its durable pendingEffect without reru
 test('blocked label delivery survives a crash after the remote effect without duplicating work or labels', async () => {
   const fixture = await runFixture({
     rejectStoreEvent: 'state:blocked:none',
-    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
@@ -1522,7 +1564,7 @@ test('blocked label delivery survives a crash after the remote effect without du
 
 test('blocked terminal replay repairs a stale running label without rerunning work', async () => {
   const fixture = await runFixture({
-    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
@@ -1551,7 +1593,7 @@ test('blocked transition preserves concurrent labels and never restores revoked 
   ]) {
     const fixture = await runFixture({
       blockedTransitionLabels: entry.concurrent,
-      proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+      proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
     });
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: 'external' });
@@ -1564,7 +1606,7 @@ test('blocked transition resumes when the post-effect projection write fails', a
     blockedTransitionLabels: ['agent:running'],
     rejectStoreEvent: 'state:proving:blocked-labels',
     rejectStoreOccurrence: 2,
-    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'] }, receipt: receipt() }),
+    proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
@@ -1586,9 +1628,11 @@ test('malformed report repair and clean transport retry use separate budgets wit
       { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
     ],
   });
+  assert.equal((await malformed.runner.runIssue({ targetRoot: malformed.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await malformed.runner.runIssue({ targetRoot: malformed.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(malformed.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(pick((await malformed.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 1 });
+  assert.deepEqual(malformed.implementationRepairOnly, [false, true]);
+  assert.deepEqual(pick((await malformed.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
 
   const transport = await runFixture({
     implementationResults: [
@@ -1596,6 +1640,7 @@ test('malformed report repair and clean transport retry use separate budgets wit
       { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
     ],
   });
+  assert.equal((await transport.runner.runIssue({ targetRoot: transport.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await transport.runner.runIssue({ targetRoot: transport.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(transport.events.filter((event) => event === 'agent').length, 2);
   assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
@@ -1609,21 +1654,68 @@ test('incomplete cumulative changedFiles gets one report-only repair without con
     ],
   });
 
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 1 });
+  assert.deepEqual(fixture.implementationRepairOnly, [false, true]);
+  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
 });
 
-test('repeated cumulative changedFiles mismatch remains fail-closed', async () => {
-  const mismatch = { kind: 'completed' as const, report: { version: 1 as const, status: 'completed' as const, summary: 'delta only', changedFiles: ['repair-only.txt'], residualRisks: [] } };
-  const fixture = await runFixture({ implementationResults: [mismatch, mismatch] });
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+test('six malformed implementation reports remain bounded report-only recovery for one product result', async () => {
+  const malformed = { kind: 'completed' as const, report: { status: 'completed' } };
+  const fixture = await runFixture({
+    implementationResults: [
+      malformed, malformed, malformed, malformed, malformed, malformed,
+      { kind: 'completed', report: { version: 1, status: 'completed', summary: 'recovered', changedFiles: ['feature.txt'], residualRisks: [] } },
+    ],
+  });
 
-  assert.equal(result.status, 'internal-error');
-  const outcome = (await fixture.store.read()).runs[0]?.terminalOutcome;
-  assert.equal(outcome?.status, 'internal-error');
-  if (outcome?.status === 'internal-error') assert.equal(outcome.code, 'implementation-change-set-invalid');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    assert.deepEqual(
+      pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']),
+      { status: 'transport-failed', resumable: true },
+    );
+  }
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.deepEqual(fixture.implementationRepairOnly, [false, true, true, true, true, true, true]);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 7);
+  assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
+});
+
+test('settled implementation, proof, and review infrastructure failures resume on the next bounded run', async () => {
+  let proofCalls = 0;
+  const cases: Array<{ name: string; options: FixtureOptions; expectedImplementationCalls: number }> = [
+    {
+      name: 'implementation',
+      options: { implementationResults: [
+        { kind: 'transport-failed', resumable: true },
+        { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
+      ] },
+      expectedImplementationCalls: 2,
+    },
+    {
+      name: 'proof',
+      options: { proof: async () => (++proofCalls === 1
+        ? { status: 'transport-failed', resumable: true, receipt: receipt() }
+        : passedProof()) },
+      expectedImplementationCalls: 1,
+    },
+    { name: 'review', options: { reviewTransportOnce: true }, expectedImplementationCalls: 1 },
+  ];
+
+  for (const entry of cases) {
+    proofCalls = 0;
+    const fixture = await runFixture(entry.options);
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
+    assert.equal(fixture.events.includes('effect:pr'), false, entry.name);
+    assert.equal(fixture.events.at(-1), 'owner-release', entry.name);
+    const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(resumed.status, 'review-ready', entry.name);
+    assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, entry.expectedImplementationCalls, entry.name);
+    assert.equal(fixture.events.filter((event) => event === 'effect:pr').length, 1, entry.name);
+    assert.equal(fixture.events.filter((event) => event === 'owner-release').length, 2, entry.name);
+  }
 });
 
 test('resumable implementation transport retries once when the interrupted attempt changed the worktree', async () => {
@@ -1635,9 +1727,11 @@ test('resumable implementation transport retries once when the interrupted attem
     ],
   });
 
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
+  assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 },
+    JSON.stringify({ state: await fixture.store.read(), events: fixture.events, evidence: fixture.evidence }));
 });
 
 test('invoked publication rejection is resumable, retains pendingEffect, and starts no later effect', async () => {
@@ -1735,7 +1829,7 @@ test('implementation and proof transport, cancellation, internal failure, and ma
     { name: 'implementation transport', options: { implementationResult: { kind: 'transport-failed', resumable: true } }, status: 'transport-failed', resumable: true },
     { name: 'implementation cancelled', options: { implementationResult: { kind: 'cancelled' } }, status: 'cancelled' },
     { name: 'implementation internal', options: { implementationResult: { kind: 'internal-error' } }, status: 'internal-error' },
-    { name: 'implementation malformed', options: { implementationResult: { kind: 'completed', report: { status: 'completed' } } }, status: 'internal-error' },
+    { name: 'implementation malformed', options: { implementationResult: { kind: 'completed', report: { status: 'completed' } } }, status: 'transport-failed', resumable: true },
     { name: 'proof transport', options: { proof: async () => ({ status: 'transport-failed', resumable: true, receipt: receipt() }) }, status: 'transport-failed', resumable: true },
     { name: 'proof cancelled', options: { proof: async () => ({ status: 'cancelled', receipt: receipt() }) }, status: 'cancelled' },
     { name: 'proof internal', options: { proof: async () => ({ status: 'internal-error', receipt: receipt() }) }, status: 'internal-error' },
@@ -1939,12 +2033,9 @@ test('safe-halt returns after one tick, preserves attempt identity, and retries 
   assert.equal((await fixture.store.read()).runs[0]!.cycle, 1);
 });
 
-test('one bounded safe-halt observation covers every operation family without replacement or budget spend', async () => {
+test('one bounded safe-halt observation covers every live operation family without replacement or budget spend', async () => {
   const safeImplementation = (): ImplementationAgentResult => ({ kind: 'safe-halt' });
   const cases: Array<{ name: string; options: FixtureOptions }> = [
-    { name: 'triage', options: { routeSafeHaltOnce: true } },
-    { name: 'spec-author', options: { route: 'spec-required', specAuthorSafeHaltOnce: true } },
-    { name: 'spec-review', options: { route: 'spec-required', specReviewSafeHaltOnce: true } },
     { name: 'implementation', options: { implementationResults: [safeImplementation()] } },
     { name: 'report-repair', options: { implementationResults: [
       { kind: 'completed', report: { version: 0, status: 'bad' } }, safeImplementation(),
@@ -1955,6 +2046,12 @@ test('one bounded safe-halt observation covers every operation family without re
   ];
   for (const entry of cases) {
     const fixture = await runFixture(entry.options);
+    if (entry.name === 'report-repair') {
+      const malformed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+      assert.deepEqual(pick(malformed, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+      assert.equal((await fixture.store.read()).runs[0]?.lifecycle, 'implementing');
+      assert.equal((await fixture.store.read()).runs[0]?.activeAttempt, undefined);
+    }
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
     const frozen = (await fixture.store.read()).runs[0]!;
@@ -2089,10 +2186,6 @@ interface FixtureOptions {
   rawRunStateBytes?: Buffer;
   stateInspections?: RunStateInspection[];
   ownerContention?: boolean;
-  route?: 'direct' | 'spec-required';
-  routeSequence?: Array<'direct' | 'spec-required'>;
-  specQuestionOnce?: boolean;
-  conflictQuestionOnce?: boolean;
   initialLabels?: string[];
   blockedTransitionLabels?: string[];
   revokeAtAuthorization?: number;
@@ -2133,33 +2226,36 @@ interface FixtureOptions {
     author?: string;
     authorId?: string;
   }>;
-  expectedTriageComment?: string;
-  revokeDuringRoute?: boolean;
-  dropRunningDuringRoute?: boolean;
   workflowVerificationReject?: boolean;
   reviewMalformedOnce?: boolean;
   reviewMalformedCount?: number;
+  reviewIncoherentNeedsWorkOnce?: boolean;
+  reviewNeedsWorkOnce?: boolean;
+  reviewOutOfConeOnTargetedOnce?: boolean;
+  reviewOutOfConeApproved?: boolean;
+  reviewOutOfConeAffectedTargets?: string[];
+  reviewRejectedOnce?: boolean;
+  reviewRejectedAlways?: boolean;
+  reviewAffectedTargets?: string[];
+  configuredChecks?: Record<string, string>;
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
+  diffTreesUnisolatable?: boolean;
+  diffTreeOverride?: { changedFiles: string[]; patch: string };
+  denyReadPaths?: string[];
   getBaseShaRejectOnce?: boolean;
-  competingClaimDuringRoute?: boolean;
-  malformedCurrentClaimDuringRoute?: boolean;
-  replaceHistoricalClaimDuringRoute?: boolean;
-  competingClaimAfterClaim?: boolean;
-  ordinaryCommentAfterClaim?: string;
-  issueBodyAfterClaim?: string;
-  expectedTriageIssueBody?: string;
   issueBody?: string;
   permissionSequence?: Array<'write' | 'admin' | 'read' | 'throw'>;
   implementationPreparedGate?: Promise<void>;
   implementationBeforePreparedGate?: Promise<void>;
-  routeSafeHaltOnce?: boolean;
-  specAuthorSafeHaltOnce?: boolean;
-  specReviewSafeHaltOnce?: boolean;
   reviewSafeHaltOnce?: boolean;
+  reviewTransportOnce?: boolean;
+  reviewPreLaunchTransportOnce?: boolean;
   checkSafeHaltOnce?: boolean;
   proofSafeHaltOnce?: boolean;
+  checkPreLaunchRejectOnce?: boolean;
+  proofPreLaunchRejectOnce?: boolean;
 }
 
 async function runFixture(options: FixtureOptions = {}) {
@@ -2179,6 +2275,8 @@ async function runFixture(options: FixtureOptions = {}) {
   const events: string[] = [];
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
   const config = configFixture();
+  if (options.configuredChecks) config.checks = structuredClone(options.configuredChecks);
+  if (options.denyReadPaths) config.deny.readPaths = [...options.denyReadPaths];
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
   const configBytes = Buffer.from(`${canonicalJson(config)}\n`);
   const capabilities = createCheckedChangeCapabilities();
@@ -2215,6 +2313,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const localGit = new LocalGitRunIssueAdapter();
   const candidateAuthorityHashes: string[] = [];
   const implementationAttemptIds: string[] = [];
+  const implementationRepairOnly: boolean[] = [];
   const git = traceGit(localGit, events, options, candidateAuthorityHashes);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
   let blockedTransitionMutated = false;
@@ -2232,8 +2331,11 @@ async function runFixture(options: FixtureOptions = {}) {
   let reads = 0;
   let authReads = 0;
   let reviewCalls = 0;
-  const implementationAuthorities: DeliveryAuthorityV1[] = [];
-  const reviewAuthorities: DeliveryAuthorityV1[] = [];
+  let reviewSessionCount = 0;
+  const reviewInputs: any[] = [];
+  const reviewReportRepairInputs: Array<{ repairOnly: boolean; hash: string | null; bytes: Buffer | null }> = [];
+  const implementationAuthorities: DeliveryAuthority[] = [];
+  const reviewAuthorities: DeliveryAuthority[] = [];
   const checkedChangePayloads: CheckedChangePayload[] = [];
   const rejectedEffects = new Set<string>();
   const shouldReject = (effect: string) => {
@@ -2297,24 +2399,6 @@ async function runFixture(options: FixtureOptions = {}) {
         if (claim && shouldReject('claim-comment')) throw new Error('claim comment rejected');
         if (!claim && shouldReject('comment')) throw new Error('comment rejected');
         comments.push({ id: `comment-${nextCommentId++}`, body, authorAssociation: 'OWNER' });
-        if (claim && options.competingClaimAfterClaim) {
-          comments.push({
-            id: `comment-${nextCommentId++}`,
-            body: [
-              '<!-- codex-orchestrator:run:33333333-3333-4333-8333-333333333333:claim -->',
-              'codex-orchestrator claimed #42 for branch codex/issue-42',
-            ].join('\n'),
-            authorAssociation: 'COLLABORATOR',
-          });
-        }
-        if (claim && options.ordinaryCommentAfterClaim) {
-          comments.push({
-            id: `comment-${nextCommentId++}`,
-            body: options.ordinaryCommentAfterClaim,
-            authorAssociation: 'OWNER',
-          });
-        }
-        if (claim && options.issueBodyAfterClaim) issue.body = options.issueBodyAfterClaim;
       },
       getRepositoryPermission: async (_login, expectedUserId) => {
         const permission = options.permissionSequence?.shift() ?? 'write';
@@ -2332,161 +2416,10 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     git,
-    routeCoordinator: {
-      run: async ({ state, workflowGeneration, promptFacts }) => {
-        events.push('route:triage');
-        if (options.expectedTriageComment) {
-          assert.equal(promptFacts.some((fact) => fact.includes(options.expectedTriageComment!)), true);
-        }
-        if (options.expectedTriageIssueBody) {
-          const issueFact = promptFacts.find((fact) => fact.startsWith('issue='));
-          assert.ok(issueFact);
-          const routedIssue = JSON.parse(issueFact.slice('issue='.length)) as { body?: unknown };
-          assert.equal(routedIssue.body, options.expectedTriageIssueBody);
-          assert.notEqual(routedIssue.body, options.issueBodyAfterClaim);
-        }
-        const expected = await state.read();
-        if (options.routeSafeHaltOnce) {
-          options.routeSafeHaltOnce = false;
-          const attemptId = await state.prepareAttempt('triage', 'initial');
-          await state.launchAttempt(attemptId, 4041, 4041);
-          return {
-            status: 'safe-halt' as const,
-            process: {
-              pid: 4041, processGroupId: 4041, startedAt: '2026-07-16T12:00:00.000Z',
-              baseline: {
-                headSha: baseSha, indexTreeSha: baseSha, trackedContentSha256: '1'.repeat(64),
-                untrackedContentSha256: '2'.repeat(64), worktreeIdentity: 'fixture-route',
-              },
-            },
-          };
-        }
-        const route = options.routeSequence?.shift() ?? options.route ?? 'direct';
-        const artifact = route === 'spec-required' ? {
-          version: 1 as const, status: 'spec-required' as const,
-          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
-          direct: null,
-          specRequired: { summary: 'Spec fixture.', complexityReasons: ['Durable review authority.'], specMode: 'standard' as const, reviewFocus: ['independence'] },
-          blocker: null,
-        } : {
-          version: 1 as const, status: 'direct' as const,
-          inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
-          direct: { summary: 'Direct fixture.', behaviors: ['Implement behavior.'], verification: ['Run checks.'] },
-          specRequired: null, blocker: null,
-        };
-        const triage = {
-          operation: 'triage' as const,
-          attemptId: 'triage-fixture',
-          artifactSha256: hashTriageArtifact(artifact),
-          generationHash: workflowGeneration.generationHash,
-        };
-        const review = null;
-        const receipt: RouteReceiptV1 = {
-          version: 1,
-          route,
-          triage,
-          review,
-          artifact,
-          decisionSha256: '',
-          decidedAt: '2026-07-16T12:00:00.000Z',
-          assumptions: [],
-        };
-        receipt.decisionSha256 = hashRouteDecision(receipt);
-        const completed = {
-          version: expected.version,
-          triageRepairs: expected.triageRepairs,
-          triageTransportRetries: expected.triageTransportRetries,
-          phase: 'route-complete' as const,
-          triage,
-        };
-        assert.equal(await state.complete(expected, completed, receipt, triage.artifactSha256), true);
-        if (options.revokeDuringRoute) labels = labels.filter((label) => label !== 'agent:auto');
-        if (options.dropRunningDuringRoute) labels = labels.filter((label) => label !== 'agent:running');
-        if (options.competingClaimDuringRoute) {
-          comments.push({
-            id: `comment-${nextCommentId++}`,
-            body: [
-              '<!-- codex-orchestrator:run:22222222-2222-4222-8222-222222222222:claim -->',
-              'codex-orchestrator claimed #42 for branch codex/issue-42',
-            ].join('\n'),
-            authorAssociation: 'COLLABORATOR',
-          });
-        }
-        if (options.malformedCurrentClaimDuringRoute) {
-          const currentClaim = comments.find((comment) => comment.body.includes(':claim -->'));
-          assert.ok(currentClaim);
-          comments.push({
-            id: `comment-${nextCommentId++}`,
-            body: `${currentClaim.body.split('\n')[0]}\nmalformed claim body`,
-            authorAssociation: 'OWNER',
-          });
-        }
-        if (options.replaceHistoricalClaimDuringRoute) {
-          const historicalIndex = comments.findIndex((comment) => comment.id === 'historical-claim');
-          assert.notEqual(historicalIndex, -1);
-          const [historical] = comments.splice(historicalIndex, 1);
-          comments.push({ ...historical!, id: `comment-${nextCommentId++}` });
-        }
-        return { status: 'succeeded' as const, receipt };
-      },
-    },
-    routeContinuations: {
-      direct: async () => { events.push('route:direct'); return { status: 'completed' }; },
-      specRequired: (context, state, signal) => new SpecCoordinator({
-        state,
-        operation: {
-          author: async ({ attemptId, state: delivery, onPrepared, onLaunched }) => {
-            events.push('spec-author');
-            const sessionId = delivery.authorSessionId ?? 'author-session';
-            await onPrepared({ attemptId, sessionId });
-            await onLaunched({ attemptId, sessionId, pid: 701, processGroupId: 701 });
-            if (options.specAuthorSafeHaltOnce) {
-              options.specAuthorSafeHaltOnce = false;
-              return { status: 'safe-halt' as const };
-            }
-            const revision = createSpecRevision({
-              revision: delivery.revisions.length + 1, path: `/state/spec-${delivery.revisions.length + 1}.md`, content: '# Frozen spec\n',
-              evidence: [{ path: 'issue:42', sha256: 'c'.repeat(64), description: 'Issue authority' }],
-              author: { attemptId, sessionId }, previousRevision: delivery.revisions.at(-1) ?? null,
-            });
-            if (options.specQuestionOnce && delivery.stage === 'authoring') return {
-              status: 'decision-required', attemptResultSha256: 'c'.repeat(64), value: revision,
-              decisionGaps: [{ id: 'pricing', summary: 'Choose pricing behavior.', evidence: ['issue:42'] }],
-              question: 'Which pricing behavior?',
-            };
-            if (options.conflictQuestionOnce && delivery.trustedAnswer?.accepted === false) {
-              options.conflictQuestionOnce = false;
-              return {
-                status: 'decision-required', attemptResultSha256: 'c'.repeat(64), value: revision,
-                decisionGaps: [{ id: 'pricing-conflict', summary: 'Resolve conflicting trusted answers.', evidence: ['issue:42'] }],
-                question: 'Which trusted pricing answer should control?',
-              };
-            }
-            return { status: 'completed', attemptResultSha256: 'c'.repeat(64), value: revision };
-          },
-          review: async ({ attemptId, state: delivery, onPrepared, onLaunched }) => {
-            events.push('spec-review');
-            const sessionId = delivery.review.reviewer?.sessionId ?? 'review-session';
-            await onPrepared({ attemptId, sessionId });
-            await onLaunched({ attemptId, sessionId, pid: 702, processGroupId: 702 });
-            if (options.specReviewSafeHaltOnce) {
-              options.specReviewSafeHaltOnce = false;
-              return { status: 'safe-halt' as const };
-            }
-            const target = delivery.revisions.at(-1)!;
-            return { status: 'completed', attemptResultSha256: 'd'.repeat(64), reportSha256: 'd'.repeat(64), value: {
-              version: 1 as const, targetRevision: target.revision, targetSha256: target.revisionSha256,
-              verdict: 'approved' as const, reviewer: { attemptId, sessionId },
-              coverage: ['approved-product-intent','deterministic-executability','safety','scope','validation'],
-              defects: [], acceptedRisks: [],
-            } };
-          },
-        },
-      }).run(context, signal),
-    },
     implementationAgent: {
-      run: async ({ attemptId, worktreePath: path, deliveryAuthority, onPrepared, onLaunched }) => {
+      run: async ({ attemptId, worktreePath: path, deliveryAuthority, cycle, reworkFindings, repairOnly, onPrepared, onLaunched }) => {
         implementationAttemptIds.push(attemptId);
+        implementationRepairOnly.push(repairOnly);
         implementationAuthorities.push(structuredClone(deliveryAuthority));
         events.push('agent');
         events.push('agent:implementation');
@@ -2516,8 +2449,8 @@ async function runFixture(options: FixtureOptions = {}) {
           await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
         }
         if (selected?.kind !== 'completed' && selected) return selected;
-        if (options.agentWrites !== false) {
-          await writeFile(join(path, 'feature.txt'), 'implemented\n');
+        if (options.agentWrites !== false && !repairOnly) {
+          await writeFile(join(path, 'feature.txt'), cycle > 1 ? `implemented repair ${reworkFindings.join('|')}\n` : 'implemented\n');
         }
         if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
         if (options.agentCommit) {
@@ -2531,6 +2464,12 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     implementationReviewer: {
       run: async (input) => {
+        reviewInputs.push(structuredClone({ ...input, signal: undefined, onPrepared: undefined, onLaunched: undefined, originalReportBytes: undefined }));
+        reviewReportRepairInputs.push({
+          repairOnly: input.repairOnly,
+          hash: input.originalReportSha256,
+          bytes: input.originalReportBytes ? Buffer.from(input.originalReportBytes) : null,
+        });
         reviewAuthorities.push(structuredClone(input.deliveryAuthority));
         reviewCalls += 1;
         events.push('review:code-review');
@@ -2540,8 +2479,17 @@ async function runFixture(options: FixtureOptions = {}) {
           targetFingerprint: input.targetFingerprint,
         };
         await input.onPrepared(invocation);
+        if (options.reviewPreLaunchTransportOnce) {
+          options.reviewPreLaunchTransportOnce = false;
+          events.push('review:pre-launch-failed');
+          return { kind: 'transport-failed' as const, resumable: true };
+        }
         await input.onLaunched({ ...invocation, pid: 4242, processGroupId: 4242 });
         events.push('review:code-review-launched');
+        if (options.reviewTransportOnce) {
+          options.reviewTransportOnce = false;
+          return { kind: 'transport-failed' as const, resumable: true };
+        }
         if (options.reviewSafeHaltOnce) {
           options.reviewSafeHaltOnce = false;
           return {
@@ -2559,9 +2507,83 @@ async function runFixture(options: FixtureOptions = {}) {
           || (options.reviewMalformedCount ?? 0) > 0) {
           if ((options.reviewMalformedCount ?? 0) > 0) options.reviewMalformedCount!--;
           const originalReportBytes = Buffer.from('{"report":{"version":1}}');
+          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
           return {
             kind: 'report-invalid', diagnostic: 'missing operation', originalReportBytes,
             originalReportSha256: sha256(originalReportBytes),
+          };
+        }
+        if (options.reviewIncoherentNeedsWorkOnce) {
+          options.reviewIncoherentNeedsWorkOnce = false;
+          const originalReportBytes = Buffer.from(JSON.stringify({ verdict: 'needs-work', defects: [] }));
+          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
+          return {
+            kind: 'report-invalid', diagnostic: 'needs-work review requires an open or reopened defect or repair finding',
+            originalReportBytes, originalReportSha256: sha256(originalReportBytes),
+          };
+        }
+        if (options.reviewNeedsWorkOnce) {
+          options.reviewNeedsWorkOnce = false;
+          return {
+            kind: 'completed' as const, attemptId: invocation.attemptId, artifactSha256: '7'.repeat(64),
+            report: {
+              version: 1 as const, operation: input.operation, targetRevision: input.targetRevision,
+              targetFingerprint: input.targetFingerprint, verdict: 'needs-work' as const,
+              coverage: ['acceptance-criteria', 'correctness'],
+              defects: [{
+                id: 'finding-1', class: 'blocker' as const, severity: 'high' as const, confidence: 'high' as const,
+                status: 'open' as const, invariant: 'behavior works', failure: 'edge case fails', evidence: ['focused test'],
+                repair: 'fix edge case', affectedTargets: options.reviewAffectedTargets ?? ['src/a.ts'], introducedTargetRevision: input.targetRevision,
+                statusTargetRevision: input.targetRevision, supersededBy: null,
+              }],
+              residualRisks: [], reviewerSessionId: input.reviewerSessionId, repairFindingOutcomes: [],
+            },
+          };
+        }
+        if (options.reviewOutOfConeOnTargetedOnce && input.repairPatch !== null) {
+          options.reviewOutOfConeOnTargetedOnce = false;
+          return {
+            kind: 'completed' as const, attemptId: invocation.attemptId, artifactSha256: '6'.repeat(64),
+            report: {
+              version: 1 as const, operation: input.operation, targetRevision: input.targetRevision,
+              targetFingerprint: input.targetFingerprint, verdict: options.reviewOutOfConeApproved ? 'approved' as const : 'needs-work' as const,
+              coverage: ['correctness'],
+              defects: [
+                ...input.defects.map((defect) => ({ ...defect, status: 'verified' as const, statusTargetRevision: input.targetRevision })),
+                {
+                  id: 'out-of-cone', class: options.reviewOutOfConeApproved ? 'improvement' as const : 'blocker' as const,
+                  severity: 'high' as const, confidence: 'high' as const,
+                  status: 'open' as const, invariant: 'unrelated scope stays closed', failure: 'unrelated behavior changed',
+                  evidence: ['unrelated file'], repair: 'reopen complete review',
+                  affectedTargets: options.reviewOutOfConeAffectedTargets ?? ['path:unrelated.ts'],
+                  introducedTargetRevision: input.targetRevision, statusTargetRevision: input.targetRevision, supersededBy: null,
+                },
+              ],
+              residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+              repairFindingOutcomes: [
+                ...input.defects.map((defect) => ({ id: defect.id, status: 'verified' as const })),
+                ...input.repairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
+              ],
+            },
+          };
+        }
+        if (options.reviewRejectedOnce || options.reviewRejectedAlways) {
+          options.reviewRejectedOnce = false;
+          return {
+            kind: 'completed' as const, attemptId: invocation.attemptId, artifactSha256: '9'.repeat(64),
+            report: {
+              version: 1 as const, operation: input.operation, targetRevision: input.targetRevision,
+              targetFingerprint: input.targetFingerprint, verdict: 'rejected' as const, coverage: [],
+              defects: [{
+                id: 'review-rejection-1', class: 'blocker' as const, severity: 'high' as const, confidence: 'high' as const,
+                status: 'open' as const, invariant: 'issue authority remains bounded', failure: 'unauthorized ownership expansion',
+                evidence: ['reviewed immutable candidate'], repair: 'return to Plan for an explicit authority decision',
+                affectedTargets: ['contract:authority'], introducedTargetRevision: input.targetRevision,
+                statusTargetRevision: input.targetRevision, supersededBy: null,
+              }],
+              residualRisks: ['Publishing would exceed issue authority.'], reviewerSessionId: input.reviewerSessionId,
+              repairFindingOutcomes: [],
+            },
           };
         }
         return {
@@ -2569,12 +2591,12 @@ async function runFixture(options: FixtureOptions = {}) {
           report: {
             version: 1, operation: input.operation, targetRevision: input.targetRevision,
             targetFingerprint: input.targetFingerprint, verdict: 'approved',
-            coverage: ['acceptance-criteria', 'correctness', 'test-quality'],
+            coverage: [...input.reviewFocus],
             defects: input.defects.map((defect) => ({ ...defect, status: 'verified' as const, statusTargetRevision: input.targetRevision })),
             residualRisks: [], reviewerSessionId: input.reviewerSessionId,
             repairFindingOutcomes: [
               ...input.defects.map((defect) => ({ id: defect.id, status: 'verified' as const })),
-              ...input.fixedRepairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
+              ...input.repairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
             ],
           },
         };
@@ -2583,6 +2605,11 @@ async function runFixture(options: FixtureOptions = {}) {
     checks: {
       supportsLaunchOwnership: true,
       run: async ({ id, onLaunched }) => {
+        if (options.checkPreLaunchRejectOnce) {
+          options.checkPreLaunchRejectOnce = false;
+          events.push('check:pre-launch-failed');
+          throw new Error('check tooling unavailable before launch');
+        }
         await onLaunched?.({ pid: 987654, processGroupId: 987654 });
         events.push(id === 'typecheck' ? 'check:typecheck' : `check:changed:${id}`);
         if (options.checkSafeHaltOnce) {
@@ -2604,6 +2631,11 @@ async function runFixture(options: FixtureOptions = {}) {
     proof: {
       proveChange: async ({ checkedChange, recoverOnly, beforeAgentLaunch, onLaunched }) => {
         await beforeAgentLaunch?.();
+        if (options.proofPreLaunchRejectOnce) {
+          options.proofPreLaunchRejectOnce = false;
+          events.push('proof:pre-launch-failed');
+          throw new Error('proof tooling unavailable before launch');
+        }
         await onLaunched?.({ pid: 24680, processGroupId: 24680, launchedAt: '2026-07-16T12:00:00.000Z' });
         events.push('proof');
         if (options.proofSafeHaltOnce) {
@@ -2659,7 +2691,7 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     createRunId: () => '00000000-0000-4000-8000-000000000001',
     createProofId: () => 'proof-1',
-    createReviewSessionId: () => 'code-review-session-1',
+    createReviewSessionId: () => `code-review-session-${++reviewSessionCount}`,
     processIdentity: {
       host: 'fixture-host', bootId: 'fixture-boot',
       capture: async () => ({ kind: 'unavailable', platform: 'darwin' }),
@@ -2694,8 +2726,9 @@ async function runFixture(options: FixtureOptions = {}) {
   return {
     runner: new RunIssue(dependencies), dependencies, options, targetRoot, remoteRoot, worktreePath, baseSha, statePath,
     events, evidence, store: rawStore, comments, implementationAuthorities, reviewAuthorities,
-    candidateAuthorityHashes, checkedChangePayloads,
-    implementationAttemptIds,
+    candidateAuthorityHashes, checkedChangePayloads, reviewInputs,
+    reviewReportRepairInputs,
+    implementationAttemptIds, implementationRepairOnly,
   };
 }
 
@@ -2824,6 +2857,11 @@ function traceGit(
     snapshot: (path) => delegate.snapshot(path),
     fingerprintDeniedPaths: (path, deniedPaths) => delegate.fingerprintDeniedPaths(path, deniedPaths),
     listChangedFiles: (path) => delegate.listChangedFiles(path),
+    diffTrees: (path, previousTreeSha, candidateTreeSha) => options.diffTreesUnisolatable
+      ? Promise.reject(new Error('previous tree object unavailable'))
+      : options.diffTreeOverride
+        ? Promise.resolve(structuredClone(options.diffTreeOverride))
+        : delegate.diffTrees(path, previousTreeSha, candidateTreeSha),
     listChangedFilesIgnoringUntrackedRoot: (path, ignoredRoot) => delegate.listChangedFilesIgnoringUntrackedRoot(path, ignoredRoot),
     fingerprintChangedFiles: (path, changedFiles) => delegate.fingerprintChangedFiles(path, changedFiles),
     stageAll: async (path) => { events.push('git:stage'); return delegate.stageAll(path); },
@@ -2862,7 +2900,7 @@ function configFixture(): AgentAutoConfig {
         review: label('agent:review'),
       },
     },
-    runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60, maxCycles: 5 },
+    runner: { workspaceRoot: '.worktrees', stateDir: '.codex-orchestrator/state', branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 60 },
     codex: { command: 'codex', timeoutMs: 1000, idleTimeoutMs: 500, toolNetwork: 'deny' },
     checks: { typecheck: 'npm run typecheck' },
     proof: { artifactDir: '.codex-orchestrator/proofs' },

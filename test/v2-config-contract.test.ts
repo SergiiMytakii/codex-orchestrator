@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import { parseAgentAutoConfig, type AgentAutoConfig } from '../src/v2/config.js';
@@ -25,7 +27,6 @@ function validConfig(): AgentAutoConfig {
       stateDir: '.codex-orchestrator/v2/state',
       branchTemplate: 'codex/issue-${issueNumber}',
       pollIntervalSeconds: 60,
-      maxCycles: 5,
     },
     codex: {
       command: 'codex',
@@ -52,7 +53,7 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   assert.deepEqual(PUBLIC_COMMANDS, ['setup', 'doctor', 'status', 'run', 'daemon']);
   assert.deepEqual(RUN_ISSUE_STATUSES, [
     'review-ready',
-    'spec-frozen',
+    'repair-ready',
     'not-eligible',
     'blocked',
     'transport-failed',
@@ -69,11 +70,21 @@ test('V2 accepts the exact clean config and snapshots the only command, status, 
   ]);
 });
 
+test('the checked-in package config parses through the real V2 parser', async () => {
+  const checkedIn = JSON.parse(await readFile(
+    path.join(process.cwd(), '.codex-orchestrator/config.json'),
+    'utf8',
+  ));
+
+  assert.deepEqual(parseAgentAutoConfig(checkedIn), checkedIn);
+});
+
 test('V2 rejects unknown configuration surfaces', () => {
   const rejected = [
     { ...validConfig(), schema: 'codex-orchestrator.invalid' },
     { ...validConfig(), unknown: {} },
     { ...validConfig(), runner: { ...validConfig().runner, profile: 'deep' } },
+    { ...validConfig(), runner: { ...validConfig().runner, maxCycles: 5 } },
     { ...validConfig(), codex: { ...validConfig().codex, requiredVersion: '0.144.4' } },
   ];
 
@@ -82,7 +93,6 @@ test('V2 rejects unknown configuration surfaces', () => {
 
 test('V2 rejects invalid integers, non-canonical paths, commands, and empty policy strings', () => {
   const rejected = [
-    { ...validConfig(), runner: { ...validConfig().runner, maxCycles: 4 } },
     { ...validConfig(), runner: { ...validConfig().runner, pollIntervalSeconds: 0 } },
     { ...validConfig(), runner: { ...validConfig().runner, workspaceRoot: '../workspaces' } },
     { ...validConfig(), proof: { artifactDir: '/absolute/proofs' } },
@@ -135,15 +145,9 @@ test('V2 accepts a strict optional Runner-owned Android proof recipe and rejects
 test('CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
-    { result: { status: 'spec-frozen', receipt: {
-      version: 1, issueNumber: 42, runId: 'run-42', workflowGenerationSha256: 'a'.repeat(64), revision: 1,
-      path: '/state/spec.md', contentSha256: 'b'.repeat(64), revisionSha256: 'c'.repeat(64),
-      reviewReportSha256: 'd'.repeat(64), reviewerAttemptId: 'review-attempt', reviewerSessionId: 'reviewer', receiptSha256: 'e'.repeat(64),
-    }, evidencePath: 'evidence/spec.json' }, exit: 0 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
     { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },
-    { result: { status: 'blocked', kind: 'exhausted', resumable: true, evidencePath: 'evidence/5.json' }, exit: 20 },
     { result: { status: 'transport-failed', resumable: true, evidencePath: 'evidence/6.json' }, exit: 70 },
     { result: { status: 'internal-error', evidencePath: 'evidence/7.json' }, exit: 70 },
     { result: { status: 'cancelled', evidencePath: 'evidence/8.json' }, exit: 130 },

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, containsCredentialEvidence } from './containment.js';
 import type { ContainedReportOperation, ContainedReportOperationResult, ReportOnlyWorktreeSnapshot } from './contained-report-operation.js';
 import type { CodeReviewDefectV1, CodeReviewReportV1, ReviewOperation } from './code-review-report.js';
-import type { DeliveryAuthorityV1 } from './delivery-authority.js';
+import type { DeliveryAuthority } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -26,12 +26,21 @@ export interface ImplementationReviewerInput {
   implementationAttemptId: string;
   targetRevision: number;
   targetFingerprint: string;
+  currentTreeSha: string;
+  previousTarget: {
+    targetRevision: number;
+    targetFingerprint: string;
+    candidateTreeSha: string;
+  } | null;
+  repairPatch: string | null;
+  repairFindings: Array<{ id: string; sourceId: string; summary: string; affectedContracts: string[] }>;
+  checkedChangeSha256: string;
+  checks: unknown[];
+  proofReceipt: unknown;
   issue: unknown;
   frozenCriteria: unknown[];
-  routeReceipt: unknown;
-  deliveryAuthority: DeliveryAuthorityV1;
+  deliveryAuthority: DeliveryAuthority;
   defects: CodeReviewDefectV1[];
-  fixedRepairFindings: Array<{ id: string; affectedContracts: string[] }>;
   reviewFocus: string[];
   workflowGeneration: WorkflowGenerationReceipt;
   repairOnly: boolean;
@@ -67,6 +76,17 @@ export class ContainedImplementationReviewer {
       }
       assertPositiveInteger(input.targetRevision, 'target revision');
       assertSha256(input.targetFingerprint, 'target fingerprint');
+      assertGitSha(input.currentTreeSha, 'current target tree');
+      const targeted = input.repairPatch !== null;
+      if (!targeted) {
+        if (input.previousTarget === null && input.repairFindings.length !== 0) throw new Error('initial complete review target is invalid');
+      } else {
+        if (!input.previousTarget || (input.repairFindings.length === 0 && !input.defects.some((defect) => defect.status === 'fixed'))) {
+          throw new Error('targeted review target is invalid');
+        }
+        assertText(input.repairPatch, 'repair patch');
+      }
+      assertSha256(input.checkedChangeSha256, 'review checked change');
       promptFacts = [buildCapsule(input)];
     } catch (error) {
       return {
@@ -92,10 +112,10 @@ export class ContainedImplementationReviewer {
         reviewContext: {
           operation: input.operation, targetRevision: input.targetRevision,
           targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
-          previousFindingIds: [
-            ...input.defects.map((defect) => defect.id),
-            ...input.fixedRepairFindings.map((finding) => finding.id),
-          ].sort(),
+          previousFindingIds: (input.repairPatch !== null
+            ? [...input.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]
+            : [...input.defects.map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]).sort(),
+          requiredCoverage: input.repairPatch === null ? [...input.reviewFocus] : [],
         },
         onPrepared: () => input.onPrepared(structuredClone(invocation)),
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
@@ -103,7 +123,7 @@ export class ContainedImplementationReviewer {
     } catch {
       return { kind: 'internal-error', code: 'review-operation-threw' };
     }
-    return mapResult(result);
+    return mapResult(result, input);
   }
 }
 
@@ -111,15 +131,39 @@ function buildCapsule(input: ImplementationReviewerInput): string {
   const repair = input.repairOnly
     ? validateRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes)
     : rejectUnexpectedRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes);
+  const repairFindings = input.repairFindings.map((finding) => {
+    assertText(finding.id, 'repair finding ID');
+    assertText(finding.sourceId, 'repair finding source ID');
+    assertText(finding.summary, 'repair finding summary');
+    return {
+      id: finding.id,
+      sourceId: finding.sourceId,
+      summary: finding.summary,
+      affectedContracts: sortedUnique(finding.affectedContracts, 'repair finding affected contracts'),
+    };
+  }).sort((left, right) => left.id.localeCompare(right.id));
+  if (repairFindings.some((finding, index) => index > 0 && finding.id === repairFindings[index - 1]!.id)) {
+    throw new Error('repair finding IDs have duplicates');
+  }
   const text = canonicalJson({
     version: 1, operation: input.operation, reviewerSessionId: input.reviewerSessionId,
-    targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint,
+    target: {
+      current: {
+        targetRevision: input.targetRevision,
+        targetFingerprint: input.targetFingerprint,
+        candidateTreeSha: input.currentTreeSha,
+      },
+      previous: input.previousTarget,
+      repairPatch: input.repairPatch,
+    },
+    repairFindings,
+    proof: {
+      checkedChangeSha256: input.checkedChangeSha256,
+      checks: input.checks,
+      receipt: input.proofReceipt,
+    },
     issue: input.issue, frozenCriteria: input.frozenCriteria,
-    routeReceipt: input.routeReceipt, deliveryAuthority: input.deliveryAuthority, defects: input.defects,
-    fixedRepairFindings: input.fixedRepairFindings.map((finding) => ({
-      id: finding.id,
-      affectedContracts: sortedUnique(finding.affectedContracts, 'fixed repair finding contracts'),
-    })).sort((left, right) => left.id.localeCompare(right.id)),
+    deliveryAuthority: input.deliveryAuthority, defects: input.defects,
     reviewFocus: sortedUnique(input.reviewFocus, 'review focus'),
     repairOnly: input.repairOnly, repair,
   });
@@ -133,7 +177,7 @@ function validateRepairInput(hash: string | null, diagnostic: string | null, byt
   if (hash === null || diagnostic === null || bytes === null) throw new Error('report repair input is incomplete');
   assertSha256(hash, 'original report hash');
   assertText(diagnostic, 'validation diagnostic');
-  if (bytes.length > MAX_CAPSULE_BYTES || createHash('sha256').update(bytes).digest('hex') !== hash) {
+  if (createHash('sha256').update(bytes).digest('hex') !== hash) {
     throw new Error('original report bytes do not match repair hash');
   }
   const text = bytes.toString('utf8');
@@ -146,7 +190,7 @@ function rejectUnexpectedRepairInput(hash: string | null, diagnostic: string | n
   return null;
 }
 
-function mapResult(result: ContainedReportOperationResult): ImplementationReviewerResult {
+function mapResult(result: ContainedReportOperationResult, input: ImplementationReviewerInput): ImplementationReviewerResult {
   if (result.status === 'completed') return {
     kind: 'completed', attemptId: result.attemptId, report: result.validatedPayload as CodeReviewReportV1,
     artifactSha256: result.artifactSha256,
@@ -154,17 +198,38 @@ function mapResult(result: ContainedReportOperationResult): ImplementationReview
   if (result.status === 'retryable') return { kind: 'transport-failed', resumable: true };
   if (result.status === 'safe-halt') return { kind: 'safe-halt', process: result.process };
   if (result.status === 'cancelled') return { kind: 'cancelled' };
-  if (result.status === 'invalid' && result.repairInput) return {
-    kind: 'report-invalid',
-    diagnostic: result.findings[0] ?? 'review report is invalid',
-    originalReportSha256: result.repairInput.originalReportSha256,
-    originalReportBytes: Buffer.from(result.repairInput.originalReportBytes),
-  };
+  if (result.status === 'invalid' && result.repairInput) {
+    const repair = {
+      diagnostic: result.findings[0] ?? 'review report is invalid',
+      originalReportSha256: result.repairInput.originalReportSha256,
+      originalReportBytes: Buffer.from(result.repairInput.originalReportBytes),
+    };
+    try {
+      buildCapsule({
+        ...input,
+        repairOnly: true,
+        originalReportSha256: repair.originalReportSha256,
+        validationDiagnostic: repair.diagnostic,
+        originalReportBytes: repair.originalReportBytes,
+      });
+    } catch {
+      return { kind: 'internal-error', code: 'review-report-repair-input-invalid' };
+    }
+    return { kind: 'report-invalid', ...repair };
+  }
+  if (result.status === 'blocked' && [
+    'report-operation-prepare-failed',
+    'report-operation-launch-failed',
+    'report-operation-attempt-incomplete',
+    'report-operation-result-read-failed',
+    'report-operation-read-view-failed',
+    'report-operation-report-unavailable',
+  ].includes(result.code)) return { kind: 'transport-failed', resumable: true };
   return { kind: 'internal-error', code: result.status === 'invalid' ? 'review-report-invalid' : result.code };
 }
 
 function sortedUnique(value: string[], field: string): string[] {
-  if (!Array.isArray(value) || value.length > 256 || value.some((item) => typeof item !== 'string' || item.length === 0)) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) throw new Error(`${field} is invalid`);
   const sorted = [...value].sort();
   if (sorted.some((item, index) => index > 0 && item === sorted[index - 1])) throw new Error(`${field} has duplicates`);
   return sorted;
@@ -176,6 +241,10 @@ function assertText(value: unknown, field: string): asserts value is string {
 
 function assertSha256(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || !SHA256.test(value)) throw new Error(`${field} is invalid`);
+}
+
+function assertGitSha(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)) throw new Error(`${field} is invalid`);
 }
 
 function assertPositiveInteger(value: unknown, field: string): asserts value is number {

@@ -19,10 +19,11 @@ reserved them to the Runner. Do not emit the Diagnosing Bugs output contract;
 finish by emitting the non-empty implementation report required below.
 
 The issue is already authorized for implementation. Do not start planning,
-ticket publication, planning, independent review, or delivery. The Runner owns
-review, checks, commits, publication, retries, and
+ticket publication, independent review, or delivery. Preserve the same logical
+Implement ownership for supplied repair findings. The Runner owns affected
+checks, proof, review, commits, publication, and
 external state. Never commit, push, publish, mutate GitHub, or expose
 credentials. In the final report, `changedFiles` is the complete current product
-change set across all implementation cycles, not only files touched in this
+change set across the Run, not only files touched in this
 attempt; exclude Runner-owned proof artifacts. Return only
 `schemas/implementation-report-v1.json`.

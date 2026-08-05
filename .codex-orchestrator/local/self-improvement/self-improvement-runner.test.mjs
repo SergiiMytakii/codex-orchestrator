@@ -23,32 +23,6 @@ function v2RunResult(result) {
   return JSON.stringify({ schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result });
 }
 
-const validFrozenSpecReceipt = {
-  version: 1,
-  issueNumber: 123,
-  runId: 'run-123',
-  workflowGenerationSha256: 'a'.repeat(64),
-  revision: 1,
-  path: 'specs/123.md',
-  contentSha256: 'b'.repeat(64),
-  revisionSha256: 'c'.repeat(64),
-  reviewReportSha256: 'd'.repeat(64),
-  reviewerSessionId: 'reviewer-session',
-  receiptSha256: 'e'.repeat(64),
-};
-
-const validFrozenSpecQuestionReceipt = {
-  version: 1,
-  revisionSha256: 'f'.repeat(64),
-  decisionGaps: [{ id: 'product-choice', summary: 'Choose the intended behavior.', evidence: ['issue body'] }],
-  questionId: 'q-123',
-  question: 'Which behavior should be used?',
-  answerPrefix: 'Answer q-123:',
-  marker: '<!-- codex-orchestrator:spec-question:q-123 -->',
-  evidencePath: 'specs/123.md',
-  questionSha256: '1'.repeat(64),
-};
-
 const runnerPath = fileURLToPath(new URL('./runner.mjs', import.meta.url));
 
 async function runStandaloneImplement({ result, exitCode, args = ['--issue', '123'] }) {
@@ -175,16 +149,10 @@ for (const scenario of [
     result: { status: 'cancelled', evidencePath: 'evidence.json' },
   },
   {
-    name: 'route-ready',
+    name: 'repair-ready',
     wrapperStatus: 'skipped',
     exitCode: 0,
-    result: { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
-  },
-  {
-    name: 'spec-frozen',
-    wrapperStatus: 'skipped',
-    exitCode: 0,
-    result: { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
+    result: { status: 'repair-ready', source: 'review', blockerIds: ['finding-1'], evidencePath: 'evidence.json' },
   },
   {
     name: 'requeued owner contention',
@@ -255,15 +223,6 @@ test('standalone implement fails closed when the typed result and exit code disa
   const result = await runStandaloneImplement({
     exitCode: 21,
     result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence.json' },
-  });
-  assert.equal(result.code, 70);
-  assert.match(result.stdout, /implement: failed issue #123/);
-});
-
-test('standalone implement rejects an incomplete spec-frozen receipt', async () => {
-  const result = await runStandaloneImplement({
-    exitCode: 0,
-    result: { status: 'spec-frozen', receipt: { version: 1 }, evidencePath: 'evidence.json' },
   });
   assert.equal(result.code, 70);
   assert.match(result.stdout, /implement: failed issue #123/);
@@ -725,11 +684,12 @@ test('typed V2 result parser rejects misleading prose and maps every result stat
   for (const result of [
     { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json' },
     { status: 'review-ready', pullRequestUrl: 'https://example.test/pr/1', evidencePath: 'evidence.json', continuationEpoch: 'epoch-1' },
-    { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
-    { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
-    { status: 'spec-frozen', receipt: validFrozenSpecQuestionReceipt, evidencePath: 'evidence.json' },
+    { status: 'repair-ready', source: 'proof', blockerIds: ['proof-1'], evidencePath: 'evidence.json' },
     { status: 'not-eligible', reason: 'closed', evidencePath: 'evidence.json' },
-    { status: 'blocked', kind: 'safety', resumable: false, evidencePath: 'evidence.json' },
+    { status: 'blocked', kind: 'decision-delta', resumable: false, evidencePath: 'evidence.json', blocker: {
+      kind: 'decision-delta', summary: 'Choose behavior.', attempted: ['read issue'], resumable: false,
+      reviewerRejectionDetail: 'Review rejected an unauthorized choice.',
+    } },
     { status: 'transport-failed', resumable: true, evidencePath: 'evidence.json' },
     { status: 'cancelled', evidencePath: 'evidence.json' },
     { status: 'internal-error', evidencePath: 'evidence.json' },
@@ -760,8 +720,7 @@ test('implement trusts typed blocked result instead of misleading successful pro
 });
 
 for (const result of [
-  { status: 'route-ready', route: 'spec-required', evidencePath: 'evidence.json' },
-  { status: 'spec-frozen', receipt: validFrozenSpecReceipt, evidencePath: 'evidence.json' },
+  { status: 'repair-ready', source: 'check', blockerIds: ['check-1'], evidencePath: 'evidence.json' },
   { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence.json' },
   { status: 'requeued', reason: 'state-changed' },
 ]) test(`zero-code ${result.status} outcome cannot trigger live smoke`, async () => {
@@ -877,6 +836,46 @@ test('daily reuses an open auto self-improvement issue instead of discovering an
     const result = await runner.daily();
     assert.equal(result.phases.find((phase) => phase.name === 'select').issueNumber, 310);
     assert.equal(result.phases.find((phase) => phase.name === 'discover'), undefined);
+    assert.equal(exec.calls.some((call) => call.command === 'codex'), false);
+    assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('two bounded daily invocations resume one running issue after repair-ready', async () => {
+  let invocation = 0;
+  const exec = makeExecStub({
+    gh: ({ args }) => {
+      if (args[0] === 'repo') return { code: 0, stdout: JSON.stringify({ nameWithOwner: 'SergiiMytakii/codex-orchestrator' }) };
+      if (args[0] === 'auth') return { code: 0, stdout: '' };
+      if (args[0] === 'label' && args[1] === 'list') return { code: 0, stdout: JSON.stringify([{ name: 'agent:auto' }, { name: 'agent:manual' }, { name: 'self-improvement' }]) };
+      if (args[0] === 'issue' && args[1] === 'list' && args.includes('self-improvement-runner-id:codex-orchestrator-local-self-improvement in:body')) {
+        return { code: 0, stdout: JSON.stringify([
+          { number: 313, title: 'running repair', state: 'OPEN', labels: [{ name: 'agent:auto' }, { name: 'agent:running' }, { name: 'self-improvement' }] },
+        ]) };
+      }
+      throw new Error(`unexpected gh call ${args.join(' ')}`);
+    },
+    [commandKey('npm', ['run', 'build', '--silent'])]: { code: 0, stdout: '' },
+    [commandKey('node', ['dist/src/v2/cli.js', 'run', '--target', '<cwd>', '--issue', '313'])]: () => {
+      invocation += 1;
+      return invocation === 1
+        ? { code: 0, stdout: v2RunResult({ status: 'repair-ready', source: 'review', blockerIds: ['finding-1'], evidencePath: 'repair.json' }) }
+        : { code: 0, stdout: v2RunResult({ status: 'review-ready', pullRequestUrl: 'https://example.test/pr/313', evidencePath: 'review.json' }) };
+    },
+    [commandKey('npm', ['run', 'smoke:live'])]: { code: 0, stdout: 'smoke ok' },
+  });
+  const { runner, cleanup } = await makeRunner({ exec });
+  try {
+    const first = await runner.daily();
+    const second = await runner.daily();
+
+    assert.equal(first.phases.find((phase) => phase.name === 'implement').status, 'skipped');
+    assert.equal(first.phases.find((phase) => phase.name === 'live-smoke').status, 'skipped');
+    assert.equal(second.phases.find((phase) => phase.name === 'implement').status, 'passed');
+    assert.equal(invocation, 2);
+    assert.equal(exec.calls.filter((call) => call.command === 'node' && call.args.includes('--issue')).length, 2);
     assert.equal(exec.calls.some((call) => call.command === 'codex'), false);
     assert.equal(exec.calls.some((call) => call.args[0] === 'issue' && call.args[1] === 'create'), false);
   } finally {

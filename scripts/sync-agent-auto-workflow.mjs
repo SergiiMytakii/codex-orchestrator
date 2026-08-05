@@ -11,9 +11,6 @@ const PRODUCTION_OPERATION_BINDINGS = {
   'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'implementer'],
   'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'standards_reviewer'],
   implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer'],
-  'spec-author': ['to-spec', [], 'schemas/spec-author-v1.json', 'implementer'],
-  'spec-review': ['code-review', [], 'schemas/spec-review-v1.json', 'standards_reviewer'],
-  triage: ['plan', ['bug-root-cause-explainer'], 'schemas/triage-route-v1.json', 'explorer'],
 };
 
 const options = parseArgs(process.argv.slice(2));
@@ -743,7 +740,7 @@ function validateClosure(files, physical, field) {
 
 function validateGeneratedPolicy(policy, id) {
   assertExactKeys(policy, ['sandboxMode', 'cwdClass', 'worktreeAccess', 'writableRootClasses', 'runnerPostcondition', 'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite']);
-  if (!['read-only', 'workspace-write'].includes(policy.sandboxMode) || !['worktree', 'target-state'].includes(policy.cwdClass)
+  if (!['read-only', 'workspace-write'].includes(policy.sandboxMode) || policy.cwdClass !== 'worktree'
     || !['read-only', 'write'].includes(policy.worktreeAccess) || !Array.isArray(policy.writableRootClasses)
     || policy.network !== 'deny' || !Array.isArray(policy.networkHosts) || policy.networkHosts.length !== 0
     || !Array.isArray(policy.mcpTools) || policy.mcpTools.length !== 0 || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) {
@@ -752,7 +749,7 @@ function validateGeneratedPolicy(policy, id) {
   if (policy.sandboxMode === 'read-only'
     ? policy.worktreeAccess !== 'read-only' || policy.writableRootClasses.length !== 0 || policy.runnerPostcondition !== 'report-only'
     : policy.worktreeAccess !== 'write' || policy.writableRootClasses.length !== 1 || policy.writableRootClasses[0] !== policy.cwdClass
-      || !['change-set', 'proof-only', 'spec-only'].includes(policy.runnerPostcondition)) {
+      || !['change-set', 'proof-only', 'report-only'].includes(policy.runnerPostcondition)) {
     throw new Error(`Workflow operation policy is inconsistent: ${id}`);
   }
 }

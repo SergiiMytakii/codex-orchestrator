@@ -112,8 +112,9 @@ workflow owner. Do not publish any intermediate PRD.
 
 ### 4. Run one fresh semantic packet review
 
-For the settled packet, launch exactly one fresh `standards_reviewer` child. Begin
-its brief with `Assigned role: standards_reviewer`, provide the full source authority
+For the settled packet, launch exactly one fresh `standards_reviewer` without a
+history fork (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin its
+brief with `Assigned role: standards_reviewer`, provide the full source authority
 and complete publish-ready packet, and require both internal lenses in the same
 review activation: source fidelity and ticket executability.
 

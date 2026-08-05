@@ -42,7 +42,6 @@ export interface AgentAutoConfig {
     stateDir: string;
     branchTemplate: 'codex/issue-${issueNumber}';
     pollIntervalSeconds: number;
-    maxCycles: 5;
   };
   codex: {
     command: string;
@@ -78,13 +77,11 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
     'stateDir',
     'branchTemplate',
     'pollIntervalSeconds',
-    'maxCycles',
   ], 'config.runner');
   assertRepositoryRelativePath(value.runner.workspaceRoot, 'config.runner.workspaceRoot');
   assertRepositoryRelativePath(value.runner.stateDir, 'config.runner.stateDir');
   if (value.runner.branchTemplate !== 'codex/issue-${issueNumber}') throw new Error('config.runner.branchTemplate is invalid');
   assertPositiveSafeInteger(value.runner.pollIntervalSeconds, 'config.runner.pollIntervalSeconds');
-  if (value.runner.maxCycles !== 5) throw new Error('config.runner.maxCycles must be 5');
 
   assertExactObject(value.codex, [
     'command',

@@ -31,10 +31,10 @@ async function source(): Promise<string> {
 }
 
 const retainedScenarios = [
-  'package-install', 'spec-first', 'product-question', 'discovery-matrix', 'commit-policy',
+  'package-install', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
   'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'review-feedback-continuation', 'quality-gates', 'safety-negative',
+  'review-feedback-continuation', 'safety-negative',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
@@ -53,7 +53,7 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
       'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-      'acceptance-proof-negative', 'review-feedback-continuation', 'quality-gates',
+      'acceptance-proof-negative', 'review-feedback-continuation',
     ],
   );
 });
@@ -81,12 +81,12 @@ test('authoritative candidate smoke proves mixed-index capture and exact publica
   assert.match(text, /candidate execution directory survived successful publication/u);
 });
 
-test('default core release proves direct, spec-first, product-question, and post-PR flows', async () => {
+test('default core release proves package delivery and post-PR targeted repair', async () => {
   const text = await source();
   const coreProfile = text.slice(text.indexOf("['core-release'"), text.indexOf("['v2-regression'"));
   assert.deepEqual(
     [...coreProfile.matchAll(/'([^']+)'/gu)].map((match) => match[1]),
-    ['core-release', 'package-install', 'spec-first', 'product-question', 'review-feedback-continuation'],
+    ['core-release', 'package-install', 'review-feedback-continuation'],
   );
 });
 
@@ -133,6 +133,80 @@ test('packed smoke parses npm JSON after prepack lifecycle output', async () => 
     ']',
     '',
   ].join('\n')), [{ filename: 'codex-orchestrator-0.1.51.tgz' }]);
+});
+
+test('live smoke executes bounded repair-ready continuations and stops at a real result boundary', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    continueRepairReady: (
+      runOnce: () => Promise<{ status: string }>,
+      options?: { maxContinuations?: number },
+    ) => Promise<{ status: string }>;
+  };
+  const statuses = ['repair-ready', 'repair-ready', 'review-ready'];
+  let calls = 0;
+  const settled = await module.continueRepairReady(async () => ({ status: statuses[calls++]! }), { maxContinuations: 3 });
+  assert.deepEqual(settled, { status: 'review-ready' });
+  assert.equal(calls, 3);
+
+  let boundedCalls = 0;
+  await assert.rejects(module.continueRepairReady(async () => {
+    boundedCalls += 1;
+    return { status: 'repair-ready' };
+  }, { maxContinuations: 2 }), /exceeded 2 bounded runs/u);
+  assert.equal(boundedCalls, 3);
+
+  let terminalCalls = 0;
+  assert.deepEqual(await module.continueRepairReady(async () => {
+    terminalCalls += 1;
+    return { status: 'blocked' };
+  }), { status: 'blocked' });
+  assert.equal(terminalCalls, 1);
+});
+
+test('live smoke accepts the real repair-ready envelope and resumes bounded infrastructure outcomes', async () => {
+  const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
+    parseRunIssueEnvelope: (stdout: string, exitStatus: number) => { status: string; resumable?: boolean; kind?: string };
+    continueRepairReady: (
+      runOnce: () => Promise<{ status: string; resumable?: boolean; kind?: string }>,
+      options?: { maxContinuations?: number },
+    ) => Promise<{ status: string; resumable?: boolean; kind?: string }>;
+  };
+  const envelope = (result: Record<string, unknown>, exitStatus: number) => module.parseRunIssueEnvelope(JSON.stringify({
+    schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result,
+  }), exitStatus);
+  const results = [
+    envelope({ status: 'repair-ready', source: 'review', blockerIds: ['finding-1'], evidencePath: 'repair.json' }, 0),
+    envelope({ status: 'transport-failed', resumable: true, evidencePath: 'transport.json' }, 70),
+    envelope({ status: 'blocked', kind: 'external', resumable: true, evidencePath: 'service.json' }, 20),
+    envelope({ status: 'review-ready', pullRequestUrl: 'https://example.invalid/1', evidencePath: 'ready.json' }, 0),
+  ];
+  let calls = 0;
+  assert.equal((await module.continueRepairReady(async () => results[calls++]!, { maxContinuations: 3 })).status, 'review-ready');
+  assert.equal(calls, 4);
+
+  assert.throws(() => envelope({ status: 'repair-ready', source: 'check', blockerIds: [], evidencePath: 'repair.json' }, 70), /exit disagree/u);
+  let terminalCalls = 0;
+  assert.equal((await module.continueRepairReady(async () => {
+    terminalCalls += 1;
+    return envelope({ status: 'transport-failed', resumable: false, evidencePath: 'terminal.json' }, 70);
+  })).status, 'transport-failed');
+  assert.equal(terminalCalls, 1);
+});
+
+test('authoritative smoke docs describe only current profiles, labels, and unbounded targeted repair', async () => {
+  const [checklist, labels] = await Promise.all([
+    readFile(fileURLToPath(new URL('../../docs/live-smoke-checklist.md', import.meta.url)), 'utf8'),
+    readFile(fileURLToPath(new URL('../../docs/agents/triage-labels.md', import.meta.url)), 'utf8'),
+  ]);
+  assert.match(checklist, /two default scenarios/u);
+  assert.match(checklist, /targeted repair/u);
+  assert.match(checklist, /no semantic round limit/u);
+  assert.doesNotMatch(checklist, /spec-first|product-question|fifth failed|all four default|one complete independent review/u);
+  assert.match(labels, /agent:auto/u);
+  assert.match(labels, /agent:running/u);
+  assert.match(labels, /agent:blocked/u);
+  assert.match(labels, /agent:review/u);
+  assert.doesNotMatch(labels, /agent:waiting-human|ready-for-agent|product-question|spec-first/u);
 });
 
 test('live smoke documents scratch repo and strict cleanup defaults', async () => {
@@ -186,24 +260,6 @@ test('strict cleanup removes only run-created local resources and requires compl
   assert.doesNotMatch(removal, /for \(const name/u);
 });
 
-test('spec-first and product-question continue approved authority in the same Run', async () => {
-  const text = await source();
-  const scenarios = text.slice(text.indexOf('async function runSpecFirstScenario'), text.indexOf('async function runDiscoveryMatrixScenario'));
-  assert.match(scenarios, /routeReceipt\?\.route !== 'spec-required'/u);
-  assert.match(scenarios, /specDelivery\?\.stage !== 'frozen'/u);
-  assert.match(scenarios, /status: 'spec-frozen'/u);
-  assert.match(scenarios, /receipt\.answerPrefix/u);
-  assert.match(scenarios, /acceptedAnswers\?\.length !== 1/u);
-  const normalization = text.slice(text.indexOf('function normalizeSpecReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
-  for (const coverage of ['approved-product-intent', 'deterministic-executability', 'safety', 'scope', 'validation']) {
-    assert.match(normalization, new RegExp(coverage, 'u'));
-  }
-  assert.match(text, /'spec-frozen': 0/u);
-  const runtime = await readFile(fileURLToPath(new URL('../../src/v2/runtime.ts', import.meta.url)), 'utf8');
-  assert.match(runtime, /acceptedAnswers: state\.acceptedAnswers/u);
-  assert.match(runtime, /trustedAnswer: state\.trustedAnswer \?\? null/u);
-});
-
 test('live smoke omits the redundant free-form real-codex scenario', async () => {
   const text = await source();
   assert.doesNotMatch(text, /real-codex|runRealCodexScenario/u);
@@ -231,11 +287,12 @@ test('real Codex smoke budgets cover the complete multi-operation workflow', asy
   assert.match(text, /config\.codex\.timeoutMs = 600_000;/u);
 });
 
-test('quality-gates consumes implementation cycles without a second review lifecycle', async () => {
+test('live code review normalization preserves the Runner capsule', async () => {
   const text = await source();
   const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function applyFault'));
   assert.match(normalization, /coverage: capsule\.reviewFocus/u);
-  assert.match(normalization, /capsule\.fixedRepairFindings/u);
+  assert.match(normalization, /capsule\.repairFindings/u);
+  assert.match(normalization, /capsule\.target\?\.current/u);
   assert.match(normalization, /verdict: 'approved'/u);
   assert.match(normalization, /status: 'verified'/u);
   assert.doesNotMatch(normalization, /closure|mode|reopen/u);
@@ -245,7 +302,7 @@ test('every live code review is normalized from the runner-owned review capsule'
   const text = await source();
   const normalization = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
   assert.match(normalization, /operation: capsule\.operation/u);
-  assert.match(normalization, /targetFingerprint: capsule\.targetFingerprint/u);
+  assert.match(normalization, /targetFingerprint: target\.targetFingerprint/u);
   assert.match(normalization, /reviewerSessionId: capsule\.reviewerSessionId/u);
   assert.match(normalization, /writeFileSync\(reportPath, JSON\.stringify\(\{ report \}\)\)/u);
   assert.doesNotMatch(normalization, /readFileSync\(reportPath/u);
@@ -343,9 +400,6 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   assert.match(text, /expected one durable report repair/u);
   assert.match(text, /expected two publishable responsive screenshots/u);
   assert.match(text, /read-only diagnostics mutated the target/u);
-  assert.match(text, /did not exhaust on the fifth configured-check failure/u);
-  assert.match(text, /directReview\.terminalOutcome\.kind !== 'exhausted'/u);
-  assert.match(text, /reworkFindings\[0\]\.startsWith\('Check smoke failed:'\)/u);
   assert.match(text, /denied-path-modified/u);
   assert.match(text, /negative scenario published a branch or PR/u);
   assert.match(text, /terminalCode=\$\{terminalCode\}/u);
@@ -368,7 +422,7 @@ test('implementation operation resumes Implement after diagnosis and defines cum
   assert.match(operation, /Diagnosing Bugs is a side procedure of the enclosing\s+Implement procedure, not a terminal response/isu);
   assert.match(operation, /Return its reproduction and\s+root-cause evidence to that same Implement procedure, then continue the\s+authorized fix through TDD or other regression proof and post-fix verification/isu);
   assert.match(operation, /Do not emit the Diagnosing Bugs output contract;\s+finish by emitting the non-empty implementation report/isu);
-  assert.match(operation, /changedFiles.*complete current product\s+change set across all implementation cycles/isu);
+  assert.match(operation, /changedFiles.*complete current product\s+change set across the Run/isu);
 });
 
 test('strict cleanup retries eventually consistent observations before failing', async () => {

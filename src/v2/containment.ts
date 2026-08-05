@@ -85,7 +85,7 @@ export function buildContainmentCodexArgs(input: {
 
 export function validateContainmentOperationPolicy(policy: WorkflowOperationPolicy): void {
   if (!['read-only', 'workspace-write'].includes(policy.sandboxMode)
-    || !['worktree', 'target-state'].includes(policy.cwdClass)
+    || policy.cwdClass !== 'worktree'
     || !['read-only', 'write'].includes(policy.worktreeAccess)
     || policy.network !== 'deny' || policy.networkHosts.length !== 0 || policy.mcpTools.length !== 0
     || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) {
@@ -99,7 +99,7 @@ export function validateContainmentOperationPolicy(policy: WorkflowOperationPoli
   }
   if (policy.worktreeAccess !== 'write' || policy.writableRootClasses.length !== 1
     || policy.writableRootClasses[0] !== policy.cwdClass
-    || !['change-set', 'proof-only', 'spec-only'].includes(policy.runnerPostcondition)) {
+    || !['change-set', 'proof-only'].includes(policy.runnerPostcondition)) {
     throw new Error('write operation policy is inconsistent');
   }
 }

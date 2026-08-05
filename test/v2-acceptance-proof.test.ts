@@ -203,7 +203,7 @@ test('host identity filtering applies only to publishable artifacts', async () =
   assert.equal((await publishable.proof.proveChange(publishable.input())).status, 'internal-error');
 });
 
-test('report repair and transport retry are explicit caller-owned attempts with bounded counters', async () => {
+test('report repair and transport retry remain resumable without semantic exhaustion', async () => {
   const malformed = proofFixture({
     agentResult: {
       kind: 'report',
@@ -231,12 +231,13 @@ test('report repair and transport retry are explicit caller-owned attempts with 
   const invalidRepair = proofFixture({ agentResult: {
     kind: 'report', report: { version: 1 }, proofPhaseChangedFiles: [],
   } });
-  const exhaustedRepair = await invalidRepair.proof.proveChange(invalidRepair.input({
+  const continuedRepair = await invalidRepair.proof.proveChange(invalidRepair.input({
     attemptId: 'attempt-invalid-report-repair',
     reportRepairCount: 1,
     reportRepairFindings: invalid.findings,
   }));
-  assert.equal(exhaustedRepair.status, 'internal-error');
+  assert.equal(continuedRepair.status, 'report-repair');
+  if (continuedRepair.status === 'report-repair') assert.equal(continuedRepair.reportRepairCount, 2);
   assert.equal(invalidRepair.agentCalls.length, 1);
 
   const transport = proofFixture({
@@ -250,10 +251,9 @@ test('report repair and transport retry are explicit caller-owned attempts with 
   assert.equal(transport.agentCalls.length, 1);
   assert.equal(launchAuthorizations, 1);
 
-  const exhausted = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true } });
-  const terminal = await exhausted.proof.proveChange(exhausted.input({ transportRetryCount: 1 }));
-  assert.equal(terminal.status, 'transport-failed');
-  if (terminal.status === 'transport-failed') assert.equal(terminal.resumable, false);
+  const laterRetry = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true } });
+  const continued = await laterRetry.proof.proveChange(laterRetry.input({ transportRetryCount: 6 }));
+  assert.deepEqual(continued, { status: 'transport-failed', resumable: true });
 });
 
 test('passed proof returns only a sanitized receipt and has no hidden lifecycle dependency', async () => {
@@ -326,7 +326,7 @@ test('needs-rework, external-block, transport, cancellation, and internal agent 
           ...passingReport(),
           status: 'external-block',
           criteria: [{ ...passingReport().criteria[0]!, status: 'unknown', confidence: 'low', evidenceRefs: [] }],
-          blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['retry fixture'] },
+          blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['retry fixture'], resumable: false },
         },
         proofPhaseChangedFiles: [artifactPath()],
       },

@@ -7,9 +7,11 @@ const MAX_SUMMARY_LENGTH = 4 * 1024;
 const MAX_ARRAY_LENGTH = 256;
 
 export interface ExternalBlocker {
-  kind: 'credential' | 'tool' | 'service' | 'product-decision';
+  kind: 'credential' | 'tool' | 'service' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
   summary: string;
   attempted: string[];
+  resumable: boolean;
+  reviewerRejectionDetail?: string;
 }
 
 export interface ImplementationReportV1 {
@@ -88,23 +90,31 @@ export function implementationReportSkillExcerpt(): string {
 }
 
 function validateExternalBlocker(value: unknown, field: string): asserts value is ExternalBlocker {
-  assertExactObject(value, ['kind', 'summary', 'attempted'], field);
-  if (!['credential', 'tool', 'service', 'product-decision'].includes(value.kind as string)) {
+  assertRecord(value, field);
+  assertExactObject(value, ['kind', 'summary', 'attempted', 'resumable', ...(hasOwn(value, 'reviewerRejectionDetail') ? ['reviewerRejectionDetail'] : [])], field);
+  if (!['credential', 'tool', 'service', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.kind as string)) {
     throw new Error(`${field}.kind is invalid`);
   }
   assertBoundedString(value.summary, `${field}.summary`, MAX_SUMMARY_LENGTH, true);
   assertStringArray(value.attempted, `${field}.attempted`);
+  if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
+  if (['decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.kind as string) && value.resumable) {
+    throw new Error(`${field}.resumable must be false for an authority boundary`);
+  }
+  if (hasOwn(value, 'reviewerRejectionDetail')) assertBoundedString(value.reviewerRejectionDetail, `${field}.reviewerRejectionDetail`, MAX_SUMMARY_LENGTH, true);
 }
 
 function externalBlockerSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['kind', 'summary', 'attempted'],
+    required: ['kind', 'summary', 'attempted', 'resumable'],
     properties: {
-      kind: { type: 'string', enum: ['credential', 'tool', 'service', 'product-decision'] },
+      kind: { type: 'string', enum: ['credential', 'tool', 'service', 'decision-delta', 'out-of-scope', 'authority-boundary'] },
       summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
       attempted: stringArraySchema(),
+      resumable: { type: 'boolean' },
+      reviewerRejectionDetail: boundedStringSchema(MAX_SUMMARY_LENGTH),
     },
   };
 }
@@ -162,6 +172,10 @@ function assertBoundedString(
 
 function assertRecord(value: unknown, field: string): asserts value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} must be an object`);
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function assertExactObject(value: unknown, keys: string[], field: string): asserts value is Record<string, unknown> {

@@ -14,7 +14,7 @@ export interface CheckedChangePayloadV1 {
   canonicalRepository: string;
   runId: string;
   issueNumber: number;
-  cycle: 1 | 2 | 3 | 4 | 5;
+  cycle: number;
   baseSha: string;
   headSha: string;
   indexTreeSha: string;
@@ -42,7 +42,7 @@ export interface CheckedChangePayloadV2 {
   canonicalRepository: string;
   runId: string;
   issueNumber: number;
-  cycle: 1 | 2 | 3 | 4 | 5;
+  cycle: number;
   baseSha: string;
   deliveryAuthoritySha256: string;
   binding: CandidateBindingV2;
@@ -154,7 +154,7 @@ function validatePayloadV1(value: unknown): asserts value is CheckedChangePayloa
     'packageVersion',
     'proofSchemaVersion',
   ], 'CheckedChange payload');
-  if (value.version !== 1 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5 || value.proofSchemaVersion !== 1) {
+  if (value.version !== 1 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || value.proofSchemaVersion !== 1) {
     throw new Error('CheckedChange payload versions/cycle are invalid');
   }
   if (typeof value.canonicalRepository !== 'string' || !REPOSITORY_PATTERN.test(value.canonicalRepository)) {
@@ -192,7 +192,7 @@ function validatePayloadV2(value: unknown): asserts value is CheckedChangePayloa
     'version', 'canonicalRepository', 'runId', 'issueNumber', 'cycle', 'baseSha', 'deliveryAuthoritySha256', 'binding', 'changedFiles',
     'checks', 'checkPolicySha256', 'packageVersion', 'proofSchemaVersion',
   ], 'CheckedChange payload');
-  if (value.version !== 2 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5 || value.proofSchemaVersion !== 1) {
+  if (value.version !== 2 || !Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || value.proofSchemaVersion !== 1) {
     throw new Error('CheckedChange payload versions/cycle are invalid');
   }
   validateCommonIdentity(value);

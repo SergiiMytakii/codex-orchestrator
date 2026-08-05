@@ -334,7 +334,6 @@ async function defaultConfig(
       stateDir: '.codex-orchestrator/v2/state',
       branchTemplate: 'codex/issue-${issueNumber}',
       pollIntervalSeconds: 60,
-      maxCycles: 5,
     },
     codex: {
       command: 'codex', timeoutMs: 900_000, idleTimeoutMs: 300_000, toolNetwork: 'deny',

@@ -8,16 +8,15 @@ The live smoke validates the packed npm artifact against a scratch GitHub reposi
 npm run smoke:live
 ```
 
-The default `core-release` profile is intentionally small:
+The default `core-release` profile has two default scenarios:
 
 - `package-install`: pack, install in a clean consumer, and run the public CLI.
-- `spec-first`: approve a compact spec and implement it in the same Run.
-- `product-question`: freeze one exact owner question, accept one trusted answer,
-  and continue the same Run through approved spec and delivery.
 - `review-feedback-continuation`: freeze trusted feedback and update the same PR
-  through the same full review, checks, and proof loop.
+  through affected checks and proof, targeted repair Review when the exact repair delta
+  is available, and a fast-forward-only publication update.
 
-The supplemental non-mobile V2 matrix remains available through
+The two normal profiles are `core-release` and the supplemental non-mobile
+`v2-regression` profile. The latter remains available through
 `--profile v2-regression` or explicit `--scenario` values. It covers each
 distinct discovery, policy, recovery, diagnostics, non-visual proof, and
 quality-gate behavior once. Use it when those surfaces change.
@@ -41,8 +40,6 @@ Its scenarios are intentionally bound to these current owner behaviors:
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
-- `quality-gates`: the fifth failed configured check exhausts the implementation budget
-  without publication.
 
 `browser-proof` is a deterministic contract smoke for current-run responsive
 screenshot receipts; it does not claim to drive a real browser. Real browser UI
@@ -50,11 +47,14 @@ proof remains a separate workflow with browser-owned evidence.
 
 The `review-feedback-continuation` regression scenario proves: trusted
 unresolved feedback is frozen,
-one complete independent review/checks/proof loop reruns, one fast-forward commit updates the same PR,
+the repair uses affected checks and proof plus targeted Review when its exact
+tree delta is available, one fast-forward commit updates the same PR,
 one summary marker is posted, replay is effect-free, and cleanup leaves no
 unexpected branch or PR. Its one-shot daemon invocation is constrained to the
 run-owned issue and uses a run-isolated orchestrator home. Live execution remains explicit-only;
-local tests must not substitute a production repository.
+local tests must not substitute a production repository. Repair and reviewer
+counts have no semantic round limit; each invocation remains bounded and a
+later invocation resumes durable work.
 
 The `full` profile is the union of core release and the supplemental V2
 regression scenarios. Fixture-specific Android and iOS real gates are not
@@ -99,5 +99,5 @@ Local-only command output may contain machine paths. Credentials are forbidden i
 - [ ] `npm run typecheck`
 - [ ] `npm test`
 - [ ] `npm pack --dry-run --json` contains only the V2 package boundary
-- [ ] `npm run smoke:live` passes all four default lifecycle scenarios
+- [ ] `npm run smoke:live` passes both default lifecycle scenarios
 - [ ] strict cleanup reports no remaining run-owned remote or temporary state

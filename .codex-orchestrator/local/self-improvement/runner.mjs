@@ -199,43 +199,9 @@ function parseJson(stdout, fallback) {
   return JSON.parse(text || 'null');
 }
 
-const SHA256 = /^[0-9a-f]{64}$/u;
-
 function hasExactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
-}
-
-function isHash(value) {
-  return typeof value === 'string' && SHA256.test(value);
-}
-
-function isFrozenSpecReceipt(value) {
-  const keys = [
-    'version', 'issueNumber', 'runId', 'workflowGenerationSha256', 'revision', 'path',
-    'contentSha256', 'revisionSha256', 'reviewReportSha256', 'reviewerSessionId', 'receiptSha256',
-  ];
-  return hasExactKeys(value, keys)
-    && value.version === 1
-    && Number.isSafeInteger(value.issueNumber) && value.issueNumber > 0
-    && Number.isSafeInteger(value.revision) && value.revision > 0
-    && nonEmptyString(value.runId) && nonEmptyString(value.path) && nonEmptyString(value.reviewerSessionId)
-    && ['workflowGenerationSha256', 'contentSha256', 'revisionSha256', 'reviewReportSha256', 'receiptSha256']
-      .every((field) => isHash(value[field]));
-}
-
-function isFrozenSpecQuestionReceipt(value) {
-  const keys = [
-    'version', 'revisionSha256', 'decisionGaps', 'questionId', 'question', 'answerPrefix',
-    'marker', 'evidencePath', 'questionSha256',
-  ];
-  return hasExactKeys(value, keys)
-    && value.version === 1
-    && isHash(value.revisionSha256) && isHash(value.questionSha256)
-    && ['questionId', 'question', 'answerPrefix', 'marker', 'evidencePath'].every((field) => nonEmptyString(value[field]))
-    && Array.isArray(value.decisionGaps) && value.decisionGaps.length > 0
-    && value.decisionGaps.every((gap) => hasExactKeys(gap, ['id', 'summary', 'evidence'])
-      && nonEmptyString(gap.id) && nonEmptyString(gap.summary) && nonEmptyStringArray(gap.evidence));
 }
 
 const V2_RUN_RESULT_CONTRACT = Object.freeze({
@@ -249,21 +215,31 @@ const V2_RUN_RESULT_CONTRACT = Object.freeze({
     validate: (result) => nonEmptyString(result.pullRequestUrl)
       && (!('continuationEpoch' in result) || nonEmptyString(result.continuationEpoch)),
   },
-  'route-ready': {
-    shapes: [['evidencePath', 'route', 'status']], exitCode: 0, wrapperStatus: 'skipped',
-    validate: (result) => result.route === 'spec-required',
-  },
-  'spec-frozen': {
-    shapes: [['evidencePath', 'receipt', 'status']], exitCode: 0, wrapperStatus: 'skipped',
-    validate: (result) => isFrozenSpecReceipt(result.receipt) || isFrozenSpecQuestionReceipt(result.receipt),
+  'repair-ready': {
+    shapes: [['blockerIds', 'evidencePath', 'source', 'status']], exitCode: 0, wrapperStatus: 'skipped',
+    validate: (result) => ['check', 'proof', 'review'].includes(result.source)
+      && nonEmptyStringArray(result.blockerIds),
   },
   'not-eligible': {
     shapes: [['evidencePath', 'reason', 'status']], exitCode: 21, wrapperStatus: 'skipped',
     validate: (result) => nonEmptyString(result.reason),
   },
   blocked: {
-    shapes: [['evidencePath', 'kind', 'resumable', 'status']], exitCode: 20, wrapperStatus: 'blocked',
-    validate: (result) => ['external', 'safety', 'exhausted'].includes(result.kind) && typeof result.resumable === 'boolean',
+    shapes: [
+      ['evidencePath', 'kind', 'resumable', 'status'],
+      ['blocker', 'evidencePath', 'kind', 'resumable', 'status'],
+    ],
+    exitCode: 20,
+    wrapperStatus: 'blocked',
+    validate: (result) => ['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(result.kind)
+      && typeof result.resumable === 'boolean'
+      && (!('blocker' in result) || (result.blocker && typeof result.blocker === 'object' && hasExactKeys(result.blocker, [
+        'kind', 'summary', 'attempted', 'resumable',
+        ...('reviewerRejectionDetail' in result.blocker ? ['reviewerRejectionDetail'] : []),
+      ]) && nonEmptyString(result.blocker.kind) && nonEmptyString(result.blocker.summary)
+        && Array.isArray(result.blocker.attempted) && result.blocker.attempted.every(nonEmptyString)
+        && typeof result.blocker.resumable === 'boolean'
+        && (!('reviewerRejectionDetail' in result.blocker) || nonEmptyString(result.blocker.reviewerRejectionDetail)))),
   },
   'transport-failed': {
     shapes: [['evidencePath', 'resumable', 'status']], exitCode: 70, wrapperStatus: 'failed',
@@ -864,8 +840,6 @@ export function createRunner(options = {}) {
         implementation = { status: 'skipped', reason: selection.reason, issueNumber };
       } else if (selectionClassification?.isBlockedWorkflowState) {
         implementation = { status: 'blocked', reason: `existing issue has blocking workflow state: ${selectionClassification.labels.join(', ')}`, issueNumber };
-      } else if (selectionClassification?.hasBlockingWorkflowState) {
-        implementation = { status: 'skipped', reason: `existing issue has blocking workflow state: ${selectionClassification.labels.join(', ')}`, issueNumber };
       } else if (issueNumber) {
         implementation = await implement({ issue: issueNumber });
       }

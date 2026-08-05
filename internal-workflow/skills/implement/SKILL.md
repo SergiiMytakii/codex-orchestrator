@@ -95,17 +95,18 @@ never activates the graph coordinator.
    previously reviewed result retain their approval. Repeat this repair and
    targeted Review loop until approval; reviewer count is never a stop
    condition or an authority boundary. Escalate to a complete Review only when
-   the repair cannot be isolated from previously approved scope. A failed or
-   timed-out reviewer still blocks completion.
+   the repair cannot be isolated from previously approved scope. An empty wait
+   means wait again. Never interrupt or replace a reviewer to accelerate a
+   commit; interrupted review blocks and is not code approval.
 9. After proof and every applicable review approve, create one scoped local
    commit for direct and single-ticket Implement when the scope is isolatable.
    Stage only owned paths and recheck that unrelated dirty paths remain
    unchanged. If user or repository policy explicitly forbids or reserves Git
    to another actor, return the proven uncommitted diff.
 
-Missing proof, failed or timed-out review, dirty overlap, or unisolatable scope
-produces no affected staging or commit. Never push or open a PR without separate
-authority.
+Missing proof, terminally failed or interrupted review, dirty overlap, or
+unisolatable scope produces no affected staging or commit. Never push or open a
+PR without separate authority.
 
 ## Handoff
 

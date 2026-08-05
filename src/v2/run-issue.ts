@@ -9,7 +9,8 @@ import {
   type CheckedChangePayloadV2,
 } from './checked-change.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
-import { canonicalJson, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
+import { canonicalJson, containsCredentialEvidence, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
+import { findDeniedPathMatch } from './adapters/path-policy.js';
 import {
   adoptActiveAttempt,
   confirmActiveAttemptCleanup,
@@ -20,11 +21,9 @@ import {
   type ProcessStartIdentity,
 } from './active-attempt.js';
 import { validateImplementationReport } from './implementation-report.js';
+import { validateCompletedReport } from './contained-report-operation.js';
 import {
-  canRecoverTerminalDirectReviewReport,
   directReviewCandidateTargetFingerprint,
-  directReviewTargetFingerprint,
-  MAX_DIRECT_REVIEW_REPORT_REPAIRS,
   projectTerminalDirectReview,
 } from './direct-delivery.js';
 import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
@@ -33,24 +32,9 @@ import { CheckProcessQuiescenceError, resolveIssueCheckPolicy } from './issue-ch
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
-  RouteInitializationUnrecoverableError,
+  IssueInitializationUnrecoverableError,
   WorkflowGenerationUnrecoverableError,
 } from './run-store.js';
-import {
-  initialRouteExecution,
-  type RouteCoordinatorInput,
-  type RouteCoordinatorResult,
-  type RouteCoordinatorState,
-} from './route-coordinator.js';
-import type { RoutedContinuationRegistry } from './route-continuations.js';
-import type { SpecCoordinatorResult, SpecDeliveryState } from './spec-coordinator.js';
-import type { FrozenSpecQuestionReceiptV1, FrozenSpecReceiptV1 } from './spec-delivery.js';
-import { observeTrustedSpecAnswer, revalidateTrustedSpecAnswers, specQuestionBody } from './spec-answer.js';
-import {
-  downstreamLifecycleForRoute,
-  validateRouteTransition,
-  type RouteExecutionV1,
-} from './route-decision.js';
 import type {
   PendingEffect,
   PendingEffectInput,
@@ -71,7 +55,7 @@ import {
 } from './review-feedback.js';
 import type { CandidateGitV2 } from './candidate.js';
 import type { CandidateBindingV2, CandidateBoundaryV2, CandidateMaterializationV2 } from './candidate.js';
-import { createDirectDeliveryAuthority, createSpecDeliveryAuthority, type DeliveryAuthorityV1 } from './delivery-authority.js';
+import { createIssueDeliveryAuthority, type DeliveryAuthority } from './delivery-authority.js';
 import {
   blockedLabelPolicy,
   blockedLabelProjection,
@@ -86,18 +70,15 @@ import {
   outcomeEvidenceBytes,
   publicOutcome,
   publicIssueSnapshot,
-  requireRouteExecution,
   refreshClaimedIssueSnapshot,
   snapshotIssue,
   sameInspectionIdentity,
-  sameRouteExecution,
   sameStrings,
   semanticChangesMatch,
 } from './run-state-projections.js';
 import {
   applyValidationTransition,
   nextValidationTransition,
-  projectTerminalValidationReviewRecovery,
   projectValidationFeedbackActivation,
   projectValidationProofPassed,
   projectValidationProofStart,
@@ -107,7 +88,6 @@ import {
   projectValidationReviewReportRepair,
   projectValidationReviewStart,
   projectValidationReviewTransportRetry,
-  validationRepairBudgetExhausted,
   type ValidationCasTransition,
 } from './validation-progression.js';
 import {
@@ -122,9 +102,9 @@ import {
 export type RunIssueResult =
   | { status: 'state-schema-unsupported' }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
-  | { status: 'spec-frozen'; receipt: FrozenSpecReceiptV1 | FrozenSpecQuestionReceiptV1; evidencePath: string }
+  | { status: 'repair-ready'; source: 'check' | 'proof' | 'review'; blockerIds: string[]; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
-  | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
+  | { status: 'blocked'; kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary'; resumable: boolean; evidencePath: string; blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string } }
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; evidencePath: string }
@@ -158,6 +138,10 @@ export interface RunIssueGit {
   snapshot(worktreePath: string): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   fingerprintDeniedPaths(worktreePath: string, deniedPaths: string[]): Promise<string>;
   listChangedFiles(worktreePath: string): Promise<string[]>;
+  diffTrees(worktreePath: string, previousTreeSha: string, candidateTreeSha: string): Promise<{
+    changedFiles: string[];
+    patch: string;
+  }>;
   listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]>;
   fingerprintChangedFiles(worktreePath: string, changedFiles: string[]): Promise<string>;
   stageAll(worktreePath: string): Promise<void>;
@@ -167,6 +151,15 @@ export interface RunIssueGit {
   getRemoteBranchSha(worktreePath: string, branchName: string): Promise<string | undefined>;
   commit(input: { worktreePath: string; message: string }): Promise<string>;
   push(input: { worktreePath: string; branchName: string }): Promise<void>;
+}
+
+interface ReviewValidationScope {
+  mode: 'complete' | 'targeted';
+  repairPatch: string | null;
+  changedFiles: string[];
+  checks: Record<string, string>;
+  criteria: FrozenCriterion[];
+  impactTargets: string[];
 }
 
 export type ImplementationAgentResult =
@@ -215,7 +208,7 @@ export interface RunIssueDependencies {
       worktreePath: string;
       issue: IssueSnapshot;
       frozenCriteria: FrozenCriterion[];
-      deliveryAuthority: DeliveryAuthorityV1;
+      deliveryAuthority: DeliveryAuthority;
       cycle: number;
       reworkFindings: string[];
       repairOnly: boolean;
@@ -242,10 +235,6 @@ export interface RunIssueDependencies {
   inspectAttemptResult(path: string): Promise<{ bytes: Buffer; sha256: string } | undefined>;
   observeAttemptCleanup(identity: AttemptCleanupIdentity): Promise<'confirmed' | 'pending'>;
   writeAttemptResult(input: { path: string; bytes: Buffer; sha256: string }): Promise<void>;
-  routeCoordinator: {
-    run(input: RouteCoordinatorInput & { state: RouteCoordinatorState }): Promise<RouteCoordinatorResult>;
-  };
-  routeContinuations: RoutedContinuationRegistry;
   checks: {
     supportsLaunchOwnership?: true;
     run(input: {
@@ -315,7 +304,7 @@ interface DurableConfiguredCheckResult {
 
 type TerminalSeed =
   | { status: 'review-ready'; pullRequestUrl: string; continuationEpoch?: string }
-  | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean }
+  | { status: 'blocked'; kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary'; resumable: boolean; blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string } }
   | { status: 'transport-failed'; resumable: boolean }
   | { status: 'cancelled' }
   | { status: 'internal-error'; code: string };
@@ -452,12 +441,6 @@ export class RunIssue {
           || !sameStrings(recaptured.value.canonicalChangedFiles, candidateBinding.canonicalChangedFiles)) {
           if (recaptured.value.bindingId !== candidateBinding.bindingId) {
             await candidate.releasePin({ binding: recaptured.value, expectedPinnedCommitSha: recaptured.value.candidateCommitSha });
-          }
-          if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
-            const released = await this.clearAndReleaseCandidate(active);
-            return 'status' in released
-              ? released
-              : this.terminal(released.active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'candidate-worktree-drift');
           }
           const reopened = await this.startNextCycleFromCandidate(active, ['The issue worktree changed after proof; review the new candidate.']);
           if ('status' in reopened) return reopened;
@@ -742,7 +725,7 @@ export class RunIssue {
           runId: active.record.runId,
           boundary: {
             kind: 'review-feedback', batchId: batch.batchId,
-            repairRound: feedback.repairRound as 1 | 2 | 3,
+            repairRound: feedback.repairRound,
             authoritySha256: active.record.deliveryAuthority!.authoritySha256,
           },
           artifactDir: config.proof.artifactDir,
@@ -756,9 +739,6 @@ export class RunIssue {
           }
           const released = await this.clearAndReleaseCandidate(active);
           if ('status' in released) return released;
-          if (feedback.repairRound >= 3) {
-            return this.blockReviewFeedback(released.active, 'exhausted', 'review-feedback-candidate-worktree-drift');
-          }
           const reopened = await this.persist(released.active, {
             lifecycle: 'implementing',
             reviewFeedback: reserveNextReviewFeedbackRound(feedback),
@@ -928,7 +908,7 @@ export class RunIssue {
       '',
       `Addressed frozen review feedback batch ${batch.batchId}.`,
       `Updated head: ${head}`,
-      'Complete independent review, configured checks, and Acceptance Proof passed.',
+      `${active.record.directReview?.previousTarget ? 'Targeted' : 'Complete'} independent review, configured checks, and Acceptance Proof passed.`,
       'Review threads remain for human resolution.',
     ].join('\n');
     if (active.record.pendingEffect?.kind === 'review-update-push') {
@@ -1099,9 +1079,11 @@ export class RunIssue {
     }
 
     const projected = projectReviewFeedbackBatch(observed.batch, starting.record.directReview.targetRevision);
+    const candidateTreeSha = await this.dependencies.git.getTreeSha(starting.record.worktreePath);
     const activation = projectValidationFeedbackActivation(starting.record, {
       batch: observed.batch,
       repairFindings: projected.repairFindings,
+      candidateTreeSha,
       pendingEffect: {
         kind: 'review-activation-labels',
         issueNumber: starting.record.issueNumber,
@@ -1335,9 +1317,7 @@ export class RunIssue {
         }
         if (active.record.terminalOutcome) {
           if (active.record.terminalOutcome.status !== 'review-ready') {
-            const recovered = await this.recoverTerminalReviewReport(active, issue, config, frozenCriteria);
-            if (!recovered) return publicOutcome(active.record.terminalOutcome);
-            active = recovered;
+            return publicOutcome(active.record.terminalOutcome);
           } else {
             const continuation = await this.continueReviewReady(active, targetRoot, config);
             if ('result' in continuation) return continuation.result;
@@ -1395,46 +1375,31 @@ export class RunIssue {
               ? await this.updateExistingPullRequest(active, config, input.issueNumber)
               : await this.publish(active, config, issueSnapshot, input.issueNumber);
           }
-          let transitionedFromSpec = false;
-          if (active.record.lifecycle === 'spec-authoring') {
-            if (!await this.authorized(active, config)) return await this.revoked(active);
-            const spec = await this.continueSpecRequired(active);
-            if ('result' in spec) return spec.result;
-            active = spec.active;
-            transitionedFromSpec = active.record.lifecycle === 'implementing';
-          }
-          if (!['triaging', 'routed', 'implementing', 'checking', 'proving'].includes(active.record.lifecycle)) {
+          if (!['implementing', 'checking', 'proving', 'reviewing'].includes(active.record.lifecycle)) {
             return await this.terminal(active, { status: 'internal-error', code: 'resume-phase-not-reconciled' });
           }
           if (!await this.authorized(active, config)) return await this.revoked(active);
-          if (active.record.lifecycle !== 'triaging' && active.record.lifecycle !== 'routed') {
-            if (!active.record.routeExecution || !active.record.routeReceipt) throw new RouteInitializationUnrecoverableError();
+          {
             const preparedImplementationRecovery = active.record.lifecycle === 'implementing'
               && active.record.activeAttempt?.stage === 'prepared'
               && active.record.activeAttempt.operationId === 'implementation';
-            if (active.record.lifecycle === 'implementing' && active.record.routeReceipt.route === 'spec-required'
-              && (!active.record.activeAttempt || preparedImplementationRecovery) && !active.record.directReview) {
-              const answerTrust = await this.revalidateSpecAnswers(active);
-              if (answerTrust.status === 'frozen') {
-                return frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath);
-              }
-            }
-            const reviewRecovery = active.record.lifecycle === 'implementing' && active.record.directReview?.status === 'active'
+            const reviewRecovery = active.record.lifecycle === 'reviewing' && active.record.directReview?.status === 'active'
               && active.record.directReview.stage === 'review';
-            const checkRecovery = active.record.lifecycle === 'checking'
-              && active.record.directReview?.status === 'clear';
-            const proofRecovery = active.record.lifecycle === 'proving'
-              && active.record.directReview?.status === 'clear';
+            const checkRecovery = active.record.lifecycle === 'checking';
+            const proofRecovery = active.record.lifecycle === 'proving';
             const directReviewRepair = active.record.lifecycle === 'implementing'
               && active.record.directReview?.status === 'active'
               && active.record.directReview.stage === 'review-repair';
+            const plannedRepairRecovery = active.record.lifecycle === 'implementing'
+              && active.record.reworkFindings.length > 0;
             const attemptResultRecovery = active.record.activeAttempt?.stage === 'observed'
               && active.record.activeAttempt.result !== null;
-            if (!resumedSafeHalt && !transitionedFromSpec && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
-              && !proofRecovery && !directReviewRepair && !attemptResultRecovery) {
-              if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
-                return await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
-              }
+            const implementationInfrastructureRecovery = active.record.lifecycle === 'implementing'
+              && !active.record.activeAttempt
+              && (active.record.transportRetries > 0 || active.record.reportRepairs > 0);
+            if (!resumedSafeHalt && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
+              && !proofRecovery && !directReviewRepair && !plannedRepairRecovery && !attemptResultRecovery
+              && !implementationInfrastructureRecovery) {
               active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
             }
           }
@@ -1478,16 +1443,8 @@ export class RunIssue {
         active = await this.initializeClaimedRun(active, issue);
         issueSnapshot = structuredClone(active.record.issueSnapshot);
       }
-      if (active.record.lifecycle === 'triaging' || active.record.lifecycle === 'routed') {
-        const routed = await this.routeRun(active, issueSnapshot, frozenCriteria, worktreePath, config, input.issueNumber, branchName);
-        if ('result' in routed) return routed.result;
-        active = routed.active;
-      }
       if (!active.record.deliveryAuthority) {
         return await this.terminal(active, { status: 'internal-error', code: 'delivery-authority-missing' });
-      }
-      if (active.record.lifecycle === 'checking' && !active.record.directReview) {
-        return await this.terminal(active, { status: 'internal-error', code: 'direct-review-state-missing' });
       }
       if (!this.dependencies.git.candidateV2) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
@@ -1499,56 +1456,24 @@ export class RunIssue {
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
       let progression = nextValidationTransition(active.record, active.record.deliveryAuthority!);
-      let resumeAtChecks = progression.phase === 'checks' || progression.phase === 'acceptance-proof';
-      if (progression.phase === 'full-review') {
-        const recoveryBoundary = active.record.reviewFeedback?.activeBatch
-          ? {
-            kind: 'review-feedback' as const,
-            batchId: active.record.reviewFeedback.activeBatch.batchId,
-            repairRound: active.record.reviewFeedback.repairRound as 1 | 2 | 3,
-            authoritySha256: active.record.deliveryAuthority!.authoritySha256,
-          }
-          : { kind: 'implementation-cycle' as const, cycle: active.record.cycle, authoritySha256: active.record.deliveryAuthority!.authoritySha256 };
-        const captured = await this.ensureCandidateBinding(active, config, recoveryBoundary);
-        if ('status' in captured) return captured;
-        active = captured.active;
-        const binding = active.record.candidateBinding!;
-        const candidateTargetFingerprint = directReviewCandidateTargetFingerprint({
-          binding,
-          routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
-          workflowGenerationHash: active.record.workflowGeneration.generationHash,
-          cycle: active.record.cycle,
-          frozenCriteria,
-        });
-        if (active.record.directReview!.targetFingerprint !== candidateTargetFingerprint) {
-          active = await this.persist(active, {
-            directReview: { ...active.record.directReview!, targetFingerprint: candidateTargetFingerprint },
-          });
-        }
+      const resumeAtChecks = progression.phase === 'checks' || progression.phase === 'acceptance-proof';
+      if (progression.phase === 'review') {
         const reviewed = await this.runFullReview(
           active,
           publicIssueSnapshot(issueSnapshot),
           frozenCriteria,
-          `recovered-implementation-cycle-${active.record.cycle}`,
-          config.runner.maxCycles,
+          `implementation-owner:${active.record.runId}`,
           config,
         );
         if ('status' in reviewed) return reviewed;
         active = reviewed;
         if (active.record.lifecycle === 'implementing') continue attemptLoop;
-        resumeAtChecks = true;
+        break;
       }
 
       if (!resumeAtChecks) {
         if (progression.phase !== 'implementation') {
           return await this.terminal(active, { status: 'internal-error', code: 'validation-progression-dispatch-invalid' });
-        }
-        if (active.record.routeReceipt?.route === 'spec-required'
-          && (!active.record.activeAttempt || active.record.activeAttempt.stage === 'prepared')) {
-          const answerTrust = await this.revalidateSpecAnswers(active);
-          if (answerTrust.status === 'frozen') {
-            return frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath);
-          }
         }
       const feedbackBatch = active.record.reviewFeedback?.activeBatch;
       const workerBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
@@ -1564,13 +1489,6 @@ export class RunIssue {
         } : {}),
         onPrepared: async (prepared: { attemptId: string; reportPath: string }) => {
           const currentActive = active!;
-          if (currentActive.record.routeReceipt?.route === 'spec-required') {
-            const trust = await this.revalidateSpecAnswers(currentActive);
-            if (trust.status === 'frozen') {
-              implementationPreparationFailure = frozenQuestionProjection(trust.question, trust.evidencePath);
-              throw new Error('implementation preparation authorization changed');
-            }
-          }
           if (active!.record.activeAttempt?.attemptId !== prepared.attemptId
             || active!.record.activeAttempt.resultPath !== prepared.reportPath) {
             throw new Error('implementation attempt identity mismatch');
@@ -1588,6 +1506,8 @@ export class RunIssue {
         },
       };
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
+      const reportOnlyRecovery = active.record.reportRepairs > 0;
+      const reportOnlyBaseline = reportOnlyRecovery ? await this.dependencies.git.snapshot(worktreePath) : null;
       if (!active.record.activeAttempt) {
         active = await this.prepareAttempt(
           active,
@@ -1610,8 +1530,10 @@ export class RunIssue {
           frozenCriteria,
           deliveryAuthority: active.record.deliveryAuthority!,
           cycle: active.record.cycle,
-          reworkFindings: active.record.reworkFindings,
-          repairOnly: false,
+          reworkFindings: reportOnlyRecovery
+            ? ['Emit a schema-valid implementation report for the existing exact product result.']
+            : active.record.reworkFindings,
+          repairOnly: reportOnlyRecovery,
           workflowGeneration: active.record.workflowGeneration,
           signal: this.signal,
           ...implementationLaunch,
@@ -1632,135 +1554,63 @@ export class RunIssue {
       if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== deniedPathsBaseline) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'denied-path-modified');
       }
-      if (implementation.kind === 'transport-failed' && implementation.resumable && active.record.transportRetries === 0) {
+      if (implementation.kind === 'transport-failed' && implementation.resumable) {
         active = await this.clearAttempt(active);
-        active = await this.persist(active, { transportRetries: 1 });
-        continue attemptLoop;
+        active = await this.persist(active, { transportRetries: active.record.transportRetries + 1 });
+        return this.invokedFailure(active, 'implementation-transport-retryable',
+          'Implementation infrastructure is temporarily unavailable; a later bounded invocation may retry.');
       }
       if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
+      if (reportOnlyBaseline && !sameFreshness(reportOnlyBaseline, await this.dependencies.git.snapshot(worktreePath))) {
+        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
+      }
       let report;
       try {
         report = validateImplementationReport(implementation.report);
       } catch {
-        if (active.record.reportRepairs >= 1) {
-          return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' });
-        }
-        const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
         if (isAdoptableAttempt(active.record.activeAttempt)) {
-          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: 1 });
+          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: active.record.reportRepairs + 1 });
           active = await this.clearAttempt(active);
         } else {
-          active = await this.persist(active, { reportRepairs: 1 });
+          active = await this.persist(active, { reportRepairs: active.record.reportRepairs + 1 });
         }
-        const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
-        if (repairBlock) return repairBlock;
-        active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:report-repair`);
-        try {
-          implementation = await this.dependencies.implementationAgent.run({
-            operation: 'implementation',
-            attemptId: active.record.activeAttempt!.attemptId,
-            runId,
-            worktreePath,
-            issue: publicIssueSnapshot(issueSnapshot),
-            frozenCriteria,
-            deliveryAuthority: active.record.deliveryAuthority!,
-            cycle: active.record.cycle,
-            reworkFindings: ['The previous implementation report did not match the generated schema.'],
-            repairOnly: true,
-            workflowGeneration: active.record.workflowGeneration,
-            signal: this.signal,
-            ...implementationLaunch,
-          });
-        } catch (error) {
-          if (implementationPreparationFailure) return implementationPreparationFailure;
-          throw error;
-        }
-        if (implementationPreparationFailure) return implementationPreparationFailure;
-        if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
-          active, implementation.kind === 'completed' ? implementation.report : implementation,
-        );
-        if (implementation.kind === 'safe-halt') {
-          active = await this.persist(active, { lifecycle: 'safe-halt' });
-          return await this.invokedFailure(active, 'active-attempt-observation-deferred',
-            'The implementation report-repair process remains unresolved; the next daemon tick will make one fresh bounded observation.');
-        }
-        if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
-        const afterRepair = await this.dependencies.git.snapshot(worktreePath);
-        if (!sameFreshness(repairBaseline, afterRepair)) {
-          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
-        }
-        try { report = validateImplementationReport(implementation.report); }
-        catch { return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' }); }
+        return this.invokedFailure(active, 'implementation-report-retryable',
+          'The implementation report was malformed; a later bounded invocation will retry report-only.');
       }
       if (report.status === 'external-block') {
-        return await this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
+        if (report.blocker!.resumable) {
+          if (isAdoptableAttempt(active.record.activeAttempt)) {
+            active = await this.adoptAttempt(active, sha256(canonicalJson(report)), {
+              transportRetries: active.record.transportRetries + 1,
+            });
+          }
+          active = await this.clearAttempt(active);
+          return this.invokedFailure(active, 'implementation-external-block-retryable', report.blocker!.summary);
+        }
+        return await this.terminal(active, implementationBlockerOutcome(report.blocker!));
       }
       if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
       }
       const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
       if (changedFiles.length === 0 || !sameStrings(changedFiles, report.changedFiles)) {
-        if (changedFiles.length === 0 || active.record.reportRepairs >= 1) {
+        if (changedFiles.length === 0) {
           return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
         }
-        const repairBaseline = await this.dependencies.git.snapshot(worktreePath);
         if (isAdoptableAttempt(active.record.activeAttempt)) {
-          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: 1 });
+          active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: active.record.reportRepairs + 1 });
           active = await this.clearAttempt(active);
         } else {
-          active = await this.persist(active, { reportRepairs: 1 });
+          active = await this.persist(active, { reportRepairs: active.record.reportRepairs + 1 });
         }
-        const repairBlock = await this.revalidateFeedbackWorker(active, config, input.issueNumber);
-        if (repairBlock) return repairBlock;
-        active = await this.prepareAttempt(active, 'implementation', `${active.record.cycle}:changed-files-repair`);
-        try {
-          implementation = await this.dependencies.implementationAgent.run({
-            operation: 'implementation',
-            attemptId: active.record.activeAttempt!.attemptId,
-            runId,
-            worktreePath,
-            issue: publicIssueSnapshot(issueSnapshot),
-            frozenCriteria,
-            deliveryAuthority: active.record.deliveryAuthority!,
-            cycle: active.record.cycle,
-            reworkFindings: [`The report changedFiles must equal the complete current product change set: ${canonicalJson(changedFiles)}.`],
-            repairOnly: true,
-            workflowGeneration: active.record.workflowGeneration,
-            signal: this.signal,
-            ...implementationLaunch,
-          });
-        } catch (error) {
-          if (implementationPreparationFailure) return implementationPreparationFailure;
-          throw error;
-        }
-        if (implementationPreparationFailure) return implementationPreparationFailure;
-        if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(
-          active, implementation.kind === 'completed' ? implementation.report : implementation,
-        );
-        if (implementation.kind === 'safe-halt') {
-          active = await this.persist(active, { lifecycle: 'safe-halt' });
-          return await this.invokedFailure(active, 'active-attempt-observation-deferred',
-            'The implementation changed-files repair remains unresolved; the next daemon tick will make one fresh bounded observation.');
-        }
-        if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
-        const afterRepair = await this.dependencies.git.snapshot(worktreePath);
-        if (!sameFreshness(repairBaseline, afterRepair)) {
-          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
-        }
-        try { report = validateImplementationReport(implementation.report); }
-        catch { return await this.terminal(active, { status: 'internal-error', code: 'implementation-report-malformed' }); }
-        if (report.status === 'external-block') {
-          return await this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
-        }
-        if (!sameStrings(changedFiles, report.changedFiles)) {
-          return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
-        }
+        return this.invokedFailure(active, 'implementation-change-set-report-retryable',
+          `The implementation report must describe the current exact change set ${canonicalJson(changedFiles)}; a later bounded invocation will retry report-only.`);
       }
 
       if (isAdoptableAttempt(active.record.activeAttempt)) {
         active = await this.adoptAttempt(active, sha256(canonicalJson(report)), {
           transportRetries: active.record.transportRetries,
-          reportRepairs: active.record.reportRepairs,
+          reportRepairs: 0,
         });
         active = await this.clearAttempt(active);
       }
@@ -1769,7 +1619,7 @@ export class RunIssue {
           ? {
             kind: 'review-feedback' as const,
             batchId: active.record.reviewFeedback.activeBatch.batchId,
-            repairRound: active.record.reviewFeedback.repairRound as 1 | 2 | 3,
+            repairRound: active.record.reviewFeedback.repairRound,
             authoritySha256: active.record.deliveryAuthority!.authoritySha256,
           }
           : { kind: 'implementation-cycle' as const, cycle: active.record.cycle, authoritySha256: active.record.deliveryAuthority!.authoritySha256 };
@@ -1782,30 +1632,7 @@ export class RunIssue {
           if ('status' in released) return released;
           return this.terminal(released.active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
         }
-        const targetFingerprint = directReviewCandidateTargetFingerprint({
-          binding,
-          routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
-          workflowGenerationHash: active.record.workflowGeneration.generationHash,
-          cycle: active.record.cycle,
-          frozenCriteria,
-        });
-        const reviewerSessionId = this.dependencies.createReviewSessionId();
-        assertNonEmptyString(reviewerSessionId, 'reviewerSessionId');
-        active = await this.persistValidationTransition(active, projectValidationReviewStart(active.record, {
-          targetFingerprint,
-          reviewerSessionId,
-        }));
-        const reviewed = await this.runFullReview(
-          active,
-          publicIssueSnapshot(issueSnapshot),
-          frozenCriteria,
-          implementation.attemptId ?? `implementation-cycle-${active.record.cycle}`,
-          config.runner.maxCycles,
-          config,
-        );
-        if ('status' in reviewed) return reviewed;
-        active = reviewed;
-        if (active.record.lifecycle === 'implementing') continue attemptLoop;
+        active = await this.persist(active, { lifecycle: 'checking' });
       }
       progression = nextValidationTransition(active.record, active.record.deliveryAuthority!);
       if (progression.phase !== 'checks' && progression.phase !== 'acceptance-proof') {
@@ -1814,12 +1641,23 @@ export class RunIssue {
       let checkPolicy;
       try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
       catch (error) {
-        return await this.invokedFailure(active, 'issue-verification-invalid', error instanceof Error ? error.message : undefined);
+        const detail = error instanceof Error ? error.message : 'Verification policy is invalid.';
+        return await this.terminal(active, {
+          status: 'blocked', kind: 'decision-delta', resumable: false,
+          blocker: {
+            kind: 'decision-delta',
+            summary: 'The unchanged issue Verification policy is malformed or unsafe and cannot be executed as authority.',
+            attempted: ['Parsed the issue Verification section against the configured command safety policy.'],
+            resumable: false,
+            reviewerRejectionDetail: detail,
+          },
+        }, 'issue-verification-invalid');
       }
-      const configuredChecks = Object.entries(checkPolicy.checks);
-      const finalCheckPolicySha256 = sha256(canonicalJson(checkPolicy.checks));
       const finalBinding = active.record.candidateBinding;
       if (!finalBinding) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
+      const reviewScope = await this.reviewValidationScope(active, frozenCriteria, checkPolicy.checks, config.deny.readPaths);
+      const configuredChecks = Object.entries(reviewScope.checks);
+      const finalCheckPolicySha256 = sha256(canonicalJson(reviewScope.checks));
       const reusableChecks = active.record.checks.filter((check) =>
         check.status === 'passed'
         && 'bindingId' in check
@@ -1876,26 +1714,18 @@ export class RunIssue {
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
         if (check.status === 'failed') {
-          if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
-            const released = await this.clearAndReleaseCandidate(active);
-            if ('status' in released) return released;
-            active = released.active;
-            return active.record.reviewFeedback?.activeBatch
-              ? await this.blockReviewFeedback(active, 'exhausted', 'review-feedback-check-repair-exhausted')
-              : await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
-          }
           const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
           const reopened = await this.startNextCycleFromCandidate(active, [summary], [{
             provenance: 'check', sourceId: `check:${id}:${row.outputSha256}`, summary,
             affectedContracts: ['configured-checks'],
           }]);
           if ('status' in reopened) return reopened;
-          active = reopened;
-          continue attemptLoop;
+          return this.semanticContinuation(reopened, 'check', [`check:${id}:${row.outputSha256}`],
+            'The consolidated affected-check repair batch is ready for the next bounded invocation.');
         }
       }
 
-      if (!sameCheckPolicy(active.record.checks, checkPolicy.checks)) {
+      if (!sameCheckPolicy(active.record.checks, reviewScope.checks)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'configured-check-policy-drift');
       }
       const proofBinding = active.record.candidateBinding;
@@ -1953,6 +1783,7 @@ export class RunIssue {
 
       let proof: ProveChangeResult;
       let proofLaunchFailure: RunIssueResult | undefined;
+      let proofSettledBeforeLaunch = false;
       try {
         proof = await this.dependencies.proof.proveChange({
           proofId,
@@ -1964,7 +1795,7 @@ export class RunIssue {
           reportRepairFindings: proofExecutionState.reportRepairFindings,
           passedReceipt: active.record.proofReceipt,
           issue: publicIssueSnapshot(issueSnapshot),
-          frozenCriteria,
+          frozenCriteria: reviewScope.criteria,
           checkedChange,
           materialization: proofMaterialization,
           workflowGeneration: structuredClone(active.record.workflowGeneration),
@@ -1982,6 +1813,12 @@ export class RunIssue {
           },
         });
       } catch (error) {
+        if (active.record.activeAttempt?.stage === 'prepared') {
+          const settled = await this.settleCandidateMaterialization(active, config, true);
+          if ('status' in settled) return settled;
+          active = settled.active;
+          proofSettledBeforeLaunch = true;
+        }
         if (proofLaunchFailure) return proofLaunchFailure;
         if (error instanceof ProofLaunchAuthorizationError) return error.outcome as RunIssueResult;
         if (error instanceof CandidateProofInspectionError) {
@@ -1989,7 +1826,10 @@ export class RunIssue {
             ? this.persistCandidateEvidenceSafetyTerminal(active, error.code)
             : this.mapCandidateFailure(active, error.code);
         }
-        return await this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
+        return proofSettledBeforeLaunch
+          ? this.invokedFailure(active, 'acceptance-proof-pre-launch-retryable',
+            'Acceptance Proof infrastructure failed before launch; a later bounded invocation may retry.')
+          : this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
       }
       if (proofLaunchFailure) return proofLaunchFailure;
       if (proof.status === 'safe-halt') {
@@ -2001,6 +1841,15 @@ export class RunIssue {
         if (!isAdoptableAttempt(active.record.activeAttempt)) {
           return this.persistCandidateEvidenceSafetyTerminal(active, 'proof-result-adoption-unconfirmed');
         }
+        const targetFingerprint = directReviewCandidateTargetFingerprint({
+          binding: active.record.candidateBinding!,
+          deliveryAuthoritySha256: active.record.deliveryAuthority!.authoritySha256,
+          workflowGenerationHash: active.record.workflowGeneration.generationHash,
+          cycle: active.record.cycle,
+          frozenCriteria,
+        });
+        const reviewerSessionId = this.dependencies.createReviewSessionId();
+        assertNonEmptyString(reviewerSessionId, 'reviewerSessionId');
         active = await this.adoptValidationTransition(
           active,
           sha256(canonicalJson(proof)),
@@ -2009,6 +1858,8 @@ export class RunIssue {
             proofId,
             proofReceipt: proof.receipt,
             verifiedAt: this.timestamp(),
+            targetFingerprint,
+            reviewerSessionId,
           }),
         );
       } else if (isAdoptableAttempt(active.record.activeAttempt)) {
@@ -2018,15 +1869,24 @@ export class RunIssue {
       if ('status' in settledProofMaterialization) return settledProofMaterialization;
       active = settledProofMaterialization.active;
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
+      if (proof.status === 'report-repair') {
+        active = await this.persist(active, { proofExecution: {
+          ...proofExecutionState,
+          reportRepairCount: proof.reportRepairCount,
+          reportRepairFindings: [...proof.findings],
+        } });
+        return this.invokedFailure(active, 'acceptance-proof-report-retryable',
+          'The Acceptance Proof report was malformed; a later bounded invocation may retry.');
+      }
+      if (proof.status === 'transport-failed' && proof.resumable) {
+        active = await this.persist(active, { proofExecution: {
+          ...proofExecutionState,
+          transportRetryCount: proofExecutionState.transportRetryCount + 1,
+        } });
+        return this.invokedFailure(active, 'acceptance-proof-transport-retryable',
+          'Acceptance Proof infrastructure is temporarily unavailable; a later bounded invocation may retry.');
+      }
       if (proof.status === 'needs-rework') {
-        if (validationRepairBudgetExhausted(active.record, config.runner.maxCycles)) {
-          const released = await this.clearAndReleaseCandidate(active);
-          if ('status' in released) return released;
-          active = released.active;
-          return active.record.reviewFeedback?.activeBatch
-            ? await this.blockReviewFeedback(active, 'exhausted', 'review-feedback-proof-repair-exhausted')
-            : await this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true });
-        }
         const reopened = await this.startNextCycleFromCandidate(active, proof.findings, proof.findings.map((summary) => ({
           provenance: 'proof' as const,
           sourceId: `proof:${proofId}:${sha256(summary)}`,
@@ -2034,10 +1894,21 @@ export class RunIssue {
           affectedContracts: ['acceptance-proof'],
         })));
         if ('status' in reopened) return reopened;
-        active = reopened;
-        continue attemptLoop;
+        return this.semanticContinuation(reopened, 'proof', proof.findings.map((finding) => `proof:${proofId}:${sha256(finding)}`),
+          'The consolidated Acceptance Proof repair batch is ready for the next bounded invocation.');
       }
       if (proof.status !== 'passed') return await this.mapProofFailure(active, proof);
+      const reviewed = await this.runFullReview(
+        active,
+        publicIssueSnapshot(issueSnapshot),
+        frozenCriteria,
+        `implementation-owner:${active.record.runId}`,
+        config,
+        reviewScope,
+      );
+      if ('status' in reviewed) return reviewed;
+      active = reviewed;
+      if (active.record.lifecycle === 'implementing') continue attemptLoop;
       break;
       }
 
@@ -2064,10 +1935,10 @@ export class RunIssue {
       if (error instanceof LaunchAuthorizationRevokedError) {
         return await this.revoked(error.active);
       }
-      if (active && error instanceof RouteInitializationUnrecoverableError) {
+      if (active && error instanceof IssueInitializationUnrecoverableError) {
         const evidence = await this.dependencies.writeEvidence({
           runId: active.record.runId,
-          code: 'route-initialization-unrecoverable',
+          code: 'issue-initialization-unrecoverable',
           summary: 'The claimed run cannot be safely initialized without product-state ambiguity.',
         });
         return { status: 'blocked', kind: 'safety', resumable: false, evidencePath: evidence.path };
@@ -2105,255 +1976,35 @@ export class RunIssue {
     if (active.record.lifecycle !== 'claimed'
       || active.record.activeAttempt
       || active.record.pendingEffect
-      || active.record.routeExecution
-      || active.record.routeReceipt) {
-      throw new RouteInitializationUnrecoverableError();
+      ) {
+      throw new IssueInitializationUnrecoverableError();
     }
     const [snapshot, changedFiles] = await Promise.all([
       this.dependencies.git.snapshot(active.record.worktreePath),
       this.dependencies.git.listChangedFiles(active.record.worktreePath),
     ]);
     if (snapshot.headSha !== active.record.baseSha || changedFiles.length !== 0) {
-      throw new RouteInitializationUnrecoverableError();
+      throw new IssueInitializationUnrecoverableError();
     }
     try {
       await this.dependencies.verifyWorkflowGeneration(active.record.workflowGeneration);
     } catch {
-      throw new RouteInitializationUnrecoverableError();
+      throw new IssueInitializationUnrecoverableError();
     }
     const issueSnapshot = issue?.state === 'OPEN'
       ? refreshClaimedIssueSnapshot(active.record.issueSnapshot, issue)
       : active.record.issueSnapshot;
-    return this.persist(active, { lifecycle: 'triaging', routeExecution: initialRouteExecution(), issueSnapshot });
-  }
-
-  private async routeRun(
-    starting: ActiveRun,
-    issue: RunRecord['issueSnapshot'],
-    frozenCriteria: FrozenCriterion[],
-    worktreePath: string,
-    config: AgentAutoConfig,
-    issueNumber: number,
-    branchName: string,
-  ): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
-    let active = starting;
-    while (active.record.lifecycle === 'triaging') {
-      let currentIssue: RunIssueSnapshot | undefined;
-      try {
-        currentIssue = await this.readIssue(active.record.issueNumber);
-      } catch (error) {
-        if (error instanceof TransportReadError) {
-          return { result: await this.invokedFailure(active, 'authorization-read-failed') };
-        }
-        throw error;
-      }
-      if (!currentIssue || !this.isAuthorizedIssue(currentIssue, active.record, config)) {
-        return { result: await this.revoked(active) };
-      }
-      active = await this.persist(active, {
-        issueSnapshot: refreshClaimedIssueSnapshot(active.record.issueSnapshot, currentIssue),
-      });
-      issue = structuredClone(active.record.issueSnapshot);
-      const state: RouteCoordinatorState = {
-        read: async () => requireRouteExecution(active.record.routeExecution),
-        compareAndSwap: async (expected, next) => {
-          if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
-          active = await this.persist(active, { routeExecution: structuredClone(next) });
-          return true;
-        },
-        prepareAttempt: async (operationId, sourceId) => {
-          active = await this.prepareAttempt(active, operationId, sourceId);
-          return active.record.activeAttempt!.attemptId;
-        },
-        launchAttempt: async (attemptId, pid, processGroupId) => {
-          if (active.record.activeAttempt?.attemptId !== attemptId) throw new Error('route active attempt mismatch');
-          active = await this.launchAttempt(active, pid, processGroupId);
-        },
-        adopt: async (expected, next, resultSha256) => {
-          if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
-          active = isAdoptableAttempt(active.record.activeAttempt)
-            ? await this.adoptAttempt(active, resultSha256, { routeExecution: structuredClone(next) })
-            : await this.persist(active, { routeExecution: structuredClone(next) });
-          return true;
-        },
-        clearAttempt: async () => {
-          active = await this.clearAttempt(active);
-        },
-        complete: async (expected, next, receipt, resultSha256) => {
-          if (!sameRouteExecution(active.record.routeExecution, expected)) return false;
-          const changes = {
-            lifecycle: 'routed' as const,
-            routeExecution: structuredClone(next),
-            routeReceipt: structuredClone(receipt),
-          };
-          active = isAdoptableAttempt(active.record.activeAttempt)
-            ? await this.adoptAttempt(active, resultSha256, changes)
-            : await this.persist(active, changes);
-          return true;
-        },
-        cancel: async (expected) => {
-          return sameRouteExecution(active.record.routeExecution, expected);
-        },
-      };
-      const result = await this.dependencies.routeCoordinator.run({
-        state,
-        runId: active.record.runId,
-        worktreePath,
-        workflowGeneration: structuredClone(active.record.workflowGeneration),
-        promptFacts: [
-          `issue=${canonicalJson(issue)}`,
-          `frozenCriteria=${canonicalJson(frozenCriteria)}`,
-          `canonicalRepository=${active.record.canonicalRepository}`,
-          `baseSha=${active.record.baseSha}`,
-        ],
-        signal: this.signal,
-      });
-      if (result.status === 'repairable' || result.status === 'retryable') continue;
-      if (result.status === 'safe-halt') {
-        active = await this.persist(active, {
-          lifecycle: 'safe-halt',
-        });
-        return { result: await this.invokedFailure(active, 'active-attempt-observation-deferred',
-          'The triage process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
-      }
-      if (result.status === 'cancelled') {
-        return { result: await this.terminal(active, { status: 'cancelled' }) };
-      }
-      if (result.status === 'blocked') {
-        return { result: await this.terminal(active, {
-          status: 'blocked',
-          kind: result.kind,
-          resumable: result.kind !== 'exhausted',
-        }, result.code) };
-      }
-      if ((active.record.lifecycle as string) !== 'routed' || !active.record.routeReceipt) {
-        return { result: await this.terminal(active, { status: 'internal-error', code: 'route-completion-not-persisted' }) };
-      }
-    }
-
-    if (active.record.lifecycle !== 'routed' || !active.record.routeReceipt) {
-      return { result: await this.terminal(active, { status: 'internal-error', code: 'route-state-not-dispatchable' }) };
-    }
-    try {
-      if (!await this.authorized(active, config)) {
-        return { result: await this.revoked(active) };
-      }
-    } catch (error) {
-      if (error instanceof TransportReadError) return { result: await this.invokedFailure(active, 'authorization-read-failed') };
-      throw error;
-    }
-    const receipt = structuredClone(active.record.routeReceipt);
-    const lifecycle = downstreamLifecycleForRoute(receipt, active.record.workflowGeneration.generationHash);
-    validateRouteTransition({
-      lifecycle: 'routed',
-      routeExecution: active.record.routeExecution,
-      routeReceipt: receipt,
-      generationHash: active.record.workflowGeneration.generationHash,
-    }, {
-      lifecycle,
-      routeExecution: active.record.routeExecution,
-      routeReceipt: receipt,
-      generationHash: active.record.workflowGeneration.generationHash,
+    return this.persist(active, {
+      lifecycle: 'implementing',
+      deliveryAuthority: createIssueDeliveryAuthority({
+        issueNumber: issueSnapshot.number,
+        issueUrl: issueSnapshot.url,
+        title: issueSnapshot.title,
+        body: issueSnapshot.body,
+        authorizationLabel: active.config.github.labels.auto.name,
+      }),
+      issueSnapshot,
     });
-    active = await this.persist(active, {
-      lifecycle,
-      ...(receipt.route === 'direct' ? { deliveryAuthority: createDirectDeliveryAuthority(receipt) } : {}),
-    });
-    try {
-      if (!await this.authorized(active, config)) {
-        return { result: await this.revoked(active) };
-      }
-    } catch (error) {
-      if (error instanceof TransportReadError) return { result: await this.invokedFailure(active, 'authorization-read-failed') };
-      throw error;
-    }
-    const context = {
-      runId: active.record.runId,
-      issue: structuredClone(active.record.issueSnapshot),
-      frozenCriteria: structuredClone(active.record.frozenCriteria),
-      worktreePath,
-      workflowGeneration: structuredClone(active.record.workflowGeneration),
-      receipt,
-    };
-    const continuation = receipt.route === 'direct'
-      ? await this.dependencies.routeContinuations.direct(context)
-      : await this.dependencies.routeContinuations.specRequired(context, this.specState(() => active, (next) => { active = next; }), this.signal);
-    if (continuation.status === 'safe-halt') {
-      active = await this.persist(active, { lifecycle: 'safe-halt' });
-      return { result: await this.invokedFailure(active, 'active-attempt-observation-deferred',
-        'The spec process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
-    }
-    if (continuation.status === 'cancelled') return { result: await this.terminal(active, { status: 'cancelled' }) };
-    if (continuation.status === 'blocked') {
-      return { result: await this.terminal(active, {
-        status: 'blocked', kind: continuation.kind, resumable: continuation.kind !== 'exhausted',
-      }, continuation.code) };
-    }
-    if (continuation.status === 'retryable') {
-      return { result: await this.terminal(active, { status: 'transport-failed', resumable: true }, continuation.code) };
-    }
-    if (receipt.route !== 'direct') {
-      const specContinuation = continuation as SpecCoordinatorResult;
-      if (specContinuation.status === 'decision-required') {
-        return { result: specContinuation.evidencePath
-          ? frozenQuestionProjection(specContinuation.receipt, specContinuation.evidencePath)
-          : await this.specQuestionResult(active, specContinuation.receipt) };
-      }
-      if (specContinuation.status !== 'completed') return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      const frozen = active.record.specDelivery?.frozen;
-      if (!frozen) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      const answerTrust = await this.revalidateSpecAnswers(active);
-      if (answerTrust.status === 'frozen') return { result: frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath) };
-      return { active: await this.persist(active, {
-        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(receipt, active.record.specDelivery!),
-      }) };
-    }
-    return { active };
-  }
-
-  private async specQuestionResult(active: ActiveRun, receipt: FrozenSpecQuestionReceiptV1): Promise<RunIssueResult> {
-    const body = specQuestionBody(receipt);
-    const expected = { kind: 'spec-question-comment' as const, issueNumber: active.record.issueNumber, marker: receipt.marker, bodySha256: sha256(body) };
-    if (!active.record.pendingEffect) {
-      const existing = await this.readIssue(active.record.issueNumber);
-      const existingMatches = existing ? commentsWithMarker(existing, receipt.marker) : [];
-      const stored = active.record.specDelivery?.questionResult;
-      if (existingMatches.length === 1 && sha256(existingMatches[0]!.body) === expected.bodySha256
-        && stored?.questionSha256 === receipt.questionSha256) {
-        return frozenQuestionProjection(receipt, stored.evidencePath);
-      }
-    }
-    if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: expected });
-    if (canonicalJson(active.record.pendingEffect) !== canonicalJson(createPendingEffect(expected))) {
-      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
-    }
-    const effect = active.record.pendingEffect;
-    if (effect?.kind !== 'spec-question-comment') {
-      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-effect-diverged');
-    }
-    const settlement = await settleCommentEffect(effect, {
-      observe: async () => {
-        const issue = await this.readIssue(active.record.issueNumber);
-        const matches = issue ? commentsWithMarker(issue, receipt.marker) : [];
-        if (matches.length === 0) return 'absent';
-        return matches.length === 1 && sha256(matches[0]!.body) === expected.bodySha256 ? 'confirmed' : 'diverged';
-      },
-      invoke: () => this.dependencies.issues.postComment(active.record.issueNumber, body),
-    });
-    if (settlement.status === 'unknown') return this.invokedFailure(active, 'spec-question-comment-unknown');
-    if (settlement.status === 'diverged') {
-      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'spec-question-comment-conflict');
-    }
-    if (settlement.status !== 'confirmed') return this.invokedFailure(active, 'spec-question-comment-unobserved');
-    active = await this.confirmEffect(active);
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'spec-frozen', summary: receipt.questionSha256 });
-    active = await this.persist(active, {
-      specDelivery: {
-        ...active.record.specDelivery!,
-        questionResult: { questionSha256: receipt.questionSha256, evidenceId: evidence.id, evidencePath: evidence.path },
-      },
-    });
-    return frozenQuestionProjection(receipt, evidence.path);
   }
 
   private async createInitialWorktreeEffect(active: ActiveRun, targetRoot: string): Promise<{ active: ActiveRun } | RunIssueResult> {
@@ -2411,123 +2062,6 @@ export class RunIssue {
       return this.invokedFailure(active, 'review-feedback-worktree-diverged');
     }
     return { active: await this.confirmEffect(active) };
-  }
-
-  private specState(readActive: () => ActiveRun, writeActive: (active: ActiveRun) => void): SpecDeliveryState {
-    return {
-      read: async () => structuredClone(readActive().record.specDelivery),
-      compareAndSwap: async (expected, next) => {
-        const active = readActive();
-        const observed = active.record.specDelivery;
-        if (observed === undefined || expected === undefined) {
-          if (observed !== expected) return false;
-        } else if (canonicalJson(observed) !== canonicalJson(expected)) return false;
-        const saved = await this.persist(active, { specDelivery: structuredClone(next) });
-        writeActive(saved);
-        return true;
-      },
-      prepareAttempt: async (operationId, sourceId) => {
-        const saved = await this.prepareAttempt(readActive(), operationId, sourceId);
-        writeActive(saved);
-        const attempt = saved.record.activeAttempt!;
-        return { attemptId: attempt.attemptId, recoverOnly: attempt.stage === 'observed' && attempt.result !== null };
-      },
-      launchAttempt: async (attemptId, pid, processGroupId) => {
-        const active = readActive();
-        if (active.record.activeAttempt?.attemptId !== attemptId) throw new Error('spec active attempt mismatch');
-        writeActive(await this.launchAttempt(active, pid, processGroupId));
-      },
-      adopt: async (expected, next, resultSha256) => {
-        const active = readActive();
-        if (canonicalJson(active.record.specDelivery) !== canonicalJson(expected)) return false;
-        const saved = isAdoptableAttempt(active.record.activeAttempt)
-          ? await this.adoptAttempt(active, resultSha256, { specDelivery: structuredClone(next) })
-          : await this.persist(active, { specDelivery: structuredClone(next) });
-        writeActive(saved);
-        return true;
-      },
-      clearAttempt: async () => {
-        const saved = await this.clearAttempt(readActive());
-        writeActive(saved);
-      },
-      revalidateBeforeAttempt: async () => {
-        const trust = await this.revalidateSpecAnswers(readActive());
-        return trust.status === 'valid'
-          ? trust
-          : {
-            status: 'frozen' as const, receipt: structuredClone(trust.question), evidencePath: trust.evidencePath,
-          };
-      },
-    };
-  }
-
-  private async continueSpecRequired(active: ActiveRun): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
-    if (!active.record.routeReceipt || active.record.routeReceipt.route !== 'spec-required') {
-      return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-route-missing' }) };
-    }
-    let current = active;
-    if (current.record.specDelivery?.stage === 'question') {
-      const accepted = await this.observeSpecAnswer(current);
-      if ('result' in accepted) return accepted;
-      current = accepted.active;
-    }
-    const context = {
-      runId: current.record.runId, issue: structuredClone(current.record.issueSnapshot),
-      frozenCriteria: structuredClone(current.record.frozenCriteria), worktreePath: current.record.worktreePath,
-      workflowGeneration: structuredClone(current.record.workflowGeneration), receipt: structuredClone(current.record.routeReceipt!),
-    };
-    const result: SpecCoordinatorResult = await this.dependencies.routeContinuations.specRequired(
-      context, this.specState(() => current, (next) => { current = next; }), this.signal,
-    );
-    if (result.status === 'safe-halt') {
-      current = await this.persist(current, { lifecycle: 'safe-halt' });
-      return { result: await this.invokedFailure(current, 'active-attempt-observation-deferred',
-        'The spec process remains unresolved; the next daemon tick will make one fresh bounded observation.') };
-    }
-    if (result.status === 'completed') {
-      const frozen = current.record.specDelivery?.frozen;
-      if (!frozen) return { result: await this.terminal(current, { status: 'internal-error', code: 'spec-freeze-receipt-missing' }) };
-      const answerTrust = await this.revalidateSpecAnswers(current);
-      if (answerTrust.status === 'frozen') return { result: frozenQuestionProjection(answerTrust.question, answerTrust.evidencePath) };
-      return { active: await this.persist(current, {
-        lifecycle: 'implementing', deliveryAuthority: createSpecDeliveryAuthority(current.record.routeReceipt!, current.record.specDelivery!),
-      }) };
-    }
-    if (result.status === 'decision-required') return { result: result.evidencePath
-      ? frozenQuestionProjection(result.receipt, result.evidencePath)
-      : await this.specQuestionResult(current, result.receipt) };
-    if (result.status === 'cancelled') return { result: await this.terminal(current, { status: 'cancelled' }) };
-    if (result.status === 'retryable') return { result: await this.terminal(current, { status: 'transport-failed', resumable: true }, result.code) };
-    return { result: await this.terminal(current, { status: 'blocked', kind: result.kind, resumable: result.kind !== 'exhausted' }, result.code) };
-  }
-
-  private async observeSpecAnswer(active: ActiveRun): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
-    const delivery = active.record.specDelivery!;
-    const question = delivery.question!;
-    const questionResult = delivery.questionResult;
-    if (!questionResult) return { result: await this.terminal(active, { status: 'internal-error', code: 'spec-question-result-missing' }) };
-    const issue = await this.readIssue(active.record.issueNumber);
-    const observed = await observeTrustedSpecAnswer({
-      delivery,
-      issue,
-      getRepositoryPermission: this.dependencies.issues.getRepositoryPermission,
-    });
-    return observed.status === 'frozen'
-      ? { result: frozenQuestionProjection(question, questionResult.evidencePath) }
-      : { active: await this.persist(active, { specDelivery: observed.delivery }) };
-  }
-
-  private async revalidateSpecAnswers(active: ActiveRun): Promise<
-    { status: 'valid' } | { status: 'frozen'; question: FrozenSpecQuestionReceiptV1; evidencePath: string }
-  > {
-    let issue: RunIssueSnapshot | undefined;
-    try { issue = await this.readIssue(active.record.issueNumber); }
-    catch { issue = undefined; }
-    return revalidateTrustedSpecAnswers({
-      delivery: active.record.specDelivery,
-      issue,
-      getRepositoryPermission: this.dependencies.issues.getRepositoryPermission,
-    });
   }
 
   private async readStrictConfig(targetRoot: string): Promise<{ bytes: Buffer; config: AgentAutoConfig }> {
@@ -2596,7 +2130,7 @@ export class RunIssue {
     }
     const record = { ...active.record, ...normalized, updatedAt: this.timestamp() } as RunRecord;
     if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'routeExecution', 'routeReceipt', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt'] as const) {
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
@@ -3075,6 +2609,11 @@ export class RunIssue {
         onLaunched: async ({ pid, processGroupId }) => { active = await this.launchAttempt(active, pid, processGroupId); },
       });
     } catch (error) {
+      if (active.record.activeAttempt?.stage === 'prepared') {
+        const settled = await this.settleCandidateMaterialization(active, active.config, true);
+        if ('status' in settled) return settled;
+        active = settled.active;
+      }
       if (error instanceof CheckProcessQuiescenceError) {
         active = await this.persist(active, { lifecycle: 'safe-halt' });
         return this.invokedFailure(active, 'active-attempt-observation-deferred',
@@ -3131,12 +2670,13 @@ export class RunIssue {
   private async settleCandidateMaterialization(
     active: ActiveRun,
     config: AgentAutoConfig,
+    settledPreLaunch = false,
   ): Promise<{ active: ActiveRun } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
     const materialization = active.record.candidateMaterialization;
     if (!candidate || !binding || !materialization) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-state-missing');
-    if (active.record.activeAttempt?.stage !== 'adopted') {
+    if (active.record.activeAttempt?.stage !== (settledPreLaunch ? 'prepared' : 'adopted')) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-result-adoption-unconfirmed');
     }
     const inspection = await candidate.inspectMaterialization({ binding, materialization, artifactDir: config.proof.artifactDir });
@@ -3172,6 +2712,11 @@ export class RunIssue {
       return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-mutated', false);
     }
     if (active.record.activeAttempt?.stage === 'observed' && active.record.activeAttempt.result) {
+      return { active };
+    }
+    if (active.record.activeAttempt?.stage === 'adopted'
+      && active.record.activeAttempt.operationId === 'code-review'
+      && (active.record.directReview?.review.reportRepairs ?? 0) > 0) {
       return { active };
     }
     if (active.record.terminalOutcome && !active.record.activeAttempt) {
@@ -3267,21 +2812,147 @@ export class RunIssue {
     return this.terminal(active, { status: 'transport-failed', resumable: false }, code);
   }
 
+  private async reviewValidationScope(
+    active: ActiveRun,
+    frozenCriteria: FrozenCriterion[],
+    configuredChecks: Record<string, string>,
+    deniedPaths: string[],
+  ): Promise<ReviewValidationScope> {
+    const binding = active.record.candidateBinding;
+    const review = active.record.directReview;
+    if (!binding) throw new Error('review scope requires candidate identity');
+    if (!review?.previousTarget) return {
+      mode: 'complete',
+      repairPatch: null,
+      changedFiles: [...binding.canonicalChangedFiles],
+      checks: structuredClone(configuredChecks),
+      criteria: structuredClone(frozenCriteria),
+      impactTargets: [],
+    };
+
+    let treeDiff: Awaited<ReturnType<RunIssueGit['diffTrees']>>;
+    try {
+      treeDiff = await this.dependencies.git.diffTrees(
+        active.record.worktreePath,
+        review.previousTarget.candidateTreeSha,
+        binding.candidateTreeSha,
+      );
+    } catch {
+      return {
+        mode: 'complete', repairPatch: null, changedFiles: [...binding.canonicalChangedFiles],
+        checks: structuredClone(configuredChecks), criteria: structuredClone(frozenCriteria),
+        impactTargets: [],
+      };
+    }
+    const repairDefects = review.review.defects.filter((defect) => ['open', 'reopened', 'fixed'].includes(defect.status));
+    const repairFindings = review.repairFindings.filter((finding) => ['open', 'reopened', 'fixed'].includes(finding.status));
+    const repairedBlockerIds = [...new Set([
+      ...repairDefects.map((defect) => defect.id),
+      ...repairFindings.map((finding) => finding.id),
+      ...repairFindings.map((finding) => finding.sourceId),
+    ])].sort();
+    const contracts = [...new Set([
+      ...repairDefects.flatMap((defect) => defect.affectedTargets),
+      ...repairFindings.flatMap((finding) => finding.affectedContracts),
+    ])].sort();
+    const checkEntries = Object.entries(configuredChecks);
+    const exactChecks = new Set(contracts.filter((target) => target.startsWith('check:')).map((target) => target.slice('check:'.length)));
+    const exactCriteria = new Set(contracts.filter((target) => target.startsWith('criterion:')).map((target) => target.slice('criterion:'.length)));
+    const affectedChecks = checkEntries.filter(([id]) => exactChecks.has(id));
+    const affectedCriteria = frozenCriteria.filter((criterion) => exactCriteria.has(criterion.id));
+    const directImpact = new Set([
+      ...treeDiff.changedFiles,
+      ...treeDiff.changedFiles.map((path) => `path:${path}`),
+      ...review.review.defects
+        .filter((defect) => defect.introducedTargetRevision < review.targetRevision)
+        .flatMap((defect) => defect.affectedTargets),
+      ...repairFindings.flatMap((finding) => finding.affectedContracts),
+    ]);
+    const retainedOutOfConeDefect = review.stage === 'review' && review.review.defects
+      .filter((defect) => defect.introducedTargetRevision === review.targetRevision
+        && (defect.status === 'open' || defect.status === 'reopened'))
+      .some((defect) => defect.affectedTargets.length === 0
+        || defect.affectedTargets.some((target) => !directImpact.has(target)));
+    const isolated = treeDiff.changedFiles.length > 0 && repairedBlockerIds.length > 0
+      && treeDiff.patch.trim().length > 0
+      && Buffer.byteLength(treeDiff.patch, 'utf8') <= 1024 * 1024
+      && !containsCredentialEvidence(treeDiff.patch)
+      && !treeDiff.changedFiles.some((path) => findDeniedPathMatch(path, deniedPaths))
+      && !retainedOutOfConeDefect;
+    return {
+      mode: isolated ? 'targeted' : 'complete',
+      repairPatch: isolated ? treeDiff.patch : null,
+      changedFiles: isolated ? treeDiff.changedFiles : [...binding.canonicalChangedFiles],
+      checks: isolated && affectedChecks.length > 0
+        ? Object.fromEntries(affectedChecks)
+        : structuredClone(configuredChecks),
+      criteria: isolated && affectedCriteria.length > 0
+        ? structuredClone(affectedCriteria)
+        : structuredClone(frozenCriteria),
+      impactTargets: isolated ? [...new Set([
+        ...contracts,
+        ...treeDiff.changedFiles,
+        ...treeDiff.changedFiles.map((path) => `path:${path}`),
+      ])].sort() : [],
+    };
+  }
+
   private async runFullReview(
     starting: ActiveRun,
     issue: IssueSnapshot,
     frozenCriteria: FrozenCriterion[],
     implementationAttemptId: string,
-    maxCycles: number,
     config: AgentAutoConfig,
+    suppliedScope?: ReviewValidationScope,
   ): Promise<ActiveRun | RunIssueResult> {
     let active = starting;
+    let reviewScope: ReviewValidationScope;
+    try {
+      reviewScope = suppliedScope ?? await this.reviewValidationScope(
+        active,
+        frozenCriteria,
+        resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks).checks,
+        config.deny.readPaths,
+      );
+    } catch (error) {
+      return this.invokedFailure(active, 'review-scope-unavailable', error instanceof Error ? error.message : undefined);
+    }
     let reportRepair: { originalReportSha256: string; originalReportBytes: Buffer; diagnostic: string } | undefined;
+    const retainedAttempt = active.record.activeAttempt;
+    const retainedReview = active.record.directReview;
+    if (retainedReview?.review.reportRepairs && retainedAttempt?.stage === 'adopted' && retainedAttempt.result) {
+      const stored = await this.dependencies.inspectAttemptResult(retainedAttempt.resultPath);
+      if (!stored || stored.sha256 !== retainedAttempt.result.sha256) {
+        return this.invokedFailure(active, 'direct-review-report-result-unavailable',
+          'The exact malformed Review result is not currently observable; report-only recovery remains fenced.');
+      }
+      const validation = validateCompletedReport('code-review', retainedAttempt.attemptId, stored.bytes, {
+        operation: 'code-review',
+        targetRevision: retainedReview.targetRevision,
+        targetFingerprint: retainedReview.targetFingerprint,
+        reviewerSessionId: retainedReview.review.reviewerSessionId!,
+        previousFindingIds: [
+          ...retainedReview.review.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id),
+          ...retainedReview.repairFindings.filter((finding) => finding.status === 'fixed').map((finding) => finding.id),
+        ].sort(),
+        requiredCoverage: reviewScope.mode === 'complete' ? [
+          'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
+          'repository-standards', 'requirements', 'tests', 'zero-legacy',
+        ] : [],
+      });
+      if (validation.status !== 'invalid' || !validation.repairInput) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-retained-result-diverged');
+      }
+      reportRepair = {
+        originalReportSha256: validation.repairInput.originalReportSha256,
+        originalReportBytes: Buffer.from(validation.repairInput.originalReportBytes),
+        diagnostic: validation.findings[0] ?? 'review report is invalid',
+      };
+      active = await this.clearAttempt(active);
+    }
     while (true) {
       const directReview = active.record.directReview;
-      const routeReceipt = active.record.routeReceipt;
-      if (!directReview || !routeReceipt || !['direct', 'spec-required'].includes(routeReceipt.route)
-        || directReview.stage !== 'review') {
+      if (!directReview || directReview.stage !== 'review') {
         return this.terminal(active, { status: 'internal-error', code: 'direct-review-state-invalid' });
       }
       const reviewerSessionId = directReview.review.reviewerSessionId;
@@ -3307,7 +2978,7 @@ export class RunIssue {
       const abortPreparedReview = async (
         validation: Exclude<FeedbackWorkerObservation, { status: 'valid' }>,
       ): Promise<RunIssueResult> => {
-        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        const settledExecution = await this.settleCandidateMaterialization(active, config, true);
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
         const released = await this.clearAndReleaseCandidate(active);
@@ -3329,14 +3000,27 @@ export class RunIssue {
         implementationAttemptId,
         targetRevision: directReview.targetRevision,
         targetFingerprint: directReview.targetFingerprint,
+        currentTreeSha: active.record.candidateBinding!.candidateTreeSha,
+        previousTarget: structuredClone(directReview.previousTarget),
+        repairPatch: reviewScope.repairPatch,
+        repairFindings: directReview.repairFindings.filter((finding) => finding.status === 'fixed')
+          .map((finding) => ({
+            id: finding.id,
+            sourceId: finding.sourceId,
+            summary: finding.summary,
+            affectedContracts: structuredClone(finding.affectedContracts),
+          })),
+        checkedChangeSha256: active.record.checkedChangeSha256!,
+        checks: structuredClone(active.record.checks),
+        proofReceipt: structuredClone(active.record.proofReceipt!),
         issue,
-        frozenCriteria,
-        routeReceipt: structuredClone(routeReceipt),
+        frozenCriteria: reviewScope.criteria,
         deliveryAuthority: structuredClone(active.record.deliveryAuthority!),
         defects: structuredClone(directReview.review.defects),
-        fixedRepairFindings: directReview.repairFindings.filter((finding) => finding.status === 'fixed')
-          .map((finding) => ({ id: finding.id, affectedContracts: [...finding.affectedContracts] })),
-        reviewFocus: ['acceptance-criteria', 'correctness', 'test-quality'],
+        reviewFocus: [
+          'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
+          'repository-standards', 'requirements', 'tests', 'zero-legacy',
+        ],
         workflowGeneration: structuredClone(active.record.workflowGeneration),
         repairOnly: reportRepair !== undefined,
         originalReportSha256: reportRepair?.originalReportSha256 ?? null,
@@ -3365,12 +3049,44 @@ export class RunIssue {
       if (result.kind === 'completed') {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
-        if (result.report.verdict === 'needs-work') {
-          if (validationRepairBudgetExhausted(active.record, maxCycles)) {
-            return active.record.reviewFeedback?.activeBatch
-              ? this.blockReviewFeedback(active, 'exhausted', 'direct-review-repair-exhausted')
-              : this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-repair-exhausted');
+        if (reviewScope.mode === 'targeted') {
+          const impact = new Set(reviewScope.impactTargets);
+          const defectsInCone = result.report.defects
+            .filter((defect) => defect.introducedTargetRevision === current.targetRevision
+              || defect.statusTargetRevision === current.targetRevision)
+            .every((defect) => defect.affectedTargets.length > 0
+              && defect.affectedTargets.every((target) => impact.has(target)));
+          const reopenedInCone = result.report.repairFindingOutcomes
+            .filter((outcome) => outcome.status === 'reopened')
+            .every((outcome) => {
+              const contracts = current.repairFindings.find((finding) => finding.id === outcome.id)?.affectedContracts;
+              return contracts !== undefined && contracts.length > 0 && contracts.every((target) => impact.has(target));
+            });
+          if (!defectsInCone || !reopenedInCone) {
+            active = await this.adoptAttempt(active, result.artifactSha256, {});
+            const settledExecution = await this.settleCandidateMaterialization(active, config);
+            if ('status' in settledExecution) return settledExecution;
+            const completeReview = structuredClone(settledExecution.active.record.directReview!);
+            completeReview.review.defects = structuredClone(result.report.defects);
+            completeReview.review.reviewerSessionId = this.dependencies.createReviewSessionId();
+            completeReview.review.reportRepairs = 0;
+            completeReview.review.transportRetries = 0;
+            active = await this.persist(settledExecution.active, {
+              lifecycle: 'checking',
+              checks: [],
+              checkedChangeSha256: undefined,
+              proofId: undefined,
+              proofReceipt: undefined,
+              ...(settledExecution.active.record.reviewFeedback ? {
+                reviewFeedback: { ...settledExecution.active.record.reviewFeedback, verifiedReceipt: null },
+              } : {}),
+              directReview: completeReview,
+            });
+            return this.invokedFailure(active, 'targeted-review-impact-unisolated',
+              'The targeted Review reported an out-of-cone finding; full checks, proof, and complete Review will resume for the same target.');
           }
+        }
+        if (result.report.verdict === 'needs-work') {
           active = await this.adoptValidationTransition(
             active,
             result.artifactSha256,
@@ -3379,13 +3095,41 @@ export class RunIssue {
           const settledExecution = await this.settleCandidateMaterialization(active, config);
           if ('status' in settledExecution) return settledExecution;
           const released = await this.clearAndReleaseCandidate(settledExecution.active);
-          return 'status' in released ? released : released.active;
+          return 'status' in released
+            ? released
+            : this.semanticContinuation(released.active, 'review', [
+              ...result.report.defects.filter((defect) => defect.status === 'open' || defect.status === 'reopened').map((defect) => defect.id),
+              ...result.report.repairFindingOutcomes.filter((finding) => finding.status === 'reopened').map((finding) => finding.id),
+            ], 'The consolidated Review repair batch is ready for the next bounded invocation.');
         }
-        if (result.report.verdict !== 'approved') return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-rejected');
+        if (result.report.verdict !== 'approved') {
+          const feedbackActive = active.record.reviewFeedback?.activeBatch !== null
+            && active.record.reviewFeedback?.activeBatch !== undefined;
+          const kind: 'authority-boundary' | 'decision-delta' = feedbackActive ? 'authority-boundary' : 'decision-delta';
+          const findings = [
+            ...result.report.defects.map((defect) => `${defect.id}: ${defect.failure}`),
+            ...result.report.residualRisks,
+          ];
+          const outcome = {
+            status: 'blocked' as const,
+            kind,
+            resumable: false,
+            blocker: {
+              kind,
+              summary: `Standards Review rejected revision ${result.report.targetRevision}.`,
+              attempted: ['Reviewed the immutable candidate against issue authority, current checks, and Acceptance Proof.'],
+              resumable: false,
+              reviewerRejectionDetail: findings.join('\n') || 'The reviewer rejected the candidate without an authorized in-scope repair.',
+            },
+          };
+          return feedbackActive
+            ? this.blockReviewFeedback(active, kind, 'direct-review-rejected', outcome)
+            : this.terminal(active, outcome, 'direct-review-rejected');
+        }
         active = await this.adoptValidationTransition(
           active,
           result.artifactSha256,
-          projectValidationReviewApproved(active.record, result.report, result.artifactSha256),
+          projectValidationReviewApproved(active.record, result.report, result.artifactSha256, reviewScope.mode),
         );
         const settledExecution = await this.settleCandidateMaterialization(active, config);
         return 'status' in settledExecution ? settledExecution : settledExecution.active;
@@ -3393,43 +3137,31 @@ export class RunIssue {
       if (result.kind === 'report-invalid') {
         const current = active.record.directReview;
         if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
-        if (current.review.reportRepairs >= MAX_DIRECT_REVIEW_REPORT_REPAIRS) {
-          return this.terminal(
-            active,
-            { status: 'internal-error', code: 'direct-review-report-malformed' },
-            'direct-review-report-malformed',
-          );
-        }
         active = await this.adoptValidationTransition(
           active,
           result.originalReportSha256,
           projectValidationReviewReportRepair(active.record),
         );
-        const settledExecution = await this.settleCandidateMaterialization(active, config);
-        if ('status' in settledExecution) return settledExecution;
-        active = settledExecution.active;
-        reportRepair = {
-          originalReportSha256: result.originalReportSha256,
-          originalReportBytes: Buffer.from(result.originalReportBytes),
-          diagnostic: result.diagnostic,
-        };
-        continue;
+        return this.invokedFailure(active, 'direct-review-report-retryable',
+          'The review report was malformed; a later bounded invocation may retry the same immutable candidate.');
       }
       if (result.kind === 'transport-failed') {
         const current = active.record.directReview;
-        if (!current || current.review.transportRetries >= 1) {
-          return this.terminal(active, { status: 'blocked', kind: 'exhausted', resumable: true }, 'direct-review-transport-exhausted');
-        }
+        if (!current) return this.terminal(active, { status: 'internal-error', code: 'direct-review-result-orphaned' });
         const transition = projectValidationReviewTransportRetry(active.record);
         if (isAdoptableAttempt(active.record.activeAttempt)) {
           active = await this.adoptValidationTransition(active, sha256(canonicalJson(result)), transition);
         } else {
           active = await this.persistValidationTransition(active, transition);
         }
-        const settledExecution = await this.settleCandidateMaterialization(active, config);
+        const settledExecution = await this.settleCandidateMaterialization(
+          active,
+          config,
+          active.record.activeAttempt?.stage === 'prepared',
+        );
         if ('status' in settledExecution) return settledExecution;
-        active = settledExecution.active;
-        continue;
+        return this.invokedFailure(settledExecution.active, 'direct-review-transport-retryable',
+          'Review infrastructure is temporarily unavailable; a later bounded invocation may retry.');
       }
       if (result.kind === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt' });
@@ -3439,54 +3171,6 @@ export class RunIssue {
       if (result.kind === 'cancelled') return this.terminal(active, { status: 'cancelled' });
       return this.terminal(active, { status: 'internal-error', code: result.code });
     }
-  }
-
-  private async recoverTerminalReviewReport(
-    active: ActiveRun,
-    issue: RunIssueSnapshot | undefined,
-    config: AgentAutoConfig,
-    frozenCriteria: FrozenCriterion[],
-  ): Promise<ActiveRun | undefined> {
-    const directReview = active.record.directReview;
-    if (!issue || !directReview || active.record.pendingEffect || active.record.activeAttempt
-      || active.record.terminalOutcome?.status !== 'internal-error'
-      || directReview.status !== 'terminal' || directReview.terminalOutcome?.status !== 'internal-error'
-      || !canRecoverTerminalDirectReviewReport(directReview)
-      || !this.isAuthorizedIssue(issue, active.record, config)) return undefined;
-    let worktree: 'absent' | 'matching' | 'diverged';
-    try {
-      worktree = await this.dependencies.git.inspectWorktree({
-        worktreePath: active.record.worktreePath,
-        branchName: active.record.branchName,
-        baseSha: active.record.baseSha,
-      });
-    } catch {
-      return undefined;
-    }
-    if (worktree !== 'matching'
-      || await this.dependencies.git.getHead(active.record.worktreePath) !== expectedImplementationHead(active.record)) return undefined;
-    const changedFiles = active.record.candidateBinding?.canonicalChangedFiles
-      ?? await this.dependencies.git.listChangedFiles(active.record.worktreePath);
-    if (changedFiles.length === 0 || !active.record.routeReceipt) return undefined;
-    const binding = active.record.candidateBinding;
-    const targetFingerprint = binding
-      ? directReviewCandidateTargetFingerprint({
-        binding,
-        routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
-        workflowGenerationHash: active.record.workflowGeneration.generationHash,
-        cycle: active.record.cycle,
-        frozenCriteria,
-      })
-      : directReviewTargetFingerprint({
-        snapshot: await this.dependencies.git.snapshot(active.record.worktreePath),
-        changedFiles,
-        routeDecisionSha256: active.record.deliveryAuthority!.authoritySha256,
-        workflowGenerationHash: active.record.workflowGeneration.generationHash,
-        cycle: active.record.cycle,
-        frozenCriteria,
-      });
-    if (targetFingerprint !== directReview.targetFingerprint) return undefined;
-    return this.persistValidationTransition(active, projectTerminalValidationReviewRecovery(active.record));
   }
 
   private async startNextCycle(
@@ -3524,8 +3208,9 @@ export class RunIssue {
 
   private async blockReviewFeedback(
     active: ActiveRun,
-    kind: 'safety' | 'exhausted',
+    kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary',
     evidenceCode: string,
+    outcome: Extract<TerminalSeed, { status: 'blocked' }> = { status: 'blocked', kind, resumable: false },
   ): Promise<RunIssueResult> {
     const feedback = active.record.reviewFeedback;
     if (!feedback?.activeBatch) return this.terminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode);
@@ -3568,7 +3253,7 @@ export class RunIssue {
         return this.invokedFailure(active, 'review-feedback-blocked-labels-observation-diverged');
       }
     }
-    return this.persistTerminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode, false, {
+    return this.persistTerminal(active, outcome, evidenceCode, false, {
       reviewFeedback: blockReviewFeedback(feedback, kind, this.timestamp()),
     }, true);
   }
@@ -3584,7 +3269,17 @@ export class RunIssue {
 
   private async mapProofFailure(active: ActiveRun, proof: Exclude<ProveChangeResult, { status: 'passed' }>): Promise<RunIssueResult> {
     if (proof.status === 'needs-rework') return this.terminal(active, { status: 'internal-error', code: 'proof-rework-loop-not-yet-implemented' });
-    if (proof.status === 'external-block') return this.terminal(active, { status: 'blocked', kind: 'external', resumable: true });
+    if (proof.status === 'external-block') {
+      if (proof.blocker.resumable) {
+        const proofExecution = active.record.proofExecution;
+        if (proofExecution) active = await this.persist(active, { proofExecution: {
+          ...proofExecution,
+          transportRetryCount: proofExecution.transportRetryCount + 1,
+        } });
+        return this.invokedFailure(active, 'acceptance-proof-external-block-retryable', proof.blocker.summary);
+      }
+      return this.terminal(active, implementationBlockerOutcome(proof.blocker));
+    }
     if (proof.status === 'transport-failed') return this.terminal(active, { status: 'transport-failed', resumable: proof.resumable });
     if (proof.status === 'cancelled') return this.terminal(active, { status: 'cancelled' });
     return this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
@@ -3602,6 +3297,20 @@ export class RunIssue {
   ): Promise<RunIssueResult> {
     const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary });
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
+  }
+
+  private async semanticContinuation(
+    active: ActiveRun,
+    source: 'check' | 'proof' | 'review',
+    blockerIds: string[],
+    summary: string,
+  ): Promise<RunIssueResult> {
+    const evidence = await this.dependencies.writeEvidence({
+      runId: active.record.runId,
+      code: `${source}-repair-ready`,
+      summary,
+    });
+    return { status: 'repair-ready', source, blockerIds: [...new Set(blockerIds)].sort(), evidencePath: evidence.path };
   }
 
   private async observeOutcomeEvidenceEffect(
@@ -3642,11 +3351,12 @@ export class RunIssue {
     evidenceCode: string = outcome.status,
     retainIntent = false,
   ): Promise<RunIssueResult> {
-    if (active.record.reviewFeedback?.activeBatch && outcome.status !== 'review-ready') {
+    if (active.record.reviewFeedback?.activeBatch && outcome.status === 'blocked') {
       return this.blockReviewFeedback(
         active,
-        outcome.status === 'blocked' && outcome.kind === 'exhausted' ? 'exhausted' : 'safety',
+        outcome.kind,
         evidenceCode,
+        outcome,
       );
     }
     if (outcome.status === 'blocked') {
@@ -3778,10 +3488,6 @@ export class RunIssue {
         ? { status: 'blocked', kind: outcome.kind }
         : { status: outcome.status }, outcome.status === 'internal-error' ? outcome.code : undefined);
     }
-    if (active.record.lifecycle === 'triaging' || (active.record.lifecycle === 'safe-halt' && !active.record.routeReceipt)) {
-      changes.routeExecution = undefined;
-      changes.routeReceipt = undefined;
-    }
     active = await this.persist(active, changes);
     if (!retainIntent) active = await this.confirmEffect(active);
     return publicOutcome(terminalOutcome);
@@ -3825,10 +3531,9 @@ class PostEffectStateError extends Error {
   }
 }
 function lifecycleForAttempt(operationId: string): RunRecord['lifecycle'] {
-  if (operationId === 'triage') return 'triaging';
-  if (operationId === 'spec-author' || operationId === 'spec-review') return 'spec-authoring';
   if (operationId === 'configured-check') return 'checking';
   if (operationId === 'acceptance-proof') return 'proving';
+  if (operationId === 'code-review') return 'reviewing';
   return 'implementing';
 }
 function findRun(state: RunStateFile, runId: string): RunRecord {
@@ -3876,8 +3581,12 @@ function parseTerminalSeedSummary(summary: string): TerminalSeed {
     && exact(record.continuationEpoch === undefined ? ['pullRequestUrl', 'status'] : ['continuationEpoch', 'pullRequestUrl', 'status'])) {
     return record as unknown as Extract<TerminalSeed, { status: 'review-ready' }>;
   }
-  if (record.status === 'blocked' && ['external', 'safety', 'exhausted'].includes(record.kind as string)
-    && typeof record.resumable === 'boolean' && exact(['kind', 'resumable', 'status'])) {
+  const hasBlocker = Object.prototype.hasOwnProperty.call(record, 'blocker');
+  if (record.status === 'blocked'
+    && ['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(record.kind as string)
+    && typeof record.resumable === 'boolean'
+    && (!hasBlocker || isTerminalBlockerDetail(record.blocker))
+    && exact(['kind', 'resumable', 'status', ...(hasBlocker ? ['blocker'] : [])])) {
     return record as unknown as Extract<TerminalSeed, { status: 'blocked' }>;
   }
   if (record.status === 'transport-failed' && typeof record.resumable === 'boolean' && exact(['resumable', 'status'])) {
@@ -3888,6 +3597,23 @@ function parseTerminalSeedSummary(summary: string): TerminalSeed {
     return record as unknown as Extract<TerminalSeed, { status: 'internal-error' }>;
   }
   throw new Error('outcome evidence terminal seed is invalid');
+}
+
+function isTerminalBlockerDetail(value: unknown): value is {
+  kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const blocker = value as Record<string, unknown>;
+  const expected = ['attempted', 'kind', 'resumable', 'summary',
+    ...(Object.prototype.hasOwnProperty.call(blocker, 'reviewerRejectionDetail') ? ['reviewerRejectionDetail'] : [])].sort();
+  const keys = Object.keys(blocker).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index])
+    && typeof blocker.kind === 'string' && blocker.kind.length > 0
+    && typeof blocker.summary === 'string' && blocker.summary.length > 0
+    && typeof blocker.resumable === 'boolean'
+    && Array.isArray(blocker.attempted) && blocker.attempted.every((item) => typeof item === 'string' && item.length > 0)
+    && (blocker.reviewerRejectionDetail === undefined
+      || (typeof blocker.reviewerRejectionDetail === 'string' && blocker.reviewerRejectionDetail.length > 0));
 }
 
 function validateConfiguredCheckAttemptBytes(
@@ -3949,11 +3675,11 @@ function expectedImplementationHead(record: RunRecord): string {
 function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | undefined {
   if (record.lifecycle !== 'implementing') return undefined;
   const feedback = record.reviewFeedback;
-  if (feedback?.activeBatch && feedback.repairRound >= 1 && feedback.repairRound <= 3) {
+  if (feedback?.activeBatch && feedback.repairRound >= 1) {
     return {
       kind: 'review-feedback',
       batchId: feedback.activeBatch.batchId,
-      repairRound: feedback.repairRound as 1 | 2 | 3,
+      repairRound: feedback.repairRound,
       authoritySha256: record.deliveryAuthority!.authoritySha256,
     };
   }
@@ -3962,10 +3688,6 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
 
 function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
   return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
-}
-
-function frozenQuestionProjection(receipt: FrozenSpecQuestionReceiptV1, evidencePath: string): RunIssueResult {
-  return { status: 'spec-frozen', receipt: structuredClone(receipt), evidencePath };
 }
 
 function sortedUnique(values: string[]): string[] {
@@ -3997,6 +3719,19 @@ function boundedLocalGitFailureSummary(prefix: string, error: unknown): string {
 
 function assertUuid(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)) throw new Error('runId is invalid');
+}
+
+function implementationBlockerOutcome(blocker: {
+  kind: 'credential' | 'tool' | 'service' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
+  summary: string;
+  attempted: string[];
+  resumable: boolean;
+  reviewerRejectionDetail?: string;
+}): Extract<TerminalSeed, { status: 'blocked' }> {
+  const kind = ['decision-delta', 'out-of-scope', 'authority-boundary'].includes(blocker.kind)
+    ? blocker.kind as 'decision-delta' | 'out-of-scope' | 'authority-boundary'
+    : 'external';
+  return { status: 'blocked', kind, resumable: blocker.resumable, blocker: structuredClone(blocker) };
 }
 
 function assertGitSha(value: unknown, field: string): asserts value is string {

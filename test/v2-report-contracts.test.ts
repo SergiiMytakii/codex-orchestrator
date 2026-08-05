@@ -14,6 +14,7 @@ import {
   type ProofReportV1,
 } from '../src/v2/proof-report.js';
 import { decodeAgentReportForValidation, unwrapAgentReportEnvelope } from '../src/v2/report-envelope.js';
+import { codeReviewReportOutputSchema } from '../src/v2/code-review-report.js';
 
 const completedImplementation: ImplementationReportV1 = {
   version: 1,
@@ -22,6 +23,16 @@ const completedImplementation: ImplementationReportV1 = {
   changedFiles: ['src/feature.ts'],
   residualRisks: [],
 };
+
+test('package-owned and generated code-review schemas equal the runtime schema owner', async () => {
+  const expected = codeReviewReportOutputSchema();
+  for (const path of [
+    'scripts/runtime-workflow-overlays/schemas/code-review-v1.json',
+    'internal-workflow/schemas/code-review-v1.json',
+  ]) {
+    assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), expected, path);
+  }
+});
 
 const passedProof: ProofReportV1 = {
   version: 1,
@@ -154,7 +165,20 @@ test('implementation output schema and runtime validator have parity across stat
         ...completedImplementation,
         status: 'external-block',
         changedFiles: [],
-        blocker: { kind: 'credential', summary: 'Login required.', attempted: ['codex login status'] },
+        blocker: { kind: 'credential', summary: 'Login required.', attempted: ['codex login status'], resumable: false },
+      },
+      accepted: true,
+    },
+    {
+      value: {
+        ...completedImplementation,
+        status: 'external-block',
+        changedFiles: [],
+        blocker: {
+          kind: 'decision-delta', summary: 'Product choice is required.', attempted: ['inspected issue authority'],
+          resumable: false,
+          reviewerRejectionDetail: 'Reviewer rejected guessing the missing choice.',
+        },
       },
       accepted: true,
     },
@@ -162,7 +186,7 @@ test('implementation output schema and runtime validator have parity across stat
     {
       value: {
         ...completedImplementation,
-        blocker: { kind: 'tool', summary: 'Unexpected blocker.', attempted: ['tool'] },
+        blocker: { kind: 'tool', summary: 'Unexpected blocker.', attempted: ['tool'], resumable: false },
       },
       accepted: false,
     },
@@ -199,13 +223,6 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
 test('checked-in proof workflow schema matches its TypeScript owner', async () => {
   const checkedIn = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/proof-report-v1.json', 'utf8'));
   assert.deepEqual(checkedIn, proofReportOutputSchema());
-});
-
-test('spec review generation reuses the exact validated code-review defect schema', async () => {
-  const specReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/spec-review-v1.json', 'utf8'));
-  const codeReview = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/code-review-v1.json', 'utf8'));
-  assert.deepEqual(specReview.properties.defects.items, codeReview.properties.report.properties.defects.items);
-  assert.equal(specReview.properties.defects.items.additionalProperties, false);
 });
 
 test('proof generation schema stays compact while runtime owns platform combinations', () => {
@@ -292,7 +309,7 @@ test('proof output schema covers valid terminal reports and runtime validator re
         ...passedProof,
         status: 'external-block',
         criteria: [{ ...passedProof.criteria[0], status: 'unknown', confidence: 'low' }],
-        blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['retry fixture'] },
+        blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['retry fixture'], resumable: false },
       },
       accepted: true,
     },
@@ -343,7 +360,7 @@ test('proof runtime binds decisions to matching visual evidence omitted from the
     status: 'external-block',
     decision: { mode: 'visual', targets: ['browser', 'android'] },
     criteria: [{ ...visualProof.criteria[0], status: 'unknown', confidence: 'low' }],
-    blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['inspect service'] },
+    blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['inspect service'], resumable: false },
   };
 
   const invalidReports = {

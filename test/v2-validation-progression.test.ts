@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { DeliveryAuthorityV1 } from '../src/v2/delivery-authority.js';
+import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import type { DirectReviewV1 } from '../src/v2/direct-delivery.js';
 import type { ReviewFeedbackRunDataV1 } from '../src/v2/review-feedback.js';
 import { InMemoryRunRecordWriter, type RunRecord } from '../src/v2/run-store.js';
@@ -11,33 +11,32 @@ import {
   nextValidationTransition,
   projectValidationRepair,
   projectValidationReviewStart,
-  validationRepairBudgetExhausted,
 } from '../src/v2/validation-progression.js';
 
-test('direct and spec authority dispatch through the same fixed validation progression', () => {
-  for (const kind of ['direct', 'spec'] as const) {
-    const authority = deliveryAuthority(kind);
+test('issue authority dispatches implementation then checks proof review and publication', () => {
+  for (const authority of [deliveryAuthority()]) {
     const implementing = run('implementing', authority);
     assert.equal(nextValidationTransition(implementing, authority).phase, 'implementation');
 
-    implementing.directReview = directReview('review');
-    assert.equal(nextValidationTransition(implementing, authority).phase, 'full-review');
-
     implementing.lifecycle = 'checking';
-    implementing.directReview = { ...implementing.directReview, status: 'clear' };
     assert.equal(nextValidationTransition(implementing, authority).phase, 'checks');
 
     implementing.lifecycle = 'proving';
     assert.equal(nextValidationTransition(implementing, authority).phase, 'acceptance-proof');
 
-    implementing.lifecycle = 'publishing';
     implementing.proofReceipt = { proofId: 'proof-1' } as RunRecord['proofReceipt'];
+    implementing.lifecycle = 'reviewing';
+    implementing.directReview = directReview('review');
+    assert.equal(nextValidationTransition(implementing, authority).phase, 'review');
+
+    implementing.lifecycle = 'publishing';
+    implementing.directReview = { ...implementing.directReview, status: 'clear' };
     assert.equal(nextValidationTransition(implementing, authority).phase, 'publication');
   }
 });
 
 test('post-PR feedback changes context but not validation progression ownership', () => {
-  const authority = deliveryAuthority('direct');
+  const authority = deliveryAuthority();
   const record = run('implementing', authority);
   record.directReview = directReview('review-repair');
   record.reviewFeedback = reviewFeedback();
@@ -58,7 +57,7 @@ test('post-PR feedback changes context but not validation progression ownership'
 });
 
 test('validation progression rejects mismatched authority, pending effects, and non-validation phases', () => {
-  const authority = deliveryAuthority('direct');
+  const authority = deliveryAuthority();
   const record = run('implementing', authority);
   assert.throws(
     () => nextValidationTransition(record, { ...authority, authoritySha256: 'f'.repeat(64) }),
@@ -67,12 +66,12 @@ test('validation progression rejects mismatched authority, pending effects, and 
   record.pendingEffect = { kind: 'claim-labels', effectId: 'effect-1', issueNumber: 42, expected: [] };
   assert.throws(() => nextValidationTransition(record, authority), /pending effect/u);
   delete record.pendingEffect;
-  record.lifecycle = 'triaging';
+  record.lifecycle = 'claimed';
   assert.throws(() => nextValidationTransition(record, authority), /outside validation progression/u);
 });
 
 test('semantic repair returns one CAS transition without a reworking lifecycle', () => {
-  const authority = deliveryAuthority('direct');
+  const authority = deliveryAuthority();
   const record = run('checking', authority);
   record.cycle = 2;
   record.candidateBinding = { bindingId: 'binding-1' } as RunRecord['candidateBinding'];
@@ -94,21 +93,16 @@ test('semantic repair returns one CAS transition without a reworking lifecycle',
   });
 });
 
-test('Run-owned validation budgets remain route-independent and bounded', () => {
-  const authority = deliveryAuthority('direct');
+test('semantic repair revisions are unbounded and remain Run-owned', () => {
+  const authority = deliveryAuthority();
   const initial = run('implementing', authority);
-  assert.equal(validationRepairBudgetExhausted(initial, 5), false);
-  initial.cycle = 5;
-  assert.equal(validationRepairBudgetExhausted(initial, 5), true);
-  initial.reviewFeedback = reviewFeedback();
-  initial.reviewFeedback.repairRound = 2;
-  assert.equal(validationRepairBudgetExhausted(initial, 5), false);
-  initial.reviewFeedback.repairRound = 3;
-  assert.equal(validationRepairBudgetExhausted(initial, 5), true);
+  initial.cycle = 99;
+  const transition = projectValidationRepair({ ...initial, lifecycle: 'checking' }, ['still in scope']);
+  assert.equal(transition.changes.cycle, 100);
 });
 
 test('CAS consumption rejects stale authority context before any write', () => {
-  const authority = deliveryAuthority('direct');
+  const authority = deliveryAuthority();
   const record = run('implementing', authority);
   const transition = projectValidationReviewStart(record, {
     targetFingerprint: 'e'.repeat(64),
@@ -124,7 +118,7 @@ test('CAS consumption rejects stale authority context before any write', () => {
 });
 
 test('production transition adapter rejects every stale expected field before RunRecordWriter CAS', () => {
-  const authority = deliveryAuthority('direct');
+  const authority = deliveryAuthority();
   const original = run('implementing', authority);
   const transition = projectValidationReviewStart(original, {
     targetFingerprint: 'e'.repeat(64),
@@ -154,7 +148,7 @@ test('production transition adapter rejects every stale expected field before Ru
   assert.equal(writes, 0);
 });
 
-function run(lifecycle: RunRecord['lifecycle'], authority: DeliveryAuthorityV1): RunRecord {
+function run(lifecycle: RunRecord['lifecycle'], authority: DeliveryAuthority): RunRecord {
   return {
     runId: '00000000-0000-4000-8000-000000000001',
     lifecycle,
@@ -165,18 +159,13 @@ function run(lifecycle: RunRecord['lifecycle'], authority: DeliveryAuthorityV1):
   } as unknown as RunRecord;
 }
 
-function deliveryAuthority(kind: 'direct' | 'spec'): DeliveryAuthorityV1 {
-  const base = {
-    version: 1 as const,
-    routeDecisionSha256: 'a'.repeat(64),
-    sourceSha256: 'b'.repeat(64),
-    authoritySha256: (kind === 'direct' ? 'c' : 'd').repeat(64),
+function deliveryAuthority(): DeliveryAuthority {
+  return {
+    version: 2, kind: 'issue', issueNumber: 42, issueUrl: 'https://example.invalid/issues/42',
+    issueSnapshotSha256: 'a'.repeat(64), authorizationLabel: 'agent:auto',
+    sourceSha256: 'a'.repeat(64), authoritySha256: 'c'.repeat(64),
   };
-  return kind === 'direct'
-    ? { ...base, kind }
-    : { ...base, kind, frozenSpec: {} as Extract<DeliveryAuthorityV1, { kind: 'spec' }>['frozenSpec'] };
 }
-
 function directReview(stage: 'review' | 'review-repair'): DirectReviewV1 {
   return { status: 'active', stage } as DirectReviewV1;
 }

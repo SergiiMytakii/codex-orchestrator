@@ -1,19 +1,15 @@
-# Triage Labels
+# Runner labels
 
-The skills speak in terms of five canonical triage roles. This file maps those
-roles to the actual label strings used in this repo's issue tracker.
+These are the current labels owned by the package lifecycle. They are distinct
+from external planning or issue-triage vocabulary.
 
-| Label in mattpocock/skills | Label in our tracker | Meaning |
-| --- | --- | --- |
-| `needs-triage` | `needs-triage` | Maintainer needs to evaluate this issue |
-| `needs-info` | `needs-info` | Waiting on reporter for more information |
-| `ready-for-agent` | `ready-for-agent` | Fully specified, ready for an AFK agent |
-| `ready-for-human` | `ready-for-human` | Requires human implementation |
-| `wontfix` | `wontfix` | Will not be actioned |
+| Label | Meaning |
+| --- | --- |
+| `agent:auto` | Explicit authority to execute this open Issue. |
+| `agent:running` | The Runner currently owns the bounded invocation. |
+| `agent:blocked` | The Issue stopped at an authority, proof, external, preservation, or safety boundary. |
+| `agent:review` | The draft PR passed applicable checks, proof, and Review and is ready for human review. |
 
-These labels are separate from the runner authorization labels `agent:auto`,
-`agent:running`, `agent:waiting-human`, `agent:blocked`, and `agent:review`.
-
-When a skill mentions a triage role, use the corresponding label string from
-this table, while respecting the GitHub mutation boundary in
-`docs/agents/issue-tracker.md`.
+Only `agent:auto` grants delivery authority. Planning context, Parent links,
+comments, and other triage labels do not. GitHub mutations remain subject to
+the boundary in `docs/agents/issue-tracker.md`.

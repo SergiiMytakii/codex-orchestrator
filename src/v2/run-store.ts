@@ -1,16 +1,8 @@
 import type { ProofReceipt } from './proof-report.js';
 import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
 import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
-import { validateSpecDelivery, type SpecDeliveryV1 } from './spec-delivery.js';
-import {
-  validateRouteExecution,
-  validateRouteReceipt,
-  validateRouteStateInvariant,
-  type RouteExecutionV1,
-  type RouteReceiptV1,
-} from './route-decision.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
-import { validateDeliveryAuthority, type DeliveryAuthorityV1 } from './delivery-authority.js';
+import { validateDeliveryAuthority, type DeliveryAuthority } from './delivery-authority.js';
 import { constants } from 'node:fs';
 import { posix } from 'node:path';
 import { open, type FileHandle } from 'node:fs/promises';
@@ -28,12 +20,10 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 
 export type Lifecycle =
   | 'claimed'
-  | 'triaging'
-  | 'routed'
-  | 'spec-authoring'
   | 'implementing'
   | 'checking'
   | 'proving'
+  | 'reviewing'
   | 'publishing'
   | 'safe-halt'
   | 'review-ready'
@@ -46,7 +36,7 @@ type EffectIdentity = { effectId: string };
 
 export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
-  | { kind: 'claim-comment' | 'handoff-comment' | 'spec-question-comment'; issueNumber: number; marker: string; bodySha256: string }
+  | { kind: 'claim-comment' | 'handoff-comment'; issueNumber: number; marker: string; bodySha256: string }
   | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
@@ -55,7 +45,7 @@ export type PendingEffect = EffectIdentity & (
     kind: 'blocked-labels';
     issueNumber: number;
     expected: string[];
-    blockKind: 'external' | 'safety' | 'exhausted';
+    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
     resumable: boolean;
     evidenceCode: string;
   }
@@ -69,7 +59,7 @@ export type PendingEffect = EffectIdentity & (
     issueNumber: number;
     batchId: string;
     expected: string[];
-    blockKind: 'safety' | 'exhausted';
+    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
     evidenceCode: string;
   }
   | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
@@ -88,7 +78,7 @@ export function createPendingEffect<T extends PendingEffectInput>(effect: T): T 
 
 export type RunTerminalOutcome =
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
-  | { status: 'blocked'; kind: 'external' | 'safety' | 'exhausted'; resumable: boolean; evidencePath: string }
+  | { status: 'blocked'; kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary'; resumable: boolean; evidencePath: string; blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string } }
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; code: string; evidencePath: string };
@@ -134,19 +124,16 @@ export interface RunRecord {
   branchName: string;
   worktreePath: string;
   lifecycle: Lifecycle;
-  cycle: 1 | 2 | 3 | 4 | 5;
-  reportRepairs: 0 | 1;
-  transportRetries: 0 | 1;
+  cycle: number;
+  reportRepairs: number;
+  transportRetries: number;
   issueSnapshot: PersistedIssueSnapshotV1;
   frozenCriteria: PersistedFrozenCriterionV1[];
   reworkFindings: string[];
   packageVersion: string;
   workflowGeneration: WorkflowGenerationReceipt;
-  routeExecution?: RouteExecutionV1;
-  routeReceipt?: RouteReceiptV1;
-  deliveryAuthority?: DeliveryAuthorityV1;
+  deliveryAuthority?: DeliveryAuthority;
   directReview?: DirectReviewV1;
-  specDelivery?: SpecDeliveryV1;
   reviewFeedback?: ReviewFeedbackRunDataV1;
   changeBindingVersion?: 2;
   candidateBinding?: CandidateBindingV2;
@@ -161,8 +148,8 @@ export interface RunRecord {
   proofId?: string;
   proofExecution?: {
     startedAt: string;
-    transportRetryCount: 0 | 1;
-    reportRepairCount: 0 | 1;
+    transportRetryCount: number;
+    reportRepairCount: number;
     reportRepairFindings: string[];
   };
   proofReceipt?: ProofReceipt;
@@ -199,10 +186,10 @@ export class WorkflowGenerationUnrecoverableError extends Error {
   }
 }
 
-export class RouteInitializationUnrecoverableError extends Error {
+export class IssueInitializationUnrecoverableError extends Error {
   constructor() {
-    super('route-initialization-unrecoverable');
-    this.name = 'RouteInitializationUnrecoverableError';
+    super('issue-initialization-unrecoverable');
+    this.name = 'IssueInitializationUnrecoverableError';
   }
 }
 
@@ -301,11 +288,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'pendingEffect',
     'outcomeEvidenceId',
     'terminalOutcome',
-    'routeExecution',
-    'routeReceipt',
     'deliveryAuthority',
     'directReview',
-    'specDelivery',
     'reviewFeedback',
     'changeBindingVersion',
     'candidateBinding',
@@ -327,9 +311,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field}.worktreePath is invalid`);
   }
   if (!isLifecycle(value.lifecycle)) throw new Error(`${field}.lifecycle is invalid`);
-  if (!Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1 || (value.cycle as number) > 5) throw new Error(`${field}.cycle is invalid`);
-  if (value.reportRepairs !== 0 && value.reportRepairs !== 1) throw new Error(`${field}.reportRepairs is invalid`);
-  if (value.transportRetries !== 0 && value.transportRetries !== 1) throw new Error(`${field}.transportRetries is invalid`);
+  if (!Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1) throw new Error(`${field}.cycle is invalid`);
+  if (!Number.isSafeInteger(value.reportRepairs) || (value.reportRepairs as number) < 0) throw new Error(`${field}.reportRepairs is invalid`);
+  if (!Number.isSafeInteger(value.transportRetries) || (value.transportRetries as number) < 0) throw new Error(`${field}.transportRetries is invalid`);
   validateIssueSnapshot(value.issueSnapshot, `${field}.issueSnapshot`);
   validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
   validateStringList(value.reworkFindings, `${field}.reworkFindings`);
@@ -339,19 +323,20 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (workflowGeneration.packageVersion !== value.packageVersion) {
     throw new Error(`${field}.workflowGeneration package version mismatch`);
   }
-  const routeGenerationHash = workflowGeneration.generationHash;
-  if (hasOwn(value, 'routeExecution')) validateRouteExecution(value.routeExecution, routeGenerationHash);
-  if (hasOwn(value, 'routeReceipt')) validateRouteReceipt(value.routeReceipt, routeGenerationHash);
   if (hasOwn(value, 'deliveryAuthority')) {
-    if (!hasOwn(value, 'routeReceipt')) throw new Error(`${field}.deliveryAuthority requires route receipt`);
     validateDeliveryAuthority(
       value.deliveryAuthority,
-      value.routeReceipt as RouteReceiptV1,
-      hasOwn(value, 'specDelivery') ? value.specDelivery as SpecDeliveryV1 : undefined,
+      {
+        issueNumber: value.issueSnapshot.number as number,
+        issueUrl: value.issueSnapshot.url as string,
+        title: value.issueSnapshot.title as string,
+        body: value.issueSnapshot.body as string,
+        authorizationLabel: (value.deliveryAuthority as DeliveryAuthority).authorizationLabel,
+      },
     );
   }
-  if (['implementing', 'checking', 'proving', 'publishing', 'review-ready'].includes(value.lifecycle as string)
-    && hasOwn(value, 'routeReceipt') && !hasOwn(value, 'deliveryAuthority')) {
+  if (['implementing', 'checking', 'proving', 'reviewing', 'publishing', 'review-ready'].includes(value.lifecycle as string)
+    && !hasOwn(value, 'deliveryAuthority')) {
     throw new Error(`${field}.deliveryAuthority is required for delivery progression`);
   }
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
@@ -368,9 +353,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
   if (hasOwn(value, 'directReview')) {
-    if (!hasOwn(value, 'routeReceipt') || !['direct', 'spec-required'].includes((value.routeReceipt as RouteReceiptV1).route)) {
-      throw new Error(`${field}.directReview requires a delivery authority route`);
-    }
+    if (!hasOwn(value, 'deliveryAuthority')) throw new Error(`${field}.directReview requires delivery authority`);
     validateDirectReview(value.directReview, {
       lifecycle: value.lifecycle as string,
       ...(hasOwn(value, 'terminalOutcome') ? { terminalOutcome: directTerminalOutcome(value.terminalOutcome as RunTerminalOutcome) } : {}),
@@ -378,19 +361,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
         ? { terminalCode: (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'internal-error' }>).code }
         : {}),
     });
-  }
-  if (hasOwn(value, 'specDelivery')) {
-    if (!hasOwn(value, 'routeReceipt') || (value.routeReceipt as RouteReceiptV1).route !== 'spec-required') {
-      throw new Error(`${field}.specDelivery requires a spec-required route`);
-    }
-    const spec = validateSpecDelivery(value.specDelivery);
-    if (spec.issueNumber !== value.issueNumber || spec.runId !== value.runId
-      || spec.workflowGenerationSha256 !== routeGenerationHash) {
-      throw new Error(`${field}.specDelivery identity binding is invalid`);
-    }
-    if (value.lifecycle === 'implementing' && spec.stage !== 'frozen') {
-      throw new Error(`${field}.specDelivery must be frozen before implementation`);
-    }
   }
   if (hasOwn(value, 'reviewFeedback')) {
     validateReviewFeedbackRunData(value.reviewFeedback);
@@ -435,7 +405,9 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     || value.checks.some((check) => check.status === 'failed'))) {
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);
   }
-  if (value.lifecycle === 'publishing' && !hasOwn(value, 'proofReceipt')) throw new Error(`${field} publishing requires proofReceipt`);
+  if ((value.lifecycle === 'reviewing' || value.lifecycle === 'publishing') && !hasOwn(value, 'proofReceipt')) {
+    throw new Error(`${field} review and publication require proofReceipt`);
+  }
   if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
@@ -457,12 +429,6 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
     throw new Error(`${field} resumable transport failure cannot retain pending effect`);
   }
-  validateRouteStateInvariant({
-    lifecycle: value.lifecycle,
-    routeExecution: value.routeExecution,
-    routeReceipt: value.routeReceipt,
-    generationHash: routeGenerationHash,
-  });
 }
 
 function directTerminalOutcome(outcome: RunTerminalOutcome): DirectReviewV1['terminalOutcome'] | undefined {
@@ -577,7 +543,7 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertExactObject(value, [...identity, 'owner', 'repo', 'head', 'base', 'issueNumber', 'marker'], field);
     for (const key of ['owner', 'repo', 'head', 'base', 'marker'] as const) assertNonEmptyString(value[key], `${field}.${key}`);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-  } else if (kind === 'claim-comment' || kind === 'handoff-comment' || kind === 'spec-question-comment') {
+  } else if (kind === 'claim-comment' || kind === 'handoff-comment') {
     assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
@@ -622,13 +588,15 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertSha256(value.batchId, `${field}.batchId`);
     validateStringArray(value.expected, `${field}.expected`);
-    if (value.blockKind !== 'safety' && value.blockKind !== 'exhausted') throw new Error(`${field}.blockKind is invalid`);
+    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) {
+      throw new Error(`${field}.blockKind is invalid`);
+    }
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else if (kind === 'blocked-labels') {
     assertExactObject(value, [...identity, 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
-    if (!['external', 'safety', 'exhausted'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
+    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
     if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else if (kind === 'worktree-create') {
@@ -671,9 +639,10 @@ function validateTerminalOutcome(value: unknown, field: string): void {
     assertNonEmptyString(value.pullRequestUrl, `${field}.pullRequestUrl`);
     if (hasOwn(value, 'continuationEpoch')) assertGitSha(value.continuationEpoch, `${field}.continuationEpoch`);
   } else if (status === 'blocked') {
-    assertExactObject(value, ['status', 'kind', 'resumable', 'evidencePath'], field);
-    if (!['external', 'safety', 'exhausted'].includes(value.kind as string)) throw new Error(`${field}.kind is invalid`);
+    assertExactObject(value, ['status', 'kind', 'resumable', 'evidencePath', ...(hasOwn(value, 'blocker') ? ['blocker'] : [])], field);
+    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.kind as string)) throw new Error(`${field}.kind is invalid`);
     if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
+    if (hasOwn(value, 'blocker')) validateBlockerDetail(value.blocker, `${field}.blocker`);
   } else if (status === 'transport-failed') {
     assertExactObject(value, ['status', 'resumable', 'evidencePath'], field);
     if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
@@ -686,6 +655,16 @@ function validateTerminalOutcome(value: unknown, field: string): void {
     throw new Error(`${field}.status is invalid`);
   }
   assertNonEmptyString((value as { evidencePath?: unknown }).evidencePath, `${field}.evidencePath`);
+}
+
+function validateBlockerDetail(value: unknown, field: string): void {
+  assertExactObject(value, ['kind', 'summary', 'attempted', 'resumable', ...(hasOwn(value, 'reviewerRejectionDetail') ? ['reviewerRejectionDetail'] : [])], field);
+  assertNonEmptyString(value.kind, `${field}.kind`);
+  assertNonEmptyString(value.summary, `${field}.summary`);
+  if (!Array.isArray(value.attempted) || value.attempted.length > 256) throw new Error(`${field}.attempted is invalid`);
+  for (const attempted of value.attempted) assertNonEmptyString(attempted, `${field}.attempted`);
+  if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
+  if (hasOwn(value, 'reviewerRejectionDetail')) assertNonEmptyString(value.reviewerRejectionDetail, `${field}.reviewerRejectionDetail`);
 }
 
 function validateReceipt(value: unknown, field: string): void {
@@ -707,8 +686,8 @@ function validateReceipt(value: unknown, field: string): void {
 function validateProofExecution(value: unknown, field: string): void {
   assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings'], field);
   assertTimestamp(value.startedAt, `${field}.startedAt`);
-  if (value.transportRetryCount !== 0 && value.transportRetryCount !== 1) throw new Error(`${field}.transportRetryCount is invalid`);
-  if (value.reportRepairCount !== 0 && value.reportRepairCount !== 1) throw new Error(`${field}.reportRepairCount is invalid`);
+  if (!Number.isSafeInteger(value.transportRetryCount) || (value.transportRetryCount as number) < 0) throw new Error(`${field}.transportRetryCount is invalid`);
+  if (!Number.isSafeInteger(value.reportRepairCount) || (value.reportRepairCount as number) < 0) throw new Error(`${field}.reportRepairCount is invalid`);
   validateStringList(value.reportRepairFindings, `${field}.reportRepairFindings`);
   if ((value.reportRepairCount === 0) !== (value.reportRepairFindings.length === 0)) {
     throw new Error(`${field} report repair state is invalid`);
@@ -776,11 +755,13 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }
   if (batch && !feedback.verifiedReceipt
-    && !['implementing', 'checking', 'proving', 'safe-halt'].includes(run.lifecycle)) {
+    && !['implementing', 'checking', 'proving', 'reviewing', 'safe-halt'].includes(run.lifecycle)) {
     throw new Error(`${field}.reviewFeedback active batch has invalid lifecycle`);
   }
   if (feedback.verifiedReceipt) {
-    if (run.lifecycle !== 'publishing') throw new Error(`${field}.reviewFeedback verified batch requires publishing lifecycle`);
+    if (run.lifecycle !== 'reviewing' && run.lifecycle !== 'publishing') {
+      throw new Error(`${field}.reviewFeedback verified batch requires review or publication lifecycle`);
+    }
     const verified = feedback.verifiedReceipt;
     if (!verified || verified.batchId !== batch?.batchId
       || verified.checkedChangeSha256 !== run.checkedChangeSha256
@@ -793,7 +774,7 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
 
 function isLifecycle(value: unknown): value is Lifecycle {
   return typeof value === 'string' && [
-    'claimed', 'triaging', 'routed', 'spec-authoring', 'implementing', 'checking', 'proving', 'publishing', 'safe-halt',
+    'claimed', 'implementing', 'checking', 'proving', 'reviewing', 'publishing', 'safe-halt',
     'review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error',
   ].includes(value);
 }

@@ -1,16 +1,12 @@
 # Codex Orchestrator
 
-Codex Orchestrator turns an authorized GitHub Issue into a controlled Codex delivery run. It reads the issue, decides whether the work is ready to implement, works in an isolated Git worktree, validates the result, and—only after all required gates pass—pushes a branch and opens a draft pull request.
+Codex Orchestrator turns one explicitly authorized GitHub Issue into a controlled Codex delivery run. Planning remains external. The package implements the issue in an isolated Git worktree, validates the immutable candidate, and—only after all required gates pass—pushes a branch and opens a draft pull request.
 
 The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, checks, recovery, and publication; Codex owns the bounded analysis, implementation, review, and proof tasks assigned to it.
 
 ## What happens to an issue
 
-Add the configured `agent:auto` label to an open issue, then run the orchestrator. It will choose one of three routes:
-
-- **Direct delivery:** the issue is clear enough to implement. Codex changes the code, an independent review checks it, issue-scoped verification checks run, Acceptance Proof verifies the acceptance criteria, and the Runner creates a draft PR.
-- **Specification first:** the issue is too complex for safe direct implementation. Separate Codex workers author and independently review a deterministic implementation specification; after approval, the Runner continues through implementation, complete review, checks, proof, and publication in the same Run. `spec-frozen` is returned only while a revision-bound product answer is still required.
-- **Human decision required:** an independently authored spec found a real product gap. The package returns `spec-frozen`, posts one revision-bound question, and resumes the same Run at the next spec revision after a trusted answer.
+Add the configured `agent:auto` label to an open executable issue, then run the orchestrator. That label authorizes only that issue. The lifecycle is `implementation → affected checks → Acceptance Proof → Review → publication`. A product or ownership decision gap is returned as an issue-local blocker for external Plan; the package does not create a PRD, spec, or ticket graph.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
@@ -57,7 +53,7 @@ Now create or choose a clear GitHub Issue, include acceptance criteria when poss
 npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
-The command prints one JSON result. Direct and approved spec-first delivery return `review-ready` with the draft PR URL. A genuine product decision returns `spec-frozen` with the exact revision, immutable gaps, question marker, answer prefix, and evidence path.
+The command prints one JSON result. Successful delivery returns `review-ready` with the draft PR URL. Decision, authority, preservation, and proof boundaries return a precise blocked result with evidence.
 
 ## Main commands
 
@@ -130,18 +126,17 @@ The daemon uses the same lifecycle as `run`; it does not have a less strict exec
 
 ### Continue from pull-request review feedback
 
-After a direct or spec-required run reaches `review-ready`, the daemon also
+After a run reaches `review-ready`, the daemon also
 polls issues with `agent:review`. A quiet PR remains effect-free. When the same
 marker-bound, same-repository draft PR receives a new unresolved inline thread
 root or a non-empty `CHANGES_REQUESTED` review from a current repository writer
 or admin, the Runner freezes that exact feedback batch and resumes the existing
-run without repeating triage or spec work.
+run through the same targeted repair lifecycle.
 
-The frozen batch enters the same implementation → complete independent review
-→ checks → proof loop used by initial delivery. Every repair creates a new
-candidate and receives a complete review that accounts for prior finding IDs. It
-has a separate maximum of three feedback rounds and does not consume the
-original five implementation cycles. Publication appends one fast-forward
+The frozen batch enters the same implementation → affected checks → proof →
+targeted independent review loop used by in-scope repair. The reviewer receives
+the previous revision, repair delta, blocker IDs, direct impact cone, and affected
+proof. There is no semantic round limit. Publication appends one fast-forward
 commit to the existing branch and PR; divergence blocks without reset, rebase,
 amend, or force-push recovery.
 
@@ -160,7 +155,7 @@ The default labels are:
 | --- | --- |
 | `agent:auto` | The issue is authorized for orchestration. |
 | `agent:running` | A Runner has claimed the issue. |
-| `agent:blocked` | The run stopped on an external, safety, or exhausted-budget blocker. |
+| `agent:blocked` | The run stopped on an authority, external, preservation, proof, or safety boundary. |
 | `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 
 Important command results:
@@ -168,7 +163,7 @@ Important command results:
 | Result | What to do |
 | --- | --- |
 | `review-ready` | Open the returned draft PR URL and review the change; later trusted unresolved feedback may resume the same run and PR. |
-| `spec-frozen` | Reply to the revision-bound issue question using its answer prefix. Re-run the command or let the daemon continue the same Run; an approved spec otherwise proceeds automatically. |
+| `repair-ready` | The semantic repair batch is durably ready. Run one more bounded CLI call or daemon tick; live smoke continues only up to its fixed limit. |
 | `not-eligible` | Check that the issue is open, has only the appropriate authorization label, and has no existing open PR for its branch. |
 | `requeued` | Another known Runner owns the repository; retry later. |
 | `blocked` | Read `kind`, `resumable`, and `evidencePath`; fix the external condition only when the evidence says it is safe to resume. |
@@ -183,7 +178,7 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
 - `checks`: finite fallback commands for issues without a command-only
-  `Verification:` section. They run after each complete independent review.
+  `Verification:` section. They run before Review against the immutable candidate.
   A failed check becomes a bounded finding for the next implementation cycle;
   there is no qualification operation or separate retry coordinator. Final
   checks must all pass; failures are never accepted by comparing output hashes.
@@ -192,7 +187,7 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 - `deny.readPaths`: paths the worker must not read or modify.
 - `deny.commands`: absolute command paths that must not be exposed to the worker.
 
-`runner.maxCycles`, the branch template, and containment settings are fixed policy in the current schema rather than open-ended tuning knobs. There is no configured Codex version pin or local certification step: the Runner uses the installed `codex` command and applies the fixed sandbox, environment, network, and authority restrictions to every worker invocation.
+The branch template and containment settings are fixed policy in the current schema rather than open-ended tuning knobs. Semantic repair counts are not stop conditions. There is no configured Codex version pin or local certification step: the Runner uses the installed `codex` command and applies the fixed sandbox, environment, network, and authority restrictions to every worker invocation.
 
 ## Safety model in plain language
 

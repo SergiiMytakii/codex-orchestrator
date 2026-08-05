@@ -7,7 +7,12 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
-import { ContainedProofAgent, materializeReportReadView } from '../src/v2/runtime.js';
+import {
+  ContainedImplementationAgent,
+  ContainedProofAgent,
+  materializeReportReadView,
+  selectedConfiguredCheckPolicySha256,
+} from '../src/v2/runtime.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
 import {
@@ -21,7 +26,20 @@ import {
 const packageRoot = join(import.meta.dirname, '..', '..');
 const execFileAsync = promisify(execFile);
 
-test('report read view excludes env, denied paths, and symlinks before triage launch', async () => {
+test('production proof freshness binds one selected affected check to current two-check authority', () => {
+  const authority = { typecheck: 'npm run typecheck', lint: 'npm run lint' };
+  const selected = [{ id: 'typecheck', command: 'npm run typecheck' }];
+  assert.equal(
+    selectedConfiguredCheckPolicySha256(selected, authority),
+    sha256('{"typecheck":"npm run typecheck"}'),
+  );
+  assert.throws(
+    () => selectedConfiguredCheckPolicySha256(selected, { ...authority, typecheck: 'npm run typecheck -- --changed' }),
+    /current configured authority/u,
+  );
+});
+
+test('report read view excludes env, denied paths, and symlinks before contained report launch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'report-read-view-'));
   const repository = join(root, 'repository');
   const destination = join(root, 'read-view');
@@ -108,34 +126,6 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   assert.equal(profile.model, 'gpt-5.6-sol');
   assert.equal(profile.reasoningEffort, 'medium');
   await verifyRuntimeAssetSnapshot(left);
-});
-
-test('triage snapshot carries transitive bug diagnostics and routing document closure', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'runtime-assets-triage-closure-'));
-  const workflowGeneration = await materializeWorkflowGeneration({
-    packageRoot,
-    runtimeRoot: join(root, 'orchestrator'),
-    packageVersion: '2.0.1',
-    bootId: 'boot-a',
-  });
-  const snapshot = await publishRuntimeAssetSnapshot({
-    workflowGeneration,
-    runtimeRoot: join(root, 'runtime'),
-    snapshotRelativePath: 'runs/run-a/attempts/triage/snapshot',
-    operation: 'triage',
-    bootId: 'boot-a',
-  });
-
-  assert.equal(snapshot.skillPaths.includes('skills/diagnosing-bugs/SKILL.md'), true);
-  for (const path of [
-    'docs/agents/bug-workflow-routing.md',
-    'docs/agents/bugfix-quality-gate.md',
-    'docs/agents/confidence-rubric.md',
-    'docs/agents/tool-usage.md',
-  ]) assert.equal(snapshot.referencedDocumentPaths.includes(path), true, path);
-  assert.equal(snapshot.files.some((file) => file.path === 'skills/diagnosing-bugs/SKILL.md'), true);
-  assert.equal(snapshot.files.some((file) => file.path === 'docs/agents/tool-usage.md'), true);
-  await verifyRuntimeAssetSnapshot(snapshot);
 });
 
 test('implementation snapshot carries the bug workflow documents', async () => {
@@ -306,6 +296,59 @@ test('contained Android proof receives only Runner-prepared evidence and no host
   assert.equal(processRuns, 1);
 });
 
+test('contained implementation and proof map a settled launch-gate failure to resumable infrastructure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-launch-gate-resume-'));
+  const orchestratorHome = join(root, 'orchestrator');
+  const targetRoot = join(root, 'target');
+  const worktree = join(targetRoot, '.worktrees', 'issue-42');
+  await mkdir(worktree, { recursive: true });
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot, runtimeRoot: orchestratorHome, packageVersion: '2.0.1', bootId: 'boot-a',
+  });
+  const process = {
+    run: async (invocation: { onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
+      await invocation.onSpawned?.({ pid: 4242, processGroupId: 4242 });
+      return { kind: 'launch-gate-failed' as const };
+    },
+  };
+  const freshness = {
+    headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+    untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'fixture-worktree',
+  };
+  const implementation = new ContainedImplementationAgent({
+    config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'),
+    safePath: '/usr/bin:/bin', bootId: 'boot-a', git: { snapshot: async () => freshness } as never,
+    process: process as never,
+  });
+  const implementationResult = await implementation.run({
+    operation: 'implementation', attemptId: 'implementation-launch-gate', runId: 'run-42', worktreePath: worktree,
+    issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
+    deliveryAuthority: {
+      version: 2, kind: 'issue', issueNumber: 42, issueUrl: 'https://example.invalid/42',
+      issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64),
+    },
+    cycle: 1, reworkFindings: [], repairOnly: false, workflowGeneration,
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(implementationResult, { kind: 'transport-failed', resumable: true });
+
+  const proof = new ContainedProofAgent({
+    config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin',
+    targetRoot, bootId: 'boot-a', androidAdbPath: '/android/adb', iosXcrunPath: '/usr/bin/xcrun',
+    processExecutor: async () => ({ stdout: '', stderr: '', exitCode: 1 }), process: process as never,
+  });
+  const proofResult = await proof.run({
+    attemptId: 'proof-launch-gate', proofId: 'proof-42', runId: 'run-42',
+    issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
+    checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
+    runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
+    repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
+  });
+  assert.deepEqual(proofResult, { kind: 'transport-failed', resumable: true });
+});
+
 test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-assets-negative-'));
   const workflowGeneration = await materializeWorkflowGeneration({
@@ -413,11 +456,6 @@ test('runtime verifier applies every skill binding form and ignores fenced examp
 test('operation snapshot rejects self-consistent removal of referenced bug workflow documents', async () => {
   const affected = {
     implementation: [
-      'docs/agents/bug-workflow-routing.md',
-      'docs/agents/bugfix-quality-gate.md',
-      'docs/agents/confidence-rubric.md',
-    ],
-    triage: [
       'docs/agents/bug-workflow-routing.md',
       'docs/agents/bugfix-quality-gate.md',
       'docs/agents/confidence-rubric.md',
@@ -564,17 +602,11 @@ async function manualRuntimeSnapshot(operation: string, closure: {
     referencedDocumentPaths: closure.referencedDocumentPaths,
     schemaPath: join(snapshotRoot, 'schemas', `${operation}.json`),
     profilePath: join(snapshotRoot, 'profiles', 'fixture.toml'),
-    policy: operation === 'triage'
-      ? {
-        sandboxMode: 'read-only' as const, cwdClass: 'worktree' as const, worktreeAccess: 'read-only' as const,
-        writableRootClasses: [], runnerPostcondition: 'report-only' as const, network: 'deny' as const,
-        networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false as const,
-      }
-      : {
-        sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
-        writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const, network: 'deny' as const,
-        networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false as const,
-      },
+    policy: {
+      sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
+      writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const, network: 'deny' as const,
+      networkHosts: [], mcpTools: [], approvalCeiling: 'never' as const, externalWrite: false as const,
+    },
     ownerUid: process.getuid!(),
     files: files as Array<WorkflowFileRecord & { sealedMode: number; ownerUid: number }>,
     contentSha256: runtimeContentSha256(files),
@@ -600,7 +632,7 @@ function androidConfigFixture(): AgentAutoConfig {
     },
     runner: {
       workspaceRoot: '.codex-orchestrator/worktrees', stateDir: '.codex-orchestrator/state',
-      branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 30, maxCycles: 5,
+      branchTemplate: 'codex/issue-${issueNumber}', pollIntervalSeconds: 30,
     },
     codex: { command: '/usr/bin/false', timeoutMs: 60_000, idleTimeoutMs: 30_000, toolNetwork: 'deny' },
     checks: {},

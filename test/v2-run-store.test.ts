@@ -5,9 +5,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import { createInitialDirectReview } from '../src/v2/direct-delivery.js';
-import { createDirectDeliveryAuthority } from '../src/v2/delivery-authority.js';
-import { hashRouteDecision, hashTriageArtifact, type RouteReceiptV1 } from '../src/v2/route-decision.js';
 import {
   FileRunRecordWriter,
   InMemoryRunRecordWriter,
@@ -115,12 +112,12 @@ test('run state rejects malformed and lifecycle-inconsistent records', async () 
   await assert.rejects(writer.read(), /unsupported/u);
 });
 
-test('run state accepts bounded recovery counters and rejects values beyond the autonomous budgets', async () => {
+test('run state accepts unbounded semantic revisions and resumable infrastructure recovery counters', async () => {
   const root = await temporaryRoot();
   const writer = new FileRunRecordWriter(join(root, 'run-state.json'), deterministicAtomicOptions());
   const recoverable = {
     ...record(),
-    cycle: 5,
+    cycle: 100,
     reportRepairs: 1,
     transportRetries: 1,
     issueSnapshot: {
@@ -134,15 +131,14 @@ test('run state accepts bounded recovery counters and rejects values beyond the 
     frozenCriteria: [{ id: 'criterion-1', order: 1, text: 'The behavior works.', source: 'explicit' }],
     reworkFindings: ['typecheck failed'],
   } as unknown as RunRecord;
-  assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 5);
+  assert.equal((await writer.compareAndSwap(0, body([recoverable]))).runs[0]?.cycle, 100);
 
-  for (const invalid of [
-    { ...recoverable, cycle: 6 },
-    { ...recoverable, reportRepairs: 2 },
-    { ...recoverable, transportRetries: 2 },
+  for (const resumed of [
+    { ...recoverable, reportRepairs: 100 },
+    { ...recoverable, transportRetries: 100 },
   ]) {
     const next = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-    await assert.rejects(next.compareAndSwap(0, body([invalid as RunRecord])), /cycle|Repairs|Retries|status|launches/u);
+    assert.equal((await next.compareAndSwap(0, body([resumed as RunRecord]))).runs[0]?.cycle, 100);
   }
 });
 
@@ -170,67 +166,6 @@ test('run state round-trips the durable blocked-label pending effect exactly', a
   await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /blockKind/u);
 });
 
-
-test('run store persists exact triaging and routed state', async () => {
-  const generationHash = record().workflowGeneration.generationHash;
-  const triage = {
-    version: 1 as const,
-    status: 'direct' as const,
-    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }],
-    assumptions: [],
-    direct: { summary: 'Direct.', behaviors: ['Deliver.'], verification: ['Test.'] },
-    specRequired: null,
-    blocker: null,
-  };
-  const triageRef = {
-    operation: 'triage' as const,
-    attemptId: 'triage-1',
-    artifactSha256: hashTriageArtifact(triage),
-    generationHash,
-  };
-  const receipt: RouteReceiptV1 = {
-    version: 1,
-    route: 'direct',
-    triage: triageRef,
-    review: null,
-    artifact: triage,
-    decisionSha256: '',
-    decidedAt: timestamp(),
-    assumptions: [],
-  };
-  receipt.decisionSha256 = hashRouteDecision(receipt);
-  const budgets = {
-    version: 1 as const,
-    triageRepairs: 0 as const,
-    triageTransportRetries: 0 as const,
-  };
-  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  const triaging = { ...record(), lifecycle: 'triaging' as const, routeExecution: { ...budgets, phase: 'triage-ready' as const } };
-  const routed = { ...record(), lifecycle: 'routed' as const, routeExecution: { ...budgets, phase: 'route-complete' as const, triage: triageRef }, routeReceipt: receipt };
-  await writer.compareAndSwap(0, body([triaging]));
-  const second = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  assert.equal((await second.compareAndSwap(0, body([routed]))).runs[0]?.lifecycle, 'routed');
-
-  const malformed = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  await assert.rejects(malformed.compareAndSwap(0, body([{ ...routed, routeExecution: { ...routed.routeExecution, phase: 'triage-ready' } } as RunRecord])), /route-complete|keys/u);
-});
-
-test('run store persists direct review composites and rejects them on non-direct routes', async () => {
-  const routed = directRoutedRecord();
-  const directReview = createInitialDirectReview({
-    targetFingerprint: '7'.repeat(64), codeReviewerSessionId: 'review-session-1',
-  });
-  const writer = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  const saved = await writer.compareAndSwap(0, body([{
-    ...routed, lifecycle: 'implementing', directReview,
-    deliveryAuthority: createDirectDeliveryAuthority(routed.routeReceipt!),
-  }]));
-  assert.equal((saved.runs[0] as RunRecord & { directReview: typeof directReview }).directReview.stage, 'review');
-
-  const invalid = { ...record(), lifecycle: 'implementing' as const, directReview };
-  const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /direct route|delivery.?authority/u);
-});
 
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
   for (const point of ['before-file-fsync', 'before-rename'] as const) {
@@ -360,32 +295,6 @@ function record(): RunRecord {
     checks: [],
     createdAt: timestamp(),
     updatedAt: timestamp(),
-  };
-}
-
-function directRoutedRecord(): RunRecord {
-  const base = record();
-  const artifact = {
-    version: 1 as const, status: 'direct' as const,
-    inspectedEvidence: [{ kind: 'issue' as const, location: '#42', summary: 'Read issue.' }], assumptions: [],
-    direct: { summary: 'Direct.', behaviors: ['Deliver.'], verification: ['Test.'] },
-    specRequired: null, blocker: null,
-  };
-  const triage = {
-    operation: 'triage' as const, attemptId: 'triage-direct-1', artifactSha256: hashTriageArtifact(artifact),
-    generationHash: base.workflowGeneration.generationHash,
-  };
-  const routeReceipt: RouteReceiptV1 = {
-    version: 1, route: 'direct', triage, review: null, artifact, decisionSha256: '', decidedAt: timestamp(), assumptions: [],
-  };
-  routeReceipt.decisionSha256 = hashRouteDecision(routeReceipt);
-  return {
-    ...base,
-    lifecycle: 'routed',
-    routeExecution: {
-      version: 1, triageRepairs: 0, triageTransportRetries: 0, phase: 'route-complete', triage,
-    },
-    routeReceipt,
   };
 }
 

@@ -51,6 +51,17 @@ test('CLI renders only the typed runIssue outcome and matching exit', async () =
   });
 });
 
+test('CLI reports bounded semantic repair continuation as success rather than transport failure', async () => {
+  const output: string[] = [];
+  const result = { status: 'repair-ready' as const, source: 'review' as const, blockerIds: ['REV-1'], evidencePath: 'repair.json' };
+  const exit = await runCli(['run', '--target', '/tmp/target', '--issue', '17'], {
+    executeRun: async () => result,
+    write: (text) => { output.push(text); },
+  });
+  assert.equal(exit, 0);
+  assert.deepEqual(JSON.parse(output.join('')).result, result);
+});
+
 test('CLI renders effect-free unsupported state as the exact public result with blocked exit', async () => {
   const output: string[] = [];
   const exit = await runCli(['run', '--target', '/tmp/target', '--issue', '17'], {
@@ -115,6 +126,26 @@ test('daemon deduplicates auto and review candidates and suppresses unchanged re
   const changed = async () => ({ status: 'blocked' as const, kind: 'safety' as const, resumable: false, evidencePath: 'blocked.json' });
   await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue], executeRun: changed, write: (text) => output.push(text), lastResults });
   assert.equal(output.length, 3);
+});
+
+test('daemon releases a temporarily unavailable issue and resumes it after other candidates progress', async () => {
+  const issue = (number: number) => ({
+    number, title: `Issue ${number}`, body: '', url: `https://example.invalid/${number}`, state: 'OPEN' as const,
+    labels: [{ name: 'agent:auto' }], comments: [], closedByPullRequestsReferences: [],
+  });
+  const calls: number[] = [];
+  let firstIssueCalls = 0;
+  const executeRun = async ({ issueNumber }: { targetRoot: string; issueNumber: number }) => {
+    calls.push(issueNumber);
+    if (issueNumber === 1 && firstIssueCalls++ === 0) {
+      return { status: 'transport-failed' as const, resumable: true, evidencePath: 'service-down.json' };
+    }
+    return { status: 'review-ready' as const, pullRequestUrl: `https://example.invalid/pr/${issueNumber}`, evidencePath: 'ready.json' };
+  };
+  const lastResults = new Map<number, string>();
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue(1), issue(2)], executeRun, write: () => {}, lastResults });
+  await executeDaemonCandidates({ targetRoot: '/tmp/target', candidates: [issue(1)], executeRun, write: () => {}, lastResults });
+  assert.deepEqual(calls, [1, 2, 1]);
 });
 
 test('continuous daemon retries fresh discovery after a failed tick without replaying stale candidates', async () => {

@@ -1,6 +1,6 @@
 # ADR 0001: Runner-owned issue loop
 
-Status: accepted and implemented by the V2 runtime.
+Status: superseded by ADR 0003. This file records the historical policy.
 
 ## Decision
 

@@ -27,7 +27,6 @@
   ],
   "sharedEvals": [],
   "profiles": {
-    "explorer": "explorer.toml",
     "implementer": "implementer.toml",
     "standards_reviewer": "standards-reviewer.toml"
   },
@@ -98,66 +97,6 @@
         "worktreeAccess": "write",
         "writableRootClasses": ["worktree"],
         "runnerPostcondition": "change-set",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
-    "spec-author": {
-      "entry": "operations/spec-author/SKILL.md",
-      "sourceSkill": "to-spec",
-      "dependencySkills": [],
-      "resources": ["docs/agents/confidence-rubric.md"],
-      "outputSchema": "schemas/spec-author-v1.json",
-      "profile": "implementer",
-      "policy": {
-        "sandboxMode": "workspace-write",
-        "cwdClass": "target-state",
-        "worktreeAccess": "write",
-        "writableRootClasses": ["target-state"],
-        "runnerPostcondition": "spec-only",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
-    "spec-review": {
-      "entry": "operations/spec-review/SKILL.md",
-      "sourceSkill": "code-review",
-      "dependencySkills": [],
-      "resources": ["docs/agents/confidence-rubric.md"],
-      "outputSchema": "schemas/spec-review-v1.json",
-      "profile": "standards_reviewer",
-      "policy": {
-        "sandboxMode": "read-only",
-        "cwdClass": "worktree",
-        "worktreeAccess": "read-only",
-        "writableRootClasses": [],
-        "runnerPostcondition": "report-only",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
-    "triage": {
-      "entry": "operations/triage/SKILL.md",
-      "sourceSkill": "plan",
-      "dependencySkills": ["bug-root-cause-explainer"],
-      "resources": ["docs/agents/coding-skill-routing.md"],
-      "outputSchema": "schemas/triage-route-v1.json",
-      "profile": "explorer",
-      "policy": {
-        "sandboxMode": "read-only",
-        "cwdClass": "worktree",
-        "worktreeAccess": "read-only",
-        "writableRootClasses": [],
-        "runnerPostcondition": "report-only",
         "network": "deny",
         "networkHosts": [],
         "mcpTools": [],

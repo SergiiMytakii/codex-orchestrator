@@ -74,7 +74,7 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
   assert.deepEqual(Object.keys(loaded.manifest.operations).sort(), [
-    'acceptance-proof', 'code-review', 'implementation', 'spec-author', 'spec-review', 'triage',
+    'acceptance-proof', 'code-review', 'implementation',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
     'diagnosing-bugs', 'tdd',
@@ -85,22 +85,12 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
     'docs/agents/bugfix-quality-gate.md',
     'docs/agents/confidence-rubric.md',
   ]) assert.equal(loaded.manifest.operations.implementation.files.includes(path), true, path);
-  assert.equal(loaded.manifest.operations.triage.sourceSkill, 'plan');
   assert.deepEqual(loaded.manifest.skills['bug-root-cause-explainer'].dependencySkills, ['diagnosing-bugs']);
-  for (const path of [
-    'docs/agents/bug-workflow-routing.md',
-    'docs/agents/bugfix-quality-gate.md',
-    'docs/agents/confidence-rubric.md',
-  ]) assert.equal(loaded.manifest.operations.triage.files.includes(path), true, path);
-  for (const path of [
-    'docs/agents/tool-usage.md',
-    'skills/diagnosing-bugs/SKILL.md',
-  ]) assert.equal(loaded.manifest.operations.triage.files.includes(path), true, path);
   assert.equal(loaded.manifest.operations['code-review'].sourceSkill, 'code-review');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
-    'explorer', 'implementer', 'standards_reviewer',
+    'implementer', 'standards_reviewer',
   ]);
 });
 
@@ -162,7 +152,7 @@ test('workflow loader and generation verifier fail closed on tamper and invalid 
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-negative-'));
   const runtimeRoot = join(root, 'runtime');
   const receipt = await materializeWorkflowGeneration({ packageRoot, runtimeRoot, packageVersion: '2.0.1', bootId: 'boot-a' });
-  const path = join(receipt.generationRoot, 'operations', 'triage', 'SKILL.md');
+  const path = join(receipt.generationRoot, 'operations', 'code-review', 'SKILL.md');
   await chmod(path, 0o644);
   await writeFile(path, '# tampered\n');
   await chmod(path, 0o444);
@@ -205,11 +195,6 @@ test('workflow loader rejects canonically rehashed V2 bytes whose adapter omits 
 test('workflow loader rejects canonically rehashed production closures missing bug workflow documents', async () => {
   const affected = {
     implementation: [
-      'docs/agents/bug-workflow-routing.md',
-      'docs/agents/bugfix-quality-gate.md',
-      'docs/agents/confidence-rubric.md',
-    ],
-    triage: [
       'docs/agents/bug-workflow-routing.md',
       'docs/agents/bugfix-quality-gate.md',
       'docs/agents/confidence-rubric.md',

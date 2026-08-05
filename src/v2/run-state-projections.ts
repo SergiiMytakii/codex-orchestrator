@@ -2,7 +2,6 @@ import type { FrozenCriterion, IssueSnapshot } from './acceptance-proof.js';
 import type { AgentAutoConfig } from './config.js';
 import { canonicalJson } from './containment.js';
 import type { RunRecord, RunStateInspection, RunTerminalOutcome } from './run-store.js';
-import type { RouteExecutionV1 } from './route-decision.js';
 
 interface IssueObservation {
   number: number;
@@ -131,15 +130,6 @@ export function blockedLabelProjection(
   if (running || (auto && !blocked)) return { status: 'transition' };
   if (blocked) return { status: 'settled', expected: auto ? [policy.auto, policy.blocked].sort() : [policy.blocked] };
   return { status: 'settled', expected: [] };
-}
-
-export function requireRouteExecution(value: RouteExecutionV1 | undefined): RouteExecutionV1 {
-  if (!value) throw new Error('route execution is missing');
-  return structuredClone(value);
-}
-
-export function sameRouteExecution(left: RouteExecutionV1 | undefined, right: RouteExecutionV1): boolean {
-  return left !== undefined && canonicalJson(left) === canonicalJson(right);
 }
 
 export function sameStrings(left: string[], right: string[]): boolean {

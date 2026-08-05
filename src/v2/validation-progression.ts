@@ -1,13 +1,12 @@
 import { canonicalJson, sha256 } from './containment.js';
 import type { CodeReviewReportV1 } from './code-review-report.js';
-import type { DeliveryAuthorityV1 } from './delivery-authority.js';
+import type { DeliveryAuthority } from './delivery-authority.js';
 import {
   acceptApprovedDirectReview,
   acceptNeedsWorkDirectReview,
   beginDirectReviewRepair,
   createInitialDirectReview,
   prepareDirectReview,
-  recoverTerminalDirectReviewReport,
 } from './direct-delivery.js';
 import type { DirectRepairFindingV1 } from './direct-delivery.js';
 import {
@@ -20,9 +19,9 @@ import type { Lifecycle, PendingEffect, PendingEffectInput, RunRecord } from './
 
 export type ValidationProgressionPhase =
   | 'implementation'
-  | 'full-review'
   | 'checks'
   | 'acceptance-proof'
+  | 'review'
   | 'publication';
 
 export interface ValidationProgressionTransition {
@@ -36,7 +35,7 @@ export interface ValidationProgressionTransition {
     activeAttemptId: string | null;
     pendingEffectId: string | null;
   };
-  feedback: { batchId: string; repairRound: 1 | 2 | 3 } | null;
+  feedback: { batchId: string; repairRound: number } | null;
 }
 
 export interface ValidationRepairSource {
@@ -79,15 +78,14 @@ export interface ValidationCasTransition {
     | 'semantic-repair'
     | 'proof-start'
     | 'proof-passed'
-    | 'feedback-activation'
-    | 'terminal-review-recovery';
+    | 'feedback-activation';
   expected: ValidationProgressionTransition['expected'];
   changes: ValidationTransitionChanges;
 }
 
 export function nextValidationTransition(
   run: Readonly<RunRecord>,
-  authority: Readonly<DeliveryAuthorityV1>,
+  authority: Readonly<DeliveryAuthority>,
 ): ValidationProgressionTransition {
   if (!run.deliveryAuthority || canonicalJson(run.deliveryAuthority) !== canonicalJson(authority)) {
     throw new Error('validation progression authority mismatch');
@@ -99,11 +97,16 @@ export function nextValidationTransition(
     if (run.directReview?.status === 'terminal' || run.directReview?.status === 'clear') {
       throw new Error('implementing validation progression has an invalid review projection');
     }
-    phase = run.directReview?.stage === 'review' ? 'full-review' : 'implementation';
+    phase = 'implementation';
   } else if (run.lifecycle === 'checking') {
     phase = 'checks';
   } else if (run.lifecycle === 'proving') {
     phase = 'acceptance-proof';
+  } else if (run.lifecycle === 'reviewing') {
+    if (!run.proofReceipt || run.directReview?.stage !== 'review') {
+      throw new Error('review validation progression requires candidate proof and an active review');
+    }
+    phase = 'review';
   } else if (run.lifecycle === 'publishing') {
     if (!run.proofReceipt) throw new Error('publication validation progression requires a proof receipt');
     phase = 'publication';
@@ -113,21 +116,15 @@ export function nextValidationTransition(
 
   const batch = run.reviewFeedback?.activeBatch;
   const repairRound = run.reviewFeedback?.repairRound;
-  if (batch && repairRound !== 1 && repairRound !== 2 && repairRound !== 3) {
+  if (batch && (!Number.isSafeInteger(repairRound) || (repairRound as number) < 1)) {
     throw new Error('post-PR validation progression repair round is invalid');
   }
   return {
     kind: 'dispatch',
     phase,
     expected: transitionExpected(run, authority),
-    feedback: batch ? { batchId: batch.batchId, repairRound: repairRound as 1 | 2 | 3 } : null,
+    feedback: batch ? { batchId: batch.batchId, repairRound: repairRound as number } : null,
   };
-}
-
-export function validationRepairBudgetExhausted(run: Readonly<RunRecord>, maxCycles: number): boolean {
-  return run.reviewFeedback?.activeBatch
-    ? run.reviewFeedback.repairRound >= 3
-    : run.cycle >= maxCycles;
 }
 
 export function projectValidationRepair(
@@ -138,7 +135,8 @@ export function projectValidationRepair(
   const authority = run.deliveryAuthority;
   if (!authority) throw new Error('validation repair requires delivery authority');
   if (findings.length === 0) throw new Error('validation repair requires findings');
-  const directReview = run.directReview?.status === 'clear'
+  const directReview = run.directReview && (run.directReview.status === 'clear'
+    || (run.directReview.status === 'active' && run.directReview.stage === 'review-repair'))
     ? beginDirectReviewRepair(run.directReview, (sources ?? findings.map((summary) => {
       const provenance = run.lifecycle === 'proving' ? 'proof' as const : 'check' as const;
       return {
@@ -155,13 +153,13 @@ export function projectValidationRepair(
       summary: source.summary,
       affectedContracts: [...source.affectedContracts],
       status: 'open' as const,
-    })))
+    })), run.candidateBinding?.candidateTreeSha)
     : run.directReview;
   return casTransition(run, 'semantic-repair', {
     lifecycle: 'implementing',
     changeBindingVersion: undefined,
     candidateBinding: undefined,
-    cycle: run.reviewFeedback?.activeBatch ? run.cycle : (run.cycle + 1) as RunRecord['cycle'],
+    cycle: run.reviewFeedback?.activeBatch ? run.cycle : run.cycle + 1,
     ...(run.reviewFeedback?.activeBatch ? { reviewFeedback: reserveNextReviewFeedbackRound(run.reviewFeedback) } : {}),
     reworkFindings: [...findings],
     ...(directReview ? { directReview } : {}),
@@ -182,7 +180,7 @@ export function projectValidationReviewStart(
       targetFingerprint: input.targetFingerprint,
       codeReviewerSessionId: input.reviewerSessionId,
     });
-  return casTransition(run, 'review-start', { directReview });
+  return casTransition(run, 'review-start', { lifecycle: 'reviewing', directReview });
 }
 
 export function projectValidationReviewNeedsWork(
@@ -191,7 +189,8 @@ export function projectValidationReviewNeedsWork(
   artifactSha256: string,
 ): ValidationCasTransition {
   if (!run.directReview) throw new Error('validation review result is orphaned');
-  const repaired = acceptNeedsWorkDirectReview(run.directReview, report, artifactSha256);
+  if (!run.candidateBinding) throw new Error('validation review result requires candidate identity');
+  const repaired = acceptNeedsWorkDirectReview(run.directReview, report, artifactSha256, run.candidateBinding.candidateTreeSha);
   const findings = [
     ...report.defects
       .filter((defect) => defect.status === 'open' || defect.status === 'reopened')
@@ -202,7 +201,7 @@ export function projectValidationReviewNeedsWork(
   ];
   return casTransition(run, 'review-needs-work', {
     lifecycle: 'implementing',
-    cycle: run.reviewFeedback?.activeBatch ? run.cycle : (run.cycle + 1) as RunRecord['cycle'],
+    cycle: run.reviewFeedback?.activeBatch ? run.cycle : run.cycle + 1,
     ...(run.reviewFeedback?.activeBatch ? { reviewFeedback: reserveNextReviewFeedbackRound(run.reviewFeedback) } : {}),
     directReview: repaired,
     reworkFindings: findings,
@@ -217,11 +216,13 @@ export function projectValidationReviewApproved(
   run: Readonly<RunRecord>,
   report: CodeReviewReportV1,
   artifactSha256: string,
+  mode: 'complete' | 'targeted',
 ): ValidationCasTransition {
   if (!run.directReview) throw new Error('validation review result is orphaned');
+  if (!run.candidateBinding) throw new Error('validation review result requires candidate identity');
   return casTransition(run, 'review-approved', {
-    lifecycle: 'checking',
-    directReview: acceptApprovedDirectReview(run.directReview, report, artifactSha256),
+    lifecycle: 'publishing',
+    directReview: acceptApprovedDirectReview(run.directReview, report, artifactSha256, run.candidateBinding.candidateTreeSha, mode),
   });
 }
 
@@ -233,7 +234,7 @@ export function projectValidationReviewReportRepair(run: Readonly<RunRecord>): V
       ...structuredClone(current),
       review: {
         ...current.review,
-        reportRepairs: (current.review.reportRepairs + 1) as typeof current.review.reportRepairs,
+        reportRepairs: current.review.reportRepairs + 1,
       },
     },
   });
@@ -245,7 +246,7 @@ export function projectValidationReviewTransportRetry(run: Readonly<RunRecord>):
   return casTransition(run, 'review-transport-retry', {
     directReview: {
       ...structuredClone(current),
-      review: { ...current.review, transportRetries: 1 },
+      review: { ...current.review, transportRetries: current.review.transportRetries + 1 },
     },
   });
 }
@@ -273,11 +274,29 @@ export function projectValidationProofPassed(
     proofId: string;
     proofReceipt: NonNullable<RunRecord['proofReceipt']>;
     verifiedAt: string;
+    targetFingerprint: string;
+    reviewerSessionId: string;
   },
 ): ValidationCasTransition {
+  const directReview = run.directReview?.stage === 'review-repair'
+    ? prepareDirectReview(run.directReview, input.targetFingerprint, input.reviewerSessionId)
+    : run.directReview?.stage === 'review'
+      ? {
+        ...structuredClone(run.directReview),
+        review: { ...structuredClone(run.directReview.review), reviewerSessionId: input.reviewerSessionId },
+      }
+      : createInitialDirectReview({
+        targetFingerprint: input.targetFingerprint,
+        codeReviewerSessionId: input.reviewerSessionId,
+      });
+  if (directReview.targetFingerprint !== input.targetFingerprint
+    || directReview.review.reviewerSessionId !== input.reviewerSessionId) {
+    throw new Error('proof-passed review target correlation mismatch');
+  }
   return casTransition(run, 'proof-passed', {
-    lifecycle: 'publishing',
+    lifecycle: 'reviewing',
     proofReceipt: structuredClone(input.proofReceipt),
+    directReview,
     reworkFindings: [],
     ...(run.reviewFeedback?.activeBatch ? {
       reviewFeedback: markReviewFeedbackVerified(run.reviewFeedback, {
@@ -294,13 +313,14 @@ export function projectValidationFeedbackActivation(
   input: {
     batch: FrozenReviewFeedbackBatchV1;
     repairFindings: DirectRepairFindingV1[];
+    candidateTreeSha: string;
     pendingEffect: PendingEffectInput;
   },
 ): ValidationCasTransition {
   if (!run.reviewFeedback || run.directReview?.status !== 'clear') {
     throw new Error('validation feedback activation requires a clear reviewed Run');
   }
-  const repairReview = beginDirectReviewRepair(run.directReview, input.repairFindings);
+  const repairReview = beginDirectReviewRepair(run.directReview, input.repairFindings, input.candidateTreeSha);
   return casTransition(run, 'feedback-activation', {
     lifecycle: 'implementing',
     reviewFeedback: activateReviewFeedback(run.reviewFeedback, input.batch),
@@ -318,16 +338,6 @@ export function projectValidationFeedbackActivation(
     terminalOutcome: undefined,
     outcomeEvidenceId: undefined,
     pendingEffect: structuredClone(input.pendingEffect),
-  });
-}
-
-export function projectTerminalValidationReviewRecovery(run: Readonly<RunRecord>): ValidationCasTransition {
-  if (!run.directReview) throw new Error('terminal validation review is missing');
-  return casTransition(run, 'terminal-review-recovery', {
-    lifecycle: 'implementing',
-    directReview: recoverTerminalDirectReviewReport(run.directReview),
-    terminalOutcome: undefined,
-    outcomeEvidenceId: undefined,
   });
 }
 
@@ -352,7 +362,7 @@ export function applyValidationTransition<T>(
 
 function transitionExpected(
   run: Readonly<RunRecord>,
-  authority: Readonly<DeliveryAuthorityV1>,
+  authority: Readonly<DeliveryAuthority>,
 ): ValidationProgressionTransition['expected'] {
   return {
     runId: run.runId,

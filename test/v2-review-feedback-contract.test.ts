@@ -42,7 +42,7 @@ test('consumed sources are append-preserving and batch hashes are deterministic'
   assert.equal(reserveNextReviewFeedbackRound(active).repairRound, 2);
 });
 
-test('review feedback validation rejects unknown keys active terminal mixtures and a fourth round', () => {
+test('review feedback validation rejects unknown keys and permits fourth and later rounds', () => {
   const sourceA = source('pr-thread:T_1', 'Thread body');
   const batch = createFrozenReviewFeedbackBatch({
     runId: '00000000-0000-4000-8000-000000000001', canonicalRepository: 'owner/repo',
@@ -56,7 +56,49 @@ test('review feedback validation rejects unknown keys active terminal mixtures a
   assert.throws(() => validateReviewFeedbackRunData({ ...active, extra: true } as never), /keys/u);
   assert.throws(() => validateReviewFeedbackRunData({ ...active, extraLifecycle: 'blocked-safety' } as never), /keys/u);
   const round3 = reserveNextReviewFeedbackRound(reserveNextReviewFeedbackRound(active));
-  assert.throws(() => reserveNextReviewFeedbackRound(round3), /exhausted/u);
+  assert.equal(reserveNextReviewFeedbackRound(round3).repairRound, 4);
+});
+
+test('review feedback history and consumed source dedup remain valid beyond old numeric caps', () => {
+  const history = Array.from({ length: 300 }, (_, index) => ({
+    kind: 'published' as const,
+    batchId: index.toString(16).padStart(64, '0'),
+    sourceIds: [`pr-review:history-${index}`],
+    priorHeadSha: 'a'.repeat(40),
+    publishedHeadSha: 'b'.repeat(40),
+    pullRequestNumber: 17,
+    summaryCommentId: `comment-${index}`,
+    publishedAt: '2026-07-27T10:00:00.000Z',
+  }));
+  const consumedSourceIds = Array.from({ length: 1_100 }, (_, index) => `pr-thread:consumed-${index}`);
+  const execution = {
+    ...createReviewFeedbackRunData(),
+    previousPublishedHeadSha: 'b'.repeat(40),
+    history,
+    consumedSourceIds,
+  };
+
+  assert.doesNotThrow(() => validateReviewFeedbackRunData(execution));
+  const appended = appendConsumedReviewSourceIds(execution, ['pr-thread:consumed-1099', 'pr-review:new-source']);
+  assert.equal(appended.consumedSourceIds.length, 1_101);
+  assert.equal(appended.consumedSourceIds.filter((id) => id === 'pr-thread:consumed-1099').length, 1);
+});
+
+test('257 trusted sources survive freeze persistence restart and activation without a semantic ceiling', () => {
+  const sources = Array.from({ length: 257 }, (_, index) => source(`pr-thread:T_${index.toString().padStart(3, '0')}`, `Trusted body ${index}`));
+  const batch = createFrozenReviewFeedbackBatch({
+    runId: '00000000-0000-4000-8000-000000000001', canonicalRepository: 'owner/repo',
+    pullRequest: { nodeId: 'PR_1', number: 17, headSha: 'a'.repeat(40), headRefName: 'codex/issue-42', baseRefName: 'main', marker: '<!-- marker -->' },
+    priorPublishedHeadSha: 'a'.repeat(40), sources, frozenAt: '2026-07-27T10:00:00.000Z',
+  });
+  const activated = activateReviewFeedback(
+    { ...createReviewFeedbackRunData(), previousPublishedHeadSha: 'a'.repeat(40) },
+    JSON.parse(JSON.stringify(batch)),
+  );
+  const restarted = JSON.parse(JSON.stringify(activated));
+  assert.doesNotThrow(() => validateReviewFeedbackRunData(restarted));
+  assert.equal(restarted.activeBatch.sources.length, 257);
+  assert.equal(restarted.consumedSourceIds.length, 257);
 });
 
 test('review feedback validation binds trusted bodies and verified receipts to the active batch', () => {

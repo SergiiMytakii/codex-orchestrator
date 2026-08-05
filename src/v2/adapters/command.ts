@@ -9,6 +9,7 @@ export interface ProcessCommandOptions {
   idleTimeoutMs?: number;
   signal?: AbortSignal;
   processGroup?: boolean;
+  maxOutputBytes?: number;
   onStdoutChunk?: (chunk: string) => void | Promise<void>;
   onStderrChunk?: (chunk: string) => void | Promise<void>;
 }
@@ -17,6 +18,15 @@ export interface ProcessCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+export class ProcessOutputLimitError extends Error {
+  readonly code = 'command-output-limit-exceeded';
+
+  constructor(readonly maxOutputBytes: number) {
+    super(`Command output exceeded ${maxOutputBytes} bytes.`);
+    this.name = 'ProcessOutputLimitError';
+  }
 }
 
 export type ProcessExecutor = (
@@ -43,6 +53,8 @@ function runSpawn(
     let timedOut = false;
     let idleTimedOut = false;
     let aborted = false;
+    let outputLimitExceeded = false;
+    let outputBytes = 0;
     const callbackTasks: Array<Promise<void>> = [];
     const ownsProcessGroup = options.processGroup === true && process.platform !== 'win32';
     const child = spawn(file, args, {
@@ -54,6 +66,13 @@ function runSpawn(
     });
     let stdout = '';
     let stderr = '';
+
+    if (options.maxOutputBytes !== undefined
+      && (!Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 1)) {
+      child.kill();
+      reject(new Error('maxOutputBytes must be a positive safe integer'));
+      return;
+    }
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -81,13 +100,28 @@ function runSpawn(
     };
     resetIdleTimeout();
 
+    const capture = (chunk: string, stream: 'stdout' | 'stderr') => {
+      const bytes = Buffer.byteLength(chunk, 'utf8');
+      if (options.maxOutputBytes !== undefined && outputBytes + bytes > options.maxOutputBytes) {
+        outputLimitExceeded = true;
+        signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
+        setTimeout(() => {
+          if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
+        }, 2_000).unref();
+        return false;
+      }
+      outputBytes += bytes;
+      if (stream === 'stdout') stdout += chunk;
+      else stderr += chunk;
+      return true;
+    };
     child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
+      if (!capture(chunk, 'stdout')) return;
       scheduleCallback(options.onStdoutChunk, chunk);
       resetIdleTimeout();
     });
     child.stderr.on('data', (chunk: string) => {
-      stderr += chunk;
+      if (!capture(chunk, 'stderr')) return;
       scheduleCallback(options.onStderrChunk, chunk);
       resetIdleTimeout();
     });
@@ -141,6 +175,10 @@ function runSpawn(
         await Promise.all(callbackTasks);
         if ((aborted || timedOut || idleTimedOut) && ownsProcessGroup && child.pid) {
           await waitForProcessGroupAbsence(child.pid);
+        }
+        if (outputLimitExceeded) {
+          reject(new ProcessOutputLimitError(options.maxOutputBytes!));
+          return;
         }
         if (aborted) {
           resolve({ stdout, stderr: stderr ? `${stderr}\nCommand cancelled.` : 'Command cancelled.', exitCode: 130 });

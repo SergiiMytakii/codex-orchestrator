@@ -6,7 +6,6 @@ import type { DirectRepairFindingV1 } from './direct-delivery.js';
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const SOURCE_ID = /^pr-(?:thread|review):[^\s]+$/u;
-const MAX_SOURCES = 256;
 
 export interface ReviewFeedbackPermissionReceiptV1 {
   permission: 'write' | 'admin';
@@ -61,7 +60,7 @@ export interface ReviewFeedbackPublishedReceiptV1 {
 }
 
 export interface ReviewFeedbackBlockedReceiptV1 {
-  kind: 'blocked-safety' | 'blocked-exhausted';
+  kind: 'blocked-external' | 'blocked-safety' | 'blocked-decision-delta' | 'blocked-out-of-scope' | 'blocked-authority-boundary';
   batchId: string;
   blockedAt: string;
 }
@@ -71,7 +70,7 @@ export interface ReviewFeedbackRunDataV1 {
   updateEpoch: number;
   consumedSourceIds: string[];
   previousPublishedHeadSha: string | null;
-  repairRound: 0 | 1 | 2 | 3;
+  repairRound: number;
   activeBatch: FrozenReviewFeedbackBatchV1 | null;
   history: Array<ReviewFeedbackPublishedReceiptV1 | ReviewFeedbackBlockedReceiptV1>;
   verifiedReceipt: { batchId: string; checkedChangeSha256: string; proofId: string; verifiedAt: string } | null;
@@ -220,12 +219,10 @@ export function activateReviewFeedback(
 
 export function reserveNextReviewFeedbackRound(execution: ReviewFeedbackRunDataV1): ReviewFeedbackRunDataV1 {
   validateReviewFeedbackRunData(execution);
-  if (!execution.activeBatch || execution.repairRound >= 3) {
-    throw new Error('review feedback repair budget is exhausted or inactive');
-  }
+  if (!execution.activeBatch) throw new Error('review feedback repair is inactive');
   const result = {
     ...structuredClone(execution),
-    repairRound: (execution.repairRound + 1) as 2 | 3,
+    repairRound: execution.repairRound + 1,
     verifiedReceipt: null,
   };
   validateReviewFeedbackRunData(result);
@@ -266,13 +263,13 @@ export function publishReviewFeedback(execution: ReviewFeedbackRunDataV1, receip
 
 export function blockReviewFeedback(
   execution: ReviewFeedbackRunDataV1,
-  kind: 'safety' | 'exhausted',
+  kind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary',
   blockedAt: string,
 ): ReviewFeedbackRunDataV1 {
   validateReviewFeedbackRunData(execution);
   if (!execution.activeBatch) throw new Error('review feedback has no active batch to block');
   const receipt: ReviewFeedbackBlockedReceiptV1 = {
-    kind: kind === 'safety' ? 'blocked-safety' : 'blocked-exhausted',
+    kind: `blocked-${kind}`,
     batchId: execution.activeBatch.batchId,
     blockedAt,
   };
@@ -296,8 +293,8 @@ export function validateReviewFeedbackRunData(value: unknown): asserts value is 
   if (!Number.isSafeInteger(value.updateEpoch) || (value.updateEpoch as number) < 0) throw new Error('review feedback update epoch is invalid');
   validateSourceIds(value.consumedSourceIds, 'review feedback consumed source IDs');
   if (value.previousPublishedHeadSha !== null) assertGitSha(value.previousPublishedHeadSha, 'review feedback previous published head');
-  if (![0, 1, 2, 3].includes(value.repairRound as number)) throw new Error('review feedback repair round is invalid');
-  if (!Array.isArray(value.history) || value.history.length > MAX_SOURCES) throw new Error('review feedback history is invalid');
+  if (!Number.isSafeInteger(value.repairRound) || (value.repairRound as number) < 0) throw new Error('review feedback repair round is invalid');
+  if (!Array.isArray(value.history)) throw new Error('review feedback history is invalid');
   for (const item of value.history) validateHistory(item);
   if (value.activeBatch !== null) validateFrozenReviewFeedbackBatch(value.activeBatch);
   if (value.verifiedReceipt !== null) validateVerifiedReceipt(value.verifiedReceipt);
@@ -308,7 +305,7 @@ export function validateReviewFeedbackRunData(value: unknown): asserts value is 
     throw new Error('review feedback idle state is invalid');
   }
   if (value.activeBatch !== null && (value.previousPublishedHeadSha === null
-    || ![1, 2, 3].includes(value.repairRound as number)
+    || (value.repairRound as number) < 1
     || (value.activeBatch as FrozenReviewFeedbackBatchV1).priorPublishedHeadSha !== value.previousPublishedHeadSha)) {
     throw new Error('review feedback active state is invalid');
   }
@@ -332,7 +329,7 @@ export function validateFrozenReviewFeedbackBatch(value: unknown): asserts value
   assertGitSha(value.pullRequest.headSha, 'review feedback pull request head');
   for (const field of ['headRefName', 'baseRefName', 'marker'] as const) assertString(value.pullRequest[field], `review feedback pull request ${field}`);
   assertGitSha(value.priorPublishedHeadSha, 'review feedback prior published head');
-  if (!Array.isArray(value.sources) || value.sources.length === 0 || value.sources.length > MAX_SOURCES) throw new Error('review feedback sources are invalid');
+  if (!Array.isArray(value.sources) || value.sources.length === 0) throw new Error('review feedback sources are invalid');
   let prior = '';
   for (const source of value.sources) {
     validateFrozenSource(source);
@@ -382,7 +379,7 @@ function validateHistory(value: unknown): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('review feedback history item is invalid');
   const kind = (value as { kind?: unknown }).kind;
   if (kind === 'published') validatePublishedReceipt(value);
-  else if (kind === 'blocked-safety' || kind === 'blocked-exhausted') {
+  else if (['blocked-external', 'blocked-safety', 'blocked-decision-delta', 'blocked-out-of-scope', 'blocked-authority-boundary'].includes(kind as string)) {
     exactObject(value, ['kind', 'batchId', 'blockedAt'], 'review feedback blocked receipt');
     assertSha(value.batchId, 'review feedback blocked batch ID');
     assertTimestamp(value.blockedAt, 'review feedback blockedAt');
@@ -410,7 +407,7 @@ function validateVerifiedReceipt(value: unknown): void {
 }
 
 function validateSourceIds(value: unknown, field: string): asserts value is string[] {
-  if (!Array.isArray(value) || value.length > MAX_SOURCES * 4) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${field} is invalid`);
   const seen = new Set<string>();
   for (const item of value) {
     assertSourceId(item, field);
