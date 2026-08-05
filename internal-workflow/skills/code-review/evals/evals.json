@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "skill": "code-review",
+  "cases": [
+    {
+      "id": "concrete-blocker-or-observation",
+      "prompt": "The settled diff has one proven correctness defect and one Fowler smell with no demonstrated impact.",
+      "expected": [
+        "report the correctness defect as a blocker with trigger, impact, and evidence",
+        "report the smell only as a non-blocking observation",
+        "block only because of the concrete defect"
+      ],
+      "forbidden": [
+        "block on the smell alone",
+        "turn a general improvement into a missing obligation"
+      ]
+    },
+    {
+      "id": "one-read-only-reviewer",
+      "prompt": "Run Review on one settled substantial target and report its findings.",
+      "expected": [
+        "launch one fresh Standards reviewer covering requirement fidelity and correctness",
+        "keep Review read-only",
+        "return observations and consolidated blockers to the caller"
+      ],
+      "forbidden": [
+        "repair the target",
+        "start another reviewer from Review"
+      ]
+    }
+  ]
+}

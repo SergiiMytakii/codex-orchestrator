@@ -78,6 +78,6 @@ successor until every repository checkpoint for the wave is confirmed and the
 combined proof is current. Record no settlement state outside the ephemeral
 repository-keyed ledger.
 
-Root may make a small integration-only repair after diff inspection and must
-rerun affected proof. A change to product behavior, ownership, scope, or ticket
+Root never edits a repair. Every authorized in-scope defect returns to a unique
+fresh implementer, then root reruns affected proof. A change to product behavior, ownership, scope, or ticket
 boundaries is a Decision Delta and stops integration.

@@ -8,6 +8,9 @@ description: Research material external API, SDK, specification, service, or sou
 Resolve one external question into reusable evidence for downstream coding work.
 The invoked skill authorizes one `researcher` child; root owns source
 verification, artifact integration, user communication, and later decisions.
+Research authorizes only the one cited evidence artifact described below. It
+does not authorize implementation or production mutation, Git actions, tracker
+writes, or the decision that consumes the evidence.
 
 ## Route Proportionately
 

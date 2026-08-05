@@ -21,6 +21,10 @@ to a later planning artifact.
 
 ## Publish template
 
+For local files, prefix the body with `# <NN> — <Ticket title>`. For a real
+tracker, use the same title as the issue title and begin the body at `## Parent`.
+The body shape is otherwise identical:
+
 ```md
 ## Parent
 
@@ -74,6 +78,10 @@ Publish in dependency order and await each create, link, and label effect
 separately, then reread authoritative tracker state before the next write.
 Persist each returned identity through the Parent/source links in issue bodies.
 Apply labels only after identity reconciliation.
+
+Publication records the graph frontier but never works it. A ticket with no
+unresolved blockers is merely eligible for later separately authorized
+delivery; publication does not start that delivery.
 
 After a timeout, transport loss, or unknown write outcome, reread the tracker
 and retry only a proven-missing effect. Continue an identifiable partial packet

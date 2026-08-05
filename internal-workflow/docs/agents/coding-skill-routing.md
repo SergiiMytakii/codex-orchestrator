@@ -71,16 +71,35 @@ fail meaningfully before the edit.
 A change is substantial when its behavior or contract goes beyond an obvious
 local edit. This includes a public API, persistence, auth or payment,
 concurrency or shared state, and cross-module interaction. Substantial settled
-work launches two distinct fresh children in parallel:
+work launches one fresh `standards_reviewer`. It checks the result against the
+request, issue, or Parent PRD and checks correctness, repository rules, cleanup,
+and legacy or duplicate ownership.
 
-- `spec_reviewer` checks the result against the request, issue, or Parent PRD.
-- `standards_reviewer` checks correctness, repository rules, cleanup, and legacy
-  or duplicate ownership.
-
-Both waits must complete and both reviewers must approve the same settled diff.
+The wait must complete and the reviewer must approve the settled diff.
 Docs, copy, formatting, mechanical config, and an obvious local correction may
 finish with direct proof and no reviewer. Reviewer failure or timeout blocks
 approval; root does not replace independent review with self-review.
+
+A Review blocker requires a concrete correctness defect, missing obligation,
+required-proof gap, or real ownership or runtime conflict. A Fowler smell,
+general improvement, preference, or uncertain concern is a non-blocking
+observation unless separate evidence proves one of those concrete impacts.
+Review remains read-only and runs one fresh Standards reviewer per invocation.
+
+For direct or single-ticket substantial work, Implement consolidates all
+blockers from each review into one repair batch for that revision. The original
+Implement authority covers every verified in-scope repair without another user
+confirmation. After repair it reruns affected proof and launches a targeted
+fresh reviewer over only the repair delta, repaired blockers, direct impact cone,
+and affected proof. Untouched previously approved scope retains approval. This
+repair and targeted Review loop continues until approval; reviewer count is not a
+stop condition. A complete Review repeats only when repair impact cannot be
+isolated from previously approved scope.
+
+Graph children receive no per-ticket delivery Review. After every checkpoint,
+Tickets Orchestrator owns the initial cumulative review over the complete Parent
+range, then follows the same unlimited repair loop with targeted Review of each
+repair delta and directly affected Parent obligations.
 
 Proof and applicable review must approve before staging or commit. Direct and
 single-ticket Implement creates one scoped local commit by default when the
@@ -97,9 +116,9 @@ central configuration details:
 | --- | --- |
 | Root dialogue, integration, and Git ownership | `root` |
 | One isolated executable ticket | `implementer` |
-| Requirement fidelity review | `spec_reviewer` |
-| Correctness and repository-standards review | `standards_reviewer` |
+| Requirement fidelity, correctness, and repository-standards review | `standards_reviewer` |
 | Bounded repository exploration | `explorer` |
+| Independent bounded design alternative | `explorer` |
 | Primary-source external research | `researcher` |
 
 ## Runtime Safety

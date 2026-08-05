@@ -29,7 +29,6 @@
   "profiles": {
     "explorer": "explorer.toml",
     "implementer": "implementer.toml",
-    "spec_reviewer": "spec-reviewer.toml",
     "standards_reviewer": "standards-reviewer.toml"
   },
   "overlayRoot": "scripts/runtime-workflow-overlays",
@@ -132,7 +131,7 @@
       "dependencySkills": [],
       "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/spec-review-v1.json",
-      "profile": "spec_reviewer",
+      "profile": "standards_reviewer",
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",

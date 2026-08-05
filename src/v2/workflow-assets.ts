@@ -30,7 +30,7 @@ const EXPECTED_OPERATION_BINDINGS: Record<string, {
     outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer',
   },
   'spec-author': { sourceSkill: 'to-spec', dependencySkills: [], outputSchema: 'schemas/spec-author-v1.json', profile: 'implementer' },
-  'spec-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/spec-review-v1.json', profile: 'spec_reviewer' },
+  'spec-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/spec-review-v1.json', profile: 'standards_reviewer' },
   triage: {
     sourceSkill: 'plan', dependencySkills: ['bug-root-cause-explainer'],
     outputSchema: 'schemas/triage-route-v1.json', profile: 'explorer',

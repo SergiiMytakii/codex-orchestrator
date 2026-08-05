@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "skill": "to-spec",
+  "cases": [
+    {
+      "id": "combined-prd-stays-contextual",
+      "prompt": "Plan invoked to-spec in combined mode for a spec-and-tickets outcome.",
+      "expected": ["synthesize the PRD from known context", "return the draft to Plan without review or publication"],
+      "forbidden": ["publish an intermediate PRD", "run the packet review"]
+    },
+    {
+      "id": "standalone-planning-context",
+      "prompt": "Publish this synthesized PRD as standalone durable planning context.",
+      "expected": ["publish one Artifact: planning-context issue", "apply no triage state", "preserve planning as non-executable authority"],
+      "forbidden": ["create implementation tickets", "imply implementation authorization"]
+    },
+    {
+      "id": "proportional-prd-does-not-size-tickets",
+      "prompt": "Write a proportional PRD for this risky cross-module outcome without deciding its implementation breakdown.",
+      "expected": ["preserve Decisions For Approval and Non-Obvious Consequences", "include Risk / Proof Notes because risk is material", "leave ticket count and slicing to Plan and to-tickets"],
+      "forbidden": ["make user stories extremely extensive", "determine ticket count from modules, files, or risk"]
+    }
+  ]
+}

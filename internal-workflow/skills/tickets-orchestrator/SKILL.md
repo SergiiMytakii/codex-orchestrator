@@ -1,6 +1,6 @@
 ---
 name: tickets-orchestrator
-description: Coordinate an approved multi-ticket dependency graph through unique fresh workers, strict dependency-safe integration, root-owned Git checkpoints, direct Parent proof, and one cumulative parallel Spec and Standards review. Route a single ticket to Implement.
+description: Coordinate an approved multi-ticket dependency graph through unique fresh workers, strict dependency-safe integration, root-owned Git checkpoints, direct Parent proof, and one cumulative Standards review. Route a single ticket to Implement.
 ---
 
 # Tickets Orchestrator
@@ -101,13 +101,16 @@ the missing scoped checkpoint. Release no successor until every repository
 checkpoint in the wave is confirmed and that combined proof is current. Keep
 all settlement state only in the ephemeral repository-keyed ledger.
 
-Root may repair only a small integration defect discovered from the integrated
-diff. A material in-scope defect must return to a unique fresh implementer for
-the affected existing ticket under that ticket's original bounded assignment
-and no-Git boundary. Root then integrates the worker result, reruns the affected
-proof, and creates a new scoped checkpoint before final review resumes. New
+Any authorized in-scope repair returns to a unique fresh implementer for the
+affected existing ticket under that ticket's original bounded assignment and
+no-Git boundary. Root never edits the repair itself. Root integrates the worker
+result, reruns the affected proof, and creates a new scoped checkpoint before
+final review resumes. New
 behavior, ownership, scope, or ticket boundaries are a Decision Delta and stop
 the graph.
+
+No per-ticket delivery Review runs for graph children. Their worker proof and
+root checkpoint gates accumulate into the one final Parent Review below.
 
 ## Recovery
 
@@ -135,27 +138,39 @@ Compare the complete Parent PRD directly against all full cumulative repository
 ranges. Do not substitute child reports, local tests, tracker state, or the
 last child diff.
 
-The reusable final-review mechanism launches exactly two distinct fresh
-reviewer children in parallel on the same identical repository-keyed set of
-final checkpoints and ranges:
+The reusable final-review mechanism launches exactly one fresh
+`standards_reviewer` on the repository-keyed set of final checkpoints and
+ranges. It checks every Parent obligation directly against the full diff and
+completed proof plus correctness, repository policy, failure paths, cleanup,
+duplicate ownership, compatibility residue, and unnecessary machinery.
 
-- `Assigned role: spec_reviewer` checks every Parent obligation directly
-  against the full diff and completed proof.
-- `Assigned role: standards_reviewer` checks correctness, repository policy,
-  failure paths, cleanup, duplicate ownership, compatibility residue, and
-  unnecessary machinery on that same final range map.
+Capture its non-empty identity, complete its wait, and require findings covering
+both questions plus `APPROVE`. Generic `PASS` without direct
+Parent coverage is rejected. A failed or timed-out reviewer blocks Parent
+completion. A blocker requires a concrete correctness defect, missing Parent
+obligation, required-proof gap, or real ownership or runtime conflict. Fowler
+smells and general improvements remain non-blocking observations without that
+concrete impact, and the reviewer may return `APPROVE` with observations.
 
-Capture both non-empty identities, complete both waits, and require
-axis-specific findings and `APPROVE` from each. Generic `PASS` without direct
-Parent coverage is rejected. A failed or timed-out axis blocks Parent
-completion. When either reviewer finds a material in-scope defect, assign the
+When the reviewer finds a concrete authorized in-scope blocker, assign the
 affected existing ticket to a unique fresh implementer with no Git authority.
 Root integrates the returned repair, reruns affected target-state and combined
 deterministic proof, creates the scoped checkpoint, pins the new revision, and
-launches a new parallel reviewer pair; no old approval carries forward. Root
-may directly make only a small integration repair. Before relaunch, update the
-affected repository's final checkpoint and range and give both reviewers the
-complete updated map.
+launches a targeted fresh reviewer. Before relaunch, update the affected
+repository's final checkpoint and range. Give the reviewer the previous
+reviewed checkpoint as baseline, the repair delta, repaired blockers, directly
+affected Parent obligations and cross-ticket seams, and current affected proof.
+Review only the repair delta and directly affected Parent obligations.
+Untouched parts of the cumulative result retain their approval.
+
+Before each repair dispatch, consolidate every blocker from the current review
+into one graph-final repair batch. Dispatch each affected existing ticket once
+under its original boundary, then settle all returned checkpoints and proof
+before targeted Review. The original Parent and ticket authority covers these
+in-scope repairs without another user confirmation. Repeat the graph-final
+repair and targeted Review loop until approval; reviewer count is never a
+stop condition. Use a complete cumulative Review again only when the repair
+cannot be isolated from previously approved scope.
 
 Deterministic checks may prove this mechanism's contract without counting as a
 real final-review activation. The real activation occurs only for the settled
@@ -172,7 +187,7 @@ Report, per repository key, the integration worktree, baseline SHA, ordered
 checkpoint and recovery-commit SHAs, final checkpoint SHA, and exact final
 range. Also report frontier state, worker identities and write scopes,
 dependency and overlap decisions, checkpoint messages, combined deterministic
-results tied to repository ranges, both final review axes and the identical
-ranges in their briefs when activated, tracker actions, skipped checks, risks,
+results tied to repository ranges, both final review questions and the ranges
+in the reviewer brief when activated, tracker actions, skipped checks, risks,
 Decision Deltas, blockers, and exact Git actions. Never claim Parent completion
 from a child checkpoint or persist the in-memory ledger as handoff state.

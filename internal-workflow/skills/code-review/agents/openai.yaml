@@ -1,6 +1,6 @@
 interface:
   display_name: "Review"
-  short_description: "Parallel Spec and Standards review"
-  default_prompt: "Use $code-review to inspect the settled change with distinct fresh Spec and Standards reviewers in parallel. Report findings without implementing or repairing them."
+  short_description: "Independent requirements and standards review"
+  default_prompt: "Use $code-review to inspect the settled change with one fresh Standards reviewer covering requirement fidelity and correctness. Report findings without implementing or repairing them."
 policy:
   allow_implicit_invocation: true

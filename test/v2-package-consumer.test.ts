@@ -155,7 +155,10 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
     assert.match(await readFile(implementation.entryPath, 'utf8'), /Follow packaged \[Implement\]/u);
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
-    assert.match(await readFile(codeReview.entryPath, 'utf8'), /independent Standards reviewer/u);
+    const codeReviewOperation = await readFile(codeReview.entryPath, 'utf8');
+    assert.match(codeReviewOperation, /independent Standards reviewer/u);
+    assert.match(codeReviewOperation, /requirement\s+fidelity and correctness/u);
+    assert.doesNotMatch(codeReviewOperation, /parallel Spec and Standards/iu);
     assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
@@ -207,14 +210,14 @@ async function assertInstalledContract(installed: string): Promise<void> {
     'unique fresh `implementer`',
     'Workers perform no Git action',
     'clean isolated integration worktree and pinned baseline',
-    'exactly two distinct fresh reviewer children in parallel',
+    'exactly one fresh `standards_reviewer`',
   ]) assert.match(flatGraph, new RegExp(contract.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu'));
 
   const manifest = JSON.parse(await readFile(join(installed, 'internal-workflow', 'manifest.json'), 'utf8')) as {
     profiles: Record<string, string>;
   };
   assert.deepEqual(Object.keys(manifest.profiles).sort(), [
-    'explorer', 'implementer', 'spec_reviewer', 'standards_reviewer',
+    'explorer', 'implementer', 'standards_reviewer',
   ]);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {

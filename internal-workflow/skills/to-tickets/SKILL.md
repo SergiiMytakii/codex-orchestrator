@@ -23,8 +23,9 @@ The primary route remains `planning-only` while compiling or publishing these
 artifacts. `ticket-graph` begins only after separate delivery authorization;
 never report it merely because the planning output is a graph.
 
-The issue tracker and triage vocabulary should have been provided — run
-`$setup-matt-pocock-skills` if not.
+Read the repository's issue-tracker policy and triage vocabulary before
+preparing publication. If either required authority is missing, stop before
+tracker effects and ask the user; do not invent a tracker, schema, or labels.
 
 ## Progressive Reference
 
@@ -37,10 +38,17 @@ tracker effect.
 Split only for an independent outcome, owner, release, real blocker, safe
 parallel boundary, or human/live gate. Do not split by technical layer.
 
-Keep one coherent outcome as one ticket. Add discovery, integration, or HITL
-tickets only when each has its own outcome and blocking relationship. Risk
-strengthens proof and review focus; it does not create tickets. Merge steps that
-share one owner, release, and validation path.
+Each ticket is a tracer-bullet vertical slice: it cuts a narrow but COMPLETE
+path through every relevant layer, is demoable or verifiable on its own, and is
+sized to fit in a single fresh context window. Keep one coherent outcome as one
+ticket. Add discovery, integration, or HITL tickets only when each has its own
+outcome and blocking relationship. Risk strengthens proof and review focus; it
+does not create tickets. Merge steps that share one owner, release, and
+validation path.
+
+Where repository evidence proves a small prefactor is required, "Make the
+change easy, then make the easy change." Keep it inside the same vertical
+outcome unless it is independently verifiable and genuinely blocks later work.
 
 ## Process
 
@@ -53,6 +61,11 @@ create a blocking discovery ticket.
 Explore only enough repository code, tests, ADRs, and domain docs to identify
 the real owner/public seam and a compatible proof. Never invent paths, symbols,
 commands, fixtures, ownership, or behavior.
+
+When an applicable owner/public seam is honestly unknown, create a blocking
+discovery ticket whose observable outcome is the missing owner, seam, and proof
+evidence. Do not publish the dependent implementation ticket as AFK-ready until
+that discovery resolves it.
 
 ### 2. Draft executable vertical tickets
 
@@ -75,6 +88,16 @@ For user-facing work, include an end-to-end walkthrough criterion and use
 `$ui-evidence-proof` as the proof standard. For a wide mechanical refactor, use
 expand-contract and keep each migration batch independently green.
 
+If repository evidence proves an **indivisible migration** whose intermediate
+batches cannot be independently green, do not publish those batches as child
+tickets and do not create a shared red integration branch. Compile one
+executable migration ticket with one owner, one isolated execution scope, and
+one final green acceptance boundary over the complete migrated state. In this
+fallback, intermediate batches are not child checkpoints and release no successor. If
+that complete outcome cannot fit one fresh implementation context or lacks a
+credible final proof, return a Decision Delta instead of publishing an
+unexecutable graph.
+
 ### 3. Freeze the complete publish-ready packet
 
 Keep one contextual packet containing the complete Parent PRD and every exact
@@ -89,8 +112,8 @@ workflow owner. Do not publish any intermediate PRD.
 
 ### 4. Run one fresh semantic packet review
 
-For the settled packet, launch exactly one fresh `spec_reviewer` child. Begin
-its brief with `Assigned role: spec_reviewer`, provide the full source authority
+For the settled packet, launch exactly one fresh `standards_reviewer` child. Begin
+its brief with `Assigned role: standards_reviewer`, provide the full source authority
 and complete publish-ready packet, and require both internal lenses in the same
 review activation: source fidelity and ticket executability.
 
@@ -105,17 +128,27 @@ review activation: source fidelity and ticket executability.
 The reviewer is read-only and returns `APPROVE` or `NEEDS_WORK` with exact
 source/artifact evidence. Capture a non-empty fresh child identity and wait for
 that same child. Do not split the lenses across children and do not launch the
-delivery Spec + Standards pair. A missing, failed, or non-approving review
+delivery Standards review. A missing, failed, or non-approving review
 blocks approval and publication. If repairs change a product decision, return
 that decision to the user rather than resolving it in review.
 
 ### 5. Get one explicit approval
 
 After the semantic review approves, show the complete publish-ready packet and
-obtain one explicit user approval of the exact Parent/ticket bodies, product
+obtain one explicit user approval of the exact Parent and ticket bodies, product
 decisions, scope, exclusions, ticket boundaries, blockers/dependencies,
 ownership, HITL/live gates, and proof obligations. Tracker identifiers, native
 links, and final state are the only fields publication may fill afterward.
+
+The single exact-packet approval also answers Matt's useful breakdown checks:
+
+- Does the granularity feel right?
+- Are the blocking edges correct — does each ticket only depend on tickets that
+  genuinely gate it?
+- Should any tickets be merged or split further?
+
+These are not separate quizzes or approvals. Any requested change rebuilds the
+complete packet under the Decision Delta rule below.
 
 A change to behavior, scope, ownership, ticket boundaries, blockers, or proof
 obligations invalidates approval and returns a Decision Delta. The changed
@@ -135,6 +168,10 @@ blockers first.
   `.scratch/<feature-slug>/issues/<NN>-<slug>.md`.
 - **Real tracker:** publish one issue per ticket in dependency order and use
   native Parent/sub-issue and blocking links.
+
+Record the future frontier — tickets whose blockers are all done — in the
+approved graph, but do not work it. Delivery starts only under separate
+authorization after this planning flow stops.
 
 The issue body plus Parent PRD is the durable execution authority. Apply
 `ready-for-agent` to AFK and `ready-for-human` to HITL tickets directly; do not

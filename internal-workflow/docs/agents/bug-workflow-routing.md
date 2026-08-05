@@ -17,8 +17,9 @@ Inside an active user-authorized implementation/TDD flow, keep a reviewer repair
 in that same TDD activation only when the defect is high-confidence,
 source-required, inside the approved behavior/Seam, and has bounded trigger,
 cause, and repair. Group related cases by protected invariant before one
-consolidated repair batch. New product intent, a new Seam, or a risky trade-off
-stops for user approval. A separately authorized fix with no active flow routes
+consolidated repair batch for the current reviewed revision. Continue repair,
+affected proof, and targeted Review until approval. New product intent, a new
+Seam, or a risky trade-off stops for user approval. A separately authorized fix with no active flow routes
 through `implement`; ambiguous reproduction/cause/repair first routes through
 `diagnosing-bugs`.
 

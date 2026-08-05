@@ -12,9 +12,8 @@ delivery authority by itself.
 
 - **Combined flow:** Combined mode is invoked by Plan. Return the draft to Plan
   in the current context so it can pass the draft directly to `$to-tickets`.
-  Do not review or publish an intermediate PRD. `$to-tickets` owns executable
-  ticket compilation, the complete packet review, one approval, publication,
-  and authoritative read-back. The approved ticket packet is the last planning
+  Do not review or publish an intermediate PRD. `$to-tickets` owns every
+  remaining packet step. The approved ticket packet is the last planning
   artifact before separately authorized delivery.
 - **Standalone:** publish one durable planning-context issue only when
   requested. Mark it `Artifact: planning-context`. Do not apply a triage state
@@ -23,8 +22,10 @@ delivery authority by itself.
 If synthesis exposes a new product decision, keep the PRD unapproved and return
 the decision to the user. Publication alone is never approval.
 
-The issue tracker configuration should have been provided to you — run
-`$setup-matt-pocock-skills` if not.
+Before standalone publication, read the repository's issue-tracker policy. If
+no authoritative tracker or publication procedure exists, stop and ask where
+to publish; do not invent one. Combined mode does not need a tracker until
+`$to-tickets` prepares publication.
 
 ## Artifact Shape
 
@@ -34,11 +35,11 @@ bug, incident, data repair, or understood implementation correction may use a
 template and include only sections that carry a real decision, consequence,
 scope boundary, or proof obligation.
 
-One coherent product outcome normally supports one implementation ticket even
-when it spans modules or repositories. Add another only for a separate owner,
-release boundary, independently verifiable outcome, real blocker, or human/live
-step. Material risk strengthens `Risk / Proof Notes`; it does not make the PRD
-or solution broader. Omit that section when no material risk exists.
+`$to-spec` does not determine implementation-ticket count. PRD length, section
+count, file count, and risk do not size a later ticket packet; Plan and
+`$to-tickets` retain composition and slicing ownership. Material risk
+strengthens `Risk / Proof Notes`; it does not make the PRD or solution broader.
+Omit that section when no material risk exists.
 
 ## Process
 
@@ -46,8 +47,12 @@ or solution broader. Omit that section when no material risk exists.
    ADRs, and reuse cited `$research` artifacts. Keep unsupported external facts
    open instead of converting them into product scope.
 
-2. Record only seams that materially define behavior, proof, or ownership. Ask
-   the user only when a seam choice changes scope, risk, or ownership.
+2. Sketch the seams at which the outcome will be proved. Existing seams should
+   be preferred to new ones. Use the highest seam possible. If new seams are
+   needed, propose them at the highest point you can. The fewer seams across the
+   codebase, the better; the ideal number is one. Record only seams that
+   materially define behavior, proof, or ownership, and ask the user only when
+   a seam choice changes scope, risk, or ownership.
 
 3. Write the template below, then follow the requested mode. A standalone
    planning-context issue is marked `Artifact: planning-context`; it is not an

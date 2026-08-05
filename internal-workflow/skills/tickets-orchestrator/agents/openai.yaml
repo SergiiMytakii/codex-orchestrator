@@ -1,6 +1,6 @@
 interface:
   display_name: "Tickets Orchestrator"
   short_description: "Coordinate approved multi-ticket graphs"
-  default_prompt: "Use $tickets-orchestrator for this approved multi-ticket graph: unique fresh child implementers, strict dependency-safe root integration, root-owned checkpoints, direct cumulative Parent proof, and one parallel Spec and Standards review."
+  default_prompt: "Use $tickets-orchestrator for this approved multi-ticket graph: unique fresh child implementers, strict dependency-safe root integration, root-owned checkpoints, direct cumulative Parent proof, and one fresh Standards review covering requirement fidelity and correctness."
 policy:
   allow_implicit_invocation: true

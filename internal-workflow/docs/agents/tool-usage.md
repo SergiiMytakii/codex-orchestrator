@@ -25,7 +25,11 @@ Before any install, launch, attach, reload, restart, terminate, or force-stop:
    dependency injection, providers, globals, routes, or initialization changes.
 5. Always pass the PID confirmed by `discover --json` as `--expected-pid`; never
    execute the raw discovered attach command.
-6. Verify that the same PID and expected environment remain after each runtime or
+6. Confirm that the generated attach command preserves the selected run's effective
+   target and every `--dart-define` / `--dart-define-from-file`. Missing compile
+   identity must block runtime control rather than fall back to defaults.
+   Treat raw define values as sensitive; inspect only the helper's redacted display.
+7. Verify that the same PID and expected environment remain after each runtime or
    navigation action.
 
 The bundled `flutter_session_ctl.py` helper is the only allowed reload/restart

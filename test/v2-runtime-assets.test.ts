@@ -106,7 +106,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
   assert.equal(profile.name, 'implementer');
   assert.equal(profile.model, 'gpt-5.6-sol');
-  assert.equal(profile.reasoningEffort, 'high');
+  assert.equal(profile.reasoningEffort, 'medium');
   await verifyRuntimeAssetSnapshot(left);
 });
 

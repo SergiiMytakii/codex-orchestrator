@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "skill": "research",
+  "cases": [
+    {
+      "id": "narrow-lookup-stays-inline",
+      "prompt": "Find one current option name in the official documentation for a package already pinned by the repository. No durable note was requested.",
+      "expected": [
+        "read the pinned local version first",
+        "use the owning specialized documentation source inline",
+        "answer in chat without delegation or a repository artifact"
+      ],
+      "forbidden": [
+        "launch a researcher for one narrow lookup",
+        "create a research capsule artifact",
+        "change production code"
+      ]
+    },
+    {
+      "id": "fresh-primary-source-capsule",
+      "prompt": "Compare a material external SDK contract across its current specification, first-party source, and release notes, and save reusable evidence.",
+      "expected": [
+        "record the decision, pinned local context, scope, exclusions, and required freshness",
+        "delegate one bounded read-only question to a researcher",
+        "cite primary sources with version or date, conflicts, unknowns, and labelled inferences",
+        "save exactly one Markdown research artifact"
+      ],
+      "forbidden": [
+        "use a secondary article as authority",
+        "make the blocked implementation decision before research returns",
+        "perform a production mutation"
+      ]
+    },
+    {
+      "id": "root-verifies-material-claims",
+      "prompt": "A researcher returns a cited claim that changes architecture and compatibility.",
+      "expected": [
+        "root opens the exact source behind the material claim",
+        "root repairs unsupported or overstated wording",
+        "the artifact separates sourced fact from repository inference"
+      ],
+      "forbidden": [
+        "accept the child summary as source verification",
+        "treat the artifact as implementation authority",
+        "perform Git or tracker writes"
+      ]
+    }
+  ]
+}

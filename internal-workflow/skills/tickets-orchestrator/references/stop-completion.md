@@ -20,8 +20,8 @@ confirmed for a partially settled multi-repository wave:
 - a ticket, checkpoint, proof result, or final range cannot be assigned to
   exactly one repository-keyed in-memory integration entry;
 - checkpoint ownership, message, scope, or commit result is ambiguous;
-- either final reviewer is missing, reused, incomplete, failed, timed out, tied
-  to another revision, or does not approve its axis; or
+- the final reviewer is missing, incomplete, failed, timed out, tied to another
+  revision, or does not approve; or
 - work is interrupted while index or worktree ownership is uncertain.
 
 ## Recovery
@@ -53,8 +53,8 @@ The graph is complete only when every child has one confirmed root checkpoint,
 all blockers are settled, every final repository worktree boundary is clean,
 deterministic proof is current for every exact `baseline..final` range, the
 complete Parent PRD is proved directly against those full cumulative diffs, and
-two distinct fresh parallel reviewers completed on the identical
-repository-keyed range map with axis-specific `APPROVE` verdicts. A child
+one fresh Standards reviewer completed on the repository-keyed range map with
+an `APPROVE` verdict covering requirement fidelity and correctness. A child
 checkpoint, local test result, tracker status, worker report, generic verdict,
 or review of only the final child cannot establish Parent completion.
 

@@ -43,6 +43,37 @@
       "prompt": "Search finds two matching Parents or publication concurrency cannot be excluded.",
       "expected": ["perform no writes", "fail closed for reconciliation"],
       "forbidden": ["pick one Parent by guess", "create another packet"]
+    },
+    {
+      "id": "tracer-bullet-vertical-outcome",
+      "prompt": "Slice one approved outcome that crosses schema, API, UI, and behavior proof.",
+      "expected": ["create the smallest tracer-bullet ticket that completes the relevant end-to-end path", "keep the ticket demoable or verifiable in one fresh context"],
+      "forbidden": ["split by schema, API, UI, and tests", "create tickets from generic risk"]
+    },
+    {
+      "id": "unknown-owner-seam-becomes-discovery",
+      "prompt": "The approved outcome is clear, but repository evidence cannot identify the applicable owner or public proof seam.",
+      "expected": ["create a blocking discovery ticket for owner, seam, and proof evidence", "block the dependent implementation ticket"],
+      "forbidden": ["guess the owner or seam", "publish the dependent ticket as AFK-ready"]
+    },
+    {
+      "id": "one-exact-packet-approval",
+      "prompt": "The complete Parent and ticket bodies passed the one combined semantic review.",
+      "expected": ["show the exact complete packet", "obtain one approval covering granularity, blocking edges, boundaries, ownership, and proof", "publish only the approved terms"],
+      "forbidden": ["run separate fidelity and executability reviewers", "request multiple approvals", "change ticket boundaries during publication"]
+    },
+    {
+      "id": "indivisible-migration-one-green-ticket",
+      "prompt": "A broad migration has one owner and final proof, but its intermediate batches cannot remain green independently.",
+      "expected": [
+        "compile one executable migration ticket with one final green acceptance boundary",
+        "keep intermediate batches inside that ticket rather than child checkpoints",
+        "return a Decision Delta if the complete migration cannot fit one fresh context"
+      ],
+      "forbidden": [
+        "publish red migration batches as graph children",
+        "create a shared red integration branch"
+      ]
     }
   ]
 }

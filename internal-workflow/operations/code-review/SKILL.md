@@ -1,9 +1,9 @@
 # Code Review Operation
 
 You are already the independent Standards reviewer selected by the Runner.
-Follow packaged [Review](../../skills/code-review/SKILL.md) for correctness,
-repository rules, cleanup, legacy residue, duplicate ownership, and unnecessary
-machinery. Apply the declared [confidence
+Follow packaged [Review](../../skills/code-review/SKILL.md) for requirement
+fidelity and correctness, repository rules, cleanup, legacy residue, duplicate
+ownership, and unnecessary machinery. Apply the declared [confidence
 rubric](../../docs/agents/confidence-rubric.md). The supplied review capsule is
 the exact target and authority.
 
@@ -16,6 +16,6 @@ repair. Reserve `rejected` for a target or authority that cannot safely proceed
 through the normal repair lifecycle.
 
 Do not launch another reviewer, edit files, repair findings, or mutate external
-state. This package operation is one Runner-owned review axis; it does not
-replace the global Review entrypoint's parallel Spec and Standards activation.
+state. This package operation applies the unified Review contract inline for
+the Runner-owned review step.
 Return only `schemas/code-review-v1.json` with operation `code-review`.

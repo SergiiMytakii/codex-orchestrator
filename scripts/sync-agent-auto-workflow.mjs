@@ -12,7 +12,7 @@ const PRODUCTION_OPERATION_BINDINGS = {
   'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'standards_reviewer'],
   implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer'],
   'spec-author': ['to-spec', [], 'schemas/spec-author-v1.json', 'implementer'],
-  'spec-review': ['code-review', [], 'schemas/spec-review-v1.json', 'spec_reviewer'],
+  'spec-review': ['code-review', [], 'schemas/spec-review-v1.json', 'standards_reviewer'],
   triage: ['plan', ['bug-root-cause-explainer'], 'schemas/triage-route-v1.json', 'explorer'],
 };
 

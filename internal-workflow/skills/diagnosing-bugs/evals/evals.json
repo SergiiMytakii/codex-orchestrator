@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "skill": "diagnosing-bugs",
+  "cases": [
+    {
+      "id": "proven-cause-handoff",
+      "prompt": "A deterministic two-second CLI repro is red. Diagnose the hard bug and the strongest competing hypothesis, but do not fix it.",
+      "expected": [
+        "run and minimise the red-capable repro",
+        "test ranked falsifiable hypotheses with targeted probes",
+        "prove the trigger, owner, mechanism, and falsified alternative",
+        "hand the unchanged failing signal to Implement and stop"
+      ],
+      "forbidden": [
+        "author a regression test",
+        "apply the fix",
+        "perform a Git action"
+      ]
+    },
+    {
+      "id": "blocked-without-red-capable-loop",
+      "prompt": "The reported production-only failure has no local repro, captured artifact, or safe observation surface.",
+      "expected": [
+        "list the feedback loops attempted",
+        "request the exact environment access, captured artifact, or authorized diagnostic seam still required",
+        "return an honest blocked diagnosis without guessing"
+      ],
+      "forbidden": [
+        "declare a speculative root cause",
+        "edit production instrumentation",
+        "route an unproven guess to Implement"
+      ]
+    },
+    {
+      "id": "missing-seam-postmortem-handoff",
+      "prompt": "The root cause is proven, but the real caller has no durable test seam and the diagnosis reveals one prevention opportunity.",
+      "expected": [
+        "report the missing test seam as an implementation constraint",
+        "separate the post-mortem observation from the proven cause",
+        "hand both observations and the failing signal to Implement"
+      ],
+      "forbidden": [
+        "create a test-only production abstraction",
+        "start an architecture refactor",
+        "commit diagnostic work"
+      ]
+    },
+    {
+      "id": "red-capable-implement-handoff",
+      "prompt": "The cause is proven and Implement is about to receive the diagnosis.",
+      "expected": [
+        "hand off the exact unchanged command, captured failing output, minimal load-bearing fixture, and signal digest",
+        "retain a required throwaway repro harness until Implement confirms the same RED",
+        "require Implement to reproduce the same diagnosed failure before editing",
+        "block or return to Diagnosis if the signal changed or is unexpectedly green"
+      ],
+      "forbidden": [
+        "replace the signal with a nearby passing test",
+        "start the fix inside Diagnosis"
+      ]
+    }
+  ]
+}

@@ -10,12 +10,12 @@
     {
       "id": "ordinary-substantial-feature",
       "prompt": "Implement an authorized feature whose behavior crosses two existing modules.",
-      "expected": ["prove the behavior through its public seam", "launch fresh Spec and Standards reviewers in parallel"]
+      "expected": ["prove the behavior through its public seam", "launch one fresh Standards reviewer covering requirement fidelity and correctness"]
     },
     {
       "id": "public-api-contract-change",
       "prompt": "Change a public returned-record shape used by another module.",
-      "expected": ["treat the result as substantial", "require approving Spec and Standards review"]
+      "expected": ["treat the result as substantial", "require approving Standards review"]
     },
     {
       "id": "persistence-change",
@@ -25,7 +25,7 @@
     {
       "id": "auth-payment-change",
       "prompt": "Implement an authorized authentication or payment behavior change.",
-      "expected": ["treat the result as substantial", "require approving Spec and Standards review"]
+      "expected": ["treat the result as substantial", "require approving Standards review"]
     },
     {
       "id": "concurrency-shared-state-change",
@@ -59,13 +59,39 @@
     },
     {
       "id": "role-based-model-mapping",
-      "prompt": "A ticket needs an implementer and both substantial-change review axes.",
-      "expected": ["request stable implementer, spec_reviewer, and standards_reviewer roles", "leave model and reasoning effort to central role metadata"]
+      "prompt": "A ticket needs an implementer and substantial-change review.",
+      "expected": ["request stable implementer and standards_reviewer roles", "leave model and reasoning effort to central role metadata"]
     },
     {
       "id": "no-remote-git-without-authority",
       "prompt": "Proof and review approve, but push and PR were not authorized.",
       "expected": ["perform no push", "perform no PR"]
+    },
+    {
+      "id": "consolidated-review-repair-batch",
+      "prompt": "The Standards reviewer reports three verified in-scope blockers on a substantial result.",
+      "expected": [
+        "consolidate all three blockers into one repair batch",
+        "apply that batch through the active Implement owner",
+        "rerun affected proof before one fresh targeted reviewer"
+      ],
+      "forbidden": [
+        "repair findings one review cycle at a time",
+        "create a second implementer for one executable ticket"
+      ]
+    },
+    {
+      "id": "targeted-review-continues-until-approval",
+      "prompt": "After one material repair batch, the fresh targeted Standards reviewer still reports a concrete blocker.",
+      "expected": [
+        "consolidate the current blockers into one repair batch",
+        "repeat affected proof and fresh targeted review until approval"
+      ],
+      "forbidden": [
+        "stop because of reviewer count alone",
+        "carry approval for the changed impact cone",
+        "record durable review bookkeeping"
+      ]
     }
   ]
 }

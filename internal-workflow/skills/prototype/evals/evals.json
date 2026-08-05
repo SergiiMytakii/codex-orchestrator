@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "skill": "prototype",
+  "cases": [
+    {
+      "id": "logic-tui-portable-state",
+      "prompt": "Prototype whether a small state machine feels right before production implementation.",
+      "expected": [
+        "state the single logic question",
+        "isolate the state model behind a small pure portable interface",
+        "build a lightweight TUI that re-renders the complete state after every action",
+        "provide one command and hand the validated answer to Implement"
+      ],
+      "forbidden": [
+        "mix terminal I/O into the state module",
+        "connect to production persistence",
+        "promote the prototype directly to production"
+      ]
+    },
+    {
+      "id": "ui-existing-page-variants",
+      "prompt": "Explore three layouts for a settings area that already has a real host page.",
+      "expected": [
+        "use the existing page first under a development-only prototype convention",
+        "build three structurally different variants selected by ?variant=",
+        "provide a floating switcher with URL and keyboard cycling",
+        "keep existing read-only page context visible"
+      ],
+      "forbidden": [
+        "create an isolated empty route without checking the existing page",
+        "vary only colours or copy",
+        "wire controls to real production mutations"
+      ]
+    },
+    {
+      "id": "no-production-or-git-mutation",
+      "prompt": "The prototype answered its question and one variant won.",
+      "expected": [
+        "record the answer separately from throwaway code",
+        "remove or isolate every prototype artifact",
+        "return production delivery to Implement"
+      ],
+      "forbidden": [
+        "create a branch or commit",
+        "ship the prototype code",
+        "write to a tracker"
+      ]
+    },
+    {
+      "id": "reproducible-primary-source-bundle",
+      "prompt": "The throwaway prototype answered its question and will now be cleaned from the product tree.",
+      "expected": [
+        "preserve a self-contained reproduction bundle outside the production tree before cleanup",
+        "include exact source, inputs, deterministic command or URL, observed output, answer, content digests, host revision, toolchain, lockfiles, and required host files",
+        "bundle a complete patch for every dirty tracked dependency and exact bytes for every untracked dependency; paths or digests alone are insufficient",
+        "restore UI dependencies with read-only fixtures in an isolated worktree at the recorded revision",
+        "return the bundle path while production delivery remains with Implement"
+      ],
+      "forbidden": [
+        "create a prototype branch or commit",
+        "copy secrets or production data",
+        "clean up while a required dirty or untracked dependency is not recoverable from the bundle",
+        "promote prototype source into production"
+      ]
+    }
+  ]
+}

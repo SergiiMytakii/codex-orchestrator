@@ -77,25 +77,25 @@
     {
       "id": "cumulative-parent-review-mechanism",
       "prompt": "All graph checkpoints and deterministic proof are settled at one final revision.",
-      "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch exactly two distinct fresh Spec and Standards reviewers in parallel on the identical revision", "wait for both axis-specific approvals"],
+      "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch exactly one fresh Standards reviewer covering Parent obligations and correctness", "wait for its approval"],
       "forbidden": ["review only the last child", "accept a generic PASS", "reuse a reviewer context", "create durable review lifecycle state"]
     },
     {
       "id": "repository-ranges-in-proof-review-and-handoff",
       "prompt": "A two-repository graph is ready for final proof, reviewer briefs, and handoff.",
-      "expected": ["pin an exact baseline..final range for each repository", "give both reviewers the identical repository-keyed baselines, final checkpoints, ranges, and proof", "report each integration worktree, checkpoint and recovery commit, and final range in handoff"],
-      "forbidden": ["review only one repository", "give reviewers different range maps", "persist the in-memory ledger as handoff state"]
+      "expected": ["pin an exact baseline..final range for each repository", "give the reviewer the repository-keyed baselines, final checkpoints, ranges, and proof", "report each integration worktree, checkpoint and recovery commit, and final range in handoff"],
+      "forbidden": ["review only one repository", "omit a repository range from the reviewer brief", "persist the in-memory ledger as handoff state"]
     },
     {
-      "id": "failed-final-review-axis",
-      "prompt": "The Spec reviewer approves but the Standards reviewer fails or times out.",
-      "expected": ["block Parent completion", "report the failed Standards axis"],
-      "forbidden": ["average the verdicts", "replace the reviewer with root self-review", "mark the Parent complete"]
+      "id": "failed-final-review",
+      "prompt": "The Standards reviewer fails or times out.",
+      "expected": ["block Parent completion", "report the failed Standards review"],
+      "forbidden": ["replace the reviewer with root self-review", "mark the Parent complete"]
     },
     {
       "id": "material-repair-reviews-new-revision",
       "prompt": "A final reviewer finds a material in-scope defect in affected existing ticket #33.",
-      "expected": ["assign ticket #33 to a unique fresh implementer with no Git authority", "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint", "launch a new distinct fresh parallel Spec and Standards pair on the new identical revision"],
+      "expected": ["assign ticket #33 to a unique fresh implementer with no Git authority", "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint", "launch a new distinct fresh targeted Standards reviewer on the new revision"],
       "forbidden": ["have root implement the material defect", "reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
     },
     {
@@ -103,6 +103,22 @@
       "prompt": "All local graph checkpoints and cumulative acceptance approve, but push and PR were not separately authorized.",
       "expected": ["report local checkpoint state", "perform no push or PR"],
       "forbidden": ["infer push authority", "open a PR", "mutate the tracker without authority"]
+    },
+    {
+      "id": "cumulative-final-review-repair-loop",
+      "prompt": "The cumulative graph-final Standards reviewer reports blockers in two existing tickets, and the targeted reviewer still reports one blocker.",
+      "expected": [
+        "consolidate all current-review blockers into one graph-final repair batch",
+        "dispatch each affected existing ticket once through a unique fresh Gitless implementer",
+        "settle updated checkpoints and cumulative proof before one fresh targeted Standards reviewer",
+        "continue the repair and targeted Review loop until approval"
+      ],
+      "forbidden": [
+        "run per-ticket delivery Review",
+        "stop because of reviewer count alone",
+        "carry approval for the changed impact cone",
+        "persist review bookkeeping"
+      ]
     }
   ]
 }

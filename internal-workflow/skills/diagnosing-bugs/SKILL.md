@@ -5,11 +5,11 @@ description: Diagnose hard, flaky, unclear, or performance bugs through reproduc
 
 # Diagnosing Bugs
 
-A diagnosis-only discipline for hard bugs. Skip phases only when explicitly justified.
+A diagnosis-only discipline for hard bugs. Skip phases only when explicitly justified. End with a proven root cause or an honest blocker.
 
-Routing precedence: use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md`. This skill owns reproduction and root-cause proof. It never owns the regression test, fix, post-fix verification, commit, or PR lifecycle. Once the cause is proven, hand the reproducible signal and evidence to `implement` and stop.
+Routing precedence: use [`../../docs/agents/bug-workflow-routing.md`](../../docs/agents/bug-workflow-routing.md). This skill owns reproduction and root-cause proof. It does not own the regression test or fix, post-fix verification, production mutation, or Git lifecycle. Once the cause is proven, hand the reproducible signal and evidence to `implement` and stop.
 
-Use `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/confidence-rubric.md` when deciding whether a hypothesis or root cause is high-confidence enough to report or hand off. Low-confidence concerns are questions or verification gaps, not proven causes.
+Use [`../../docs/agents/confidence-rubric.md`](../../docs/agents/confidence-rubric.md) when deciding whether a hypothesis or root cause is high-confidence enough to report or hand off. Low-confidence concerns are questions or verification gaps, not proven causes.
 
 When exploring the codebase, read `CONTEXT.md` (if it exists) to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
 
@@ -28,7 +28,7 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 5. **Replay a captured trace.** Save a real network request / payload / event log to disk; replay it through the code path in isolation.
 6. **Throwaway harness.** Spin up a minimal subset of the system (one service, mocked deps) that exercises the bug code path with a single function call.
 7. **Property / fuzz loop.** If the bug is "sometimes wrong output", run 1000 random inputs and look for the failure mode.
-8. **Bisection harness.** If the bug appeared between two known states (commit, dataset, version), automate "boot at state X, check, repeat" so you can `git bisect run` it.
+8. **Bisection harness.** If the bug appeared between two known states (snapshot, dataset, version), automate "boot at state X, check, repeat" over read-only states supplied by the active driver. Diagnosis performs no checkout or other Git action.
 9. **Differential loop.** Run the same input through old-version vs new-version (or two configs) and diff outputs.
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with `scripts/hitl-loop.template.sh` so the loop is still structured. Captured output feeds back to you.
 
@@ -50,7 +50,7 @@ The goal is not a clean repro but a **higher reproduction rate**. Loop the trigg
 
 ### When you genuinely cannot build a loop
 
-Stop and say so explicitly. List what you tried. Ask the user for: (a) access to whatever environment reproduces it, (b) a captured artifact (HAR file, log dump, core dump, screen recording with timestamps), or (c) permission to add temporary production instrumentation. Do **not** proceed to hypothesise without a loop.
+Stop and say so explicitly. List what you tried. Ask the user for: (a) access to whatever environment reproduces it, (b) a captured artifact (HAR file, log dump, core dump, screen recording with timestamps), or (c) an authorized Implement change that adds the missing diagnostic seam. Do **not** proceed to hypothesise without a loop, and do not edit production source or runtime state from this skill.
 
 ### Completion criterion — a tight loop that goes red
 
@@ -102,10 +102,12 @@ Each probe must map to a specific prediction from Phase 3. **Change one variable
 Tool preference:
 
 1. **Debugger / REPL inspection** if the env supports it. One breakpoint beats ten logs.
-2. **Targeted logs** at the boundaries that distinguish hypotheses.
+2. **Targeted logs** in a throwaway harness or an already-authorized diagnostic surface at the boundaries that distinguish hypotheses.
 3. Never "log everything and grep".
 
 **Tag every debug log** with a unique prefix, e.g. `[DEBUG-a4f2]`. Cleanup at the end becomes a single grep. Untagged logs survive; tagged logs die.
+
+If distinguishing the hypotheses requires changing production source or runtime state, stop with that missing instrumentation seam and hand it to `implement`. Diagnosis may describe the smallest observation point, but it does not apply that mutation.
 
 **Perf branch.** For performance regressions, logs are usually wrong. Instead: establish a baseline measurement (timing harness, `performance.now()`, profiler, query plan), then bisect. Measure first, isolate the cause second.
 
@@ -117,15 +119,29 @@ Prove the winning hypothesis against the tight loop before reporting it as the r
 2. Show the probe result that confirmed the winning prediction and the result that ruled out the strongest alternative.
 3. Re-run the unchanged repro after removing or disabling the probe. It must still produce the original symptom; a probe-induced failure is not proof.
 4. Classify confidence with the confidence rubric. If an assumption still changes the conclusion, report the remaining verification gap instead of claiming a proven cause.
-5. Remove all `[DEBUG-...]` instrumentation and delete throwaway prototypes unless the user explicitly authorized a diagnostic artifact to remain.
+5. Remove all `[DEBUG-...]` instrumentation and unrelated throwaway
+   prototypes. When the red signal depends on a throwaway harness, keep the
+   minimal repro harness and fixture available with the handoff until Implement
+   confirms the same RED and creates the durable regression test. This narrow
+   executable handoff artifact is not production code or a Git action; after
+   confirmation, the active root removes it unless the user authorized it to
+   remain.
 
 Then stop. Do not author a regression test, apply or recommend a speculative patch, run post-fix checks, commit, push, open a PR, or update a tracker. Hand `implement`:
 
-- the exact reproduction command and captured failing signal;
-- the minimal load-bearing scenario;
+- the exact unchanged reproduction command and captured pre-fix failing output;
+- the minimal load-bearing fixture, inputs, state, and steps;
+- a signal digest covering the command, fixture bytes, and expected failing verdict;
 - the proven trigger, owner, mechanism, and supporting probe evidence;
 - the strongest alternative ruled out and how it was falsified;
-- any missing seam, environment dependency, or residual uncertainty that constrains implementation proof.
+- any missing test seam, environment dependency, or residual uncertainty that constrains implementation proof;
+- post-mortem observations about what could have prevented the bug, clearly separated from the proven cause and without starting architecture or production work.
+
+The handoff is executable evidence, not narration. Implement must rerun the
+unchanged signal before editing and get the same diagnosed failure. A missing
+fixture, changed digest, different symptom, or unexpectedly green result
+returns to Diagnosis or blocks the fix; Implement must not silently substitute
+a nearby test.
 
 If the root cause is not proven, do not hand off a guess as implementation input. Return the best red-capable signal, tested hypotheses, and the concrete evidence or access still required.
 
@@ -150,8 +166,9 @@ Use this shape when reporting back:
 
 ## Implement handoff
 
-- Preserve this signal: <reproduction command and expected failing verdict>
-- Constraints: <proof seam, environment dependency, or residual uncertainty>
+- Preserve this signal: <exact unchanged reproduction command, captured pre-fix failing output, minimal load-bearing fixture, signal digest, and expected failing verdict>
+- Constraints: <missing test seam, environment dependency, or residual uncertainty>
+- Post-mortem observations: <prevention or architecture evidence for later authorized work>
 - Next owner: `implement`
 ```
 

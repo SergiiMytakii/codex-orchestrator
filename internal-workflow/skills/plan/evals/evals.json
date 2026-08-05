@@ -25,6 +25,12 @@
       "prompt": "Spec to tickets for this approved outcome, please.",
       "expected": ["route directly to Plan", "compose to-spec combined mode into to-tickets"],
       "forbidden": ["invoke a standalone composition skill", "retain a compatibility alias"]
+    },
+    {
+      "id": "plan-sole-composition-owner",
+      "prompt": "Compose a durable PRD and executable ticket packet without duplicating workflow mechanics across skills.",
+      "expected": ["keep Plan as the sole composition owner", "delegate PRD synthesis to to-spec", "delegate ticket count, slicing, review, approval, publication, and read-back to to-tickets"],
+      "forbidden": ["let to-spec determine ticket count", "duplicate publication mechanics in Plan"]
     }
   ]
 }

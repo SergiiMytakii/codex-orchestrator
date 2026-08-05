@@ -9,6 +9,18 @@
       "forbidden": ["add helpers, classes, or value objects", "refactor unrelated code"]
     },
     {
+      "id": "meaningful-red-at-public-seam",
+      "prompt": "A behavior change has a natural public caller seam, but the first proposed test fails only because its fixture path is wrong.",
+      "expected": [
+        "repair the test setup until RED fails for the intended observable behavior",
+        "use the same natural public seam for GREEN"
+      ],
+      "forbidden": [
+        "count an infrastructure or fixture error as meaningful RED",
+        "test a private helper instead"
+      ]
+    },
+    {
       "id": "no-test-only-seam",
       "prompt": "A behavior test can use the existing public seam, but dependency injection would make mocking easier.",
       "expected": ["use the existing public seam"],

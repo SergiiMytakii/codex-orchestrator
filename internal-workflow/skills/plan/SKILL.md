@@ -19,14 +19,19 @@ without a planning artifact.
   needed. Do not create a PRD or tickets merely to record the conversation.
 - Create a durable PRD only when product authority must survive the current
   context or be consumed in a later fresh context.
-- Create tickets only when independent outcomes, owners, releases, real
-  blockers, safe parallel boundaries, or human/live gates justify separate
-  slices. File count, technical layers, or generic risk do not justify a split.
+- Decide whether durable executable tickets are needed. Once they are,
+  `$to-tickets` owns their count and slicing from the approved product
+  authority; Plan does not pre-size the packet from file count, technical
+  layers, or generic risk.
 
 The Parent PRD is the sole product and final-acceptance authority. Tickets are
 local executable slices; they do not duplicate that authority.
 
 ## Durable composition
+
+Plan owns the composition sequence. `$to-spec` owns PRD synthesis,
+`$to-tickets` owns executable slicing and publication, and neither primitive
+repeats the other's mechanics.
 
 For a requested spec-and-tickets outcome:
 
