@@ -51,6 +51,7 @@ export interface CodexProcessInput {
   idleTimeoutMs: number;
   operationPolicy: WorkflowOperationPolicy;
   executionProfile: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
+  agentProfilePaths?: Record<string, string>;
   onSpawned: (identity: {
     pid: number;
     processGroupId: number;
@@ -116,6 +117,7 @@ export class CodexProcess {
         tmpDir: input.tmpDir,
         safePath: input.safePath,
         operationPolicy: input.operationPolicy,
+        agentProfilePaths: input.agentProfilePaths,
         executionProfile: liveSmokeModel
           ? { ...input.executionProfile, model: liveSmokeModel }
           : input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_CODEX_DEFAULT_MODEL === '1'

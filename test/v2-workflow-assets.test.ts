@@ -87,10 +87,12 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   ]) assert.equal(loaded.manifest.operations.implementation.files.includes(path), true, path);
   assert.deepEqual(loaded.manifest.skills['bug-root-cause-explainer'].dependencySkills, ['diagnosing-bugs']);
   assert.equal(loaded.manifest.operations['code-review'].sourceSkill, 'code-review');
+  assert.deepEqual(loaded.manifest.operations['code-review'].reviewers, ['spec_reviewer', 'standards_reviewer']);
+  assert.equal(loaded.manifest.operations['code-review'].profile, 'review_coordinator');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
-    'implementer', 'standards_reviewer',
+    'implementer', 'review_coordinator', 'spec_reviewer', 'standards_reviewer',
   ]);
 });
 
@@ -127,6 +129,7 @@ test('workflow packages only static target scenarios with no live execution meta
     'skill/bug-root-cause-explainer',
     'skill/code-review',
     'skill/diagnosing-bugs',
+    'skill/grilling',
     'skill/implement',
     'skill/plan',
     'skill/prototype',
@@ -223,7 +226,7 @@ test('workflow loader rejects canonically rehashed production closures missing b
   }
 });
 
-test('workflow loader binds exact operation mappings and canonical manifest bytes', async () => {
+test('workflow loader accepts workflow-owned profiles and rejects non-canonical manifest bytes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-binding-'));
   const copiedPackage = join(root, 'package');
   await cp(join(packageRoot, 'internal-workflow'), join(copiedPackage, 'internal-workflow'), { recursive: true });
@@ -236,9 +239,10 @@ test('workflow loader binds exact operation mappings and canonical manifest byte
     .filter((entry: string) => entry !== 'profiles/implementer.toml')
     .concat('profiles/standards_reviewer.toml')
     .sort();
-  rehash(rebound);
+  rehashV2Manifest(rebound);
   await writeFile(path, `${canonicalJson(rebound)}\n`);
-  await assert.rejects(loadPackageWorkflow(copiedPackage), /binding/iu);
+  const loaded = await loadPackageWorkflow(copiedPackage);
+  assert.equal(loaded.manifest.operations.implementation.profile, 'standards_reviewer');
 
   await writeFile(path, `${JSON.stringify(original, null, 2)}\n`);
   await assert.rejects(loadPackageWorkflow(copiedPackage), /canonical/iu);

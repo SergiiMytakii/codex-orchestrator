@@ -1,6 +1,6 @@
 interface:
   display_name: "Grilling"
-  short_description: "Stress-test decisions against code and domain docs"
-  default_prompt: "Use $grilling on root to stress-test this decision interactively against codebase evidence and domain language; keep user questions and accepted decisions on root, with read-only evidence or analysis children only when needed."
+  short_description: "Stress-test decisions in frontier rounds"
+  default_prompt: "Use $grilling on root to map the dependency tree, ask each currently unblocked frontier in a numbered round, and stop for explicit shared-understanding confirmation without writing domain docs."
 policy:
   allow_implicit_invocation: true

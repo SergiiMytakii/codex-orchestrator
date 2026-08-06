@@ -32,6 +32,7 @@ export interface RuntimeAssetSnapshot {
   referencedDocumentPaths: string[];
   schemaPath: string;
   profilePath: string;
+  reviewerProfiles: Record<string, string>;
   policy: WorkflowOperationPolicy;
   ownerUid: number;
   files: RuntimeAssetFileEvidence[];
@@ -147,6 +148,11 @@ export async function verifyRuntimeAssetSnapshot(snapshot: RuntimeAssetSnapshot)
     if (typeof path !== 'string' || typeof expectedPath !== 'string'
       || resolve(path) !== resolve(root, ...expectedPath.split('/'))) throw new Error('runtime asset authority path drift');
   }
+  for (const [id, path] of Object.entries(snapshot.reviewerProfiles)) {
+    if (!/^[a-z0-9_]+$/u.test(id) || !snapshot.files.some((file) => resolve(root, ...file.path.split('/')) === resolve(path))) {
+      throw new Error('runtime asset reviewer profiles drift');
+    }
+  }
 }
 
 async function snapshotFromReady(
@@ -175,6 +181,8 @@ async function snapshotFromReady(
     referencedDocumentPaths: [...operation.referencedDocumentPaths],
     schemaPath: remap(operation.schemaPath),
     profilePath: remap(operation.profilePath),
+    reviewerProfiles: Object.fromEntries(Object.entries(operation.reviewerProfiles)
+      .map(([id, path]) => [id, remap(path)])),
     policy: structuredClone(operation.policy),
     ownerUid: runnerUid(),
     files,

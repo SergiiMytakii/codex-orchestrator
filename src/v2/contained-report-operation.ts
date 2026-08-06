@@ -66,6 +66,8 @@ export interface PreparedContainedReportAttempt {
   toolHome?: string;
   tmpDir?: string;
   profile?: WorkflowExecutionProfile;
+  reviewers?: string[];
+  reviewerProfiles?: Record<string, string>;
 }
 
 export type ContainedReportLaunchResult =
@@ -149,7 +151,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
         },
       };
     }
-    return this.finishWithSnapshot(input.worktreePath, before, launchResult, input);
+    return this.finishWithSnapshot(input.worktreePath, before, launchResult, input, attempt);
   }
 
   private async finishWithSnapshot(
@@ -157,6 +159,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     before: ReportOnlyWorktreeSnapshot,
     launchResult: Exclude<ContainedReportLaunchResult, { status: 'safe-halt' }>,
     input?: ContainedReportOperationInput,
+    attempt?: PreparedContainedReportAttempt,
   ): Promise<ContainedReportOperationResult> {
     let after: ReportOnlyWorktreeSnapshot;
     try {
@@ -170,7 +173,10 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
 
     if (launchResult.status !== 'completed') return launchResult;
     if (!input) return { status: 'blocked', kind: 'external', code: 'report-operation-prepare-failed' };
-    return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes, input.reviewContext);
+    return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes, {
+      ...input.reviewContext!,
+      availableReviewers: [...(attempt?.reviewers ?? [])],
+    });
   }
 }
 

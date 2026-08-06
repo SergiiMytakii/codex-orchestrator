@@ -53,8 +53,8 @@ The graph is complete only when every child has one confirmed root checkpoint,
 all blockers are settled, every final repository worktree boundary is clean,
 deterministic proof is current for every exact `baseline..final` range, the
 complete Parent PRD is proved directly against those full cumulative diffs, and
-one fresh Standards reviewer completed on the repository-keyed range map with
-an `APPROVE` verdict covering requirement fidelity and correctness. A child
+one fresh Spec reviewer plus one fresh Standards reviewer completed on the
+repository-keyed range map with approval for both lenses. A child
 checkpoint, local test result, tracker status, worker report, generic verdict,
 or review of only the final child cannot establish Parent completion.
 

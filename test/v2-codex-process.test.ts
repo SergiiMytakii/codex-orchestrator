@@ -134,6 +134,26 @@ test('contained argv rejects operation policy widening and honors a declared rea
   }), /authority/iu);
 });
 
+test('contained argv binds packaged reviewer profiles as executable named agents', () => {
+  const base = {
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    agentProfilePaths: {
+      spec_reviewer: '/sealed/profiles/spec_reviewer.toml',
+      standards_reviewer: '/sealed/profiles/standards_reviewer.toml',
+    },
+  };
+  const args = buildContainmentCodexArgs(base);
+  assert.equal(args.includes('agents.spec_reviewer.config_file="/sealed/profiles/spec_reviewer.toml"'), true);
+  assert.equal(args.includes('agents.standards_reviewer.config_file="/sealed/profiles/standards_reviewer.toml"'), true);
+  assert.throws(() => buildContainmentCodexArgs({ ...base, agentProfilePaths: { 'bad.role': '/tmp/profile.toml' } }), /profile binding/u);
+
+  const ordered = buildContainmentCodexArgs({ ...base, agentProfilePaths: {
+    a_: '/sealed/profiles/a_.toml', a1: '/sealed/profiles/a1.toml',
+  } });
+  assert.ok(ordered.indexOf('agents.a1.config_file="/sealed/profiles/a1.toml"')
+    < ordered.indexOf('agents.a_.config_file="/sealed/profiles/a_.toml"'));
+});
+
 test('awaits stdin, exit, process-group absence, streams, and only then reads the report', async () => {
   await withRunFixture(async (fixture) => {
     const events: string[] = [];

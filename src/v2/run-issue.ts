@@ -156,6 +156,7 @@ export interface RunIssueGit {
 interface ReviewValidationScope {
   mode: 'complete' | 'targeted';
   repairPatch: string | null;
+  targetPatch: string;
   changedFiles: string[];
   checks: Record<string, string>;
   criteria: FrozenCriterion[];
@@ -1655,7 +1656,12 @@ export class RunIssue {
       }
       const finalBinding = active.record.candidateBinding;
       if (!finalBinding) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
-      const reviewScope = await this.reviewValidationScope(active, frozenCriteria, checkPolicy.checks, config.deny.readPaths);
+      let reviewScope: ReviewValidationScope;
+      try {
+        reviewScope = await this.reviewValidationScope(active, frozenCriteria, checkPolicy.checks, config.deny.readPaths);
+      } catch (error) {
+        return this.invokedFailure(active, 'review-target-unavailable', error instanceof Error ? error.message : undefined);
+      }
       const configuredChecks = Object.entries(reviewScope.checks);
       const finalCheckPolicySha256 = sha256(canonicalJson(reviewScope.checks));
       const reusableChecks = active.record.checks.filter((check) =>
@@ -2821,13 +2827,21 @@ export class RunIssue {
     const binding = active.record.candidateBinding;
     const review = active.record.directReview;
     if (!binding) throw new Error('review scope requires candidate identity');
+    const completeDiff = await this.dependencies.git.diffTrees(
+      active.record.worktreePath,
+      active.record.baseSha,
+      binding.candidateTreeSha,
+    );
+    if (completeDiff.changedFiles.length === 0 || completeDiff.patch.trim().length === 0
+      || Buffer.byteLength(completeDiff.patch, 'utf8') > 1024 * 1024
+      || containsCredentialEvidence(completeDiff.patch)
+      || completeDiff.changedFiles.some((path) => findDeniedPathMatch(path, deniedPaths))) {
+      throw new Error('exact complete Review target is unavailable');
+    }
     if (!review?.previousTarget) return {
-      mode: 'complete',
-      repairPatch: null,
-      changedFiles: [...binding.canonicalChangedFiles],
-      checks: structuredClone(configuredChecks),
-      criteria: structuredClone(frozenCriteria),
-      impactTargets: [],
+      mode: 'complete', repairPatch: null, targetPatch: completeDiff.patch,
+      changedFiles: completeDiff.changedFiles,
+      checks: structuredClone(configuredChecks), criteria: structuredClone(frozenCriteria), impactTargets: [],
     };
 
     let treeDiff: Awaited<ReturnType<RunIssueGit['diffTrees']>>;
@@ -2839,7 +2853,7 @@ export class RunIssue {
       );
     } catch {
       return {
-        mode: 'complete', repairPatch: null, changedFiles: [...binding.canonicalChangedFiles],
+        mode: 'complete', repairPatch: null, targetPatch: completeDiff.patch, changedFiles: completeDiff.changedFiles,
         checks: structuredClone(configuredChecks), criteria: structuredClone(frozenCriteria),
         impactTargets: [],
       };
@@ -2882,6 +2896,7 @@ export class RunIssue {
     return {
       mode: isolated ? 'targeted' : 'complete',
       repairPatch: isolated ? treeDiff.patch : null,
+      targetPatch: isolated ? treeDiff.patch : completeDiff.patch,
       changedFiles: isolated ? treeDiff.changedFiles : [...binding.canonicalChangedFiles],
       checks: isolated && affectedChecks.length > 0
         ? Object.fromEntries(affectedChecks)
@@ -2939,6 +2954,8 @@ export class RunIssue {
           'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
           'repository-standards', 'requirements', 'tests', 'zero-legacy',
         ] : [],
+        requireAllReviewers: reviewScope.mode === 'complete',
+        requireReviewerEvidence: true,
       });
       if (validation.status !== 'invalid' || !validation.repairInput) {
         return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-retained-result-diverged');
@@ -3003,6 +3020,8 @@ export class RunIssue {
         currentTreeSha: active.record.candidateBinding!.candidateTreeSha,
         previousTarget: structuredClone(directReview.previousTarget),
         repairPatch: reviewScope.repairPatch,
+        targetPatch: reviewScope.targetPatch,
+        changedFiles: reviewScope.changedFiles,
         repairFindings: directReview.repairFindings.filter((finding) => finding.status === 'fixed')
           .map((finding) => ({
             id: finding.id,

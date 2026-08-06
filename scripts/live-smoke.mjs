@@ -848,12 +848,14 @@ function normalizeCodeReview(reportPath, prompt) {
   const previousDefects = capsule.target?.repairPatch === null
     ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
   const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
+  const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const report = {
     version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
     targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
     defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
     repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   };
   writeFileSync(reportPath, JSON.stringify({ report }));
@@ -1040,12 +1042,14 @@ function writeReview(reportPath, prompt) {
   const previousDefects = capsule.target?.repairPatch === null
     ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
   const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
+  const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   writeAgentReport(reportPath, {
     version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
     targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
     defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+    reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
     repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   });
 }
@@ -1396,11 +1400,12 @@ async function selfTestFakeAgent() {
     };
     await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {
       cwd: root,
-      stdin: `Follow the exact operation at /code-review/SKILL.md.\nRunner-provided facts: ${JSON.stringify([JSON.stringify(reviewCapsule)])}\n`,
+      stdin: `Follow the exact operation at /code-review/SKILL.md.\nRunner-provided facts: ${JSON.stringify([JSON.stringify(reviewCapsule)])}\nAvailable reviewer roles: ["spec_reviewer","standards_reviewer"]\n`,
     });
     const review = JSON.parse(await readFile(reviewPath, 'utf8')).report;
     if (review.operation !== 'code-review' || review.verdict !== 'approved'
-      || review.targetFingerprint !== reviewCapsule.target.current.targetFingerprint || review.coverage?.[0] !== 'correctness') {
+      || review.targetFingerprint !== reviewCapsule.target.current.targetFingerprint || review.coverage?.[0] !== 'correctness'
+      || review.reviewers?.length !== 2) {
       throw new Error('fake code review report contract failed');
     }
     const proofPath = join(root, 'proof.json');

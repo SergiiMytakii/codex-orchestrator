@@ -3,29 +3,80 @@
   "skill": "code-review",
   "cases": [
     {
-      "id": "concrete-blocker-or-observation",
-      "prompt": "The settled diff has one proven correctness defect and one Fowler smell with no demonstrated impact.",
+      "id": "authorized-regression-blocks",
+      "prompt": "A settled diff breaks an existing caller invariant required by the authorized behavior; the failing public-seam regression proves the trigger and impact.",
       "expected": [
-        "report the correctness defect as a blocker with trigger, impact, and evidence",
-        "report the smell only as a non-blocking observation",
-        "block only because of the concrete defect"
+        "report a blocker linked to the existing invariant",
+        "include the trigger, impact, and regression evidence",
+        "return BLOCK"
       ],
       "forbidden": [
-        "block on the smell alone",
-        "turn a general improvement into a missing obligation"
+        "downgrade the proven regression to an observation",
+        "require a broader solution than restoring the invariant"
       ]
     },
     {
-      "id": "one-read-only-reviewer",
+      "id": "optional-architecture-is-observation",
+      "prompt": "The authorized outcome and all existing invariants pass, but the reviewer prefers a more robust architecture for hypothetical future load.",
+      "expected": [
+        "report the architecture or robustness idea only as an observation",
+        "approve when no authorized obligation, invariant, mandatory rule, or proof is missing"
+      ],
+      "forbidden": [
+        "turn hypothetical robustness into a blocker",
+        "treat the reviewer label or impact cone as authority"
+      ]
+    },
+    {
+      "id": "optional-machinery-prefers-removal",
+      "prompt": "The diff adds an optional mediator that is not needed by the authorized outcome, and the mediator contains a defect. Removing it preserves all required behavior and invariants.",
+      "expected": [
+        "prefer removing the optional mediator",
+        "keep repair scope within the authorized outcome"
+      ],
+      "forbidden": [
+        "require hardening or extending the optional mediator",
+        "expand the authorized outcome to preserve unnecessary machinery"
+      ]
+    },
+    {
+      "id": "unsupported-block-reconciles-to-approval",
+      "prompt": "A completed independent reviewer returns BLOCK, but coordinator verification proves every reported item is an optional preference with no authorized obligation, invariant, mandatory rule, or required-proof gap.",
+      "expected": [
+        "reclassify the unsupported findings as observations",
+        "return APPROVE from the completed independent evidence",
+        "perform no repair"
+      ],
+      "forbidden": [
+        "repeat review solely because of the reviewer label",
+        "expand the authorized outcome to satisfy an unsupported verdict"
+      ]
+    },
+    {
+      "id": "two-independent-read-only-lenses",
       "prompt": "Run Review on one settled substantial target and report its findings.",
       "expected": [
-        "launch one fresh Standards reviewer covering requirement fidelity and correctness",
+        "launch fresh Spec and Standards reviewers in parallel",
+        "keep their findings separated by lens",
         "keep Review read-only",
         "return observations and consolidated blockers to the caller"
       ],
       "forbidden": [
         "repair the target",
-        "start another reviewer from Review"
+        "let either reviewer invent new authority"
+      ]
+    },
+    {
+      "id": "targeted-review-selects-affected-lens",
+      "prompt": "A reviewed repair delta only restores one missing authorized requirement and changes no correctness, invariant, architecture, or repository-rule surface.",
+      "expected": [
+        "run only a fresh Spec reviewer",
+        "limit review to the repair delta and direct impact cone",
+        "preserve untouched approval"
+      ],
+      "forbidden": [
+        "rerun Standards without an affected Standards surface",
+        "repeat the complete review"
       ]
     }
   ]

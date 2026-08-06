@@ -37,6 +37,23 @@ contract. A real product or ownership decision gap returns to Plan. An approved
 multi-ticket dependency graph routes to `$tickets-orchestrator`; a single
 executable ticket never does.
 
+Grilling uses dependency-aware frontier rounds. `$grilling` is the model-invoked,
+write-free interview primitive; `$domain-modeling` is the model-invoked sole
+domain-document writer. `$grill-me`, `$grill-with-docs`, and `$wait-what` are
+explicit-only. Explicitly typed wrappers win: `$grill-me` remains write-free
+even when its prompt mentions terminology or ADRs, while `$grill-with-docs`
+keeps the whole `$grilling` interview write-free and invokes
+`$domain-modeling` only after an empty frontier and explicit confirmation.
+Implicit `$grilling` is write-free and cannot mutate domain docs.
+
+`$writing-for-agents` is a model-invoked discipline for agent-consumed
+documents and complements `$skill-creator`; it is not a router. Use
+`$resolving-merge-conflicts` only for actual Git conflicts or an explicit
+conflict-resolution request. It composes `$domain-modeling` as sole content
+writer for domain-document conflicts, while each Git operation remains gated by
+existing authority. `$documentation-gardener` may audit domain docs but routes
+every authorized domain-document mutation through `$domain-modeling`.
+
 Diagnosis-only work uses `$bug-root-cause-explainer`. Hard, flaky, unclear, or
 performance bugs use `$diagnosing-bugs` to establish a reliable signal, then
 return to Implement when a fix is authorized. External multi-source uncertainty
@@ -46,6 +63,26 @@ Implement. Grilling, TDD, to-spec, to-tickets, diagnosis, research, prototype,
 and the graph-only Tickets Orchestrator are internal or side primitives.
 Specialized runtime and platform skills remain side tools and do not compete
 with the main flow.
+
+## Phase boundaries
+
+Make a context choice only when one phase has actually completed and another is
+about to begin; never interrupt a live phase merely because the conversation is
+long. Apply these conditions in order:
+
+1. **Continue** when the next phase uses the current conversation as a primary
+   source and the same active owner and authority still apply.
+2. **Use an existing fresh-context route** only when the active workflow already
+   requires one, such as the single-ticket implementer or independent Review.
+3. **Use an authorized stable-role child** only for bounded AFK work that the
+   active skill already permits; root retains dialogue and integration.
+4. **Compact through the platform** only when relevant same-owner work must
+   continue in the current conversation and observed context pressure makes a
+   lossless continuation unreliable.
+
+These are branch conditions, not a token threshold, a new handoff skill, or a
+competing router. Plan, Implement, Review, prototype, `$to-spec`, and
+`$to-tickets` keep their existing ownership and stop boundaries.
 
 ## Implement Context
 
@@ -71,30 +108,36 @@ fail meaningfully before the edit.
 A change is substantial when its behavior or contract goes beyond an obvious
 local edit. This includes a public API, persistence, auth or payment,
 concurrency or shared state, and cross-module interaction. Substantial settled
-work launches one fresh `standards_reviewer`. It checks the result against the
-request, issue, or Parent PRD and checks correctness, repository rules, cleanup,
-and legacy or duplicate ownership.
+work launches one fresh `spec_reviewer` and one fresh `standards_reviewer` in
+parallel. Spec checks the result against the request, issue, or Parent PRD;
+Standards checks correctness, repository rules, cleanup, and legacy or duplicate
+ownership.
 
-The wait must complete and the reviewer must approve the settled diff.
+The wait must complete and the coordinator must approve the settled diff from
+the completed independent evidence.
 Docs, copy, formatting, mechanical config, and an obvious local correction may
 finish with direct proof and no reviewer. Reviewer failure or timeout blocks
 approval; root does not replace independent review with self-review.
 
-A Review blocker requires a concrete correctness defect, missing obligation,
-required-proof gap, or real ownership or runtime conflict. A Fowler smell,
-general improvement, preference, or uncertain concern is a non-blocking
-observation unless separate evidence proves one of those concrete impacts.
-Review remains read-only and runs one fresh Standards reviewer per invocation.
+A Review blocker requires a concrete defect or proof gap causally linked to an
+explicit obligation, existing invariant, or mandatory repository rule. The
+reviewer verdict is evidence, not authority: coordinator approval exists when
+the completed independent review has no verified blocker or required-proof
+gap. A Fowler smell, general improvement, preference, or uncertain concern is a
+non-blocking observation without that link. Review remains read-only. Initial
+Review runs both lenses; targeted Review runs only the affected lens, or both
+when the repair is mixed or cannot be isolated.
 
-For direct or single-ticket substantial work, Implement consolidates all
-blockers from each review into one repair batch for that revision. The original
-Implement authority covers every verified in-scope repair without another user
-confirmation. After repair it reruns affected proof and launches a targeted
-fresh reviewer over only the repair delta, repaired blockers, direct impact cone,
-and affected proof. Untouched previously approved scope retains approval. This
-repair and targeted Review loop continues until approval; reviewer count is not a
-stop condition. A complete Review repeats only when repair impact cannot be
-isolated from previously approved scope.
+For direct or single-ticket substantial work, Implement consolidates every
+verified blocker into one repair batch for that revision. The original
+Implement authority covers every verified repair that does not widen the
+authorized outcome without another user
+confirmation. After repair it reruns affected proof and launches the affected
+fresh reviewer or reviewer pair over only the repair delta, repaired blockers,
+direct impact cone, and affected proof. Untouched previously approved scope
+retains approval. This loop continues until approval; reviewer count is not a
+stop condition. A complete two-lens Review repeats only when repair impact
+cannot be isolated from previously approved scope.
 
 Graph children receive no per-ticket delivery Review. After every checkpoint,
 Tickets Orchestrator owns the initial cumulative review over the complete Parent
@@ -116,7 +159,8 @@ central configuration details:
 | --- | --- |
 | Root dialogue, integration, and Git ownership | `root` |
 | One isolated executable ticket | `implementer` |
-| Requirement fidelity, correctness, and repository-standards review | `standards_reviewer` |
+| Requirement fidelity and scope drift | `spec_reviewer` |
+| Correctness and repository standards | `standards_reviewer` |
 | Bounded repository exploration | `explorer` |
 | Independent bounded design alternative | `explorer` |
 | Primary-source external research | `researcher` |

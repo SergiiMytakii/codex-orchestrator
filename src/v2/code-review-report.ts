@@ -43,6 +43,7 @@ export interface CodeReviewReportV1 {
   defects: CodeReviewDefectV1[];
   residualRisks: string[];
   reviewerSessionId: string;
+  reviewers: Array<{ role: string; sessionId: string; verdict: 'approve' | 'block' }>;
   repairFindingOutcomes: RepairFindingOutcomeV1[];
 }
 
@@ -53,6 +54,9 @@ export interface CodeReviewValidationContext {
   reviewerSessionId: string;
   previousFindingIds?: string[];
   requiredCoverage?: string[];
+  availableReviewers?: string[];
+  requireAllReviewers?: boolean;
+  requireReviewerEvidence?: boolean;
 }
 
 export function hashCodeReviewReport(report: CodeReviewReportV1): string {
@@ -62,7 +66,7 @@ export function hashCodeReviewReport(report: CodeReviewReportV1): string {
 export function validateCodeReviewReport(value: unknown, context: CodeReviewValidationContext): CodeReviewReportV1 {
   assertExactObject(value, [
     'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
-    'residualRisks', 'reviewerSessionId', 'repairFindingOutcomes',
+    'residualRisks', 'reviewerSessionId', 'reviewers', 'repairFindingOutcomes',
   ], 'code review report');
   if (value.version !== 1) throw new Error('code review report.version is invalid');
   assertOperation(value.operation);
@@ -73,6 +77,11 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
   const requiredCoverage = sortedUniqueStrings(context.requiredCoverage ?? [], 'required review coverage');
   const residualRisks = sortedUniqueStrings(value.residualRisks, 'code review report.residualRisks');
   assertText(value.reviewerSessionId, 'code review report.reviewerSessionId');
+  const reviewers = validateReviewers(
+    value.reviewers, context.availableReviewers ?? [], context.requireAllReviewers ?? true,
+    context.requireReviewerEvidence ?? false,
+    value.reviewerSessionId as string,
+  );
   if (value.operation !== context.operation || value.targetRevision !== context.targetRevision
     || value.targetFingerprint !== context.targetFingerprint || value.reviewerSessionId !== context.reviewerSessionId) {
     throw new Error('code review report correlation mismatch');
@@ -86,6 +95,9 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
     && defect.status !== 'verified' && defect.status !== 'superseded');
   if (value.verdict === 'approved' && (unresolved || repairFindingOutcomes.some((outcome) => outcome.status === 'reopened'))) {
     throw new Error('approved review has unresolved defects or repair findings');
+  }
+  if (value.verdict === 'approved' && reviewers.some((reviewer) => reviewer.verdict !== 'approve')) {
+    throw new Error('approved review has a blocking reviewer');
   }
   if (value.verdict === 'approved' && requiredCoverage.some((item) => !coverage.includes(item))) {
     throw new Error('approved review is missing required coverage');
@@ -101,6 +113,7 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
     defects,
     residualRisks,
     repairFindingOutcomes,
+    reviewers,
   };
 }
 
@@ -134,7 +147,7 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
     type: 'object', additionalProperties: false,
     required: [
       'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
-      'residualRisks', 'reviewerSessionId', 'repairFindingOutcomes',
+      'residualRisks', 'reviewerSessionId', 'reviewers', 'repairFindingOutcomes',
     ],
     properties: {
       version: { type: 'integer', const: 1 },
@@ -146,6 +159,13 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
       defects: { type: 'array', items: defect },
       residualRisks: stringList,
       reviewerSessionId: text,
+      reviewers: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false, required: ['role', 'sessionId', 'verdict'],
+          properties: { role: text, sessionId: text, verdict: { type: 'string', enum: ['approve', 'block'] } },
+        },
+      },
       repairFindingOutcomes: {
         type: 'array',
         items: {
@@ -156,6 +176,37 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
     },
   };
   return agentReportEnvelopeSchema(report);
+}
+
+function validateReviewers(
+  value: unknown,
+  availableReviewers: string[],
+  requireAllReviewers: boolean,
+  requireReviewerEvidence: boolean,
+  coordinatorSessionId: string,
+): CodeReviewReportV1['reviewers'] {
+  if (!Array.isArray(value)) throw new Error('code review report.reviewers is invalid');
+  const reviewers = value.map((reviewer, index) => {
+    assertExactObject(reviewer, ['role', 'sessionId', 'verdict'], `code review reviewer[${index}]`);
+    assertText(reviewer.role, 'code review reviewer.role');
+    assertText(reviewer.sessionId, 'code review reviewer.sessionId');
+    if (!['approve', 'block'].includes(reviewer.verdict as string)) throw new Error('code review reviewer.verdict is invalid');
+    return structuredClone(reviewer) as CodeReviewReportV1['reviewers'][number];
+  }).sort((left, right) => left.role < right.role ? -1 : left.role > right.role ? 1 : 0);
+  assertUnique(reviewers.map((reviewer) => reviewer.role), 'code review reviewer roles');
+  assertUnique(reviewers.map((reviewer) => reviewer.sessionId), 'code review reviewer sessions');
+  if (reviewers.some((reviewer) => reviewer.sessionId === coordinatorSessionId)) {
+    throw new Error('code review reviewer session is not independent');
+  }
+  const available = [...availableReviewers].sort();
+  assertUnique(available, 'available code review reviewers');
+  const selected = reviewers.map((reviewer) => reviewer.role);
+  if ((available.length === 0 ? (requireReviewerEvidence ? selected.length === 0 : selected.length !== 0) : selected.length === 0)
+    || selected.some((role) => !available.includes(role))
+    || (requireAllReviewers && !sameStrings(selected, available))) {
+    throw new Error('code review report reviewers do not match available roles');
+  }
+  return reviewers;
 }
 
 function validateDefects(value: unknown, targetRevision: number): CodeReviewDefectV1[] {

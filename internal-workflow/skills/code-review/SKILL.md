@@ -1,104 +1,87 @@
 ---
 name: code-review
-description: Read-only Review entrypoint for a settled diff. Substantial changes receive one fresh Standards reviewer covering requirement fidelity and correctness.
+description: Read-only Review entrypoint for a settled diff. Substantial changes receive independent Spec and Standards review; targeted repair review runs only the affected lens.
 ---
 
 # Review
 
-Review the settled change against two questions:
+Review a settled change through two independent lenses:
 
-- **Spec:** does it implement the authorized request, issue, or Parent PRD
-  completely and without scope drift?
-- **Standards:** is it correct, maintainable, consistent with repository policy,
-  and free of legacy paths, duplicate ownership, compatibility residue, or
-  unnecessary machinery?
+- **Spec:** requirement fidelity, missing or partial behavior, incorrect
+  implementation, and scope drift.
+- **Standards:** correctness, failure paths, repository policy, maintainability,
+  legacy residue, duplicate ownership, and unnecessary machinery.
 
-Gate: fresh `standards_reviewer` without history fork (`fork_context=false` on
-V1; `fork_turns="none"` on V2) → child ID → wait → result. Any missing step is
-`BLOCK`; never claim approval.
+Review is inspection-only. Never edit, repair, stage, commit, push, or open a
+PR. Substantial behavior or contract changes require Review; obvious local
+docs, copy, formatting, mechanical config, or corrections may use direct proof.
 
-Review is inspection-only. It never edits, mutates, or repairs repository state,
-regardless of whether a finding is small or material.
+## Boundaries
 
-## Finding threshold
+- **Authorized outcome:** the request, issue, or Parent PRD plus existing
+  invariants and mandatory repository rules.
+- **Impact cone:** callers, data, runtime, and proof surfaces that may be
+  inspected to establish effects. Inspection creates no authority.
+- **Repair scope:** the smallest change that restores a proven obligation,
+  invariant, or mandatory rule without widening the authorized outcome.
 
-A finding may `BLOCK` only when the reviewer demonstrates a concrete
-correctness defect, missing obligation, required-proof gap, or real ownership
-or runtime conflict. Give the file and line, trigger or unmet requirement,
-impact, and evidence.
+A reviewer verdict is evidence, not authority. Mark a finding `BLOCKER` only
+when evidence links a concrete defect or required-proof gap to an authorized
+obligation, existing invariant, or mandatory rule. Include its source,
+file/line, trigger, impact, and evidence. Treat unsupported preferences,
+hypothetical hardening, and architecture or cleanup beyond the outcome as
+`OBSERVATION`.
 
-Everything else is a non-blocking observation: a heuristic smell, optional
-cleanup, general improvement, uncertain concern, or preference without a
-concrete impact. A Fowler smell is always a judgement call and remains a
-non-blocking observation unless separate evidence proves one of the blocking
-categories above. Repository policy overrides the smell baseline, and tooling
-already enforcing a rule makes a duplicate observation unnecessary. Read
-[standards-smells.md](references/standards-smells.md) for that baseline.
-
-## Applicability
-
-Review is required when behavior or contract goes beyond an obvious local edit,
-including public API, persistence, auth/payment, concurrency/shared state, and
-cross-module interaction. Docs, copy, formatting, mechanical config, and an
-obvious local correction may complete with direct proof unless the user asks
-for Review explicitly.
+For Standards, read [standards-smells.md](references/standards-smells.md).
+Fowler smells remain non-blocking observations unless separate evidence meets the blocker
+threshold. Repository policy wins, and tooling-enforced rules need no duplicate
+finding. If optional machinery causes a defect, prefer deleting it; extend it
+only when the authorized outcome requires it.
 
 ## Process
 
-1. Pin the review target and mode:
-   - initial Review receives the complete settled result, authority, repository
-     policy, changed files, and proof;
-   - targeted repair Review receives the last reviewed revision as its
-     baseline, the repair delta, repaired blockers, direct impact cone, and
-     affected proof. Review only that delta and its directly affected caller
-     seams and invariants. Untouched previously approved scope remains approved.
-   Use a complete Review only when the repair impact cannot be isolated.
-2. Launch exactly one fresh `standards_reviewer`. It receives the target,
-   authority, changed files, proof, the complete relevant
-   request/issue/Parent PRD, repository policy, and a brief to check requirement
-   fidelity, correctness, failure paths, cleanup, zero legacy, duplicate
-   ownership, unnecessary scripts, and the linked smell baseline. It reports
-   missing, partial, incorrect, or extra behavior and distinguishes concrete
-   defects from judgement calls. Begin the brief with `Assigned role:
-   standards_reviewer`.
-3. Capture its non-empty child identity and wait for that same child.
-   An empty bounded wait means wait again, not failure. Silence is not a hang;
-   request status only without interruption. Never interrupt, terminate, close,
-   or replace an active reviewer to accelerate it. Only user cancellation or a
-   terminal child failure permits stopping. An interrupted review blocks and is
-   not code approval; root never substitutes self-review.
-4. Verify every finding against the review target and its trigger path, preserve its
-   defect identity, and classify it with the threshold above. Return
-   observations separately and consolidate every blocker from the review into
-   one repair batch for the caller. When Review was invoked by an active
-   Implement or Tickets Orchestrator, that caller's original authority already
-   covers every verified in-scope repair. Return the batch to that active owner
-   with its preservation, proof, targeted fresh Review, and Git lifecycle. Do
-   not ask the user for confirmation or require separate repair authority.
-   If the current request is review-only, report the findings and stop; do not
-   invoke Implement or infer repair authority.
-5. Approval requires the completed reviewer to return `APPROVE` for the target
-   with no blocker or required-proof gap. A non-terminal polling timeout means
-   wait again. Initial approval covers the
-   complete settled result; targeted repair approval covers the delta and its
-   impact cone while preserving approval for untouched scope. Review may
-   approve while reporting non-blocking observations. Missing identity,
-   terminal failure, interruption, incomplete final wait, or non-approval
-   blocks Review; root does not replace it with self-review.
-6. Review performs one reviewer invocation and returns its result.
-   Review remains read-only: it does not repair, start another reviewer,
-   edit, stage, commit, push, or open a PR.
+1. Pin an existing baseline and settled target, then verify the comparison is
+   valid and non-empty. Supply the exact diff, changed files, proof, authority
+   source, and repository policy. Missing required authority or proof is a gap;
+   never silently skip a lens.
+2. Select the mode:
+   - initial Review launches one fresh `spec_reviewer` and one fresh `standards_reviewer`
+     in parallel;
+   - targeted Review runs only the affected lens: Spec-only repair for
+     requirement coverage or behavior, Standards-only repair for correctness,
+     invariants, architecture, or mandatory rules, and both lenses when the
+     repair affects both or cannot be isolated.
+   Give targeted reviewers the previous reviewed revision, repair delta,
+   repaired blockers, direct impact cone, and affected proof. Untouched
+   previously approved scope retains approval.
+3. Give both reviewers the same target, diff, proof, authority, policy, and
+   boundaries above. Keep each brief under 400 words and begin it with
+   `Assigned role: <role>`.
+   - `spec_reviewer` checks only missing, partial, incorrect, or extra behavior
+     against cited authority.
+   - `standards_reviewer` checks correctness, failure paths, policy, cleanup,
+     zero legacy, duplicate ownership, unnecessary machinery, and the smell
+     baseline without inventing product obligations.
+4. Use fresh children without history fork (`fork_context=false` on V1;
+   `fork_turns="none"` on V2). Capture every non-empty child identity and wait
+   for those same children. An empty bounded wait means wait again, not failure.
+   Silence is not a hang; request status only without interruption. Never
+   interrupt, terminate, close, or replace an active reviewer. Missing identity,
+   terminal failure, interruption, or incomplete final wait blocks Review;
+   root never substitutes self-review.
+5. Reconcile each finding from its evidence, preserving its lens and defect
+   identity. Reclassify unsupported `BLOCK` labels as observations; an
+   `APPROVE` label cannot erase a verified blocker. Consolidate all verified
+   blockers into one repair batch for the active Implement or Tickets
+   Orchestrator owner. Their original authority covers repairs inside Repair
+   scope without another confirmation. For review-only requests, report and
+   stop without invoking Implement.
+6. Return `Spec` and `Standards` results separately, then consolidated blockers,
+   observations, and proof gaps. Approve only after every selected independent
+   reviewer completed and no verified blocker or required-proof gap remains.
+   Review may approve with observations. A complete Review repeats only when a
+   repair cannot be isolated.
 
-## Reviewer Output
-
-Each reviewer returns findings first with file/line, concrete trigger or missing
-obligation, impact, and evidence. Label each item `BLOCKER` with one blocking
-category or `OBSERVATION`. If there are no blockers or required verification
-gaps, it ends with `APPROVE`, even when it reports observations. Otherwise it
-ends with `BLOCK` and the concrete reason.
-
-The coordinator returns both review questions, observations, consolidated blockers,
-proof gaps, and `APPROVE` only when the reviewer approves. It reports `BLOCK` only for a
-concrete blocker, required-proof gap, or failed reviewer without repairing it.
-Do not create durable review state, maps, ledgers, aliases, adapters, or
-compatibility routes.
+Each reviewer returns findings first, labelled `BLOCKER` or `OBSERVATION`, then
+`APPROVE` or `BLOCK` with a concrete reason. Do not create durable review state,
+maps, ledgers, aliases, adapters, or compatibility routes.

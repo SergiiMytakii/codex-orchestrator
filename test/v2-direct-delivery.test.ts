@@ -18,7 +18,7 @@ function report(overrides: Partial<CodeReviewReportV1>): CodeReviewReportV1 {
   return {
     version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     verdict: 'approved', coverage: ['all'], defects: [], residualRisks: [], reviewerSessionId: 'review-1',
-    repairFindingOutcomes: [], ...overrides,
+    reviewers: [], repairFindingOutcomes: [], ...overrides,
   };
 }
 

@@ -33,6 +33,8 @@ export interface ImplementationReviewerInput {
     candidateTreeSha: string;
   } | null;
   repairPatch: string | null;
+  targetPatch: string;
+  changedFiles: string[];
   repairFindings: Array<{ id: string; sourceId: string; summary: string; affectedContracts: string[] }>;
   checkedChangeSha256: string;
   checks: unknown[];
@@ -78,6 +80,9 @@ export class ContainedImplementationReviewer {
       assertSha256(input.targetFingerprint, 'target fingerprint');
       assertGitSha(input.currentTreeSha, 'current target tree');
       const targeted = input.repairPatch !== null;
+      assertText(input.targetPatch, 'review target patch');
+      const changedFiles = sortedUnique(input.changedFiles, 'review changed files');
+      if (changedFiles.length === 0) throw new Error('review changed files are empty');
       if (!targeted) {
         if (input.previousTarget === null && input.repairFindings.length !== 0) throw new Error('initial complete review target is invalid');
       } else {
@@ -87,7 +92,7 @@ export class ContainedImplementationReviewer {
         assertText(input.repairPatch, 'repair patch');
       }
       assertSha256(input.checkedChangeSha256, 'review checked change');
-      promptFacts = [buildCapsule(input)];
+      promptFacts = [buildCapsule({ ...input, changedFiles })];
     } catch (error) {
       return {
         kind: 'internal-error',
@@ -116,6 +121,7 @@ export class ContainedImplementationReviewer {
             ? [...input.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]
             : [...input.defects.map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]).sort(),
           requiredCoverage: input.repairPatch === null ? [...input.reviewFocus] : [],
+          requireAllReviewers: input.repairPatch === null,
         },
         onPrepared: () => input.onPrepared(structuredClone(invocation)),
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
@@ -155,6 +161,8 @@ function buildCapsule(input: ImplementationReviewerInput): string {
       },
       previous: input.previousTarget,
       repairPatch: input.repairPatch,
+      patch: input.targetPatch,
+      changedFiles: input.changedFiles,
     },
     repairFindings,
     proof: {

@@ -28,6 +28,8 @@
   "sharedEvals": [],
   "profiles": {
     "implementer": "implementer.toml",
+    "review_coordinator": "./scripts/runtime-workflow-overlays/profiles/review_coordinator.toml",
+    "spec_reviewer": "spec-reviewer.toml",
     "standards_reviewer": "standards-reviewer.toml"
   },
   "overlayRoot": "scripts/runtime-workflow-overlays",
@@ -47,6 +49,7 @@
       "resources": [],
       "outputSchema": "schemas/proof-report-v1.json",
       "profile": "implementer",
+      "reviewers": [],
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "worktree",
@@ -66,7 +69,8 @@
       "dependencySkills": [],
       "resources": ["docs/agents/confidence-rubric.md"],
       "outputSchema": "schemas/code-review-v1.json",
-      "profile": "standards_reviewer",
+      "profile": "review_coordinator",
+      "reviewers": ["spec_reviewer", "standards_reviewer"],
       "policy": {
         "sandboxMode": "read-only",
         "cwdClass": "worktree",
@@ -91,6 +95,7 @@
       ],
       "outputSchema": "schemas/implementation-report-v1.json",
       "profile": "implementer",
+      "reviewers": [],
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "worktree",

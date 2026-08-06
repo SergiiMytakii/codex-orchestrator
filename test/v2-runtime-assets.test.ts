@@ -602,6 +602,7 @@ async function manualRuntimeSnapshot(operation: string, closure: {
     referencedDocumentPaths: closure.referencedDocumentPaths,
     schemaPath: join(snapshotRoot, 'schemas', `${operation}.json`),
     profilePath: join(snapshotRoot, 'profiles', 'fixture.toml'),
+    reviewerProfiles: {},
     policy: {
       sandboxMode: 'workspace-write' as const, cwdClass: 'worktree' as const, worktreeAccess: 'write' as const,
       writableRootClasses: ['worktree' as const], runnerPostcondition: 'change-set' as const, network: 'deny' as const,

@@ -8,9 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
 const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v2\0';
 const PRODUCTION_OPERATION_BINDINGS = {
-  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json', 'implementer'],
-  'code-review': ['code-review', [], 'schemas/code-review-v1.json', 'standards_reviewer'],
-  implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json', 'implementer'],
+  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json'],
+  'code-review': ['code-review', [], 'schemas/code-review-v1.json'],
+  implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json'],
 };
 
 const options = parseArgs(process.argv.slice(2));
@@ -144,12 +144,13 @@ async function buildExpected(input) {
   });
 
   for (const [profile, sourceName] of Object.entries(config.profiles)) {
+    const repositorySource = sourceName.startsWith('./');
     await copyFileEntry({
-      source: join(codexHome, 'agents', sourceName),
+      source: repositorySource ? join(repoRoot, sourceName.slice(2)) : join(codexHome, 'agents', sourceName),
       target: `profiles/${profile}.toml`,
       entries,
       sourceRecords,
-      sourceBase: codexHome,
+      sourceBase: repositorySource ? repoRoot : codexHome,
       adapt: false,
       codexHome,
       adaptations: config.adaptations,
@@ -188,7 +189,8 @@ async function buildExpected(input) {
   const operations = {};
   for (const id of Object.keys(config.operations).sort(compareUtf8)) {
     const operation = structuredClone(config.operations[id]);
-    if (!entries.has(operation.entry) || !entries.has(operation.outputSchema) || !(operation.profile in profiles)) {
+    if (!entries.has(operation.entry) || !entries.has(operation.outputSchema) || !(operation.profile in profiles)
+      || operation.reviewers.some((profile) => !(profile in profiles))) {
       throw new Error(`Operation ${id} references an undeclared entry, schema, or profile.`);
     }
     if (operation.sourceSkill !== null && !(operation.sourceSkill in skills)) throw new Error(`Operation ${id} source skill is invalid.`);
@@ -196,7 +198,8 @@ async function buildExpected(input) {
     if (dependencies.some((skill) => !(skill in skills))) throw new Error(`Operation ${id} dependency skill is invalid.`);
     const resources = operation.resources;
     if (resources.some((path) => !entries.has(path))) throw new Error(`Operation ${id} resource is invalid.`);
-    const roots = [operation.entry, operation.outputSchema, profiles[operation.profile], ...resources,
+    const roots = [operation.entry, operation.outputSchema, profiles[operation.profile],
+      ...operation.reviewers.map((profile) => profiles[profile]), ...resources,
       ...(operation.sourceSkill === null ? [] : skills[operation.sourceSkill].files),
       ...dependencies.flatMap((skill) => skills[skill].files)];
     const files = referencedWorkflowClosure(roots, entries, skills);
@@ -668,16 +671,19 @@ function validateGeneratedAuthority(manifest, physical, tree) {
     if (path !== `profiles/${id}.toml` || !physical.has(path)) throw new Error(`Workflow profile binding is invalid: ${id}`);
   }
   for (const [id, operation] of Object.entries(manifest.operations)) {
-    assertExactKeys(operation, ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy', 'files']);
+    assertExactKeys(operation, ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'reviewers', 'policy', 'files']);
     if (operation.id !== id || operation.entry !== `operations/${id}/SKILL.md`
       || !(operation.sourceSkill === null || operation.sourceSkill in manifest.skills)
-      || !(operation.profile in manifest.profiles) || !physical.has(operation.outputSchema)) throw new Error(`Workflow operation binding is invalid: ${id}`);
+      || !(operation.profile in manifest.profiles) || !physical.has(operation.outputSchema)
+      || !uniqueTextList(operation.reviewers, true)
+      || operation.reviewers.some((profile) => !(profile in manifest.profiles))) throw new Error(`Workflow operation binding is invalid: ${id}`);
     validateClosure(operation.files, physical, `operation ${id}`);
     const dependencies = operation.dependencySkills;
     const resources = operation.resources;
     if (!Array.isArray(dependencies) || dependencies.some((skill) => !(skill in manifest.skills))
       || !Array.isArray(resources) || resources.some((path) => !physical.has(path))) throw new Error(`Workflow operation dependency binding is invalid: ${id}`);
-    const roots = [operation.entry, operation.outputSchema, manifest.profiles[operation.profile], ...resources,
+    const roots = [operation.entry, operation.outputSchema, manifest.profiles[operation.profile],
+      ...operation.reviewers.map((profile) => manifest.profiles[profile]), ...resources,
       ...(operation.sourceSkill === null ? [] : expectedSkills[operation.sourceSkill].files),
       ...dependencies.flatMap((skill) => expectedSkills[skill].files)];
     const expected = referencedWorkflowClosure(roots, tree, expectedSkills);
@@ -694,9 +700,9 @@ function validateGeneratedAuthority(manifest, physical, tree) {
     for (const id of expectedIds) {
       const operation = manifest.operations[id];
       const binding = bindings[id];
-      const [sourceSkill, dependencySkills, outputSchema, profile] = binding;
+      const [sourceSkill, dependencySkills, outputSchema] = binding;
       if (operation.sourceSkill !== sourceSkill || canonicalJson(operation.dependencySkills ?? []) !== canonicalJson(dependencySkills)
-        || operation.outputSchema !== outputSchema || operation.profile !== profile) {
+        || operation.outputSchema !== outputSchema) {
         throw new Error(`Production workflow operation binding is invalid: ${id}`);
       }
     }
@@ -818,12 +824,13 @@ function validateConfig(value) {
     }
   }
   for (const [id, operation] of Object.entries(value.operations)) {
-    assertExactKeys(operation, ['entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy']);
+    assertExactKeys(operation, ['entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'reviewers', 'policy']);
     if (typeof id !== 'string' || typeof operation.entry !== 'string'
       || !(operation.sourceSkill === null || typeof operation.sourceSkill === 'string')
       || typeof operation.outputSchema !== 'string' || typeof operation.profile !== 'string'
       || !isRecord(operation.policy)) throw new Error(`Workflow source operation is invalid: ${id}`);
-    if (!uniqueTextList(operation.dependencySkills, true) || !uniqueTextList(operation.resources, true)) {
+    if (!uniqueTextList(operation.dependencySkills, true) || !uniqueTextList(operation.resources, true)
+      || !uniqueTextList(operation.reviewers, true)) {
       throw new Error(`Workflow source operation dependencies are invalid: ${id}`);
     }
   }

@@ -21,13 +21,13 @@ const CONTENT_MAGIC = 'codex-orchestrator-sealed-content-v1\0';
 const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const EXPECTED_OPERATION_BINDINGS: Record<string, {
-  sourceSkill: string | null; dependencySkills: string[]; outputSchema: string; profile: string;
+  sourceSkill: string | null; dependencySkills: string[]; outputSchema: string;
 }> = {
-  'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json', profile: 'implementer' },
-  'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json', profile: 'standards_reviewer' },
+  'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json' },
+  'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json' },
   implementation: {
     sourceSkill: 'implement', dependencySkills: ['diagnosing-bugs', 'tdd'],
-    outputSchema: 'schemas/implementation-report-v1.json', profile: 'implementer',
+    outputSchema: 'schemas/implementation-report-v1.json',
   },
 };
 
@@ -57,6 +57,7 @@ interface WorkflowOperation {
   sourceSkill: string | null;
   outputSchema: string;
   profile: string;
+  reviewers: string[];
   policy: WorkflowOperationPolicy;
   files: string[];
   dependencySkills: string[];
@@ -138,6 +139,7 @@ export interface ResolvedWorkflowOperation {
   entryPath: string;
   schemaPath: string;
   profilePath: string;
+  reviewerProfiles: Record<string, string>;
   sourceSkillPath?: string;
   skillPaths: string[];
   referencedDocumentPaths: string[];
@@ -155,7 +157,9 @@ export async function resolveWorkflowOperation(
   if (!operation || operation.id !== operationId) throw new Error(`workflow operation is unavailable: ${operationId}`);
   const profile = manifest.profiles[operation.profile];
   if (!profile) throw new Error(`workflow operation profile is unavailable: ${operationId}`);
-  const required = [operation.entry, operation.outputSchema, profile];
+  const reviewerProfiles = Object.fromEntries(operation.reviewers.map((reviewer) => [reviewer, manifest.profiles[reviewer]]));
+  if (Object.values(reviewerProfiles).some((path) => !path)) throw new Error(`workflow reviewer profile is unavailable: ${operationId}`);
+  const required = [operation.entry, operation.outputSchema, profile, ...Object.values(reviewerProfiles)];
   if (!required.every((path) => operation.files.includes(path))) throw new Error(`workflow operation closure is invalid: ${operationId}`);
   const sourceSkillPath = operation.sourceSkill ? manifest.skills[operation.sourceSkill]?.entry : undefined;
   if (operation.sourceSkill && (!sourceSkillPath || !operation.files.includes(sourceSkillPath))) {
@@ -167,6 +171,8 @@ export async function resolveWorkflowOperation(
     entryPath: join(receipt.generationRoot, ...operation.entry.split('/')),
     schemaPath: join(receipt.generationRoot, ...operation.outputSchema.split('/')),
     profilePath: join(receipt.generationRoot, ...profile.split('/')),
+    reviewerProfiles: Object.fromEntries(Object.entries(reviewerProfiles)
+      .map(([id, path]) => [id, join(receipt.generationRoot, ...path.split('/'))])),
     sourceSkillPath: sourceSkillPath ? join(receipt.generationRoot, ...sourceSkillPath.split('/')) : undefined,
     skillPaths: operation.files.filter((path) => /^skills\/[a-z][a-z0-9-]*\/SKILL\.md$/u.test(path)),
     referencedDocumentPaths: operation.files.filter((path) => path.startsWith('docs/agents/') && path.endsWith('.md')),
@@ -448,22 +454,23 @@ function parseManifest(value: unknown): WorkflowManifest {
   const bindings = EXPECTED_OPERATION_BINDINGS;
   assertRecordKeys(operations, Object.keys(bindings), 'workflow operations');
   for (const [id, operation] of Object.entries(operations)) {
-    assertExact(operation, ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'policy', 'files']);
+    assertExact(operation, ['id', 'entry', 'sourceSkill', 'dependencySkills', 'resources', 'outputSchema', 'profile', 'reviewers', 'policy', 'files']);
     if (operation.id !== id || typeof operation.entry !== 'string' || operation.entry !== `operations/${id}/SKILL.md`
       || !(operation.sourceSkill === null || typeof operation.sourceSkill === 'string')
-      || typeof operation.outputSchema !== 'string' || typeof operation.profile !== 'string'
+      || typeof operation.outputSchema !== 'string' || typeof operation.profile !== 'string' || !Array.isArray(operation.reviewers)
       || !Array.isArray(operation.files) || !isRecord(operation.policy)) {
       throw new Error(`workflow operation is invalid: ${id}`);
     }
     const binding = bindings[id]!;
     validateSortedStrings(operation.dependencySkills, `workflow operation dependency skills: ${id}`);
     validateSortedStrings(operation.resources, `workflow operation resources: ${id}`);
+    validateSortedStrings(operation.reviewers, `workflow operation reviewers: ${id}`);
     const dependencySkills = operation.dependencySkills;
     const resources = operation.resources;
     if (!same(dependencySkills, binding.dependencySkills)) {
       throw new Error(`workflow operation dependency binding is invalid: ${id}`);
     }
-    if (operation.sourceSkill !== binding.sourceSkill || operation.outputSchema !== binding.outputSchema || operation.profile !== binding.profile) {
+    if (operation.sourceSkill !== binding.sourceSkill || operation.outputSchema !== binding.outputSchema) {
       throw new Error(`workflow operation binding is invalid: ${id}`);
     }
     const sourceSkill = operation.sourceSkill === null ? undefined : skills[operation.sourceSkill];
@@ -472,7 +479,9 @@ function parseManifest(value: unknown): WorkflowManifest {
       throw new Error(`workflow operation dependency skill is invalid: ${id}`);
     }
     if (resources.some((path) => typeof path !== 'string' || !physical.has(path))) throw new Error(`workflow operation resource is invalid: ${id}`);
-    if (!(operation.profile in profiles)) throw new Error(`workflow operation profile is invalid: ${id}`);
+    if (!(operation.profile in profiles) || operation.reviewers.some((profile: string) => !(profile in profiles))) {
+      throw new Error(`workflow operation profile is invalid: ${id}`);
+    }
     const operationFiles = operation.files;
     validatePathList(operationFiles, physical, `workflow operation closure: ${id}`);
     const skillIds = collectSkillDependencies(skills, [
@@ -483,6 +492,7 @@ function parseManifest(value: unknown): WorkflowManifest {
       operation.entry,
       operation.outputSchema,
       profiles[operation.profile],
+      ...operation.reviewers.map((profile: string) => profiles[profile]),
       ...resources,
       ...skillIds.flatMap((skill) => skills[skill]!.files),
     ].sort(compareUtf8);
@@ -559,6 +569,7 @@ function verifyWorkflowClosures(manifest: WorkflowManifest, bytesByPath: Map<str
       operation.entry,
       operation.outputSchema,
       manifest.profiles[operation.profile]!,
+      ...operation.reviewers.map((profile) => manifest.profiles[profile]!),
       ...operation.resources,
       ...skillIds.flatMap((skill) => expectedSkills[skill]!.files),
     ];

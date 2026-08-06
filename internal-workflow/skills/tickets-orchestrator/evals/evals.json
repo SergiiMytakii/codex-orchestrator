@@ -77,8 +77,8 @@
     {
       "id": "cumulative-parent-review-mechanism",
       "prompt": "All graph checkpoints and deterministic proof are settled at one final revision.",
-      "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch exactly one fresh Standards reviewer covering Parent obligations and correctness", "wait for its approval"],
-      "forbidden": ["review only the last child", "accept a generic PASS", "reuse a reviewer context", "create durable review lifecycle state"]
+      "expected": ["compare the complete Parent PRD directly to the full cumulative diff", "launch fresh Spec and Standards reviewers in parallel", "complete both independent waits and grant coordinator approval only when no verified blocker or required-proof gap remains"],
+      "forbidden": ["gate acceptance on the raw reviewer verdict", "review only the last child", "accept a generic PASS", "reuse a reviewer context", "create durable review lifecycle state"]
     },
     {
       "id": "repository-ranges-in-proof-review-and-handoff",
@@ -94,9 +94,9 @@
     },
     {
       "id": "material-repair-reviews-new-revision",
-      "prompt": "A final reviewer finds a material in-scope defect in affected existing ticket #33.",
-      "expected": ["assign ticket #33 to a unique fresh implementer with no Git authority", "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint", "launch a new distinct fresh targeted Standards reviewer on the new revision"],
-      "forbidden": ["have root implement the material defect", "reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
+      "prompt": "A final reviewer reports a material finding in affected existing ticket #33; root independently establishes its Authority, Trigger, Impact, and Minimal repair without widening the Parent outcome.",
+      "expected": ["classify the finding as a verified blocker only after all four facts are established", "assign ticket #33 to a unique fresh implementer with no Git authority", "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint", "launch only the affected fresh targeted lens on the new revision"],
+      "forbidden": ["dispatch repair from the reviewer label alone", "have root implement the material defect", "reuse either old approval", "record a review lifecycle", "create a durable completion artifact"]
     },
     {
       "id": "graph-delivery-stops-before-remote-git",
@@ -106,15 +106,17 @@
     },
     {
       "id": "cumulative-final-review-repair-loop",
-      "prompt": "The cumulative graph-final Standards reviewer reports blockers in two existing tickets, and the targeted reviewer still reports one blocker.",
+      "prompt": "The cumulative graph-final Standards reviewer reports two findings with established Authority, Trigger, Impact, and Minimal repair plus one unsupported preference labeled BLOCK; the targeted reviewer later reports another finding for which root independently establishes the same four facts.",
       "expected": [
-        "consolidate all current-review blockers into one graph-final repair batch",
+        "consolidate all verified current-review blockers into one graph-final repair batch",
+        "treat the unsupported preference as an observation and perform no repair for it",
         "dispatch each affected existing ticket once through a unique fresh Gitless implementer",
-        "settle updated checkpoints and cumulative proof before one fresh targeted Standards reviewer",
+        "settle updated checkpoints and cumulative proof before only the affected fresh targeted lens",
         "continue the repair and targeted Review loop until approval"
       ],
       "forbidden": [
         "run per-ticket delivery Review",
+        "treat the reviewer label as repair authority",
         "stop because of reviewer count alone",
         "carry approval for the changed impact cone",
         "persist review bookkeeping"

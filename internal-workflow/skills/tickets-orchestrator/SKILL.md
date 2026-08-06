@@ -1,6 +1,6 @@
 ---
 name: tickets-orchestrator
-description: Coordinate an approved multi-ticket dependency graph through unique fresh workers, strict dependency-safe integration, root-owned Git checkpoints, direct Parent proof, and one cumulative Standards review. Route a single ticket to Implement.
+description: Coordinate an approved multi-ticket dependency graph through unique fresh workers, strict dependency-safe integration, root-owned Git checkpoints, direct Parent proof, and cumulative Spec and Standards review. Route a single ticket to Implement.
 ---
 
 # Tickets Orchestrator
@@ -138,38 +138,44 @@ Compare the complete Parent PRD directly against all full cumulative repository
 ranges. Do not substitute child reports, local tests, tracker state, or the
 last child diff.
 
-The reusable final-review mechanism launches exactly one fresh
-`standards_reviewer` on the repository-keyed set of final checkpoints and
-ranges. It checks every Parent obligation directly against the full diff and
-completed proof plus correctness, repository policy, failure paths, cleanup,
-duplicate ownership, compatibility residue, and unnecessary machinery.
+The reusable final-review mechanism launches one fresh `spec_reviewer` and one
+fresh `standards_reviewer` in parallel on the repository-keyed set of final
+checkpoints and ranges. Spec checks every Parent obligation against the full
+diff and proof. Standards checks correctness, repository policy, failure paths,
+cleanup, duplicate ownership, compatibility residue, and unnecessary machinery.
 
-Capture its non-empty identity, complete its wait, and require findings covering
-both questions plus `APPROVE`. Generic `PASS` without direct
-Parent coverage is rejected. A failed or timed-out reviewer blocks Parent
-completion. A blocker requires a concrete correctness defect, missing Parent
-obligation, required-proof gap, or real ownership or runtime conflict. Fowler
-smells and general improvements remain non-blocking observations without that
-concrete impact, and the reviewer may return `APPROVE` with observations.
+Capture both non-empty identities and complete both waits. Reviewer verdicts
+are evidence, not authority: root verifies each finding against the Parent and
+cumulative diff, and Parent approval exists when both independent reviews have
+no verified blocker or required-proof gap. Generic `PASS` without direct Parent
+coverage, failed review, and timeout remain blocking. A blocker
+requires a concrete defect or proof gap causally linked to a Parent obligation,
+existing invariant, or mandatory repository rule. Other findings are
+non-blocking observations.
 
-When the reviewer finds a concrete authorized in-scope blocker, assign the
+Before repair dispatch, root independently establishes **Authority** (the
+Parent obligation, invariant, or rule), **Trigger**, **Impact**, and **Minimal
+repair**. Only a finding with all four facts is a verified blocker eligible for
+repair. When root verifies such a blocker, assign the
 affected existing ticket to a unique fresh implementer with no Git authority.
 Root integrates the returned repair, reruns affected target-state and combined
 deterministic proof, creates the scoped checkpoint, pins the new revision, and
-launches a targeted fresh reviewer. Before relaunch, update the affected
+launches only the affected targeted lens: Spec for Parent behavior, Standards
+for correctness or mandatory rules, and both lenses for mixed or unisolatable
+repairs. Before relaunch, update the affected
 repository's final checkpoint and range. Give the reviewer the previous
 reviewed checkpoint as baseline, the repair delta, repaired blockers, directly
 affected Parent obligations and cross-ticket seams, and current affected proof.
 Review only the repair delta and directly affected Parent obligations.
 Untouched parts of the cumulative result retain their approval.
 
-Before each repair dispatch, consolidate every blocker from the current review
+Before each repair dispatch, consolidate every verified blocker from the current review
 into one graph-final repair batch. Dispatch each affected existing ticket once
 under its original boundary, then settle all returned checkpoints and proof
 before targeted Review. The original Parent and ticket authority covers these
 in-scope repairs without another user confirmation. Repeat the graph-final
-repair and targeted Review loop until approval; reviewer count is never a
-stop condition. Use a complete cumulative Review again only when the repair
+repair and targeted Review loop until approval; reviewer count is never a stop
+condition. Use a complete cumulative two-lens Review again only when the repair
 cannot be isolated from previously approved scope.
 
 Deterministic checks may prove this mechanism's contract without counting as a

@@ -13,8 +13,9 @@ without a planning artifact.
 ## Choose the smallest planning outcome
 
 - For a real decision gap, invoke `$grilling` only as needed to reach explicit
-  shared understanding. Keep the resolved decision in the current conversation
-  unless a later fresh context needs durable authority.
+  shared understanding through dependency-aware frontier rounds. Grilling owns
+  the write-free dialogue; keep the resolved decision in the current
+  conversation unless a later fresh context needs durable authority.
 - Resolve a decision gap in the current conversation when no durable handoff is
   needed. Do not create a PRD or tickets merely to record the conversation.
 - Create a durable PRD only when product authority must survive the current

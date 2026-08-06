@@ -10,7 +10,7 @@
     {
       "id": "ordinary-substantial-feature",
       "prompt": "Implement an authorized feature whose behavior crosses two existing modules.",
-      "expected": ["prove the behavior through its public seam", "launch one fresh Standards reviewer covering requirement fidelity and correctness"]
+      "expected": ["prove the behavior through its public seam", "launch fresh Spec and Standards reviewers in parallel"]
     },
     {
       "id": "public-api-contract-change",
@@ -60,7 +60,7 @@
     {
       "id": "role-based-model-mapping",
       "prompt": "A ticket needs an implementer and substantial-change review.",
-      "expected": ["request stable implementer and standards_reviewer roles", "leave model and reasoning effort to central role metadata"]
+      "expected": ["request stable implementer, spec_reviewer, and standards_reviewer roles", "leave model and reasoning effort to central role metadata"]
     },
     {
       "id": "no-remote-git-without-authority",
@@ -69,11 +69,12 @@
     },
     {
       "id": "consolidated-review-repair-batch",
-      "prompt": "The Standards reviewer reports three verified in-scope blockers on a substantial result.",
+      "prompt": "A Standards reviewer reports three findings. Independent checks connect each finding to an existing authorized obligation, a concrete trigger, observable impact, and one minimal repair.",
       "expected": [
+        "state a short evidence-backed repair sentence before editing",
         "consolidate all three blockers into one repair batch",
         "apply that batch through the active Implement owner",
-        "rerun affected proof before one fresh targeted reviewer"
+        "rerun affected proof before only the affected fresh targeted lens"
       ],
       "forbidden": [
         "repair findings one review cycle at a time",
@@ -81,16 +82,68 @@
       ]
     },
     {
-      "id": "targeted-review-continues-until-approval",
-      "prompt": "After one material repair batch, the fresh targeted Standards reviewer still reports a concrete blocker.",
+      "id": "unsupported-reviewer-blocker-is-observation",
+      "prompt": "A reviewer labels a generic best-practice preference as a blocker but provides no authorized obligation, concrete trigger, or observable impact.",
       "expected": [
-        "consolidate the current blockers into one repair batch",
+        "independently reject the blocker classification",
+        "record the finding as a non-blocking observation",
+        "perform no repair for that finding"
+      ],
+      "forbidden": [
+        "treat the reviewer label as implementation authority"
+      ]
+    },
+    {
+      "id": "outcome-changing-repair-is-decision-delta",
+      "prompt": "A reviewer proposes a repair that introduces a new user-visible obligation beyond the authorized outcome.",
+      "expected": [
+        "report a Decision Delta",
+        "stop before implementing the proposed repair"
+      ],
+      "forbidden": [
+        "expand the authorized outcome because the reviewer requested it",
+        "treat the new obligation as an in-scope repair"
+      ]
+    },
+    {
+      "id": "necessary-neighbor-inside-impact-cone",
+      "prompt": "A verified persistence blocker can only be repaired by changing the owner file plus a necessary neighboring serializer inside explicit repository boundaries, without changing the authorized outcome.",
+      "expected": [
+        "include the neighboring serializer in the investigated impact cone",
+        "allow the minimal neighboring-file change",
+        "keep the authorized outcome unchanged"
+      ],
+      "forbidden": [
+        "reject the repair merely because it touches a neighboring file",
+        "repair an unrelated problem found in the neighboring file"
+      ]
+    },
+    {
+      "id": "targeted-review-continues-until-approval",
+      "prompt": "After one material repair batch, a fresh targeted Standards reviewer reports a finding whose Authority, Trigger, Impact, and Minimal repair are independently established.",
+      "expected": [
+        "classify the finding as a verified blocker only after all four facts are established",
+        "consolidate the verified current blockers into one repair batch",
         "repeat affected proof and fresh targeted review until approval"
       ],
       "forbidden": [
+        "repair from the reviewer label alone",
         "stop because of reviewer count alone",
         "carry approval for the changed impact cone",
         "record durable review bookkeeping"
+      ]
+    },
+    {
+      "id": "targeted-review-lens-selection",
+      "prompt": "One repair batch contains a Spec-only fix, while another contains both requirement and correctness changes.",
+      "expected": [
+        "send the Spec-only delta only to a fresh Spec reviewer",
+        "send the mixed delta to fresh Spec and Standards reviewers",
+        "preserve approval outside each direct impact cone"
+      ],
+      "forbidden": [
+        "rerun both reviewers for every isolated repair",
+        "skip either affected lens for the mixed repair"
       ]
     }
   ]

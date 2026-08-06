@@ -5,6 +5,7 @@ import { chmod, mkdir, open, readFile, readdir, rm, symlink, writeFile } from 'n
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
+
 import { promisify } from 'node:util';
 
 import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
@@ -35,6 +36,14 @@ import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinat
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
+
+function reviewParticipants(coordinatorSessionId: string, verdict: 'approve' | 'block' = 'approve', targeted = false) {
+  const reviewers = [
+    { role: 'spec_reviewer', sessionId: `${coordinatorSessionId}:spec`, verdict },
+    { role: 'standards_reviewer', sessionId: `${coordinatorSessionId}:standards`, verdict },
+  ];
+  return targeted ? reviewers.slice(1) : reviewers;
+}
 
 test('continuation worktree restoration proves exact local and remote refs before creation', async () => {
   const fixture = await runFixture();
@@ -505,9 +514,13 @@ test('review-ready replay remains effect-free and updates the same PR once for t
   const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none' });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(first.status, 'review-ready');
-  fixture.dependencies.git.diffTrees = async () => { throw new Error('published previous tree unavailable'); };
   const initialState = await fixture.store.read();
   const record = initialState.runs[0]!;
+  const diffTrees = fixture.dependencies.git.diffTrees;
+  fixture.dependencies.git.diffTrees = async (worktreePath, fromTreeSha, toTreeSha) => {
+    if (fromTreeSha !== record.baseSha) throw new Error('published previous tree unavailable');
+    return diffTrees(worktreePath, fromTreeSha, toTreeSha);
+  };
   const frozenAuthority = canonicalJson(record.deliveryAuthority);
   const oldHead = record.reviewFeedback!.previousPublishedHeadSha!;
   assert.equal(record.reviewFeedback?.activeBatch, null);
@@ -1392,15 +1405,15 @@ test('approved targeted Review with an open out-of-cone improvement expands to c
   assert.equal(fixture.events.filter((event) => event === 'proof').length, 3);
 });
 
-test('repair review falls back to complete only when the exact tree delta cannot be isolated', async () => {
+test('review waits when no exact complete or targeted tree delta can be supplied', async () => {
   const fixture = await runFixture({ reviewNeedsWorkOnce: true, diffTreesUnisolatable: true });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.reviewInputs[1]?.repairPatch, null);
-  assert.deepEqual(fixture.reviewInputs[1]?.checks.map((check: { id: string }) => check.id), ['typecheck']);
+  assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']), {
+    status: 'transport-failed', resumable: true,
+  });
+  assert.equal(fixture.reviewInputs.length, 0);
 });
 
-test('unsafe, oversized, or denied ephemeral repair patches fall back to complete Review', async () => {
+test('Review waits when every available target patch is unsafe, oversized, or denied', async () => {
   const cases = [
     {
       name: 'secret evidence',
@@ -1420,10 +1433,10 @@ test('unsafe, oversized, or denied ephemeral repair patches fall back to complet
       reviewNeedsWorkOnce: true, diffTreeOverride: entry.diffTreeOverride, denyReadPaths: entry.denyReadPaths,
       configuredChecks: { lint: 'npm run lint', typecheck: 'npm run typecheck' },
     });
-    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready', entry.name);
-    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready', entry.name);
-    assert.equal(fixture.reviewInputs[1]?.repairPatch, null, entry.name);
-    assert.deepEqual(fixture.reviewInputs[1]?.checks.map((check: { id: string }) => check.id).sort(), ['lint', 'typecheck'], entry.name);
+    assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']), {
+      status: 'transport-failed', resumable: true,
+    }, entry.name);
+    assert.equal(fixture.reviewInputs.length, 0, entry.name);
   }
 });
 
@@ -2536,7 +2549,8 @@ async function runFixture(options: FixtureOptions = {}) {
                 repair: 'fix edge case', affectedTargets: options.reviewAffectedTargets ?? ['src/a.ts'], introducedTargetRevision: input.targetRevision,
                 statusTargetRevision: input.targetRevision, supersededBy: null,
               }],
-              residualRisks: [], reviewerSessionId: input.reviewerSessionId, repairFindingOutcomes: [],
+              residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+              reviewers: reviewParticipants(input.reviewerSessionId, 'approve', input.repairPatch !== null), repairFindingOutcomes: [],
             },
           };
         }
@@ -2560,6 +2574,7 @@ async function runFixture(options: FixtureOptions = {}) {
                 },
               ],
               residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+              reviewers: reviewParticipants(input.reviewerSessionId, 'approve', input.repairPatch !== null),
               repairFindingOutcomes: [
                 ...input.defects.map((defect) => ({ id: defect.id, status: 'verified' as const })),
                 ...input.repairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),
@@ -2582,6 +2597,7 @@ async function runFixture(options: FixtureOptions = {}) {
                 statusTargetRevision: input.targetRevision, supersededBy: null,
               }],
               residualRisks: ['Publishing would exceed issue authority.'], reviewerSessionId: input.reviewerSessionId,
+              reviewers: reviewParticipants(input.reviewerSessionId, 'block', input.repairPatch !== null),
               repairFindingOutcomes: [],
             },
           };
@@ -2594,6 +2610,7 @@ async function runFixture(options: FixtureOptions = {}) {
             coverage: [...input.reviewFocus],
             defects: input.defects.map((defect) => ({ ...defect, status: 'verified' as const, statusTargetRevision: input.targetRevision })),
             residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+            reviewers: reviewParticipants(input.reviewerSessionId, 'approve', input.repairPatch !== null),
             repairFindingOutcomes: [
               ...input.defects.map((defect) => ({ id: defect.id, status: 'verified' as const })),
               ...input.repairFindings.map((finding) => ({ id: finding.id, status: 'verified' as const })),

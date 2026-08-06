@@ -38,6 +38,10 @@ const codeReviewArtifact = {
   defects: [],
   residualRisks: [],
   reviewerSessionId: 'reviewer-session-1',
+  reviewers: [
+    { role: 'spec_reviewer', sessionId: 'spec-session-1', verdict: 'approve' },
+    { role: 'standards_reviewer', sessionId: 'standards-session-1', verdict: 'approve' },
+  ],
   repairFindingOutcomes: [],
 };
 
@@ -206,7 +210,10 @@ function operationFixture(
     },
     prepare: async (input) => {
       events.push(`prepare:${input.operation}`);
-      return options.prepared ?? { operation, generationHash, policy: readOnlyPolicy };
+      return options.prepared ?? {
+        operation, generationHash, policy: readOnlyPolicy,
+        reviewers: ['spec_reviewer', 'standards_reviewer'],
+      };
     },
     launch: async (input) => {
       events.push(`launch:${input.attempt.operation}`);

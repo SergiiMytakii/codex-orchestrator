@@ -1215,6 +1215,7 @@ export function createV2Runtime(input: {
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Runner-provided facts: ${canonicalJson(promptFacts)}`,
+          `Available reviewer roles: ${canonicalJson(attempt.reviewers ?? [])}`,
           'This is a read-only, report-only operation. Do not edit files or external state, use network or MCP tools, or request additional authority.',
           'Do not read .env or any .env* file. The runner has removed repository credential paths from this read view.',
         ].join('\n'),
@@ -1222,6 +1223,7 @@ export function createV2Runtime(input: {
         idleTimeoutMs: config.codex.idleTimeoutMs,
         operationPolicy: attempt.policy,
         executionProfile: attempt.profile,
+        agentProfilePaths: attempt.reviewerProfiles,
         onSpawned: async ({ pid, processGroupId }) => onLaunched?.({ pid, processGroupId }),
         }, signal);
       } catch (error) {
@@ -1869,6 +1871,8 @@ async function prepareContainedAttempt(input: {
   tmpDir: string;
   policy: WorkflowOperationPolicy;
   profile: WorkflowExecutionProfile;
+  reviewers: string[];
+  reviewerProfiles: Record<string, string>;
 }> {
   const runtimeRoot = join(resolve(input.orchestratorHome), 'v2', sha256(input.canonicalRepository));
   const attemptRelativePath = `runs/${input.runId}/attempts/${input.attemptId}`;
@@ -1913,6 +1917,8 @@ async function prepareContainedAttempt(input: {
     tmpDir,
     policy: structuredClone(snapshot.policy),
     profile,
+    reviewers: Object.keys(snapshot.reviewerProfiles).sort(),
+    reviewerProfiles: structuredClone(snapshot.reviewerProfiles),
   };
 }
 

@@ -36,6 +36,6 @@ Each smell reads *what it is* -> *how to fix*:
 - **Refused Bequest** — a subclass or implementer that ignores or overrides most
   of what it inherits. -> drop the inheritance, use composition.
 
-A smell alone is a non-blocking observation. Escalate only when separate
-evidence demonstrates a concrete correctness defect, missing obligation,
-required-proof gap, or real ownership or runtime conflict.
+A smell alone is a non-blocking observation. Escalate only when evidence
+demonstrates a concrete defect or proof gap causally linked to an explicit
+obligation, existing invariant, or mandatory repository rule.

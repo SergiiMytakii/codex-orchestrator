@@ -1,100 +1,51 @@
 ---
 name: grilling
-description: Grill the user about a plan, decision, or idea against codebase evidence and the project's domain model, sharpening terminology and updating CONTEXT.md or ADRs as decisions crystallize. Use when the user wants to stress-test their thinking or uses any 'grill' trigger phrase.
+description: Grill the user about a plan, decision, or idea through dependency-aware frontier rounds. Use when the user wants to stress-test their thinking or uses a grill trigger phrase.
 ---
 
-<what-to-do>
+# Grilling
 
-Run the interactive session on root. Root owns every user-facing question,
-recommendation, wait for feedback, and accepted decision; never delegate or
-impersonate the conversation through a child agent.
+Interview the user until you reach a shared understanding. Model the subject as
+a **design tree**: each material decision branches into the decisions that
+depend on it.
 
-Use `explorer` only for bounded read-only evidence gathering when the answer
-depends on a cross-module execution path. The child returns evidence to root and never contacts
-the user, choose the product decision, or continue the interview themselves.
+Root owns every user-facing question, recommendation, wait for feedback, and
+accepted decision. Never delegate or impersonate the dialogue. A bounded
+`explorer` may gather read-only evidence when a fact depends on a cross-module
+path; it returns evidence to root and makes no product decision.
 
-Interview me until we reach a shared understanding. Walk down the decision tree in dependency order, resolving the decisions that other decisions depend on first. For each question, provide your recommended answer.
+## Frontier rounds
 
-Ask one high-leverage question at a time and wait for feedback before continuing. Prioritize questions where you genuinely need the user's judgment. Do not ask questions just to be exhaustive.
+The **frontier** is every unresolved material decision whose prerequisites are
+settled. Ask the whole frontier in one numbered round. For each question:
 
-For each question, provide 2-3 concrete answer options when more than one path is plausible. Mark one option as **Recommended** and explain why it is the best trade-off. If evidence proves there is only one valid option, say that plainly instead of inventing alternatives.
+- state the decision and enough context to answer it;
+- give two or three concrete options when multiple paths are plausible;
+- mark one recommended answer and explain the trade-off briefly;
+- say plainly when evidence leaves only one valid option.
 
-If a fact can be found by exploring the environment, codebase, or existing docs, look it up rather than asking. The decisions are the user's: put each material decision to them and wait for an answer. Use each answer and the evidence to resolve minor follow-on details yourself.
+Then wait for the user's answers. Each answer reshapes the design tree: record
+the settled decision, recompute the frontier, and ask the next numbered round.
+A question whose answer depends on a decision still open in the current round
+belongs to a later round. Do not ask it early or guess its prerequisite.
 
-Do not act on the plan or design until the user confirms that shared understanding has been reached.
+Finding facts is the agent's job, never the user's. Look up facts in the
+environment, codebase, current docs, or authorized external sources. If a fact
+lookup is still running, treat it as an unsettled prerequisite: defer only its
+downstream questions and ask the rest of the current frontier now. The
+decisions remain the user's; put every material decision to them and use their
+answers to resolve only minor follow-ons.
 
-</what-to-do>
+The interview is complete only when the frontier is empty: every material
+branch is settled or explicitly ruled out and no decision is silently assumed.
+Summarize the resulting shared understanding and ask the user to confirm it.
+Do not act on the result until the user explicitly confirms the shared
+understanding. A product plan produced here is input to the active driver; this
+skill does not implement it.
 
-<supporting-info>
+## Mutation boundary
 
-## Domain awareness
-
-During codebase exploration, also look for existing documentation.
-
-### File structure
-
-Most repos have a single context:
-
-```text
-/
-|-- CONTEXT.md
-|-- docs/
-|   `-- adr/
-|       |-- 0001-event-sourced-orders.md
-|       `-- 0002-postgres-for-write-model.md
-`-- src/
-```
-
-If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The map points to where each one lives:
-
-```text
-/
-|-- CONTEXT-MAP.md
-|-- docs/
-|   `-- adr/                         <- system-wide decisions
-`-- src/
-    |-- ordering/
-    |   |-- CONTEXT.md
-    |   `-- docs/adr/                <- context-specific decisions
-    `-- billing/
-        |-- CONTEXT.md
-        `-- docs/adr/
-```
-
-Create files lazily, only when there is something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. If no `docs/adr/` exists, create it when the first ADR is needed.
-
-## During the session
-
-### Challenge against the glossary
-
-When the user uses a term that conflicts with the existing language in `CONTEXT.md`, call it out immediately. For example: "Your glossary defines cancellation as X, but you seem to mean Y. Which is it?"
-
-### Sharpen fuzzy language
-
-When the user uses vague or overloaded terms, propose a precise canonical term. For example: "You're saying account. Do you mean the Customer or the User? Those are different concepts."
-
-### Discuss concrete scenarios
-
-When domain relationships are being discussed, stress-test them with specific scenarios. Invent scenarios that probe edge cases and force precise boundaries between concepts.
-
-### Cross-reference with code
-
-When the user states how something works, check whether the code agrees. Surface contradictions instead of silently choosing one version.
-
-### Update CONTEXT.md inline
-
-When a term is resolved, update `CONTEXT.md` immediately. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
-
-Do not couple `CONTEXT.md` to implementation details. Include only terms meaningful to domain experts.
-
-### Offer ADRs sparingly
-
-Only offer to create an ADR when all three are true:
-
-1. **Hard to reverse** - changing the decision later has a meaningful cost.
-2. **Surprising without context** - a future reader will wonder why this choice was made.
-3. **The result of a real trade-off** - genuine alternatives existed and one was chosen for specific reasons.
-
-If any condition is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
-
-</supporting-info>
+Grilling is write-free. It may read repository domain language to phrase
+questions consistently, but it never creates or edits `CONTEXT.md`,
+`CONTEXT-MAP.md`, or ADRs. Domain-document mutation belongs only to
+`$domain-modeling`, when that discipline is separately active.

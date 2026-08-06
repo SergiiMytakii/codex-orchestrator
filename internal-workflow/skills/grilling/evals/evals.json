@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "skill": "grilling",
+  "cases": [
+    {
+      "id": "independent-frontier-round",
+      "prompt": "Three material decisions are independent and answerable now. Start the grilling session.",
+      "expected": [
+        "map all three as the current frontier and ask them in one numbered round",
+        "give a recommendation for each decision and wait for the user's answers",
+        "keep every user-facing question on root"
+      ],
+      "forbidden": [
+        "ask only one independent question",
+        "write domain documents",
+        "act on the resulting plan"
+      ]
+    },
+    {
+      "id": "dependent-frontier-deferral",
+      "prompt": "Decision B depends on decision A, while decision C is independent and a repository fact for D is still being looked up.",
+      "expected": [
+        "ask A and C in the current numbered frontier round",
+        "defer B until A settles and defer only D while its fact prerequisite is unresolved",
+        "recompute the frontier after answers and finish only when it is empty"
+      ],
+      "forbidden": [
+        "ask B in the same round as A",
+        "ask the user to find the repository fact",
+        "claim completion before explicit shared-understanding confirmation"
+      ]
+    },
+    {
+      "id": "implicit-grilling-remains-write-free",
+      "prompt": "Without naming a wrapper, grill this terminology choice and tell me whether it deserves an ADR.",
+      "expected": [
+        "run a write-free frontier interview",
+        "discuss terminology and ADR suitability without changing files",
+        "leave domain-document mutation to a separately active domain-modeling discipline"
+      ],
+      "forbidden": [
+        "edit CONTEXT.md",
+        "create an ADR"
+      ]
+    }
+  ]
+}

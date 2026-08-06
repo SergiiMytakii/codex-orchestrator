@@ -75,29 +75,44 @@ never activates the graph coordinator.
    A public returned-record shape change remains a substantial contract change
    even when its implementation is one line or arrives through one ticket.
 6. For substantial work, invoke `$code-review` on the settled proof. The first
-   invocation reviews the complete authorized result and launches one fresh
-   Standards reviewer. Obvious local work may skip Review.
+   invocation reviews the complete authorized result with one fresh Spec
+   reviewer and one fresh Standards reviewer in parallel. Obvious local work
+   may skip Review.
 7. Handle each reviewer result:
-   - non-blocking observations do not require repair or prevent approval;
-   - only a concrete correctness defect, missing obligation, required-proof
-     gap, or real ownership or runtime conflict blocks;
-   - consolidate every blocker from the current review into one repair
-     batch. Stop only on an out-of-scope item, Decision Delta, unresolved
-     ambiguity, or another concrete authority or preservation boundary.
-     Otherwise the original Implement authority already covers the repair and
-     the active owner applies it: root for direct work or the ticket's existing
-     `implementer` for single-ticket work. Do not ask the user for confirmation
-     and do not create a second implementer for the same ticket.
+   - reviewer findings are evidence, not implementation authority. Before any
+     repair, independently verify **Authority** (the existing authorized
+     obligation being restored), **Trigger** (the concrete failing path or
+     unmet requirement), **Impact** (the observable defect or proof gap in the
+     authorized result), and **Minimal repair** (the least change that restores
+     that obligation). State one short evidence-backed sentence connecting
+     those four facts before editing;
+   - classify the result without collapsing failure paths: a new obligation,
+     changed authorized outcome, ownership or architecture decision, or repair
+     of a neighboring problem is a Decision Delta and stops for authority. A
+     missing Authority, Trigger, or Impact makes the finding unverified and it
+     receives no repair; classify it as an observation unless required proof
+     cannot establish the authorized result, in which case the proof gap blocks
+     completion without authorizing code. Only a finding with all four facts
+     established is a verified blocker eligible for repair. Apply the same gate
+     to UI, backend, persistence, concurrency, infrastructure, and every other
+     change type;
+   - if optional machinery added by the current diff causes the problem,
+     remove it instead of expanding the outcome to support it;
+   - consolidate every verified blocker from the current review into one
+     repair batch. The repair may widen the investigated impact cone and touch
+     necessary neighboring files within explicit exclusions and preservation
+     boundaries, but it must not widen the authorized outcome. The active
+     owner applies it: root for direct work or the ticket's existing
+     `implementer` for single-ticket work. Do not ask for confirmation or
+     create a second implementer when the gate proves the repair is already
+     authorized.
 8. After each repair batch, rerun affected proof and invoke `$code-review` on
-   the new revision. Review only the repair delta and its direct impact cone:
-   the repaired blockers, changed files and hunks, directly affected caller
-   seams and invariants, and current affected proof. Untouched parts of the
-   previously reviewed result retain their approval. Repeat this repair and
-   targeted Review loop until approval; reviewer count is never a stop
-   condition or an authority boundary. Escalate to a complete Review only when
-   the repair cannot be isolated from previously approved scope. An empty wait
-   means wait again. Never interrupt or replace a reviewer to accelerate a
-   commit; interrupted review blocks and is not code approval.
+   the new revision. Run only the affected lens: a Spec-only repair returns to
+   Spec, a Standards-only repair returns to Standards, and a mixed or
+   unisolatable repair returns to both lenses. Limit targeted Review to the
+   repair delta, direct impact cone, and affected proof; untouched approval
+   remains valid. Repeat until approval. Reviewer count is not a stop condition;
+   use a complete two-lens Review only when the repair cannot be isolated.
 9. After proof and every applicable review approve, create one scoped local
    commit for direct and single-ticket Implement when the scope is isolatable.
    Stage only owned paths and recheck that unrelated dirty paths remain

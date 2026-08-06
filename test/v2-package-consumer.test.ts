@@ -156,9 +156,11 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
     assert.match(await readFile(implementation.entryPath, 'utf8'), /Follow packaged \[Implement\]/u);
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
     const codeReviewOperation = await readFile(codeReview.entryPath, 'utf8');
-    assert.match(codeReviewOperation, /independent Standards reviewer/u);
-    assert.match(codeReviewOperation, /requirement\s+fidelity and correctness/u);
-    assert.doesNotMatch(codeReviewOperation, /parallel Spec and Standards/iu);
+    const flatReviewOperation = codeReviewOperation.replace(/\s+/gu, ' ');
+    assert.match(flatReviewOperation, /For complete Review launch every available role/u);
+    assert.match(flatReviewOperation, /For targeted Review select only the affected role/u);
+    assert.match(flatReviewOperation, /Capture each non-empty identity/u);
+    assert.match(flatReviewOperation, /approval requires all selected reviewers to approve/u);
     assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
@@ -210,14 +212,14 @@ async function assertInstalledContract(installed: string): Promise<void> {
     'unique fresh `implementer`',
     'Workers perform no Git action',
     'clean isolated integration worktree and pinned baseline',
-    'exactly one fresh `standards_reviewer`',
+    'one fresh `spec_reviewer` and one fresh `standards_reviewer`',
   ]) assert.match(flatGraph, new RegExp(contract.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu'));
 
   const manifest = JSON.parse(await readFile(join(installed, 'internal-workflow', 'manifest.json'), 'utf8')) as {
     profiles: Record<string, string>;
   };
   assert.deepEqual(Object.keys(manifest.profiles).sort(), [
-    'implementer', 'standards_reviewer',
+    'implementer', 'review_coordinator', 'spec_reviewer', 'standards_reviewer',
   ]);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {

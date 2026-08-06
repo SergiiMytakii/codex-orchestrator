@@ -32,9 +32,13 @@ export function buildContainmentCodexArgs(input: {
   safePath: string;
   operationPolicy?: WorkflowOperationPolicy;
   executionProfile?: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
+  agentProfilePaths?: Record<string, string>;
 }): string[] {
   const operationPolicy = input.operationPolicy ?? defaultContainmentOperationPolicy();
   validateContainmentOperationPolicy(operationPolicy);
+  for (const [id, path] of Object.entries(input.agentProfilePaths ?? {})) {
+    if (!/^[a-z0-9_]+$/u.test(id) || !path.startsWith('/')) throw new Error('agent profile binding is invalid');
+  }
   return [
     'exec',
     '--strict-config',
@@ -61,6 +65,9 @@ export function buildContainmentCodexArgs(input: {
       '-c', `model=${tomlString(input.executionProfile.model)}`,
       '-c', `model_reasoning_effort=${tomlString(input.executionProfile.reasoningEffort)}`,
     ] : []),
+    ...Object.entries(input.agentProfilePaths ?? {}).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).flatMap(([id, path]) => [
+      '-c', `agents.${id}.config_file=${tomlString(path)}`,
+    ]),
     '-c',
     'shell_environment_policy.inherit="none"',
     '-c',

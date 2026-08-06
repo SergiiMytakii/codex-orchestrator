@@ -5,7 +5,7 @@
     {
       "id": "decision-gap-stays-conversational",
       "prompt": "Resolve this product ownership choice; no durable handoff or multi-session work is needed.",
-      "expected": ["invoke grilling only as needed to reach shared understanding", "resolve the decision in the current conversation", "do not create a durable artifact"],
+      "expected": ["invoke write-free grilling only as needed and ask all currently unblocked decisions in frontier rounds", "resolve the decision in the current conversation after explicit shared-understanding confirmation", "do not create a durable artifact"],
       "forbidden": ["publish tickets", "start implementation"]
     },
     {

@@ -8,7 +8,7 @@ The package executes one open Issue explicitly authorized by the configured auto
 
 `implementation → affected checks → Acceptance Proof → Review → publication`
 
-The first Review is complete and covers requirement fidelity plus correctness and repository standards. A Review finding opens one consolidated Implement-owned repair batch. When impact is isolatable, the next fresh standards reviewer receives the previous target identity, candidate repair delta, repaired blocker IDs, direct impact cone, and affected proof. Approval outside that cone is preserved. Semantic cycle, reviewer, and post-PR round counts are correlation data, not stop conditions.
+The first Review is complete and covers requirement fidelity plus correctness and repository standards. A Review finding opens one consolidated Implement-owned repair batch. When impact is isolatable, the next fresh affected reviewer receives the previous target identity, candidate repair delta, repaired blocker IDs, direct impact cone, and affected proof: Spec for requirement coverage or behavior, Standards for correctness or mandatory rules, and both when the repair crosses lenses or cannot be isolated. Approval outside that cone is preserved. Semantic cycle, reviewer, and post-PR round counts are correlation data, not stop conditions.
 
 Transport, timeout, launch, observation, report-format, and tooling failures return resumable issue-local outcomes. Each invocation remains bounded. Existing ActiveAttempt, PendingEffect, candidate binding, Checked Change, ProofReceipt, containment, and fast-forward publication mechanisms remain the only durable owners.
 

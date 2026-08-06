@@ -17,7 +17,7 @@ const workflowGeneration = {
 const report = {
   version: 1 as const, operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
   verdict: 'approved' as const, coverage: ['correctness'], defects: [], residualRisks: [],
-  reviewerSessionId: 'review-session-1', repairFindingOutcomes: [],
+  reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [],
 };
 
 test('thin reviewer facade binds an independent attempt and delegates durable launch hooks', async () => {
@@ -45,6 +45,9 @@ test('thin reviewer facade binds an independent attempt and delegates durable la
     'repository-standards', 'requirements', 'tests', 'zero-legacy',
   ]);
   assert.equal(calls[0]?.promptFacts.length, 1);
+  const capsule = JSON.parse(calls[0]!.promptFacts[0]!) as Record<string, any>;
+  assert.deepEqual(capsule.target.changedFiles, ['feature.txt']);
+  assert.match(capsule.target.patch, /\+implemented/u);
 });
 
 test('targeted reviewer capsule carries only ephemeral exact trees, patch, blocker IDs, and current proof', async () => {
@@ -242,6 +245,7 @@ function input(overrides: Partial<ImplementationReviewerInput> = {}): Implementa
     reviewerSessionId: 'review-session-1', implementationAttemptId: 'implementation-attempt-1', targetRevision: 1,
     targetFingerprint: fingerprint, issue: { number: 1, title: 'Issue' },
     currentTreeSha: '1'.repeat(40), previousTarget: null, repairPatch: null,
+    targetPatch: 'diff --git a/feature.txt b/feature.txt\nnew file mode 100644\n+implemented\n', changedFiles: ['feature.txt'],
     repairFindings: [], checkedChangeSha256: '2'.repeat(64), checks: [], proofReceipt: { proofId: 'proof-1' },
     frozenCriteria: ['works'],
     deliveryAuthority: {

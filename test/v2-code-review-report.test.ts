@@ -9,7 +9,7 @@ function report(overrides: Partial<CodeReviewReportV1> = {}): CodeReviewReportV1
   return {
     version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     verdict: 'approved', coverage: ['acceptance'], defects: [], residualRisks: [],
-    reviewerSessionId: 'review-session-1', repairFindingOutcomes: [], ...overrides,
+    reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [], ...overrides,
   };
 }
 
@@ -18,6 +18,55 @@ test('accepts an independent complete review bound to one target revision', () =
     operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', previousFindingIds: [],
   }), report());
+});
+
+test('approval requires every workflow-declared reviewer with a fresh identity', () => {
+  const reviewers = [
+    { role: 'spec_reviewer', sessionId: 'spec-session', verdict: 'approve' as const },
+    { role: 'standards_reviewer', sessionId: 'standards-session', verdict: 'approve' as const },
+  ];
+  const context = {
+    operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'coordinator-session', previousFindingIds: [],
+    availableReviewers: ['spec_reviewer', 'standards_reviewer'],
+  };
+  assert.deepEqual(validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers }), context).reviewers, reviewers);
+  assert.throws(() => validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers: reviewers.slice(1) }), context), /available roles/u);
+  assert.throws(() => validateCodeReviewReport(report({
+    reviewerSessionId: 'coordinator-session',
+    reviewers: reviewers.map((reviewer) => ({ ...reviewer, sessionId: 'same-session' })),
+  }), context), /sessions must be unique/u);
+});
+
+test('targeted review accepts a non-empty affected subset of workflow reviewers', () => {
+  const reviewers = [{ role: 'standards_reviewer', sessionId: 'standards-session', verdict: 'approve' as const }];
+  const context = {
+    operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'coordinator-session', previousFindingIds: [],
+    availableReviewers: ['spec_reviewer', 'standards_reviewer'], requireAllReviewers: false,
+  };
+  assert.deepEqual(validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers }), context).reviewers, reviewers);
+  assert.throws(() => validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers: [] }), context), /available roles/u);
+});
+
+test('reviewer ordering uses the workflow canonical byte order', () => {
+  const reviewers = [
+    { role: 'a_', sessionId: 'session-underscore', verdict: 'approve' as const },
+    { role: 'a1', sessionId: 'session-digit', verdict: 'approve' as const },
+  ];
+  const validated = validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers }), {
+    operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'coordinator-session', availableReviewers: ['a1', 'a_'],
+  });
+  assert.deepEqual(validated.reviewers.map((reviewer) => reviewer.role), ['a1', 'a_']);
+});
+
+test('retained malformed review can require independent reviewer evidence without its inventory', () => {
+  const context = {
+    operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'coordinator-session', requireReviewerEvidence: true,
+  };
+  assert.throws(() => validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers: [] }), context), /available roles/u);
 });
 
 test('every repair review accounts for every previous finding ID', () => {
