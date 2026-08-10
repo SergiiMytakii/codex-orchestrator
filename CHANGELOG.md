@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Split implementation blockers with and without reviewer rejection details
+  into strict output-schema branches, so Codex Structured Outputs accepts
+  implementation runs while preserving the runtime validator contract.
+
 ## [2.0.12] - 2026-08-10
 
 ### Changed
