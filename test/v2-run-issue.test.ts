@@ -1591,6 +1591,7 @@ test('blocked terminal publishes bounded public text without host paths or crede
     'file:///C:/Users/alice/.ssh/id_rsa',
     'token=credential-material-12345',
     'ghp_abcdefghijklmnopqrstuvwxyz123456',
+    'github_pat_abcdefghijklmnopqrstuvwxyz123456',
     'https://alice:credential-material@example.invalid/private',
   ]) {
     const fixture = await runFixture({
@@ -1603,7 +1604,7 @@ test('blocked terminal publishes bounded public text without host paths or crede
     const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
     assert.ok(comment);
     assert.ok(comment.body.length < 16_384);
-    assert.doesNotMatch(comment.body, /\.ssh/u);
+    assert.equal(comment.body.includes(unsafeSummary), false);
   }
 });
 

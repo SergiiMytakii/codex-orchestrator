@@ -164,6 +164,7 @@ export function containsCredentialEvidence(value: string): boolean {
     /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
     /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)["']?\s*[:=]\s*["']?[^\s"']{8,}/iu,
     /\bgh[pousr]_[A-Za-z0-9]{20,}\b/u,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
     /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu,
   ].some((pattern) => pattern.test(value));
 }

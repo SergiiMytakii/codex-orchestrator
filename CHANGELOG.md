@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Blocked terminal runs now publish one redacted, bounded, idempotent issue
+  comment with the blocker reason and attempted actions before transitioning
+  labels, including restart recovery without duplicate comments.
+
 ## [2.0.13] - 2026-08-10
 
 ### Fixed
