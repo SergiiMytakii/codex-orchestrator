@@ -511,7 +511,7 @@ test('uninitialized feedback data fails closed without losing the Run', async ()
 });
 
 test('review-ready replay remains effect-free and updates the same PR once for trusted feedback', async () => {
-  const fixture = await runFixture({ rejectStoreEvent: 'state:blocked:none' });
+  const fixture = await runFixture();
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(first.status, 'review-ready');
   const initialState = await fixture.store.read();
@@ -690,7 +690,10 @@ test('review-ready replay remains effect-free and updates the same PR once for t
   let stripClaim = false;
   fixture.dependencies.issues.read = async (issueNumber) => {
     const issue = await readIssue(issueNumber);
-    return issue && stripClaim ? { ...issue, comments: [] } : issue;
+    return issue && stripClaim ? {
+      ...issue,
+      comments: issue.comments.filter((comment) => !comment.body.includes(':claim -->')),
+    } : issue;
   };
   let postPushValidations = 0;
   fixture.dependencies.reviewFeedback = {
@@ -710,32 +713,20 @@ test('review-ready replay remains effect-free and updates the same PR once for t
   } as unknown as ReviewFeedbackObserver;
   const drifted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(
-    pick(drifted, ['status', 'resumable']),
-    { status: 'transport-failed', resumable: true },
+    pick(drifted, ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'safety', resumable: false },
     `${JSON.stringify(drifted)}\n${JSON.stringify((await fixture.store.read()).runs[0]?.pendingEffect)}\n${fixture.events.join('\n')}`,
   );
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked', 'extra']);
   assert.equal(
-    (await fixture.store.read()).runs[0]?.pendingEffect?.kind,
-    'review-blocked-labels',
-    JSON.stringify((await fixture.store.read()).runs[0]),
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+    1,
   );
-  await fixture.dependencies.issues.setLabels(42, ['agent:review']);
-  const interruptedBlock = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(interruptedBlock, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
-  const interruptedBlockRecord = (await fixture.store.read()).runs[0]!;
-  assert.equal(interruptedBlockRecord.lifecycle, 'blocked');
-  assert.equal(interruptedBlockRecord.pendingEffect?.kind, 'outcome-evidence');
-  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
-  const commentsBeforeRecovery = prComments.length;
-
-  const blocked = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
-  assert.equal(prComments.length, commentsBeforeRecovery);
   const blockedRecord = (await fixture.store.read()).runs[0]!;
   assert.equal(blockedRecord.reviewFeedback?.history.length, 2);
   assert.equal(blockedRecord.reviewFeedback?.history[0]?.kind, 'published');
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
-  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked', 'extra']);
 });
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {
@@ -868,7 +859,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
       resumable: false,
       reviewerRejectionDetail: `Reviewer rejected expanding ${phase} scope.`,
     };
-    const fixtureOptions: FixtureOptions = { rejectStoreEvent: 'state:blocked:none' };
+    const fixtureOptions: FixtureOptions = {};
     const fixture = await runFixture(fixtureOptions);
     const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.equal(initial.status, 'review-ready');
@@ -944,16 +935,13 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
     }
     await fixture.dependencies.issues.setLabels(42, ['agent:review']);
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true },
-      JSON.stringify({ phase, first, state: await fixture.store.read(), events: fixture.events }));
+    let replayed = first;
     if (phase === 'review') {
+      assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, phase);
       assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
-      const rejected = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-      assert.deepEqual(pick(rejected, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, phase);
+      replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     }
-    assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence', phase);
     const workCalls = fixture.events.filter((event) => event === 'feedback-blocker-work').length;
-    const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     if (phase === 'review') {
       assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable']), {
         status: 'blocked', kind: expectedKind, resumable: false,
@@ -965,6 +953,11 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
       }, phase);
     }
     assert.equal(fixture.events.filter((event) => event === 'feedback-blocker-work').length, workCalls, phase);
+    assert.equal(
+      (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+      1,
+      phase,
+    );
     assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.history.at(-1)?.kind, `blocked-${expectedKind}`, phase);
   }
 });
@@ -1454,6 +1447,8 @@ test('ordinary external and safety terminals publish the blocked issue status', 
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: entry.kind }, entry.name);
     assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked'], entry.name);
+    const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
+    assert.match(comment?.body ?? '', /Reason: .+\n\nAttempted:\n- .+/u, entry.name);
   }
 });
 
@@ -1553,8 +1548,106 @@ test('blocked label delivery resumes from its durable pendingEffect without reru
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.deepEqual(resumed.status === 'blocked' ? resumed.blocker : undefined, {
+    kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
+  });
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
   assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+});
+
+test('blocked terminal publishes its reason before labels and does not duplicate the comment on replay', async () => {
+  const fixture = await runFixture({
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: 'proof service is down', attempted: ['bounded status probe'], resumable: false,
+    }, receipt: receipt() }),
+  });
+
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  const issue = await fixture.dependencies.issues.read(42);
+  const blockedComments = issue?.comments.filter((comment) => comment.body.includes(':blocked -->')) ?? [];
+  assert.equal(blockedComments.length, 1);
+  assert.match(blockedComments[0]!.body, /proof service is down/u);
+  assert.match(blockedComments[0]!.body, /bounded status probe/u);
+  assert.match(blockedComments[0]!.body, /Kind: external/u);
+  assert.match(blockedComments[0]!.body, /Resumable: no/u);
+  assert.ok(
+    fixture.events.indexOf('effect:blocked-comment') < fixture.events.indexOf('effect:terminal-labels'),
+    fixture.events.join('\n'),
+  );
+
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(replay, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal(
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+    1,
+  );
+});
+
+test('blocked terminal publishes bounded public text without host paths or credential evidence', async () => {
+  for (const unsafeSummary of [
+    'path=/Users/example/.ssh/id_rsa',
+    String.raw`failed(C:\Users\alice\.ssh\id_rsa)`,
+    'file:///C:/Users/alice/.ssh/id_rsa',
+  ]) {
+    const fixture = await runFixture({
+      proof: async () => ({ status: 'external-block', blocker: {
+        kind: 'service', summary: unsafeSummary,
+        attempted: Array.from({ length: 4 }, () => 'x'.repeat(3_000)), resumable: false,
+      }, receipt: receipt() }),
+    });
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+    const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
+    assert.ok(comment);
+    assert.ok(comment.body.length < 16_384);
+    assert.doesNotMatch(comment.body, /\.ssh/u);
+  }
+});
+
+test('blocked comment delivery resumes from its durable intent without rerunning work', async () => {
+  const fixture = await runFixture({
+    rejectEffect: 'comment',
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
+    }, receipt: receipt() }),
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  assert.equal(
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+    1,
+  );
+});
+
+test('blocked comment survives a crash after remote publication without duplication or rerunning work', async () => {
+  const fixture = await runFixture({
+    rejectStoreEvent: 'state:proving:blocked-labels',
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
+    }, receipt: receipt() }),
+  });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
+  assert.equal(
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+    1,
+  );
+  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(resumed, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  assert.equal(
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
+    1,
+  );
 });
 
 test('blocked label delivery survives a crash after the remote effect without duplicating work or labels', async () => {
@@ -2401,14 +2494,14 @@ async function runFixture(options: FixtureOptions = {}) {
           blockedTransitionMutated = true;
           labels = [...options.blockedTransitionLabels];
         }
-        if (labels.includes(policy.review)) return;
-        if (!labels.some((label) => label === policy.auto || label === policy.running || label === policy.blocked)) return;
-        labels = labels.filter((label) => label !== policy.running);
+        if (!labels.some((label) => label === policy.auto || label === policy.running || label === policy.blocked || label === policy.review)) return;
+        labels = labels.filter((label) => label !== policy.running && label !== policy.review);
         if (!labels.includes(policy.blocked)) labels.push(policy.blocked);
       },
       postComment: async (_issueNumber, body) => {
         const claim = body.split('\n')[0]?.endsWith(':claim -->') ?? false;
-        events.push(claim ? 'effect:claim-comment' : 'effect:handoff-comment');
+        const blocked = body.split('\n')[0]?.endsWith(':blocked -->') ?? false;
+        events.push(claim ? 'effect:claim-comment' : blocked ? 'effect:blocked-comment' : 'effect:handoff-comment');
         if (claim && shouldReject('claim-comment')) throw new Error('claim comment rejected');
         if (!claim && shouldReject('comment')) throw new Error('comment rejected');
         comments.push({ id: `comment-${nextCommentId++}`, body, authorAssociation: 'OWNER' });

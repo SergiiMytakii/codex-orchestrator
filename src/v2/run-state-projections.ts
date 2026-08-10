@@ -123,7 +123,7 @@ export function blockedLabelProjection(
 ): { status: 'settled'; expected: string[] } | { status: 'transition' | 'diverged' } {
   const policy = blockedLabelPolicy(config);
   const present = new Set(labels);
-  if (present.has(policy.review)) return { status: 'diverged' };
+  if (present.has(policy.review)) return { status: 'transition' };
   const auto = present.has(policy.auto);
   const running = present.has(policy.running);
   const blocked = present.has(policy.blocked);

@@ -37,6 +37,16 @@ type EffectIdentity = { effectId: string };
 export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
   | { kind: 'claim-comment' | 'handoff-comment'; issueNumber: number; marker: string; bodySha256: string }
+  | {
+    kind: 'blocked-comment';
+    issueNumber: number;
+    marker: string;
+    bodySha256: string;
+    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
+    resumable: boolean;
+    evidenceCode: string;
+    blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string };
+  }
   | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
@@ -48,20 +58,13 @@ export type PendingEffect = EffectIdentity & (
     blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
     resumable: boolean;
     evidenceCode: string;
+    blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string };
   }
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
   | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
   | { kind: 'review-summary'; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; marker: string; bodySha256: string; epochHeadSha: string }
   | { kind: 'review-final-labels'; issueNumber: number; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; epochHeadSha: string; expected: string[] }
-  | {
-    kind: 'review-blocked-labels';
-    issueNumber: number;
-    batchId: string;
-    expected: string[];
-    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
-    evidenceCode: string;
-  }
   | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
   | { kind: 'continuation-worktree-create'; worktreePath: string; branchName: string; baseBranch: string; publishedHeadSha: string }
   | { kind: 'candidate-pin-release'; bindingId: string; expectedPinnedCommitSha: string }
@@ -411,7 +414,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
-    || ['review-activation-labels', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence'].includes(reviewReadyEffect);
+    || ['review-activation-labels', 'blocked-comment', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence'].includes(reviewReadyEffect);
   if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || !reviewReadyEffectAllowed)) {
     throw new Error(`${field} review-ready requires proofReceipt and only a review continuation or terminal effect`);
   }
@@ -548,6 +551,20 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
     assertSha256(value.bodySha256, `${field}.bodySha256`);
+  } else if (kind === 'blocked-comment') {
+    assertExactObject(value, [
+      ...identity, 'issueNumber', 'marker', 'bodySha256', 'blockKind', 'resumable', 'evidenceCode',
+      ...(hasOwn(value, 'blocker') ? ['blocker'] : []),
+    ], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertNonEmptyString(value.marker, `${field}.marker`);
+    assertSha256(value.bodySha256, `${field}.bodySha256`);
+    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) {
+      throw new Error(`${field}.blockKind is invalid`);
+    }
+    if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
+    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
+    if (hasOwn(value, 'blocker')) validateBlockerDetail(value.blocker, `${field}.blocker`);
   } else if (kind === 'review-activation-labels') {
     assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -583,22 +600,17 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertNonEmptyString(value.pullRequestNodeId, `${field}.pullRequestNodeId`);
     assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
     validateStringArray(value.expected, `${field}.expected`);
-  } else if (kind === 'review-blocked-labels') {
-    assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'expected', 'blockKind', 'evidenceCode'], field);
-    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-    assertSha256(value.batchId, `${field}.batchId`);
-    validateStringArray(value.expected, `${field}.expected`);
-    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) {
-      throw new Error(`${field}.blockKind is invalid`);
-    }
-    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
   } else if (kind === 'blocked-labels') {
-    assertExactObject(value, [...identity, 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode'], field);
+    assertExactObject(value, [
+      ...identity, 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode',
+      ...(hasOwn(value, 'blocker') ? ['blocker'] : []),
+    ], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
     if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
     if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
     assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
+    if (hasOwn(value, 'blocker')) validateBlockerDetail(value.blocker, `${field}.blocker`);
   } else if (kind === 'worktree-create') {
     assertExactObject(value, [...identity, 'worktreePath', 'branchName', 'baseBranch', 'baseSha'], field);
     assertAbsolutePath(value.worktreePath, `${field}.worktreePath`);
@@ -750,7 +762,10 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     || batch.priorPublishedHeadSha !== feedback.previousPublishedHeadSha)) {
     throw new Error(`${field}.reviewFeedback active batch identity binding is invalid`);
   }
-  const retainedQuiescentHistory = !batch && run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked';
+  const blockedPublication = ['blocked-comment', 'blocked-labels', 'outcome-evidence'].includes(run.pendingEffect?.kind ?? '');
+  const retainedQuiescentHistory = !batch && (
+    (run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked') || blockedPublication
+  );
   if (!batch && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
     throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
   }

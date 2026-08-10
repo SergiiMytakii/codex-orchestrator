@@ -9,7 +9,7 @@ import {
   type CheckedChangePayloadV2,
 } from './checked-change.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
-import { canonicalJson, containsCredentialEvidence, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
+import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, parseJsonWithoutDuplicateKeys, sha256 } from './containment.js';
 import { findDeniedPathMatch } from './adapters/path-policy.js';
 import {
   adoptActiveAttempt,
@@ -1036,13 +1036,13 @@ export class RunIssue {
       baseBranch: config.github.baseBranch,
     });
     if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
-      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-pr-identity-missing', false) };
+      return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-pr-identity-missing') };
     }
     const expectedHeadSha = feedback.previousPublishedHeadSha === null
       ? pullRequest.headSha
       : feedback.previousPublishedHeadSha;
     if (!expectedHeadSha) {
-      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-head-missing', false) };
+      return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-head-missing') };
     }
     const observed = await this.dependencies.reviewFeedback.observeAndFreeze({
       runId: starting.record.runId,
@@ -1062,7 +1062,7 @@ export class RunIssue {
     });
     if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
     if (observed.status === 'blocked') {
-      return { result: await this.persistTerminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-observation-blocked', false) };
+      return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-observation-blocked') };
     }
     if (feedback.previousPublishedHeadSha === null) {
       const sourceIds = observed.status === 'frozen'
@@ -1269,10 +1269,15 @@ export class RunIssue {
           const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
           return await this.persistTerminal(active, seed, active.record.pendingEffect.code, false);
         }
-        if (active.record.pendingEffect?.kind === 'review-blocked-labels') {
-          return await this.blockReviewFeedback(
+        if (active.record.pendingEffect?.kind === 'blocked-comment') {
+          return await this.publishBlockedTerminal(
             active,
-            active.record.pendingEffect.blockKind,
+            {
+              status: 'blocked',
+              kind: active.record.pendingEffect.blockKind,
+              resumable: active.record.pendingEffect.resumable,
+              ...(active.record.pendingEffect.blocker ? { blocker: active.record.pendingEffect.blocker } : {}),
+            },
             active.record.pendingEffect.evidenceCode,
           );
         }
@@ -1283,6 +1288,7 @@ export class RunIssue {
               status: 'blocked',
               kind: active.record.pendingEffect.blockKind,
               resumable: active.record.pendingEffect.resumable,
+              ...(active.record.pendingEffect.blocker ? { blocker: active.record.pendingEffect.blocker } : {}),
             },
             active.record.pendingEffect.evidenceCode,
           );
@@ -1452,7 +1458,7 @@ export class RunIssue {
       }
       attemptLoop: while (true) {
         if (!await this.authorized(active, config)) {
-          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'authorization-revoked');
         }
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
@@ -1591,7 +1597,7 @@ export class RunIssue {
         return await this.terminal(active, implementationBlockerOutcome(report.blocker!));
       }
       if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record)) {
-        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
+        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'implementation-head-drift');
       }
       const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
       if (changedFiles.length === 0 || !sameStrings(changedFiles, report.changedFiles)) {
@@ -2715,7 +2721,7 @@ export class RunIssue {
         : this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-execution-missing');
     }
     if (inspection.value === 'mutated') {
-      return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-mutated', false);
+      return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-mutated');
     }
     if (active.record.activeAttempt?.stage === 'observed' && active.record.activeAttempt.result) {
       return { active };
@@ -2808,7 +2814,7 @@ export class RunIssue {
         reviewFeedback: blockReviewFeedback(active.record.reviewFeedback, 'safety', this.timestamp()),
       });
     }
-    return this.persistTerminal(active, { status: 'blocked', kind: 'safety', resumable: false }, evidenceCode, false);
+    return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, evidenceCode);
   }
 
   private mapCandidateFailure(active: ActiveRun, code: string): Promise<RunIssueResult> {
@@ -3233,46 +3239,7 @@ export class RunIssue {
   ): Promise<RunIssueResult> {
     const feedback = active.record.reviewFeedback;
     if (!feedback?.activeBatch) return this.terminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode);
-    {
-      const config = active.config;
-      const blockedLabels = [config.github.labels.auto.name, config.github.labels.blocked.name].sort();
-      const existingIntent = active.record.pendingEffect;
-      if (existingIntent?.kind !== 'review-blocked-labels') {
-        active = await this.persist(active, { pendingEffect: {
-          kind: 'review-blocked-labels', issueNumber: active.record.issueNumber,
-          batchId: feedback.activeBatch.batchId, expected: blockedLabels, blockKind: kind, evidenceCode,
-        } });
-      } else if (existingIntent.issueNumber !== active.record.issueNumber
-        || existingIntent.batchId !== feedback.activeBatch.batchId
-        || !sameStrings(existingIntent.expected, blockedLabels)
-        || existingIntent.blockKind !== kind
-        || existingIntent.evidenceCode !== evidenceCode) {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-pendingEffect-diverged');
-      }
-      const ownedRunningLabels = [config.github.labels.auto.name, config.github.labels.running.name].sort();
-      const ownedReviewLabels = [config.github.labels.review.name];
-      const effect = active.record.pendingEffect;
-      if (effect?.kind !== 'review-blocked-labels') {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-pendingEffect-diverged');
-      }
-      const settlement = await settleLabelsEffect(effect, {
-        observe: async () => {
-          const issue = await this.readIssue(active.record.issueNumber);
-          if (!issue || issue.state !== 'OPEN') return 'diverged';
-          if (sameStrings(issue.labels, blockedLabels)) return 'confirmed';
-          return sameStrings(issue.labels, ownedRunningLabels) || sameStrings(issue.labels, ownedReviewLabels)
-            ? 'absent' : 'diverged';
-        },
-        invoke: () => this.dependencies.issues.setLabels(active.record.issueNumber, blockedLabels),
-      });
-      if (settlement.status === 'unknown') {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-delivery-unknown');
-      }
-      if (settlement.status !== 'confirmed') {
-        return this.invokedFailure(active, 'review-feedback-blocked-labels-observation-diverged');
-      }
-    }
-    return this.persistTerminal(active, outcome, evidenceCode, false, {
+    return this.publishBlockedTerminal(active, outcome, evidenceCode, {
       reviewFeedback: blockReviewFeedback(feedback, kind, this.timestamp()),
     }, true);
   }
@@ -3306,7 +3273,7 @@ export class RunIssue {
 
   private async revoked(active: ActiveRun): Promise<RunIssueResult> {
     if (active.record.pendingEffect) return this.invokedFailure(active, 'revoked-with-pending-effect');
-    return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true });
+    return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'authorization-revoked');
   }
 
   private async invokedFailure(
@@ -3388,22 +3355,64 @@ export class RunIssue {
     starting: ActiveRun,
     outcome: Extract<TerminalSeed, { status: 'blocked' }>,
     evidenceCode: string,
+    additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
+    replaceExistingIntent = false,
   ): Promise<RunIssueResult> {
     let active = starting;
+    const body = blockedComment(active.record.runId, outcome, evidenceCode);
+    const marker = body.split('\n')[0]!;
+    const commentIntent = {
+      kind: 'blocked-comment' as const,
+      issueNumber: active.record.issueNumber,
+      marker,
+      bodySha256: sha256(body),
+      blockKind: outcome.kind,
+      resumable: outcome.resumable,
+      evidenceCode,
+      ...(outcome.blocker ? { blocker: outcome.blocker } : {}),
+    };
     const autoBlocked = [active.config.github.labels.auto.name, active.config.github.labels.blocked.name].sort();
     const blockedOnly = [active.config.github.labels.blocked.name];
     let expected = autoBlocked;
-    const existing = active.record.pendingEffect;
-    if (!existing) {
-      active = await this.persist(active, { pendingEffect: {
-        kind: 'blocked-labels',
-        issueNumber: active.record.issueNumber,
-        expected,
-        blockKind: outcome.kind,
-        resumable: outcome.resumable,
-        evidenceCode,
-      } });
-    } else if (existing.kind !== 'blocked-labels'
+    let existing = active.record.pendingEffect;
+    if (!existing || replaceExistingIntent) {
+      active = await this.persist(active, { ...additionalChanges, pendingEffect: commentIntent });
+      existing = active.record.pendingEffect;
+    }
+    if (existing?.kind === 'blocked-comment') {
+      if (existing.issueNumber !== commentIntent.issueNumber || existing.marker !== marker
+        || existing.bodySha256 !== sha256(body) || existing.blockKind !== outcome.kind
+        || existing.resumable !== outcome.resumable || existing.evidenceCode !== evidenceCode) {
+        return this.invokedFailure(active, 'blocked-comment-pendingEffect-diverged');
+      }
+      const settlement = await settleCommentEffect(existing, {
+        observe: async () => {
+          const observation = await this.readIssue(active.record.issueNumber);
+          const matching = observation ? commentsWithMarker(observation, marker) : [];
+          if (matching.length === 0) return 'absent';
+          return matching.length === 1 && sha256(matching[0]!.body) === sha256(body)
+            ? 'confirmed' : 'diverged';
+        },
+        invoke: () => this.dependencies.issues.postComment(active.record.issueNumber, body),
+      });
+      if (settlement.status === 'unknown') return this.invokedFailure(active, 'blocked-comment-delivery-unknown');
+      if (settlement.status !== 'confirmed') return this.invokedFailure(active, 'blocked-comment-observation-diverged');
+      try {
+        active = await this.persist(active, { pendingEffect: {
+          kind: 'blocked-labels',
+          issueNumber: active.record.issueNumber,
+          expected,
+          blockKind: outcome.kind,
+          resumable: outcome.resumable,
+          evidenceCode,
+          ...(outcome.blocker ? { blocker: outcome.blocker } : {}),
+        } });
+      } catch {
+        throw new PostEffectStateError(active);
+      }
+      existing = active.record.pendingEffect;
+    }
+    if (existing?.kind !== 'blocked-labels'
       || existing.issueNumber !== active.record.issueNumber
       || existing.blockKind !== outcome.kind
       || existing.resumable !== outcome.resumable
@@ -3452,8 +3461,7 @@ export class RunIssue {
       }
     }
     try {
-      active = await this.confirmEffect(active);
-      return await this.persistTerminal(active, outcome, evidenceCode, false);
+      return await this.persistTerminal(active, outcome, evidenceCode, false, {}, true);
     } catch {
       throw new PostEffectStateError(active);
     }
@@ -3707,6 +3715,55 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
 
 function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
   return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
+}
+
+function blockedComment(
+  runId: string,
+  outcome: Extract<TerminalSeed, { status: 'blocked' }>,
+  evidenceCode: string,
+): string {
+  const lines = [
+    `<!-- codex-orchestrator:run:${runId}:blocked -->`,
+    'codex-orchestrator blocked this run.',
+    '',
+    `Kind: ${outcome.kind}`,
+    `Resumable: ${outcome.resumable ? 'yes' : 'no'}`,
+  ];
+  if (outcome.blocker) {
+    lines.push('', `Reason: ${publicBlockedText(outcome.blocker.summary, evidenceCode, 2_000)}`);
+    if (outcome.blocker.reviewerRejectionDetail) {
+      lines.push(`Detail: ${publicBlockedText(
+        outcome.blocker.reviewerRejectionDetail,
+        'Review detail was unsafe or unavailable.',
+        2_000,
+      )}`);
+    }
+    if (outcome.blocker.attempted.length > 0) {
+      const attempted: string[] = [];
+      let remaining = 8_000;
+      for (const attempt of outcome.blocker.attempted.slice(0, 16)) {
+        if (remaining <= 0) break;
+        const text = publicBlockedText(attempt, 'Unsafe or unavailable attempted action.', Math.min(2_000, remaining));
+        attempted.push(`- ${text}`);
+        remaining -= text.length;
+      }
+      lines.push('', 'Attempted:', ...attempted);
+    } else {
+      lines.push('', 'Attempted:', '- No attempted actions were recorded.');
+    }
+  } else {
+    lines.push('', `Reason: ${evidenceCode}`, '', 'Attempted:', '- No attempted actions were recorded.');
+  }
+  return lines.join('\n');
+}
+
+function publicBlockedText(value: string, fallback: string, maxLength: number): string {
+  if (containsCredentialEvidence(value) || containsHostIdentityEvidence(value)) return fallback;
+  const normalized = value.replace(/[\r\n]+/gu, ' ').trim();
+  if (normalized.length === 0) return fallback;
+  return normalized.length <= maxLength
+    ? normalized
+    : `${normalized.slice(0, Math.max(0, maxLength - 12))} [truncated]`;
 }
 
 function sortedUnique(values: string[]): string[] {

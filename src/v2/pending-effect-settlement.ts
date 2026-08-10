@@ -5,11 +5,11 @@ type CommitEffect = Extract<PendingEffect, { kind: 'initial-commit' | 'review-up
 type PushEffect = Extract<PendingEffect, { kind: 'initial-push' | 'review-update-push' }>;
 type DraftPullRequestEffect = Extract<PendingEffect, { kind: 'draft-pr' }>;
 type CommentEffect = Extract<PendingEffect, {
-  kind: 'claim-comment' | 'handoff-comment' | 'review-summary';
+  kind: 'claim-comment' | 'handoff-comment' | 'blocked-comment' | 'review-summary';
 }>;
 type LabelsEffect = Extract<PendingEffect, {
   kind: 'claim-labels' | 'final-labels' | 'blocked-labels' | 'review-activation-labels'
-    | 'review-final-labels' | 'review-blocked-labels';
+    | 'review-final-labels';
 }>;
 type CleanupEffect = Extract<PendingEffect, { kind: 'candidate-pin-release' }>;
 
@@ -47,14 +47,14 @@ export function settleDraftPullRequestEffect(
 }
 
 export function settleCommentEffect(effect: CommentEffect, adapter: FiniteEffectAdapter): Promise<EffectSettlement> {
-  assertEffect(effect, ['claim-comment', 'handoff-comment', 'review-summary'], 'comment');
+  assertEffect(effect, ['claim-comment', 'handoff-comment', 'blocked-comment', 'review-summary'], 'comment');
   return settle(adapter);
 }
 
 export function settleLabelsEffect(effect: LabelsEffect, adapter: FiniteEffectAdapter): Promise<EffectSettlement> {
   assertEffect(effect, [
     'claim-labels', 'final-labels', 'blocked-labels', 'review-activation-labels',
-    'review-final-labels', 'review-blocked-labels',
+    'review-final-labels',
   ], 'labels');
   return settle(adapter);
 }

@@ -9,7 +9,7 @@ import {
   type CheckedChangeReadCapability,
 } from './checked-change.js';
 import type { CandidateMaterializationV2 } from './candidate.js';
-import { canonicalJson, containsCredentialEvidence, sha256 } from './containment.js';
+import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from './containment.js';
 import {
   createProofReceipt,
   proofReportRepairDiagnostic,
@@ -513,10 +513,6 @@ function validateArtifactBytes(artifact: ProofReportV1['artifacts'][number], byt
   if (containsCredentialEvidence(text)) throw new Error('proof text artifact contains credential material');
   const isLocalDiagnostic = !artifact.publishable && ['command-output', 'static-inspection'].includes(artifact.kind);
   if (!isLocalDiagnostic && containsHostIdentityEvidence(text)) throw new Error('proof text artifact contains host identity material');
-}
-
-function containsHostIdentityEvidence(value: string): boolean {
-  return /(?:^|[\s"'])(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|[A-Za-z]:\\Users\\[^\\\s"']+)/mu.test(value);
 }
 
 function validateAndroidRunnerReceipt(input: {

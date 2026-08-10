@@ -166,6 +166,10 @@ export function containsCredentialEvidence(value: string): boolean {
   ].some((pattern) => pattern.test(value));
 }
 
+export function containsHostIdentityEvidence(value: string): boolean {
+  return /(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|[A-Za-z]:[\\/]Users[\\/][^\\/\s"']+)/mu.test(value);
+}
+
 function tomlString(value: string): string {
   return JSON.stringify(value);
 }

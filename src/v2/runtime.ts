@@ -1437,14 +1437,13 @@ export function createV2Runtime(input: {
       getRepositoryPermission: (login, expectedUserId) => input.issues.getRepositoryPermission(login, expectedUserId),
       transitionToBlocked: async (issueNumber, labels) => {
         const current = await input.issues.getLabels(issueNumber);
-        if (current.includes(labels.review)) return;
         const hasRunnerStatus = current.some((label) => (
-          label === labels.auto || label === labels.running || label === labels.blocked
+          label === labels.auto || label === labels.running || label === labels.blocked || label === labels.review
         ));
         if (!hasRunnerStatus) return;
         await input.issues.updateIssue(issueNumber, {
           addLabels: current.includes(labels.blocked) ? [] : [labels.blocked],
-          removeLabels: current.includes(labels.running) ? [labels.running] : [],
+          removeLabels: [labels.running, labels.review].filter((label) => current.includes(label)),
         });
       },
       postComment: async (issueNumber, body) => { await input.issues.postComment(issueNumber, body); },
