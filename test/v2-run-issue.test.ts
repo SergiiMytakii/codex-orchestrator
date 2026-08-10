@@ -1590,6 +1590,7 @@ test('blocked terminal publishes bounded public text without host paths or crede
     String.raw`failed(C:\Users\alice\.ssh\id_rsa)`,
     'file:///C:/Users/alice/.ssh/id_rsa',
     'token=credential-material-12345',
+    '"token":"credential-material-12345"',
     'ghp_abcdefghijklmnopqrstuvwxyz123456',
     'github_pat_abcdefghijklmnopqrstuvwxyz123456',
     'https://alice:credential-material@example.invalid/private',
