@@ -1589,6 +1589,9 @@ test('blocked terminal publishes bounded public text without host paths or crede
     'path=/Users/example/.ssh/id_rsa',
     String.raw`failed(C:\Users\alice\.ssh\id_rsa)`,
     'file:///C:/Users/alice/.ssh/id_rsa',
+    'token=credential-material-12345',
+    'ghp_abcdefghijklmnopqrstuvwxyz123456',
+    'https://alice:credential-material@example.invalid/private',
   ]) {
     const fixture = await runFixture({
       proof: async () => ({ status: 'external-block', blocker: {
@@ -1602,6 +1605,28 @@ test('blocked terminal publishes bounded public text without host paths or crede
     assert.ok(comment.body.length < 16_384);
     assert.doesNotMatch(comment.body, /\.ssh/u);
   }
+});
+
+test('blocked comment settlement never posts after the issue closes', async () => {
+  const fixture = await runFixture({
+    rejectEffect: 'comment',
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
+    }, receipt: receipt() }),
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const readOpen = fixture.dependencies.issues.read;
+  fixture.dependencies.issues.read = async (issueNumber) => {
+    const observed = await readOpen(issueNumber);
+    return observed ? { ...observed, state: 'CLOSED', comments: [] } : observed;
+  };
+  const postAttempts = fixture.events.filter((event) => event === 'effect:blocked-comment').length;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  }
+  assert.equal(fixture.events.filter((event) => event === 'effect:blocked-comment').length, postAttempts);
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
 });
 
 test('blocked comment delivery resumes from its durable intent without rerunning work', async () => {
@@ -1988,7 +2013,8 @@ test('candidate proof inspection failures retain typed recovery and evidence sta
   const record = (await conflict.store.read()).runs[0]!;
   assert.ok(record.candidateBinding);
   assert.equal(record.pendingEffect, undefined);
-  assert.equal(conflict.events.includes('effect:terminal-labels'), false);
+  assert.equal(conflict.events.includes('effect:blocked-comment'), true);
+  assert.equal(conflict.events.includes('effect:terminal-labels'), true);
   assert.equal(conflict.events.includes('git:commit'), false);
 });
 

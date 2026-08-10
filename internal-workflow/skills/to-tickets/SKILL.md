@@ -46,9 +46,14 @@ outcome and blocking relationship. Risk strengthens proof and review focus; it
 does not create tickets. Merge steps that share one owner, release, and
 validation path.
 
+Do not publish a child whose outcome is only transient evidence or a tracker
+comment. Resolve that discovery before compiling the executable graph, or make
+the required durable result a committed artifact.
+
 Where repository evidence proves a small prefactor is required, "Make the
 change easy, then make the easy change." Keep it inside the same vertical
 outcome unless it is independently verifiable and genuinely blocks later work.
+File size or general cleanliness alone does not justify prefactoring.
 
 ## Process
 
@@ -69,6 +74,16 @@ that discovery resolves it.
 
 ### 2. Draft executable vertical tickets
 
+Apply this **Minimum solution check** before drafting:
+
+- state the direct solution through existing owners and seams;
+- add no new service, adapter, middleware, wrapper, compatibility path, or
+  custom verifier by default;
+- add a new mechanism only for a confirmed obligation or proven failure path
+  that the direct solution cannot satisfy;
+- perform a deletion challenge: remove any proposed mechanism that can be
+  deleted without losing required behavior, an invariant, or credible proof.
+
 Each ticket must:
 
 - deliver one observable end-to-end outcome;
@@ -79,6 +94,11 @@ Each ticket must:
   non-TDD proof;
 - explain why the proof cannot pass while the approved claim is false;
 - declare real blockers and dependency edges.
+
+Illustrative tuning values remain illustrative unless product authority makes
+them exact. Acceptance criteria describe observable outcomes. Freeze an
+internal mechanism only when a public contract, ownership boundary, safety
+requirement, or inter-ticket dependency depends on it.
 
 Keep unresolved product decisions with the user and unresolved external or
 technical discovery in a blocking AFK/HITL ticket. If the generated ticket
@@ -115,8 +135,9 @@ workflow owner. Do not publish any intermediate PRD.
 For the settled packet, launch exactly one fresh `standards_reviewer` without a
 history fork (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin its
 brief with `Assigned role: standards_reviewer`, provide the full source authority
-and complete publish-ready packet, and require both internal lenses in the same
-review activation: source fidelity and ticket executability.
+and complete publish-ready packet, and require all three internal lenses in the
+same review activation: source fidelity, ticket executability, and minimum
+solution and scope conservation.
 
 - **Source fidelity:** every product claim, decision, scope boundary,
   consequence, and blocker is grounded in the source; no behavior or ownership
@@ -125,6 +146,12 @@ review activation: source fidelity and ticket executability.
   fresh implementation context can execute and prove from its body plus the
   Parent PRD; dependencies are real, proof observes the claim, and no later
   planning artifact is required.
+- **Minimum solution and scope conservation:** reject Speculative Generality,
+  Middle Man indirection, unsupported new or duplicate owners, proof-only
+  runtime machinery, acceptance criteria without Parent/user/repository
+  authority, and prefactors that can stay inside the real vertical outcome.
+  Prefer deletion or narrowing before adding machinery. The reviewer may not
+  introduce a new runtime mechanism merely to make proof more exhaustive.
 
 The reviewer is read-only and returns `APPROVE` or `NEEDS_WORK` with exact
 source/artifact evidence. Capture a non-empty fresh child identity and wait for

@@ -74,6 +74,18 @@
         "publish red migration batches as graph children",
         "create a shared red integration branch"
       ]
+    },
+    {
+      "id": "existing-owner-before-new-machinery",
+      "prompt": "Compile tickets for an outcome that the repository's existing validator and recorder can implement and prove directly.",
+      "expected": ["use the existing validator and recorder owners", "apply the deletion challenge before drafting"],
+      "forbidden": ["add a wrapper", "split a builder as preliminary cleanup", "add a custom verifier without a confirmed obligation or proven failure path"]
+    },
+    {
+      "id": "proof-gap-does-not-create-machinery",
+      "prompt": "Semantic packet review finds that one acceptance claim is stronger than the available proof seam.",
+      "expected": ["narrow the unsupported claim or use an existing proof seam", "prefer deletion or narrowing before adding machinery"],
+      "forbidden": ["automatically add middleware", "introduce a framework or runtime mechanism merely for exhaustive proof", "invent custom tooling"]
     }
   ]
 }

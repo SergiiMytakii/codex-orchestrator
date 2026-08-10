@@ -22,6 +22,10 @@ Root must not implement a full child or merge ticket boundaries. A ticket that
 cannot execute from its body plus the Parent PRD is a ticket-packet defect and
 fails closed.
 
+Every child must authorize a committed product delta. Treat a transient-evidence
+or comment-only child as a ticket-packet defect: return it to `$to-tickets`
+without requesting an exception or creating an empty checkpoint.
+
 ## Authority and ownership
 
 Before work, require:

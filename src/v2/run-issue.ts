@@ -3388,6 +3388,7 @@ export class RunIssue {
       const settlement = await settleCommentEffect(existing, {
         observe: async () => {
           const observation = await this.readIssue(active.record.issueNumber);
+          if (!observation || observation.state !== 'OPEN') return 'diverged';
           const matching = observation ? commentsWithMarker(observation, marker) : [];
           if (matching.length === 0) return 'absent';
           return matching.length === 1 && sha256(matching[0]!.body) === sha256(body)

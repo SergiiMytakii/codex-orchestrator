@@ -426,6 +426,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && ((value.pendingEffect as PendingEffect | undefined)?.kind === 'initial-commit' || (value.pendingEffect as PendingEffect | undefined)?.kind === 'review-update-commit');
   const settlingOutcomeEvidence = (value.pendingEffect as PendingEffect | undefined)?.kind === 'outcome-evidence';
   if (terminal && hasOwn(value, 'pendingEffect') && value.lifecycle !== 'transport-failed'
+    && !(value.lifecycle === 'review-ready' && reviewReadyEffectAllowed)
     && !retainedCandidateEffect && !settlingOutcomeEvidence) throw new Error(`${field} terminal lifecycle cannot retain pending effect`);
   if (value.lifecycle === 'transport-failed' && hasOwn(value, 'pendingEffect')
     && !settlingOutcomeEvidence

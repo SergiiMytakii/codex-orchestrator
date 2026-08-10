@@ -41,18 +41,26 @@ count, file count, and risk do not size a later ticket packet; Plan and
 strengthens `Risk / Proof Notes`; it does not make the PRD or solution broader.
 Omit that section when no material risk exists.
 
+Treat only user-stated requirements, repository facts, and explicitly confirmed
+technical decisions as confirmed authority. Keep agent recommendations,
+illustrative values, and possible refactors as proposals. A request to save or
+publish the plan does not confirm those proposals. Put any proposed new runtime
+owner, abstraction, or prerequisite refactor in `Decisions For Approval` for
+explicit confirmation.
+
 ## Process
 
 1. Explore the repo if needed. Use project domain language, respect relevant
    ADRs, and reuse cited `$research` artifacts. Keep unsupported external facts
    open instead of converting them into product scope.
 
-2. Sketch the seams at which the outcome will be proved. Existing seams should
-   be preferred to new ones. Use the highest seam possible. If new seams are
-   needed, propose them at the highest point you can. The fewer seams across the
-   codebase, the better; the ideal number is one. Record only seams that
-   materially define behavior, proof, or ownership, and ask the user only when
-   a seam choice changes scope, risk, or ownership.
+2. Sketch the seams at which the outcome will be proved. Prefer existing
+   task-relevant seams and use the highest applicable seam. Add a new seam only
+   when repository evidence shows that the existing owner cannot cleanly
+   implement or prove the requested behavior. Do not centralize distinct owners
+   merely to reduce seam count. Record only seams that materially define
+   behavior, proof, or ownership, and ask the user only when a seam choice
+   changes scope, risk, or ownership.
 
 3. Write the template below, then follow the requested mode. A standalone
    planning-context issue is marked `Artifact: planning-context`; it is not an
@@ -72,8 +80,9 @@ The solution to the problem, from the user's perspective.
 
 The product, behavior, scope, ownership, rollout, and risky trade-off decisions
 the user is being asked to approve. Separate confirmed decisions from open
-decisions. If implementation discovery later changes one of these decisions,
-the delivery workflow must return a decision delta instead of guessing.
+decisions under the authority rule above. If implementation discovery later
+changes one of these decisions, the delivery workflow must return a decision
+delta instead of guessing.
 
 ## Non-Obvious Consequences
 

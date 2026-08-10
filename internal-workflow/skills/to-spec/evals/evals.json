@@ -19,6 +19,12 @@
       "prompt": "Write a proportional PRD for this risky cross-module outcome without deciding its implementation breakdown.",
       "expected": ["preserve Decisions For Approval and Non-Obvious Consequences", "include Risk / Proof Notes because risk is material", "leave ticket count and slicing to Plan and to-tickets"],
       "forbidden": ["make user stories extremely extensive", "determine ticket count from modules, files, or risk"]
+    },
+    {
+      "id": "proposal-save-does-not-confirm-architecture",
+      "prompt": "The agent proposed a facade and prerequisite refactor, then the user said to save the plan without explicitly approving either proposal.",
+      "expected": ["keep the facade and refactor as proposals", "place any proposed runtime owner, abstraction, or prerequisite refactor in Decisions For Approval"],
+      "forbidden": ["promote the facade or refactor to a confirmed decision", "treat save or publication as architectural approval"]
     }
   ]
 }
