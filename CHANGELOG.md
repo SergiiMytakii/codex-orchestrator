@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.12] - 2026-08-10
+
 ### Changed
 - Collapsed direct, approved spec-first, product-answer, and trusted PR-feedback
   delivery onto one Run-owned validation loop with exact Run/ActiveAttempt/
