@@ -186,6 +186,33 @@ test('implementation output schema and runtime validator have parity across stat
     {
       value: {
         ...completedImplementation,
+        status: 'answer-only',
+        changedFiles: [],
+        response: 'The existing draft PR already preserves the requested behavior.',
+      },
+      accepted: true,
+    },
+    {
+      value: {
+        ...completedImplementation,
+        status: 'boundary',
+        changedFiles: [],
+        response: 'This request changes the approved product decision and needs new authority.',
+        boundary: { kind: 'decision-delta' },
+      },
+      accepted: true,
+    },
+    {
+      value: {
+        ...completedImplementation,
+        status: 'answer-only',
+        response: 'An answer-only result cannot claim code changes.',
+      },
+      accepted: false,
+    },
+    {
+      value: {
+        ...completedImplementation,
         blocker: { kind: 'tool', summary: 'Unexpected blocker.', attempted: ['tool'], resumable: false },
       },
       accepted: false,
@@ -197,6 +224,16 @@ test('implementation output schema and runtime validator have parity across stat
   ];
 
   assertParity(fixtures, implementationReportOutputSchema(), validateImplementationReport);
+});
+
+test('canonical overlay and immutable packaged implementation schemas equal the runtime owner', async () => {
+  const expected = implementationReportOutputSchema();
+  for (const path of [
+    'scripts/runtime-workflow-overlays/schemas/implementation-report-v1.json',
+    'internal-workflow/schemas/implementation-report-v1.json',
+  ]) {
+    assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), expected, path);
+  }
 });
 
 test('agent output schemas use a Structured Outputs compatible root envelope', () => {

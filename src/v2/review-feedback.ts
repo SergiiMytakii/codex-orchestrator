@@ -5,7 +5,7 @@ import type { DirectRepairFindingV1 } from './direct-delivery.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
-const SOURCE_ID = /^pr-(?:thread|review):[^\s]+$/u;
+const SOURCE_ID = /^(?:pr-(?:thread|review)|issue-comment):[^\s]+$/u;
 
 export interface ReviewFeedbackPermissionReceiptV1 {
   permission: 'write' | 'admin';
@@ -15,7 +15,7 @@ export interface ReviewFeedbackPermissionReceiptV1 {
 
 export interface FrozenReviewFeedbackSourceV1 {
   sourceId: string;
-  kind: 'thread' | 'review';
+  kind: 'thread' | 'review' | 'issue-comment';
   sourceUrl: string;
   path: string | null;
   line: number | null;
@@ -65,6 +65,17 @@ export interface ReviewFeedbackBlockedReceiptV1 {
   blockedAt: string;
 }
 
+export interface ReviewFeedbackResponseReceiptV1 {
+  kind: 'responded';
+  batchId: string;
+  sourceIds: string[];
+  responseKind: 'answer-only' | 'boundary';
+  publication: 'delivered' | 'failed' | 'suppressed';
+  commentId?: string;
+  diagnostic?: string;
+  respondedAt: string;
+}
+
 export interface ReviewFeedbackRunDataV1 {
   version: 1;
   updateEpoch: number;
@@ -72,7 +83,7 @@ export interface ReviewFeedbackRunDataV1 {
   previousPublishedHeadSha: string | null;
   repairRound: number;
   activeBatch: FrozenReviewFeedbackBatchV1 | null;
-  history: Array<ReviewFeedbackPublishedReceiptV1 | ReviewFeedbackBlockedReceiptV1>;
+  history: Array<ReviewFeedbackPublishedReceiptV1 | ReviewFeedbackBlockedReceiptV1 | ReviewFeedbackResponseReceiptV1>;
   verifiedReceipt: { batchId: string; checkedChangeSha256: string; proofId: string; verifiedAt: string } | null;
 }
 
@@ -143,12 +154,14 @@ export function projectReviewFeedbackBatch(batch: FrozenReviewFeedbackBatchV1, t
       sourceId: source.sourceId,
       targetRevision,
       summary: [
-        `${source.kind === 'thread' ? 'Pull request review thread' : 'Pull request changes-requested review'}: ${source.sourceUrl}`,
+        `${source.kind === 'thread' ? 'Pull request review thread'
+          : source.kind === 'review' ? 'Pull request changes-requested review'
+            : 'Trusted issue comment'}: ${source.sourceUrl}`,
         ...(source.path ? [`Location: ${source.path}${source.line === null ? '' : `:${source.line}`}`] : []),
         source.body,
       ].join('\n'),
       affectedContracts: [...new Set([
-        'pr-review',
+        source.kind === 'issue-comment' ? 'issue-comment' : 'pr-review',
         ...(source.path ? [`path:${source.path}`] : []),
       ])].sort(),
       status: 'open',
@@ -284,6 +297,50 @@ export function blockReviewFeedback(
   return result;
 }
 
+export function respondReviewFeedback(
+  execution: ReviewFeedbackRunDataV1,
+  receipt: ReviewFeedbackResponseReceiptV1,
+): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
+  validateResponseReceipt(receipt);
+  if (!execution.activeBatch || receipt.batchId !== execution.activeBatch.batchId
+    || !sameSourceIds(receipt.sourceIds, execution.activeBatch.sources.map((source) => source.sourceId))
+    || execution.activeBatch.sources.some((source) => source.kind !== 'issue-comment')) {
+    throw new Error('review feedback response receipt does not match an active issue-comment batch');
+  }
+  const result: ReviewFeedbackRunDataV1 = {
+    ...structuredClone(execution),
+    repairRound: 0,
+    activeBatch: null,
+    history: [...execution.history, structuredClone(receipt)],
+    verifiedReceipt: null,
+  };
+  validateReviewFeedbackRunData(result);
+  return result;
+}
+
+export function settleReviewFeedbackResponse(
+  execution: ReviewFeedbackRunDataV1,
+  receipt: ReviewFeedbackResponseReceiptV1,
+): ReviewFeedbackRunDataV1 {
+  validateReviewFeedbackRunData(execution);
+  validateResponseReceipt(receipt);
+  if (execution.activeBatch !== null) throw new Error('review feedback response is not finalized');
+  const prior = execution.history.at(-1);
+  if (prior?.kind !== 'responded' || prior.batchId !== receipt.batchId
+    || prior.responseKind !== receipt.responseKind
+    || !sameSourceIds(prior.sourceIds, receipt.sourceIds)
+    || prior.respondedAt !== receipt.respondedAt) {
+    throw new Error('review feedback response settlement does not match the finalized response');
+  }
+  const result: ReviewFeedbackRunDataV1 = {
+    ...structuredClone(execution),
+    history: [...execution.history.slice(0, -1), structuredClone(receipt)],
+  };
+  validateReviewFeedbackRunData(result);
+  return result;
+}
+
 export function validateReviewFeedbackRunData(value: unknown): asserts value is ReviewFeedbackRunDataV1 {
   exactObject(value, [
     'version', 'updateEpoch', 'consumedSourceIds', 'previousPublishedHeadSha', 'repairRound', 'activeBatch',
@@ -350,8 +407,9 @@ export function validateFrozenReviewFeedbackBatch(value: unknown): asserts value
 function validateFrozenSource(value: unknown): asserts value is FrozenReviewFeedbackSourceV1 {
   exactObject(value, ['sourceId', 'kind', 'sourceUrl', 'path', 'line', 'body', 'bodySha256', 'snapshotSha256', 'threadState', 'commitSha', 'sourceCreatedAt', 'sourceUpdatedAt', 'author', 'permission'], 'review feedback source');
   assertSourceId(value.sourceId, 'review feedback source ID');
-  if (value.kind !== 'thread' && value.kind !== 'review') throw new Error('review feedback source kind is invalid');
-  if ((value.kind === 'thread') !== (value.sourceId as string).startsWith('pr-thread:')) throw new Error('review feedback source ID kind mismatch');
+  if (!['thread', 'review', 'issue-comment'].includes(value.kind as string)) throw new Error('review feedback source kind is invalid');
+  const expectedPrefix = value.kind === 'thread' ? 'pr-thread:' : value.kind === 'review' ? 'pr-review:' : 'issue-comment:';
+  if (!(value.sourceId as string).startsWith(expectedPrefix)) throw new Error('review feedback source ID kind mismatch');
   assertString(value.sourceUrl, 'review feedback source URL');
   if (value.path !== null) assertString(value.path, 'review feedback source path');
   if (value.line !== null && (!Number.isSafeInteger(value.line) || (value.line as number) < 1)) throw new Error('review feedback source line is invalid');
@@ -362,7 +420,7 @@ function validateFrozenSource(value: unknown): asserts value is FrozenReviewFeed
   if (value.kind === 'thread') {
     exactObject(value.threadState, ['isResolved', 'isOutdated'], 'review feedback thread state');
     if (typeof value.threadState.isResolved !== 'boolean' || typeof value.threadState.isOutdated !== 'boolean') throw new Error('review feedback thread state is invalid');
-  } else if (value.threadState !== null) throw new Error('review feedback review source cannot have thread state');
+  } else if (value.threadState !== null) throw new Error('review feedback non-thread source cannot have thread state');
   assertGitSha(value.commitSha, 'review feedback source commit');
   assertTimestamp(value.sourceCreatedAt, 'review feedback source createdAt');
   assertTimestamp(value.sourceUpdatedAt, 'review feedback source updatedAt');
@@ -379,11 +437,33 @@ function validateHistory(value: unknown): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('review feedback history item is invalid');
   const kind = (value as { kind?: unknown }).kind;
   if (kind === 'published') validatePublishedReceipt(value);
+  else if (kind === 'responded') validateResponseReceipt(value);
   else if (['blocked-external', 'blocked-safety', 'blocked-decision-delta', 'blocked-out-of-scope', 'blocked-authority-boundary'].includes(kind as string)) {
     exactObject(value, ['kind', 'batchId', 'blockedAt'], 'review feedback blocked receipt');
     assertSha(value.batchId, 'review feedback blocked batch ID');
     assertTimestamp(value.blockedAt, 'review feedback blockedAt');
   } else throw new Error('review feedback history kind is invalid');
+}
+
+function validateResponseReceipt(value: unknown): void {
+  const commentId = typeof value === 'object' && value !== null && Object.hasOwn(value, 'commentId') ? ['commentId'] : [];
+  const diagnostic = typeof value === 'object' && value !== null && Object.hasOwn(value, 'diagnostic') ? ['diagnostic'] : [];
+  exactObject(value, ['kind', 'batchId', 'sourceIds', 'responseKind', 'publication', ...commentId, ...diagnostic, 'respondedAt'], 'review feedback response receipt');
+  if (value.kind !== 'responded') throw new Error('review feedback response receipt kind is invalid');
+  assertSha(value.batchId, 'review feedback response batch ID');
+  validateSourceIds(value.sourceIds, 'review feedback response source IDs');
+  if (value.responseKind !== 'answer-only' && value.responseKind !== 'boundary') throw new Error('review feedback response kind is invalid');
+  if (!['delivered', 'failed', 'suppressed'].includes(value.publication as string)) throw new Error('review feedback response publication is invalid');
+  if (Object.hasOwn(value, 'commentId')) assertString(value.commentId, 'review feedback response comment ID');
+  if (Object.hasOwn(value, 'diagnostic')) assertString(value.diagnostic, 'review feedback response diagnostic');
+  if (value.publication === 'delivered' && !Object.hasOwn(value, 'commentId')) throw new Error('delivered review feedback response requires comment ID');
+  if (value.publication !== 'delivered' && !Object.hasOwn(value, 'diagnostic')) throw new Error('undelivered review feedback response requires diagnostic');
+  assertTimestamp(value.respondedAt, 'review feedback respondedAt');
+}
+
+function sameSourceIds(left: string[], right: string[]): boolean {
+  const sortedRight = [...right].sort();
+  return left.length === right.length && [...left].sort().every((value, index) => value === sortedRight[index]);
 }
 
 function validatePublishedReceipt(value: unknown): void {

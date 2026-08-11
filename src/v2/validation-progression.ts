@@ -56,6 +56,8 @@ export type ValidationProgressionChanges = Partial<Pick<RunRecord,
   | 'proofId'
   | 'proofExecution'
   | 'proofReceipt'
+  | 'implementationResult'
+  | 'terminalNotifications'
   | 'terminalOutcome'
   | 'outcomeEvidenceId'
   | 'changeBindingVersion'

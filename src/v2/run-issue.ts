@@ -20,7 +20,7 @@ import {
   type AttemptProcessIdentity,
   type ProcessStartIdentity,
 } from './active-attempt.js';
-import { validateImplementationReport } from './implementation-report.js';
+import { validateImplementationReport, type ImplementationReportV1 } from './implementation-report.js';
 import { validateCompletedReport } from './contained-report-operation.js';
 import {
   directReviewCandidateTargetFingerprint,
@@ -53,7 +53,9 @@ import {
   initializeReviewFeedback,
   projectReviewFeedbackBatch,
   publishReviewFeedback,
+  respondReviewFeedback,
   reserveNextReviewFeedbackRound,
+  settleReviewFeedbackResponse,
 } from './review-feedback.js';
 import type { CandidateGitV2 } from './candidate.js';
 import type { CandidateBindingV2, CandidateBoundaryV2, CandidateMaterializationV2 } from './candidate.js';
@@ -221,6 +223,7 @@ export interface RunIssueDependencies {
       workflowGeneration: WorkflowGenerationReceipt;
       reviewFeedbackRound?: number;
       reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+      reviewFeedbackPullRequest?: { number: number; headSha: string; headRefName: string; url: string };
       onPrepared?: (input: { attemptId: string; reportPath: string; preparedAt: string; baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'> }) => Promise<void>;
       onLaunched?: (input: { attemptId: string; pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
       signal: AbortSignal;
@@ -719,7 +722,7 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
           authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
           return !authorizationFailure;
         },
@@ -778,7 +781,7 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
           authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
           return !authorizationFailure;
         },
@@ -827,7 +830,7 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, epoch: 'pre-update', expectedHeadSha: oldHead });
+          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
           authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-prepush-revalidation-failed');
           return !authorizationFailure;
         },
@@ -846,7 +849,7 @@ export class RunIssue {
       }
     }
 
-    const postPush = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+    const postPush = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
     const postPushFailure = await this.mapFeedbackRevalidation(active, postPush, 'review-feedback-postpush-revalidation-failed');
     if (postPushFailure) return postPushFailure;
     const marker = `<!-- codex-orchestrator:run:${active.record.runId}:review-feedback:${batch.batchId} -->`;
@@ -876,7 +879,7 @@ export class RunIssue {
         || pendingEffect.marker !== marker || pendingEffect.bodySha256 !== sha256(body) || pendingEffect.epochHeadSha !== head) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-pendingEffect-diverged');
       }
-      const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+      const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-summary-revalidation-failed');
       if (validationFailure) return validationFailure;
       let matches: Array<{ id: string; body: string }> = [];
@@ -927,7 +930,7 @@ export class RunIssue {
         || !sameStrings(pendingEffect.expected, finalLabels)) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-pendingEffect-diverged');
       }
-      const validation = await coordinator.revalidate({ batch, epoch: 'post-push', expectedHeadSha: head });
+      const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
       const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-final-labels-revalidation-failed');
       if (validationFailure) return validationFailure;
       const settlement = await settleLabelsEffect(pendingEffect, {
@@ -1005,29 +1008,39 @@ export class RunIssue {
         headSha: pullRequest.headSha,
         body: pullRequest.body,
       },
+      ...(starting.record.terminalNotifications ? {
+        issueCommentCutoff: {
+          issueNumber: starting.record.issueNumber,
+          ...starting.record.terminalNotifications.commentCutoff,
+        },
+      } : {}),
     });
     if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
     if (observed.status === 'blocked') {
       return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-observation-blocked') };
     }
+    let ready = starting;
     if (feedback.previousPublishedHeadSha === null) {
-      const sourceIds = observed.status === 'frozen'
+      const issueCommentBatch = observed.status === 'frozen'
+        && observed.batch.sources.every((source) => source.kind === 'issue-comment');
+      const sourceIds = observed.status === 'frozen' && !issueCommentBatch
         ? observed.batch.sources.map((source) => source.sourceId)
-        : observed.eligibleSourceIds;
-      const active = await this.persist(starting, {
+        : observed.status === 'none' ? observed.eligibleSourceIds : [];
+      ready = await this.persist(starting, {
         reviewFeedback: initializeReviewFeedback(feedback, expectedHeadSha, sourceIds),
       });
-      return { result: publicOutcome(active.record.terminalOutcome!) };
+      if (!issueCommentBatch) return { result: publicOutcome(ready.record.terminalOutcome!) };
     }
-    if (feedback.activeBatch || observed.status === 'none') return { result: publicOutcome(terminal) };
+    const readyFeedback = ready.record.reviewFeedback!;
+    if (readyFeedback.activeBatch || observed.status === 'none') return { result: publicOutcome(terminal) };
 
     if (!await this.authorizedForExactLabels(starting, [config.github.labels.review.name])) {
       return { result: publicOutcome(terminal) };
     }
 
-    const projected = projectReviewFeedbackBatch(observed.batch, starting.record.directReview.targetRevision);
-    const candidateTreeSha = await this.dependencies.git.getTreeSha(starting.record.worktreePath);
-    const activation = projectValidationFeedbackActivation(starting.record, {
+    const projected = projectReviewFeedbackBatch(observed.batch, ready.record.directReview!.targetRevision);
+    const candidateTreeSha = await this.dependencies.git.getTreeSha(ready.record.worktreePath);
+    const activation = projectValidationFeedbackActivation(ready.record, {
       batch: observed.batch,
       repairFindings: projected.repairFindings,
       candidateTreeSha,
@@ -1038,7 +1051,16 @@ export class RunIssue {
         expected: sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]),
       },
     });
-    const active = await this.persistValidationTransition(starting, activation);
+    if (observed.batch.sources.every((source) => source.kind === 'issue-comment')) {
+      activation.changes.cycle = ready.record.cycle + 1;
+      activation.changes.checks = structuredClone(ready.record.checks);
+      activation.changes.checkedChangeSha256 = ready.record.checkedChangeSha256;
+      activation.changes.proofId = ready.record.proofId;
+      activation.changes.proofReceipt = structuredClone(ready.record.proofReceipt);
+      activation.changes.implementationResult = structuredClone(ready.record.implementationResult);
+      activation.changes.terminalNotifications = structuredClone(ready.record.terminalNotifications);
+    }
+    const active = await this.persistValidationTransition(ready, activation);
     return this.resumeActivatedReviewFeedback(active, targetRoot, config);
   }
 
@@ -1072,7 +1094,7 @@ export class RunIssue {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-authority-revoked') };
     }
     const validation = await this.dependencies.reviewFeedback.revalidate({
-      batch, epoch: 'pre-update', expectedHeadSha,
+      batch, issueNumber: active.record.issueNumber, epoch: 'pre-update', expectedHeadSha,
     });
     const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-activation-revalidation-failed');
     if (validationFailure) return { result: validationFailure };
@@ -1446,6 +1468,12 @@ export class RunIssue {
         ...(feedbackBatch ? {
           reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
           reviewFeedback: feedbackProjection!.workerFeedback,
+          reviewFeedbackPullRequest: {
+            number: feedbackBatch.pullRequest.number,
+            headSha: feedbackBatch.pullRequest.headSha,
+            headRefName: feedbackBatch.pullRequest.headRefName,
+            url: `https://github.com/${active.record.canonicalRepository}/pull/${feedbackBatch.pullRequest.number}`,
+          },
         } : {}),
         onPrepared: async (prepared: { attemptId: string; reportPath: string }) => {
           const currentActive = active!;
@@ -1548,6 +1576,11 @@ export class RunIssue {
           return this.invokedFailure(active, 'implementation-external-block-retryable', report.blocker!.summary);
         }
         return await this.terminal(active, implementationBlockerOutcome(report.blocker!));
+      }
+      if (report.status === 'answer-only' || report.status === 'boundary') {
+        return this.completeIssueFeedbackResponse(active, report as ImplementationReportV1 & {
+          status: 'answer-only' | 'boundary'; response: string;
+        }, config);
       }
       if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'implementation-head-drift');
@@ -2274,6 +2307,7 @@ export class RunIssue {
     }
     const validation = await this.dependencies.reviewFeedback.revalidate({
       batch,
+      issueNumber,
       epoch: 'pre-update',
       expectedHeadSha: batch.priorPublishedHeadSha,
     });
@@ -3287,6 +3321,152 @@ export class RunIssue {
     return { active, path: effect.path, id: `evidence:${effect.runId}:${effect.code}` };
   }
 
+  private async completeIssueFeedbackResponse(
+    starting: ActiveRun,
+    report: ImplementationReportV1 & { status: 'answer-only' | 'boundary'; response: string },
+    config: AgentAutoConfig,
+  ): Promise<RunIssueResult> {
+    let active = starting;
+    const feedback = active.record.reviewFeedback;
+    const batch = feedback?.activeBatch;
+    if (!feedback || !batch || batch.sources.some((source) => source.kind !== 'issue-comment')) {
+      return this.terminal(active, { status: 'internal-error', code: 'issue-feedback-response-source-invalid' });
+    }
+    if (await this.dependencies.git.getHead(active.record.worktreePath) !== batch.priorPublishedHeadSha
+      || (await this.dependencies.git.listChangedFilesIgnoringUntrackedRoot(
+        active.record.worktreePath, config.proof.artifactDir,
+      )).length !== 0) {
+      return this.terminal(active, { status: 'internal-error', code: 'issue-feedback-response-mutated-worktree' });
+    }
+    const marker = `<!-- codex-orchestrator:run:${active.record.runId}:issue-feedback:${batch.batchId} -->`;
+    const response = publicIssueFeedbackText(report.response,
+      report.status === 'boundary'
+        ? 'This request cannot be acted on without a new issue-local decision or authority.'
+        : 'The requested answer could not be published safely.');
+    const body = [
+      marker,
+      report.status === 'boundary' ? 'codex-orchestrator reached an authority boundary.' : 'codex-orchestrator answered this follow-up.',
+      '',
+      response,
+      ...(report.status === 'boundary' ? ['', `Boundary: ${report.boundary!.kind}`] : []),
+    ].join('\n');
+
+    const directReview = active.record.directReview!;
+    const sourceIds = batch.sources.map((source) => source.sourceId);
+    const restoredDirectReview = {
+      ...structuredClone(directReview),
+      status: 'clear' as const,
+      stage: 'review' as const,
+      review: { ...structuredClone(directReview.review), disposition: 'clear' as const },
+      repairFindings: directReview.repairFindings.filter((finding) => !sourceIds.includes(finding.sourceId)),
+    };
+    const priorReport = active.record.terminalNotifications?.report;
+    if (priorReport?.outcome !== 'review-ready' || !priorReport.pullRequestUrl) {
+      return this.terminal(active, { status: 'internal-error', code: 'issue-feedback-prior-handoff-missing' });
+    }
+    const terminalSeed = {
+      status: 'review-ready' as const,
+      pullRequestUrl: priorReport.pullRequestUrl,
+      continuationEpoch: batch.priorPublishedHeadSha,
+    };
+    const terminalOutcome = {
+      ...terminalSeed,
+      evidencePath: this.dependencies.outcomeEvidencePath(
+        active.record.runId, 'review-ready', sha256(canonicalJson(terminalSeed)),
+      ),
+    };
+    const respondedAt = this.timestamp();
+    const initialReceipt = {
+      kind: 'responded' as const,
+      batchId: batch.batchId,
+      sourceIds,
+      responseKind: report.status,
+      publication: 'failed' as const,
+      diagnostic: 'issue-feedback-response-publication-not-settled',
+      respondedAt,
+    };
+    const consumedChanges = {
+      lifecycle: 'review-ready' as const,
+      terminalOutcome,
+      outcomeEvidenceId: `evidence:${active.record.runId}:review-ready`,
+      reviewFeedback: respondReviewFeedback(feedback, initialReceipt),
+      directReview: restoredDirectReview,
+      reworkFindings: [],
+      reportRepairs: 0,
+      transportRetries: 0,
+    };
+    active = isAdoptableAttempt(active.record.activeAttempt)
+      ? await this.adoptAttempt(active, sha256(canonicalJson(report)), consumedChanges)
+      : await this.persist(active, consumedChanges);
+
+    let publication: 'delivered' | 'failed' | 'suppressed' = 'failed';
+    let commentId: string | undefined;
+    let diagnostic: string | undefined;
+    const validation = this.dependencies.reviewFeedback
+      ? await this.dependencies.reviewFeedback.revalidate({
+        batch, issueNumber: active.record.issueNumber, epoch: 'pre-update', expectedHeadSha: batch.priorPublishedHeadSha,
+      })
+      : { status: 'blocked' as const, reason: 'review feedback revalidation unavailable' };
+    if (validation.status !== 'valid') {
+      publication = 'suppressed';
+      diagnostic = validation.status === 'retryable'
+        ? 'issue-feedback-response-revalidation-retryable'
+        : 'issue-feedback-response-revalidation-blocked';
+    } else {
+      try {
+        let issue = await this.readIssue(active.record.issueNumber);
+        let matches = issue ? commentsWithMarker(issue, marker) : [];
+        if (matches.length === 0) {
+          await this.dependencies.issues.postComment(active.record.issueNumber, body);
+          issue = await this.readIssue(active.record.issueNumber);
+          matches = issue ? commentsWithMarker(issue, marker) : [];
+        }
+        const match = matches.length === 1 && sha256(matches[0]!.body) === sha256(body) ? matches[0] : undefined;
+        if (match) {
+          publication = 'delivered';
+          commentId = match.id ?? `marker:${batch.batchId}`;
+        } else {
+          diagnostic = 'issue-feedback-response-observation-diverged';
+        }
+      } catch {
+        diagnostic = 'issue-feedback-response-delivery-failed';
+      }
+    }
+    try {
+      await this.dependencies.issues.setLabels(active.record.issueNumber, [config.github.labels.review.name]);
+    } catch {
+      diagnostic = diagnostic ?? 'issue-feedback-review-label-reconciliation-failed';
+    }
+
+    let comments = active.record.issueSnapshot.comments ?? [];
+    try { comments = (await this.readIssue(active.record.issueNumber))?.comments ?? comments; } catch { /* best-effort cutoff refresh */ }
+    const receipt = {
+      kind: 'responded' as const,
+      batchId: batch.batchId,
+      sourceIds,
+      responseKind: report.status,
+      publication,
+      ...(commentId ? { commentId } : {}),
+      ...(diagnostic ? { diagnostic } : {}),
+      respondedAt,
+    };
+    try {
+      const priorNotifications = active.record.terminalNotifications;
+      active = await this.persist(active, {
+        reviewFeedback: settleReviewFeedbackResponse(active.record.reviewFeedback!, receipt),
+        ...(priorNotifications ? { terminalNotifications: {
+          ...priorNotifications,
+          commentCutoff: { commentId: issueCommentHighWaterMark(comments), observedAt: this.timestamp() },
+        } } : {}),
+      });
+    } catch {
+      return publicOutcome(terminalOutcome);
+    }
+    try { active = await this.clearAttempt(active); }
+    catch { return publicOutcome(terminalOutcome); }
+    return publicOutcome(active.record.terminalOutcome!);
+  }
+
   private async terminal(
     active: ActiveRun,
     outcome: TerminalSeed,
@@ -3935,7 +4115,7 @@ function pendingCandidateBoundary(record: RunRecord): CandidateBoundaryV2 | unde
   return { kind: 'implementation-cycle', cycle: record.cycle, authoritySha256: record.deliveryAuthority!.authoritySha256 };
 }
 
-function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ body: string; authorAssociation: string }> {
+function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ id?: string; body: string; authorAssociation: string }> {
   return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
 }
 
@@ -3987,6 +4167,11 @@ function publicBlockedText(value: string, fallback: string, maxLength: number): 
   return normalized.length <= maxLength
     ? normalized
     : `${normalized.slice(0, Math.max(0, maxLength - 12))} [truncated]`;
+}
+
+function publicIssueFeedbackText(value: string, fallback: string): string {
+  if (/\b(?:chain[- ]of[- ]thought|reasoning artifact|local-only log|private reasoning|debug log)\b/iu.test(value)) return fallback;
+  return publicBlockedText(value, fallback, 4_000);
 }
 
 function sortedUnique(values: string[]): string[] {

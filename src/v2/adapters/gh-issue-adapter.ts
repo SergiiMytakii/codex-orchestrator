@@ -310,6 +310,7 @@ function readDecimalString(record: Record<string, unknown>, key: string): string
 }
 
 function readPermission(value: unknown): GitHubRepositoryPermission {
+  if (value === 'maintain') return 'write';
   if (value === 'none' || value === 'read' || value === 'write' || value === 'admin') return value;
   throw new Error('GitHub repository permission is unsupported');
 }

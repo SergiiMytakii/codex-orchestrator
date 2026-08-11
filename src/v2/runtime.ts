@@ -806,6 +806,7 @@ export class ContainedImplementationAgent {
     workflowGeneration: WorkflowGenerationReceipt;
     reviewFeedbackRound?: number;
     reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
+    reviewFeedbackPullRequest?: { number: number; headSha: string; headRefName: string; url: string };
     onPrepared?: (input: {
       attemptId: string; reportPath: string; preparedAt: string;
       baseline: Omit<CheckedChangeFreshness, 'checkPolicySha256'>;
@@ -855,8 +856,12 @@ export class ContainedImplementationAgent {
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Implement issue #${input.issue.number}: ${input.issue.title}`,
           `Implementation cycle: ${input.cycle}.`,
-          ...(input.reviewFeedbackRound ? [`Pull-request feedback repair round: ${input.reviewFeedbackRound}.`] : []),
-          ...(input.reviewFeedback?.length ? [`Frozen trusted pull-request feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
+          ...(input.reviewFeedbackRound ? [`Trusted feedback follow-up round: ${input.reviewFeedbackRound}.`] : []),
+          ...(input.reviewFeedbackPullRequest ? [`Current same-branch draft pull request: ${canonicalJson(input.reviewFeedbackPullRequest)}`] : []),
+          ...(input.reviewFeedback?.length ? [`Frozen trusted feedback: ${canonicalJson(input.reviewFeedback)}`] : []),
+          ...(input.reviewFeedback?.some((feedback) => feedback.id.startsWith('issue-comment:')) ? [
+            'For this issue-comment cycle, either make an in-scope repair, return answer-only without modifying files, or return boundary without modifying files when authority is ambiguous or exceeded.',
+          ] : []),
           `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),

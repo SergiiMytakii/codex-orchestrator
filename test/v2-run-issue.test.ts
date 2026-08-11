@@ -633,6 +633,166 @@ test('repeated runIssue replays the durable terminal outcome without a second cl
   assert.equal((await fixture.store.read()).runs.length, 1);
 });
 
+test('trusted issue question answers on the same Run and PR without code, checks, proof, review, commit, or push', async () => {
+  const fixture = await runFixture();
+  const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(initial.status, 'review-ready');
+  if (initial.status !== 'review-ready') return;
+  const before = (await fixture.store.read()).runs[0]!;
+  const oldHead = before.reviewFeedback!.previousPublishedHeadSha!;
+  const body = 'Why does this preserve the existing behavior?';
+  const sourceId = 'issue-comment:90071992547409939999';
+  const batch = createFrozenReviewFeedbackBatch({
+    runId: before.runId,
+    canonicalRepository: before.canonicalRepository,
+    pullRequest: {
+      nodeId: 'PR_1', number: 1, headSha: oldHead, headRefName: before.branchName,
+      baseRefName: 'main', marker: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
+    },
+    priorPublishedHeadSha: oldHead,
+    sources: [{
+      sourceId, kind: 'issue-comment', sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-90071992547409939999',
+      path: null, line: null, body, bodySha256: hashReviewFeedbackText(body),
+      snapshotSha256: hashReviewFeedbackSnapshot({
+        sourceId, issueNumber: 42, url: 'https://github.com/owner/repo/issues/42#issuecomment-90071992547409939999',
+        bodySha256: hashReviewFeedbackText(body), createdAt: '2026-07-16T12:01:00.000Z',
+        updatedAt: '2026-07-16T12:01:00.000Z', author: { login: 'writer', id: '42' },
+      }),
+      threadState: null, commitSha: oldHead,
+      sourceCreatedAt: '2026-07-16T12:01:00.000Z', sourceUpdatedAt: '2026-07-16T12:01:00.000Z',
+      author: { login: 'writer', userId: '42' },
+      permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:01:01.000Z' },
+    }],
+    frozenAt: '2026-07-16T12:01:01.000Z',
+  });
+  let offered = false;
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => offered
+      ? { status: 'none', observedHeadSha: oldHead, eligibleSourceIds: [] }
+      : (offered = true, { status: 'frozen', batch }),
+    revalidate: async () => ({ status: 'valid', observedHeadSha: oldHead }),
+  } as unknown as ReviewFeedbackObserver;
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: initial.pullRequestUrl, body: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
+    number: 1, nodeId: 'PR_1', headSha: oldHead,
+  });
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched, reviewFeedback, reviewFeedbackPullRequest }) => {
+      assert.deepEqual(reviewFeedback?.map((feedback) => feedback.id), [sourceId]);
+      assert.deepEqual(reviewFeedbackPullRequest, {
+        number: 1, headSha: oldHead, headRefName: before.branchName,
+        url: 'https://github.com/owner/repo/pull/1',
+      });
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:01:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 9191, processGroupId: 9191, launchedAt: '2026-07-16T12:01:03.000Z' });
+      fixture.events.push('issue-answer-agent');
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'answer-only', summary: 'Answered without a change.', changedFiles: [], residualRisks: [],
+        response: 'Read /Users/alice/private/debug.log with token=super-secret-value before answering.',
+      } };
+    },
+  };
+
+  const responseStore = fixture.dependencies.runRecords;
+  let rejectedResponseSettlement = false;
+  fixture.dependencies.runRecords = {
+    inspect: () => responseStore.inspect(),
+    read: () => responseStore.read(),
+    compareAndSwap: async (generation, next) => {
+      const receipt = next.runs[0]?.reviewFeedback?.history.at(-1);
+      if (!rejectedResponseSettlement && receipt?.kind === 'responded' && receipt.publication === 'delivered') {
+        rejectedResponseSettlement = true;
+        throw new Error('response receipt settlement rejected after external publication');
+      }
+      return responseStore.compareAndSwap(generation, next);
+    },
+  };
+
+  const eventStart = fixture.events.length;
+  const answered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(answered.status, 'review-ready');
+  assert.equal(answered.status === 'review-ready' ? answered.pullRequestUrl : '', initial.pullRequestUrl);
+  const events = fixture.events.slice(eventStart);
+  assert.equal(events.filter((event) => event === 'issue-answer-agent').length, 1);
+  assert.equal(events.some((event) => event.startsWith('check:') || event === 'proof' || event.startsWith('review:')
+    || event === 'git:commit' || event === 'git:push'), false, events.join('\n'));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.branchName, before.branchName);
+  assert.equal(after.cycle, before.cycle + 1);
+  const responseReceipt = after.reviewFeedback?.history.at(-1);
+  assert.equal(responseReceipt?.kind, 'responded');
+  if (responseReceipt?.kind === 'responded') assert.equal(responseReceipt.publication, 'failed');
+  assert.equal(after.reviewFeedback?.activeBatch, null);
+  assert.equal(after.pendingEffect, undefined);
+  assert.deepEqual(after.terminalOutcome, before.terminalOutcome);
+  assert.equal(after.outcomeEvidenceId, before.outcomeEvidenceId);
+  assert.equal(after.reviewFeedback?.consumedSourceIds.filter((id) => id === sourceId).length, 1);
+  assert.equal(fixture.comments.filter((comment) => comment.body.includes(`:issue-feedback:${batch.batchId} -->`)).length, 1);
+  const publicAnswer = fixture.comments.find((comment) => comment.body.includes(`:issue-feedback:${batch.batchId} -->`))!.body;
+  assert.doesNotMatch(publicAnswer, /Users|super-secret|debug\.log/u);
+  assert.match(publicAnswer, /could not be published safely/u);
+
+  const replayEvents = fixture.events.length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.slice(replayEvents).includes('issue-answer-agent'), false);
+  assert.equal(fixture.comments.filter((comment) => comment.body.includes(`:issue-feedback:${batch.batchId} -->`)).length, 1);
+
+  const boundaryBody = 'Also redesign the neighboring workflow.';
+  const boundarySourceId = 'issue-comment:90071992547409940000';
+  const boundaryBatch = createFrozenReviewFeedbackBatch({
+    runId: before.runId,
+    canonicalRepository: before.canonicalRepository,
+    pullRequest: structuredClone(batch.pullRequest),
+    priorPublishedHeadSha: oldHead,
+    sources: [{
+      ...batch.sources[0]!, sourceId: boundarySourceId, body: boundaryBody,
+      sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-90071992547409940000',
+      bodySha256: hashReviewFeedbackText(boundaryBody),
+      snapshotSha256: hashReviewFeedbackSnapshot({ boundarySourceId }),
+      sourceCreatedAt: '2026-07-16T12:02:00.000Z', sourceUpdatedAt: '2026-07-16T12:02:00.000Z',
+    }],
+    frozenAt: '2026-07-16T12:02:01.000Z',
+  });
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch: boundaryBatch }),
+    revalidate: async () => ({ status: 'valid', observedHeadSha: oldHead }),
+  } as unknown as ReviewFeedbackObserver;
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 9292, processGroupId: 9292, launchedAt: '2026-07-16T12:02:03.000Z' });
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'boundary', summary: 'The request exceeds the issue.', changedFiles: [], residualRisks: [],
+        response: 'This requires a new approved decision before implementation.', boundary: { kind: 'out-of-scope' },
+      } };
+    },
+  };
+  fixture.options.permanentlyRejectEffect = 'comment';
+  const boundaryResult = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(boundaryResult.status, 'review-ready');
+  const boundaryRecord = (await fixture.store.read()).runs[0]!;
+  const boundaryReceipt = boundaryRecord.reviewFeedback?.history.at(-1);
+  assert.equal(boundaryReceipt?.kind, 'responded');
+  if (boundaryReceipt?.kind === 'responded') {
+    assert.equal(boundaryReceipt.responseKind, 'boundary');
+    assert.equal(boundaryReceipt.publication, 'failed');
+  }
+  assert.equal(boundaryRecord.reviewFeedback?.consumedSourceIds.filter((id) => id === boundarySourceId).length, 1);
+  assert.equal(fixture.comments.some((comment) => comment.body.includes(`:issue-feedback:${boundaryBatch.batchId} -->`)), false);
+
+  fixture.setIssueState('CLOSED');
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch: boundaryBatch }),
+    revalidate: async () => ({ status: 'valid', observedHeadSha: oldHead }),
+  } as unknown as ReviewFeedbackObserver;
+  fixture.dependencies.implementationAgent.run = async () => { throw new Error('closed issue must not launch Agent'); };
+  const closed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(closed.status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.reviewFeedback?.history.length, boundaryRecord.reviewFeedback?.history.length);
+});
+
 test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
   const fixture = await runFixture();
   const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -669,7 +829,7 @@ test('uninitialized feedback data fails closed without losing the Run', async ()
   assert.equal((await fixture.store.read()).runs[0]?.reviewFeedback?.previousPublishedHeadSha, null);
 });
 
-test('review-ready replay remains effect-free and updates the same PR once for trusted feedback', async () => {
+test('trusted issue-comment repair runs checks, proof, review, and updates the same PR without replacement', async () => {
   const fixture = await runFixture();
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(first.status, 'review-ready');
@@ -693,11 +853,11 @@ test('review-ready replay remains effect-free and updates the same PR once for t
     },
     priorPublishedHeadSha: oldHead,
     sources: [{
-      sourceId: 'pr-thread:T_1', kind: 'thread', sourceUrl: 'https://example.invalid/pull/1#discussion_r1',
-      path: 'feature.txt', line: 1, body: 'Change the implementation.',
+      sourceId: 'issue-comment:105', kind: 'issue-comment', sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-105',
+      path: null, line: null, body: 'Change the implementation.',
       bodySha256: hashReviewFeedbackText('Change the implementation.'),
-      snapshotSha256: hashReviewFeedbackSnapshot({ id: 'T_1' }),
-      threadState: { isResolved: false, isOutdated: false }, commitSha: oldHead,
+      snapshotSha256: hashReviewFeedbackSnapshot({ id: '105' }),
+      threadState: null, commitSha: oldHead,
       sourceCreatedAt: '2026-07-16T12:00:00.000Z', sourceUpdatedAt: '2026-07-16T12:00:00.000Z',
       author: { login: 'writer', userId: '42' },
       permission: { permission: 'write', userId: '42', checkedAt: '2026-07-16T12:00:00.000Z' },
@@ -813,12 +973,16 @@ test('review-ready replay remains effect-free and updates the same PR once for t
   const updated = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(updated.status, 'review-ready', JSON.stringify({ updated, evidence: fixture.evidence, state: await fixture.store.read(), events: fixture.events }));
   const after = (await fixture.store.read()).runs[0]!;
-  assert.equal(after.cycle, record.cycle);
+  assert.equal(after.cycle, record.cycle + 1);
   assert.equal(after.reviewFeedback?.activeBatch, null);
   assert.equal(after.reviewFeedback?.history.length, 1);
   assert.equal(canonicalJson(after.deliveryAuthority), frozenAuthority);
   assert.equal(prComments.length, 1);
   assert.match(prComments[0]!.body, /Complete independent review/u);
+  assert.equal(fixture.events.filter((event) => event === 'effect:pr').length, 1);
+  assert.equal(continuationEvents.some((event) => event.startsWith('check:')), true);
+  assert.equal(continuationEvents.includes('proof'), true);
+  assert.equal(continuationEvents.includes('review:code-review'), true);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-list', '--count', `${oldHead}..HEAD`])).stdout.trim(), '1');
 
   const effectsBeforeReplay = fixture.events.filter((event) => event.startsWith('effect:') || event.startsWith('git:')).length + prComments.length;
@@ -2669,8 +2833,8 @@ async function runFixture(options: FixtureOptions = {}) {
     title: 'Implement behavior',
     body: options.issueBody ?? '## Acceptance Criteria\n- The behavior works.',
     url: 'https://example.invalid/issues/42',
-    state: 'OPEN' as const,
   };
+  let issueState: 'OPEN' | 'CLOSED' = 'OPEN';
   const dependencies: RunIssueDependencies = {
     readConfig: async () => ({
       bytes: configBytes,
@@ -2697,7 +2861,7 @@ async function runFixture(options: FixtureOptions = {}) {
           authReads += 1;
           if (options.revokeAtAuthorization === authReads) labels = labels.filter((label) => label !== 'agent:auto');
         }
-        return { ...issue, labels: [...labels].sort(), comments: structuredClone(comments) };
+        return { ...issue, state: issueState, labels: [...labels].sort(), comments: structuredClone(comments) };
       },
       setLabels: async (_issueNumber, next) => {
         const claim = next.includes('agent:running');
@@ -3078,6 +3242,7 @@ async function runFixture(options: FixtureOptions = {}) {
     candidateAuthorityHashes, checkedChangePayloads, reviewInputs,
     reviewReportRepairInputs,
     implementationAttemptIds, implementationRepairOnly,
+    setIssueState: (state: 'OPEN' | 'CLOSED') => { issueState = state; },
   };
 }
 

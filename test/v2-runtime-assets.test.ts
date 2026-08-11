@@ -305,8 +305,10 @@ test('contained implementation and proof map a settled launch-gate failure to re
   const workflowGeneration = await materializeWorkflowGeneration({
     packageRoot, runtimeRoot: orchestratorHome, packageVersion: '2.0.1', bootId: 'boot-a',
   });
+  let implementationPrompt = '';
   const process = {
-    run: async (invocation: { onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
+    run: async (invocation: { prompt?: string; onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
+      implementationPrompt = invocation.prompt ?? '';
       await invocation.onSpawned?.({ pid: 4242, processGroupId: 4242 });
       return { kind: 'launch-gate-failed' as const };
     },
@@ -329,9 +331,22 @@ test('contained implementation and proof map a settled launch-gate failure to re
       issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64),
     },
     cycle: 1, reworkFindings: [], repairOnly: false, workflowGeneration,
+    reviewFeedbackRound: 1,
+    reviewFeedback: [{
+      id: 'issue-comment:105', sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-105',
+      path: null, line: null, body: 'Why does this work?',
+    }],
+    reviewFeedbackPullRequest: {
+      number: 17, headSha: '1'.repeat(40), headRefName: 'codex/issue-42', url: 'https://github.com/owner/repo/pull/17',
+    },
     signal: new AbortController().signal,
   });
   assert.deepEqual(implementationResult, { kind: 'transport-failed', resumable: true });
+  assert.match(implementationPrompt, /Frozen trusted feedback:.*issue-comment:105/u);
+  assert.match(implementationPrompt, /Current same-branch draft pull request:.*codex\/issue-42/u);
+  assert.match(implementationPrompt, /in-scope repair/u);
+  assert.match(implementationPrompt, /answer-only/u);
+  assert.match(implementationPrompt, /return boundary/u);
 
   const proof = new ContainedProofAgent({
     config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin',

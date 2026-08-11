@@ -96,6 +96,18 @@ test('GhCliIssueAdapter checks permission against the immutable author ID and ty
   });
 });
 
+test('GhCliIssueAdapter normalizes GitHub maintain permission to trusted write-equivalent', async () => {
+  const executor: CommandExecutor = async () => ({
+    stdout: JSON.stringify({ permission: 'maintain', user: { id: restComment.user.id } }), stderr: '',
+  });
+
+  assert.deepEqual(
+    await new GhCliIssueAdapter('owner', 'repo', executor, () => '2026-07-17T11:00:00.000Z')
+      .getRepositoryPermission('maintainer', restComment.user.id),
+    { permission: 'write', checkedAt: '2026-07-17T11:00:00.000Z', userId: restComment.user.id },
+  );
+});
+
 test('GhCliIssueAdapter returns the posted comment only after REST reread observes it', async () => {
   const calls: string[][] = [];
   const executor: CommandExecutor = async (_file, args) => {

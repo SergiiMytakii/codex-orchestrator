@@ -25,5 +25,10 @@ checks, proof, review, commits, publication, and
 external state. Never commit, push, publish, mutate GitHub, or expose
 credentials. In the final report, `changedFiles` is the complete current product
 change set across the Run, not only files touched in this
-attempt; exclude Runner-owned proof artifacts. Return only
+attempt; exclude Runner-owned proof artifacts. For a trusted issue-comment
+follow-up, return `answer-only` when no code change is required, or `boundary`
+when the request is ambiguous, changes a settled decision, or exceeds the
+original issue authority. Those outcomes must keep `changedFiles` empty and
+must not invent checks, proof, review, commit, push, or a replacement PR.
+Return only
 `schemas/implementation-report-v1.json`.

@@ -16,11 +16,13 @@ export interface ExternalBlocker {
 
 export interface ImplementationReportV1 {
   version: 1;
-  status: 'completed' | 'external-block';
+  status: 'completed' | 'external-block' | 'answer-only' | 'boundary';
   summary: string;
   changedFiles: string[];
   residualRisks: string[];
   blocker?: ExternalBlocker;
+  response?: string;
+  boundary?: { kind: 'decision-delta' | 'out-of-scope' | 'authority-boundary' };
 }
 
 export function validateImplementationReport(value: unknown): ImplementationReportV1 {
@@ -29,6 +31,10 @@ export function validateImplementationReport(value: unknown): ImplementationRepo
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks'], 'implementation report');
   } else if (value.status === 'external-block') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'blocker'], 'implementation report');
+  } else if (value.status === 'answer-only') {
+    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'response'], 'implementation report');
+  } else if (value.status === 'boundary') {
+    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'response', 'boundary'], 'implementation report');
   } else {
     throw new Error('implementation report.status is invalid');
   }
@@ -41,7 +47,20 @@ export function validateImplementationReport(value: unknown): ImplementationRepo
   if (value.status === 'completed' && value.changedFiles.length === 0) {
     throw new Error('completed implementation report requires changedFiles');
   }
+  if ((value.status === 'answer-only' || value.status === 'boundary') && value.changedFiles.length !== 0) {
+    throw new Error(`${value.status} implementation report cannot include changedFiles`);
+  }
   if (value.status === 'external-block') validateExternalBlocker(value.blocker, 'implementation report.blocker');
+  if (value.status === 'answer-only' || value.status === 'boundary') {
+    assertBoundedString(value.response, 'implementation report.response', MAX_SUMMARY_LENGTH, true);
+  }
+  if (value.status === 'boundary') {
+    assertRecord(value.boundary, 'implementation report.boundary');
+    assertExactObject(value.boundary, ['kind'], 'implementation report.boundary');
+    if (!['decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.boundary.kind as string)) {
+      throw new Error('implementation report.boundary.kind is invalid');
+    }
+  }
   return value as unknown as ImplementationReportV1;
 }
 
@@ -77,6 +96,32 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
           blocker: externalBlockerSchema(),
         },
       },
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'response'],
+        properties: {
+          ...commonProperties,
+          status: { type: 'string', const: 'answer-only' },
+          changedFiles: { ...commonProperties.changedFiles, maxItems: 0 },
+          response: boundedStringSchema(MAX_SUMMARY_LENGTH),
+        },
+      },
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'response', 'boundary'],
+        properties: {
+          ...commonProperties,
+          status: { type: 'string', const: 'boundary' },
+          changedFiles: { ...commonProperties.changedFiles, maxItems: 0 },
+          response: boundedStringSchema(MAX_SUMMARY_LENGTH),
+          boundary: {
+            type: 'object', additionalProperties: false, required: ['kind'],
+            properties: { kind: { type: 'string', enum: ['decision-delta', 'out-of-scope', 'authority-boundary'] } },
+          },
+        },
+      },
   ]);
 }
 
@@ -86,7 +131,7 @@ export function implementationReportRepairDiagnostic(error: unknown): string {
 }
 
 export function implementationReportSkillExcerpt(): string {
-  return 'Complete the work or report one external blocker. Return only the JSON object required by the runner-supplied output schema; never publish, push, open a PR, or include credential/path material.';
+  return 'Complete the work, answer a trusted issue question, state an authority boundary, or report one external blocker. Answer-only and boundary results have no changed files. Return only the JSON object required by the runner-supplied output schema; never publish, push, open a PR, or include credential/path material.';
 }
 
 function validateExternalBlocker(value: unknown, field: string): asserts value is ExternalBlocker {

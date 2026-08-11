@@ -7,6 +7,36 @@ import type { CommandExecutor } from '../src/v2/adapters/gh-cli.js';
 import { InMemoryGitHubPullRequestAdapter, type GitHubPullRequestReviewTarget } from '../src/v2/adapters/pull-requests.js';
 import { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 
+test('freezes the first trusted issue comment after the terminal cutoff and revalidates immutable source trust', async () => {
+  const pullRequests = pullRequestFixture();
+  const comments = [
+    issueComment('100', 'writer', '42', 'before cutoff', '2026-07-27T09:59:00.000Z'),
+    issueComment('101', 'writer', '42', '   ', '2026-07-27T10:01:00.000Z'),
+    issueComment('102', 'reader', '43', 'untrusted', '2026-07-27T10:02:00.000Z'),
+    issueComment('103', 'dependabot[bot]', '44', 'bot request', '2026-07-27T10:03:00.000Z'),
+    issueComment('104', 'codex-orchestrator', '45', 'orchestrator output', '2026-07-27T10:04:00.000Z'),
+    issueComment('105', 'writer', '42', 'Please explain the current behavior.', '2026-07-27T10:05:00.000Z'),
+    issueComment('106', 'admin', '46', 'Later request', '2026-07-27T10:06:00.000Z'),
+  ];
+  const issues = new PermissionFixture({ '42': 'write', '43': 'read', '44': 'write', '45': 'admin', '46': 'admin' }, comments);
+  const service = coordinator(pullRequests, issues);
+  const result = await service.observeAndFreeze({
+    ...observationInput(),
+    issueCommentCutoff: { issueNumber: 42, commentId: '100', observedAt: '2026-07-27T10:00:00.000Z' },
+  });
+
+  assert.equal(result.status, 'frozen');
+  if (result.status !== 'frozen') return;
+  assert.deepEqual(result.batch.sources.map((source) => source.sourceId), ['issue-comment:105']);
+  assert.equal(result.batch.sources[0]!.kind, 'issue-comment');
+  assert.equal(result.batch.sources[0]!.body, 'Please explain the current behavior.');
+  assert.deepEqual(issues.checked, ['43', '42']);
+  assert.equal((await service.revalidate({ batch: result.batch, issueNumber: 42, epoch: 'pre-update', expectedHeadSha: 'a'.repeat(40) })).status, 'valid');
+
+  issues.comments = comments.map((comment) => comment.id === '105' ? { ...comment, body: 'edited' } : comment);
+  assert.equal((await service.revalidate({ batch: result.batch, issueNumber: 42, epoch: 'pre-update', expectedHeadSha: 'a'.repeat(40) })).status, 'blocked');
+});
+
 test('freezes only authorized eligible review sources', async () => {
   const pullRequests = pullRequestFixture();
   pullRequests.reviewThreads.set(17, [
@@ -170,14 +200,14 @@ test('revalidation rejects edited or revoked sources and post-push permits only 
 
   pullRequests.reviewThreads.set(17, [thread('T_good', 'writer', '42', 'Root body', true, true, 'a'.repeat(40))]);
   pullRequests.reviewTargets.set(17, target('c'.repeat(40)));
-  assert.equal((await service.revalidate({ batch: observed.batch, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'valid');
+  assert.equal((await service.revalidate({ batch: observed.batch, issueNumber: 42, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'valid');
 
   pullRequests.reviewThreads.set(17, [thread('T_good', 'writer', '42', 'edited', true, true, 'a'.repeat(40))]);
-  assert.equal((await service.revalidate({ batch: observed.batch, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
+  assert.equal((await service.revalidate({ batch: observed.batch, issueNumber: 42, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
 
   pullRequests.reviewThreads.set(17, [thread('T_good', 'writer', '42', 'Root body', true, true, 'a'.repeat(40))]);
   permissions.permissions['42'] = 'read';
-  assert.equal((await service.revalidate({ batch: observed.batch, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
+  assert.equal((await service.revalidate({ batch: observed.batch, issueNumber: 42, epoch: 'post-push', expectedHeadSha: 'c'.repeat(40) })).status, 'blocked');
 });
 
 function coordinator(pullRequests: InMemoryGitHubPullRequestAdapter, issues: PermissionFixture): ReviewFeedbackObserver {
@@ -235,11 +265,28 @@ function review(id: string, login: string, userId: string, body: string, state: 
 
 class PermissionFixture extends InMemoryGitHubIssueAdapter {
   public checked: string[] = [];
-  public constructor(public permissions: Record<string, 'none' | 'read' | 'write' | 'admin'>) { super(); }
+  public constructor(
+    public permissions: Record<string, 'none' | 'read' | 'write' | 'admin'>,
+    public comments: Awaited<ReturnType<InMemoryGitHubIssueAdapter['listAllComments']>> = [],
+  ) { super(); }
+  public override async listAllComments() { return structuredClone(this.comments); }
+  public override async getIssue(number: number) {
+    return {
+      number, title: 'Issue', body: 'Body', url: `https://github.com/owner/repo/issues/${number}`,
+      state: 'OPEN' as const, labels: [], comments: structuredClone(this.comments), closedByPullRequestsReferences: [],
+    };
+  }
   public override async getRepositoryPermission(_login: string, userId: string) {
     this.checked.push(userId);
     return { permission: this.permissions[userId] ?? 'none', userId, checkedAt: '2026-07-27T10:04:00.000Z' } as const;
   }
+}
+
+function issueComment(id: string, login: string, userId: string, body: string, createdAt: string) {
+  return {
+    id, url: `https://github.com/owner/repo/issues/42#issuecomment-${id}`, body, createdAt, updatedAt: createdAt,
+    author: { login, id: userId }, authorAssociation: 'MEMBER',
+  };
 }
 
 function jsonResult(value: unknown): { stdout: string; stderr: string } {

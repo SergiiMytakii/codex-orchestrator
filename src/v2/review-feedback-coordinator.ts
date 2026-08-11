@@ -2,6 +2,7 @@ import { canonicalJson } from './containment.js';
 import {
   GitHubPermissionRetryableError,
   GitHubPermissionSafetyError,
+  type GitHubIssueComment,
   type GitHubIssueAdapter,
   type GitHubRepositoryPermissionObservation,
 } from './adapters/issues.js';
@@ -30,6 +31,7 @@ export interface ReviewFeedbackObservationInput {
   marker: string;
   consumedSourceIds: string[];
   restPullRequest: { number: number; nodeId: string; headSha: string; body: string };
+  issueCommentCutoff?: { issueNumber: number; commentId: string | null; observedAt: string };
 }
 
 export type ReviewFeedbackObservationResult =
@@ -52,7 +54,7 @@ interface CandidateSource {
 export class ReviewFeedbackObserver {
   public constructor(private readonly dependencies: {
     pullRequests: GitHubPullRequestAdapter;
-    issues: Pick<GitHubIssueAdapter, 'getRepositoryPermission'>;
+    issues: Pick<GitHubIssueAdapter, 'listAllComments' | 'getRepositoryPermission'>;
     now?: () => string;
   }) {}
 
@@ -60,13 +62,25 @@ export class ReviewFeedbackObserver {
     try {
       const snapshot = await this.readBoundedSnapshot(input.pullRequestNumber, input.marker, input.restPullRequest, async ({ threads, reviews }) => {
         const consumed = new Set(input.consumedSourceIds);
-        const candidates = collectCandidates(threads, reviews, input.expectedHeadSha)
-          .filter((candidate) => !consumed.has(candidate.source.sourceId))
-          .sort((left, right) => left.source.sourceId.localeCompare(right.source.sourceId));
+        const issueCandidates = input.issueCommentCutoff
+          ? collectIssueCommentCandidates(
+            await this.dependencies.issues.listAllComments(input.issueCommentCutoff.issueNumber),
+            input.issueCommentCutoff,
+            input.expectedHeadSha,
+          ).filter((candidate) => !consumed.has(candidate.source.sourceId))
+          : [];
+        const candidates = issueCandidates.length > 0
+          ? issueCandidates
+          : collectCandidates(threads, reviews, input.expectedHeadSha)
+            .filter((candidate) => !consumed.has(candidate.source.sourceId))
+            .sort((left, right) => left.source.sourceId.localeCompare(right.source.sourceId));
         const sources: FrozenReviewFeedbackSourceV1[] = [];
         for (const candidate of candidates) {
           const permission = await this.readTrustedPermission(candidate.login, candidate.userId);
-          if (permission) sources.push({ ...candidate.source, permission });
+          if (permission) {
+            sources.push({ ...candidate.source, permission });
+            if (candidate.source.kind === 'issue-comment') break;
+          }
         }
         return sources;
       });
@@ -96,6 +110,7 @@ export class ReviewFeedbackObserver {
 
   public async revalidate(input: {
     batch: FrozenReviewFeedbackBatchV1;
+    issueNumber: number;
     epoch: 'pre-update' | 'post-push';
     expectedHeadSha: string;
   }): Promise<ReviewFeedbackRevalidationResult> {
@@ -105,8 +120,13 @@ export class ReviewFeedbackObserver {
         input.batch.pullRequest.marker,
         undefined,
         async ({ threads, reviews }) => {
+          const issueComments = input.batch.sources.some((source) => source.kind === 'issue-comment')
+            ? await this.dependencies.issues.listAllComments(input.issueNumber)
+            : [];
           for (const frozen of input.batch.sources) {
-            const current = findCandidate(threads, reviews, frozen);
+            const current = frozen.kind === 'issue-comment'
+              ? findIssueCommentCandidate(issueComments, frozen, input.issueNumber)
+              : findCandidate(threads, reviews, frozen);
             if (!current) throw new GitHubPermissionSafetyError(`Frozen review source ${frozen.sourceId} was deleted or became ineligible`);
             if (current.source.body !== frozen.body || current.source.bodySha256 !== frozen.bodySha256
               || current.source.snapshotSha256 !== frozen.snapshotSha256 || current.source.commitSha !== frozen.commitSha
@@ -175,6 +195,79 @@ export class ReviewFeedbackObserver {
     if (permission.permission !== 'write' && permission.permission !== 'admin') return undefined;
     return permission as FrozenReviewFeedbackSourceV1['permission'];
   }
+}
+
+function collectIssueCommentCandidates(
+  comments: GitHubIssueComment[],
+  cutoff: { issueNumber: number; commentId: string | null; observedAt: string },
+  expectedHeadSha: string,
+): CandidateSource[] {
+  return comments
+    .filter((comment) => isAfterIssueCommentCutoff(comment, cutoff)
+      && comment.body.trim().length > 0
+      && !isBotOrOrchestrator(comment))
+    .sort(compareIssueComments)
+    .map((comment) => candidateFromIssueComment(comment, cutoff.issueNumber, expectedHeadSha));
+}
+
+function candidateFromIssueComment(comment: GitHubIssueComment, issueNumber: number, expectedHeadSha: string): CandidateSource {
+  const body = normalizeReviewFeedbackBody(comment.body);
+  const sourceId = `issue-comment:${comment.id}`;
+  return {
+    login: comment.author.login,
+    userId: comment.author.id,
+    source: {
+      sourceId,
+      kind: 'issue-comment',
+      sourceUrl: comment.url,
+      path: null,
+      line: null,
+      body,
+      bodySha256: hashReviewFeedbackText(body),
+      snapshotSha256: hashReviewFeedbackSnapshot({
+        sourceId, issueNumber, url: comment.url, bodySha256: hashReviewFeedbackText(body),
+        createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+        author: { login: comment.author.login, id: comment.author.id },
+      }),
+      threadState: null,
+      commitSha: expectedHeadSha,
+      sourceCreatedAt: comment.createdAt,
+      sourceUpdatedAt: comment.updatedAt,
+      author: { login: comment.author.login, userId: comment.author.id },
+    },
+  };
+}
+
+function findIssueCommentCandidate(
+  comments: GitHubIssueComment[],
+  frozen: FrozenReviewFeedbackSourceV1,
+  issueNumber: number,
+): CandidateSource | undefined {
+  const id = frozen.sourceId.slice('issue-comment:'.length);
+  const comment = comments.find((candidate) => candidate.id === id);
+  if (!comment || !comment.body.trim() || isBotOrOrchestrator(comment)) return undefined;
+  return candidateFromIssueComment(comment, issueNumber, frozen.commitSha);
+}
+
+function isAfterIssueCommentCutoff(comment: GitHubIssueComment, cutoff: { commentId: string | null; observedAt: string }): boolean {
+  if (cutoff.commentId && /^\d+$/u.test(cutoff.commentId) && /^\d+$/u.test(comment.id)) {
+    return BigInt(comment.id) > BigInt(cutoff.commentId);
+  }
+  return Date.parse(comment.createdAt) > Date.parse(cutoff.observedAt);
+}
+
+function compareIssueComments(left: GitHubIssueComment, right: GitHubIssueComment): number {
+  const time = left.createdAt.localeCompare(right.createdAt);
+  if (time !== 0) return time;
+  if (/^\d+$/u.test(left.id) && /^\d+$/u.test(right.id)) {
+    return BigInt(left.id) < BigInt(right.id) ? -1 : BigInt(left.id) > BigInt(right.id) ? 1 : 0;
+  }
+  return left.id.localeCompare(right.id);
+}
+
+function isBotOrOrchestrator(comment: GitHubIssueComment): boolean {
+  const login = comment.author.login.toLowerCase();
+  return login.endsWith('[bot]') || login.includes('codex-orchestrator');
 }
 
 function collectCandidates(
