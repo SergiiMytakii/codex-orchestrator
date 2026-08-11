@@ -69,17 +69,21 @@ export class ReviewFeedbackObserver {
             input.expectedHeadSha,
           ).filter((candidate) => !consumed.has(candidate.source.sourceId))
           : [];
-        const candidates = issueCandidates.length > 0
-          ? issueCandidates
-          : collectCandidates(threads, reviews, input.expectedHeadSha)
-            .filter((candidate) => !consumed.has(candidate.source.sourceId))
-            .sort((left, right) => left.source.sourceId.localeCompare(right.source.sourceId));
+        const pullRequestCandidates = collectCandidates(threads, reviews, input.expectedHeadSha)
+          .filter((candidate) => !consumed.has(candidate.source.sourceId))
+          .sort((left, right) => left.source.sourceId.localeCompare(right.source.sourceId));
         const sources: FrozenReviewFeedbackSourceV1[] = [];
-        for (const candidate of candidates) {
+        for (const candidate of issueCandidates) {
           const permission = await this.readTrustedPermission(candidate.login, candidate.userId);
           if (permission) {
             sources.push({ ...candidate.source, permission });
-            if (candidate.source.kind === 'issue-comment') break;
+            break;
+          }
+        }
+        if (sources.length === 0) {
+          for (const candidate of pullRequestCandidates) {
+            const permission = await this.readTrustedPermission(candidate.login, candidate.userId);
+            if (permission) sources.push({ ...candidate.source, permission });
           }
         }
         return sources;
@@ -251,7 +255,8 @@ function findIssueCommentCandidate(
 
 function isAfterIssueCommentCutoff(comment: GitHubIssueComment, cutoff: { commentId: string | null; observedAt: string }): boolean {
   if (cutoff.commentId && /^\d+$/u.test(cutoff.commentId) && /^\d+$/u.test(comment.id)) {
-    return BigInt(comment.id) > BigInt(cutoff.commentId);
+    return BigInt(comment.id) > BigInt(cutoff.commentId)
+      && Date.parse(comment.createdAt) > Date.parse(cutoff.observedAt);
   }
   return Date.parse(comment.createdAt) > Date.parse(cutoff.observedAt);
 }
@@ -267,7 +272,9 @@ function compareIssueComments(left: GitHubIssueComment, right: GitHubIssueCommen
 
 function isBotOrOrchestrator(comment: GitHubIssueComment): boolean {
   const login = comment.author.login.toLowerCase();
-  return login.endsWith('[bot]') || login.includes('codex-orchestrator');
+  const firstLine = comment.body.split('\n', 1)[0] ?? '';
+  return login.endsWith('[bot]') || login.includes('codex-orchestrator')
+    || (firstLine.startsWith('<!-- codex-orchestrator:run:') && firstLine.endsWith(' -->'));
 }
 
 function collectCandidates(

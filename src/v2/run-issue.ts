@@ -3402,6 +3402,7 @@ export class RunIssue {
     let publication: 'delivered' | 'failed' | 'suppressed' = 'failed';
     let commentId: string | undefined;
     let diagnostic: string | undefined;
+    let responseCommentCutoff = active.record.terminalNotifications?.commentCutoff;
     const validation = this.dependencies.reviewFeedback
       ? await this.dependencies.reviewFeedback.revalidate({
         batch, issueNumber: active.record.issueNumber, epoch: 'pre-update', expectedHeadSha: batch.priorPublishedHeadSha,
@@ -3415,6 +3416,12 @@ export class RunIssue {
     } else {
       try {
         let issue = await this.readIssue(active.record.issueNumber);
+        if (issue && responseCommentCutoff) {
+          responseCommentCutoff = {
+            commentId: issueCommentHighWaterMark(issue.comments),
+            observedAt: this.timestamp(),
+          };
+        }
         let matches = issue ? commentsWithMarker(issue, marker) : [];
         if (matches.length === 0) {
           await this.dependencies.issues.postComment(active.record.issueNumber, body);
@@ -3438,8 +3445,6 @@ export class RunIssue {
       diagnostic = diagnostic ?? 'issue-feedback-review-label-reconciliation-failed';
     }
 
-    let comments = active.record.issueSnapshot.comments ?? [];
-    try { comments = (await this.readIssue(active.record.issueNumber))?.comments ?? comments; } catch { /* best-effort cutoff refresh */ }
     const receipt = {
       kind: 'responded' as const,
       batchId: batch.batchId,
@@ -3451,12 +3456,11 @@ export class RunIssue {
       respondedAt,
     };
     try {
-      const priorNotifications = active.record.terminalNotifications;
       active = await this.persist(active, {
         reviewFeedback: settleReviewFeedbackResponse(active.record.reviewFeedback!, receipt),
-        ...(priorNotifications ? { terminalNotifications: {
-          ...priorNotifications,
-          commentCutoff: { commentId: issueCommentHighWaterMark(comments), observedAt: this.timestamp() },
+        ...(active.record.terminalNotifications && responseCommentCutoff ? { terminalNotifications: {
+          ...active.record.terminalNotifications,
+          commentCutoff: responseCommentCutoff,
         } } : {}),
       });
     } catch {

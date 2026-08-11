@@ -692,6 +692,18 @@ test('trusted issue question answers on the same Run and PR without code, checks
       } };
     },
   };
+  let injectAcrossPublication = false;
+  const postResponse = fixture.dependencies.issues.postComment.bind(fixture.dependencies.issues);
+  fixture.dependencies.issues.postComment = async (issueNumber, responseBody) => {
+    await postResponse(issueNumber, responseBody);
+    if (injectAcrossPublication) {
+      fixture.comments.push({
+        id: '90071992547409940001', body: 'New follow-up across answer publication', authorAssociation: 'OWNER',
+        createdAt: '2026-07-16T12:03:00.000Z', updatedAt: '2026-07-16T12:03:00.000Z',
+        author: 'writer', authorId: '42',
+      });
+    }
+  };
 
   const responseStore = fixture.dependencies.runRecords;
   let rejectedResponseSettlement = false;
@@ -738,6 +750,47 @@ test('trusted issue question answers on the same Run and PR without code, checks
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.slice(replayEvents).includes('issue-answer-agent'), false);
   assert.equal(fixture.comments.filter((comment) => comment.body.includes(`:issue-feedback:${batch.batchId} -->`)).length, 1);
+
+  const nextBody = 'Can you clarify one more detail?';
+  const nextSourceId = 'issue-comment:90071992547409940002';
+  const nextBatch = createFrozenReviewFeedbackBatch({
+    runId: before.runId,
+    canonicalRepository: before.canonicalRepository,
+    pullRequest: structuredClone(batch.pullRequest),
+    priorPublishedHeadSha: oldHead,
+    sources: [{
+      ...batch.sources[0]!, sourceId: nextSourceId, body: nextBody,
+      sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-90071992547409940002',
+      bodySha256: hashReviewFeedbackText(nextBody),
+      snapshotSha256: hashReviewFeedbackSnapshot({ nextSourceId }),
+      sourceCreatedAt: '2026-07-16T12:02:00.000Z', sourceUpdatedAt: '2026-07-16T12:02:00.000Z',
+    }],
+    frozenAt: '2026-07-16T12:02:01.000Z',
+  });
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => ({ status: 'frozen', batch: nextBatch }),
+    revalidate: async () => ({ status: 'valid', observedHeadSha: oldHead }),
+  } as unknown as ReviewFeedbackObserver;
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 9291, processGroupId: 9291, launchedAt: '2026-07-16T12:02:03.000Z' });
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'answer-only', summary: 'Clarified without a change.', changedFiles: [], residualRisks: [],
+        response: 'The additional detail is explained here.',
+      } };
+    },
+  };
+  const frozenPrePublicationBoundary = {
+    commentId: fixture.comments.at(-1)?.id ?? null,
+    observedAt: '2026-07-16T12:00:00.000Z',
+  };
+  injectAcrossPublication = true;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  injectAcrossPublication = false;
+  const afterSuccessfulResponse = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(afterSuccessfulResponse.terminalNotifications?.commentCutoff, frozenPrePublicationBoundary);
+  assert.equal(afterSuccessfulResponse.reviewFeedback?.consumedSourceIds.includes('issue-comment:90071992547409940001'), false);
 
   const boundaryBody = 'Also redesign the neighboring workflow.';
   const boundarySourceId = 'issue-comment:90071992547409940000';

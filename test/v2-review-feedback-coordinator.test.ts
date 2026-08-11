@@ -37,6 +37,62 @@ test('freezes the first trusted issue comment after the terminal cutoff and reva
   assert.equal((await service.revalidate({ batch: result.batch, issueNumber: 42, epoch: 'pre-update', expectedHeadSha: 'a'.repeat(40) })).status, 'blocked');
 });
 
+test('excludes package-owned marker comments from observation and revalidation even for a trusted human login', async () => {
+  const pullRequests = pullRequestFixture();
+  const marker = '<!-- codex-orchestrator:run:00000000-0000-4000-8000-000000000001:cycle:1:handoff -->';
+  const comments = [
+    issueComment('101', 'writer', '42', `${marker}\npackage response`, '2026-07-27T10:01:00.000Z'),
+    issueComment('102', 'writer', '42', 'Human follow-up', '2026-07-27T10:02:00.000Z'),
+  ];
+  const issues = new PermissionFixture({ '42': 'write' }, comments);
+  const service = coordinator(pullRequests, issues);
+  const result = await service.observeAndFreeze({
+    ...observationInput(),
+    issueCommentCutoff: { issueNumber: 42, commentId: '100', observedAt: '2026-07-27T10:00:00.000Z' },
+  });
+
+  assert.equal(result.status, 'frozen');
+  if (result.status !== 'frozen') return;
+  assert.deepEqual(result.batch.sources.map((source) => source.sourceId), ['issue-comment:102']);
+
+  issues.comments = comments.map((comment) => comment.id === '102'
+    ? { ...comment, body: `${marker}\npackage response under a human identity` }
+    : comment);
+  assert.equal((await service.revalidate({
+    batch: result.batch, issueNumber: 42, epoch: 'pre-update', expectedHeadSha: 'a'.repeat(40),
+  })).status, 'blocked');
+});
+
+test('rejects a comment known to predate observedAt even when its numeric ID exceeds a stale cutoff', async () => {
+  const comments = [
+    issueComment('900', 'writer', '42', 'Predates frozen boundary', '2026-07-27T09:59:59.000Z'),
+  ];
+  const result = await coordinator(pullRequestFixture(), new PermissionFixture({ '42': 'write' }, comments))
+    .observeAndFreeze({
+      ...observationInput(),
+      issueCommentCutoff: { issueNumber: 42, commentId: '100', observedAt: '2026-07-27T10:00:00.000Z' },
+    });
+
+  assert.equal(result.status, 'none');
+});
+
+test('falls back to trusted PR feedback when after-cutoff issue comments fail trust validation', async () => {
+  const pullRequests = pullRequestFixture();
+  pullRequests.reviewThreads.set(17, [
+    thread('T_good', 'writer', '42', 'Trusted PR request', false, false, 'a'.repeat(40)),
+  ]);
+  const comments = [issueComment('101', 'reader', '43', 'Untrusted issue request', '2026-07-27T10:01:00.000Z')];
+  const result = await coordinator(pullRequests, new PermissionFixture({ '42': 'write', '43': 'read' }, comments))
+    .observeAndFreeze({
+      ...observationInput(),
+      issueCommentCutoff: { issueNumber: 42, commentId: '100', observedAt: '2026-07-27T10:00:00.000Z' },
+    });
+
+  assert.equal(result.status, 'frozen');
+  if (result.status !== 'frozen') return;
+  assert.deepEqual(result.batch.sources.map((source) => source.sourceId), ['pr-thread:T_good']);
+});
+
 test('freezes only authorized eligible review sources', async () => {
   const pullRequests = pullRequestFixture();
   pullRequests.reviewThreads.set(17, [
