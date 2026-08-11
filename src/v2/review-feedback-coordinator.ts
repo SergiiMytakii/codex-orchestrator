@@ -255,8 +255,7 @@ function findIssueCommentCandidate(
 
 function isAfterIssueCommentCutoff(comment: GitHubIssueComment, cutoff: { commentId: string | null; observedAt: string }): boolean {
   if (cutoff.commentId && /^\d+$/u.test(cutoff.commentId) && /^\d+$/u.test(comment.id)) {
-    return BigInt(comment.id) > BigInt(cutoff.commentId)
-      && Date.parse(comment.createdAt) > Date.parse(cutoff.observedAt);
+    return BigInt(comment.id) > BigInt(cutoff.commentId);
   }
   return Date.parse(comment.createdAt) > Date.parse(cutoff.observedAt);
 }

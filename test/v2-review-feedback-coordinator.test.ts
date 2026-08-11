@@ -63,9 +63,10 @@ test('excludes package-owned marker comments from observation and revalidation e
   })).status, 'blocked');
 });
 
-test('rejects a comment known to predate observedAt even when its numeric ID exceeds a stale cutoff', async () => {
+test('uses numeric issue comment IDs as the authoritative cutoff even when timestamps race', async () => {
   const comments = [
     issueComment('900', 'writer', '42', 'Predates frozen boundary', '2026-07-27T09:59:59.000Z'),
+    issueComment('901', 'writer', '42', 'Same timestamp boundary race', '2026-07-27T10:00:00.000Z'),
   ];
   const result = await coordinator(pullRequestFixture(), new PermissionFixture({ '42': 'write' }, comments))
     .observeAndFreeze({
@@ -73,7 +74,9 @@ test('rejects a comment known to predate observedAt even when its numeric ID exc
       issueCommentCutoff: { issueNumber: 42, commentId: '100', observedAt: '2026-07-27T10:00:00.000Z' },
     });
 
-  assert.equal(result.status, 'none');
+  assert.equal(result.status, 'frozen');
+  if (result.status !== 'frozen') return;
+  assert.deepEqual(result.batch.sources.map((source) => source.sourceId), ['issue-comment:900']);
 });
 
 test('falls back to trusted PR feedback when after-cutoff issue comments fail trust validation', async () => {

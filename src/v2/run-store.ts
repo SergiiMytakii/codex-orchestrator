@@ -421,6 +421,25 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   const terminal = ['review-ready', 'blocked', 'transport-failed', 'cancelled', 'internal-error'].includes(value.lifecycle);
   if (terminal !== hasOwn(value, 'terminalOutcome')) throw new Error(`${field} terminal lifecycle requires terminalOutcome`);
   if (terminal && (value.terminalOutcome as RunTerminalOutcome).status !== value.lifecycle) throw new Error(`${field} terminalOutcome does not match lifecycle`);
+  if (hasOwn(value, 'terminalNotifications')) {
+    if (!terminal || value.lifecycle === 'transport-failed'
+      || (value.terminalNotifications as TerminalNotificationStateV1).report.outcome !== value.lifecycle) {
+      throw new Error(`${field} terminal notification outcome does not match lifecycle`);
+    }
+  }
+  const terminalDeliveryEffect = value.pendingEffect as PendingEffect | undefined;
+  if (terminalDeliveryEffect?.kind === 'terminal-comment' || terminalDeliveryEffect?.kind === 'terminal-labels') {
+    if (!hasOwn(value, 'terminalNotifications')) throw new Error(`${field} terminal delivery effect requires notifications`);
+    const notifications = value.terminalNotifications as TerminalNotificationStateV1;
+    const delivery = terminalDeliveryEffect.kind === 'terminal-comment' ? notifications.comment : notifications.labels;
+    if (terminalDeliveryEffect.issueNumber !== value.issueNumber
+      || terminalDeliveryEffect.outcome !== notifications.report.outcome
+      || delivery.status !== 'pending'
+      || terminalDeliveryEffect.attempt !== delivery.attempts + 1
+      || terminalDeliveryEffect.attempt > 3) {
+      throw new Error(`${field} terminal delivery effect does not match pending notification state`);
+    }
+  }
   if (value.lifecycle === 'proving' && (!hasOwn(value, 'checkedChangeSha256') || !hasOwn(value, 'proofId')
     || value.checks.some((check) => check.status === 'failed'))) {
     throw new Error(`${field} proving requires passed checks and checked change proof identity`);

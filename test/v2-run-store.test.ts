@@ -190,6 +190,49 @@ test('run state round-trips bounded terminal notification diagnostics and cutoff
   );
 });
 
+test('run state binds terminal notifications and pending delivery effects to the terminal outcome', async () => {
+  const terminal = {
+    ...reviewReadyRecord(),
+    terminalNotifications: {
+      version: 1 as const,
+      commentCutoff: { commentId: '10', observedAt: timestamp() },
+      report: {
+        version: 1 as const, outcome: 'review-ready' as const, summary: 'Implemented behavior.',
+        pullRequestUrl: 'https://github.com/owner/repo/pull/17', passedChecks: [], publishableProof: [],
+        unverified: [], risks: [], reviewFocus: [], nextAction: 'Review the draft PR.',
+      },
+      comment: { status: 'pending' as const, attempts: 1 },
+      labels: { status: 'pending' as const, attempts: 0 },
+    },
+  };
+  const malformed: RunRecord[] = [
+    { ...terminal, terminalNotifications: {
+      ...terminal.terminalNotifications,
+      report: { ...terminal.terminalNotifications.report, outcome: 'blocked' },
+    } } as RunRecord,
+    { ...terminal, pendingEffect: createPendingEffect({
+      kind: 'terminal-comment', issueNumber: 42, marker: '<!-- marker -->', bodySha256: '9'.repeat(64),
+      outcome: 'blocked', attempt: 2,
+    }) } as RunRecord,
+    { ...terminal, pendingEffect: createPendingEffect({
+      kind: 'terminal-comment', issueNumber: 42, marker: '<!-- marker -->', bodySha256: '9'.repeat(64),
+      outcome: 'review-ready', attempt: 3,
+    }) } as RunRecord,
+    { ...terminal, terminalNotifications: {
+      ...terminal.terminalNotifications,
+      labels: { status: 'delivered' as const, attempts: 1 },
+    }, pendingEffect: createPendingEffect({
+      kind: 'terminal-labels', issueNumber: 42, add: ['agent:review'], remove: ['agent:auto'],
+      outcome: 'review-ready', attempt: 2,
+    }) } as RunRecord,
+  ];
+
+  for (const [index, invalid] of malformed.entries()) {
+    const writer = new FileRunRecordWriter(join(await temporaryRoot(), `run-state-${index}.json`), deterministicAtomicOptions());
+    await assert.rejects(writer.compareAndSwap(0, body([invalid])), /terminal notification|terminal delivery/u, `${index}`);
+  }
+});
+
 
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
   for (const point of ['before-file-fsync', 'before-rename'] as const) {

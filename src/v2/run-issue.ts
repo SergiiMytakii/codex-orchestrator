@@ -193,7 +193,10 @@ export interface RunIssueDependencies {
     getRepositoryPermission?(login: string, expectedUserId: string): Promise<{ permission: 'none' | 'read' | 'write' | 'admin'; checkedAt: string; userId: string }>;
   };
   pullRequests: {
-    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{ url: string; body: string; number?: number; nodeId?: string; headSha?: string } | undefined>;
+    findOpen(input: { headBranch: string; baseBranch: string }): Promise<{
+      url: string; body: string; number?: number; nodeId?: string; headSha?: string;
+      headRefName?: string; baseRefName?: string;
+    } | undefined>;
     createDraft(input: { title: string; body: string; headBranch: string; baseBranch: string }): Promise<{ url: string }>;
     listConversationComments?(number: number): Promise<Array<{ id: string; body: string }>>;
     postConversationComment?(number: number, body: string): Promise<{ id: string; body: string }>;
@@ -524,7 +527,7 @@ export class RunIssue {
         });
         if (settlement.status === 'unauthorized') {
           return this.signal.aborted
-            ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+            ? await this.terminal(await this.confirmEffect(active), { status: 'cancelled' })
             : await this.revoked(active);
         }
         if (settlement.status === 'unknown') return await this.invokedFailure(active, 'commit-delivery-unknown');
@@ -554,7 +557,7 @@ export class RunIssue {
       });
       if (settlement.status === 'unauthorized') {
         return this.signal.aborted
-          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          ? await this.terminal(await this.confirmEffect(active), { status: 'cancelled' })
           : await this.revoked(active);
       }
       if (settlement.status === 'unknown') return await this.invokedFailure(active, 'push-delivery-unknown');
@@ -599,7 +602,7 @@ export class RunIssue {
       });
       if (settlement.status === 'unauthorized') {
         return this.signal.aborted
-          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
+          ? await this.terminal(await this.confirmEffect(active), { status: 'cancelled' })
           : await this.revoked(active);
       }
       if (settlement.status === 'unknown') return await this.invokedFailure(active, 'pr-delivery-unknown');
@@ -611,7 +614,7 @@ export class RunIssue {
 
     return this.terminal(active, {
       status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: commitSha,
-    }, 'review-ready', false, {
+    }, 'review-ready', {
       reviewFeedback: initializeReviewFeedback(
         active.record.reviewFeedback ?? {
           version: 1, updateEpoch: 0, consumedSourceIds: [], previousPublishedHeadSha: null,
@@ -956,7 +959,7 @@ export class RunIssue {
     const pullRequestUrl = `https://github.com/${active.record.canonicalRepository}/pull/${batch.pullRequest.number}`;
     return this.terminal(active, {
       status: 'review-ready', pullRequestUrl, continuationEpoch: head,
-    }, 'review-ready', false, {
+    }, 'review-ready', {
       reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
     });
   }
@@ -1071,10 +1074,11 @@ export class RunIssue {
     const runningLabels = sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]);
     const reviewLabels = [config.github.labels.review.name];
     const pendingEffect = active.record.pendingEffect;
-    if (pendingEffect && (pendingEffect.kind !== 'review-activation-labels'
-      || pendingEffect.issueNumber !== active.record.issueNumber
-      || pendingEffect.batchId !== batch.batchId
-      || !sameStrings(pendingEffect.expected, runningLabels))) {
+    const activationEffect = pendingEffect?.kind === 'review-activation-labels' ? pendingEffect : undefined;
+    if (pendingEffect && pendingEffect.kind !== 'continuation-worktree-create' && (!activationEffect
+      || activationEffect.issueNumber !== active.record.issueNumber
+      || activationEffect.batchId !== batch.batchId
+      || !sameStrings(activationEffect.expected, runningLabels))) {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-pendingEffect-diverged') };
     }
     const issue = await this.readIssue(active.record.issueNumber);
@@ -1090,8 +1094,8 @@ export class RunIssue {
     });
     const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-activation-revalidation-failed');
     if (validationFailure) return { result: validationFailure };
-    if (pendingEffect) {
-      const settlement = await settleLabelsEffect(pendingEffect, {
+    if (activationEffect) {
+      const settlement = await settleLabelsEffect(activationEffect, {
         observe: async () => {
           const observed = await this.readIssue(active.record.issueNumber);
           if (!observed || !this.hasTrustedClaim(observed, active.record)) return 'diverged';
@@ -1228,7 +1232,7 @@ export class RunIssue {
             return publicOutcome(active.record.terminalOutcome!);
           }
           const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
-          return await this.terminal(active, seed, active.record.pendingEffect.code, false);
+          return await this.terminal(active, seed, active.record.pendingEffect.code);
         }
         if (active.record.terminalOutcome && (active.record.terminalNotifications
           || active.record.pendingEffect?.kind === 'terminal-comment'
@@ -1280,7 +1284,9 @@ export class RunIssue {
           if ('status' in reconciled) return reconciled;
           active = reconciled.active;
         }
-        if (active.record.reviewFeedback?.activeBatch && active.record.pendingEffect?.kind === 'review-activation-labels') {
+        if (active.record.reviewFeedback?.activeBatch
+          && (active.record.pendingEffect?.kind === 'review-activation-labels'
+            || active.record.pendingEffect?.kind === 'continuation-worktree-create')) {
           const activation = await this.resumeActivatedReviewFeedback(active, targetRoot, config);
           if ('result' in activation) return activation.result;
           active = activation.active;
@@ -3251,9 +3257,8 @@ export class RunIssue {
     active: ActiveRun,
     code: string,
     summary: string,
-    replaceConfirmedEffect = false,
   ): Promise<{ active: ActiveRun; path: string; id: string }> {
-    if (!active.record.pendingEffect || replaceConfirmedEffect) {
+    if (!active.record.pendingEffect) {
       const recordedAt = this.timestamp();
       const path = this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary));
       const bytes = outcomeEvidenceBytes({ runId: active.record.runId, code, summary, recordedAt });
@@ -3322,8 +3327,19 @@ export class RunIssue {
       headBranch: active.record.branchName,
       baseBranch: config.github.baseBranch,
     });
-    if (!pullRequest?.url) {
-      return this.terminal(active, { status: 'internal-error', code: 'issue-feedback-prior-handoff-missing' });
+    if (!pullRequest?.url || pullRequest.number !== batch.pullRequest.number
+      || pullRequest.nodeId !== batch.pullRequest.nodeId || pullRequest.headSha !== batch.pullRequest.headSha
+      || pullRequest.headRefName !== batch.pullRequest.headRefName
+      || pullRequest.baseRefName !== batch.pullRequest.baseRefName) {
+      return this.terminal(
+        active,
+        { status: 'blocked', kind: 'safety', resumable: false },
+        'issue-feedback-prior-handoff-identity-mismatch',
+        { reviewFeedback: blockReviewFeedback({
+          ...feedback,
+          consumedSourceIds: feedback.consumedSourceIds.filter((id) => !sourceIds.includes(id)),
+        }, 'safety', this.timestamp()) },
+      );
     }
     const terminalSeed = {
       status: 'review-ready' as const,
@@ -3371,7 +3387,6 @@ export class RunIssue {
     let publication: 'delivered' | 'failed' | 'suppressed' = 'failed';
     let commentId: string | undefined;
     let diagnostic: string | undefined;
-    let responseCommentCutoff = active.record.terminalNotifications?.commentCutoff;
     const validation = this.dependencies.reviewFeedback
       ? await this.dependencies.reviewFeedback.revalidate({
         batch, issueNumber: active.record.issueNumber, epoch: 'pre-update', expectedHeadSha: batch.priorPublishedHeadSha,
@@ -3385,12 +3400,6 @@ export class RunIssue {
     } else {
       try {
         let issue = await this.readIssue(active.record.issueNumber);
-        if (issue && responseCommentCutoff) {
-          responseCommentCutoff = {
-            commentId: issueCommentHighWaterMark(issue.comments),
-            observedAt: this.timestamp(),
-          };
-        }
         let matches = issue ? commentsWithMarker(issue, marker) : [];
         if (matches.length === 0) {
           await this.dependencies.issues.postComment(active.record.issueNumber, body);
@@ -3427,10 +3436,6 @@ export class RunIssue {
     try {
       active = await this.persist(active, {
         reviewFeedback: settleReviewFeedbackResponse(active.record.reviewFeedback!, receipt),
-        ...(active.record.terminalNotifications && responseCommentCutoff ? { terminalNotifications: {
-          ...active.record.terminalNotifications,
-          commentCutoff: responseCommentCutoff,
-        } } : {}),
       });
     } catch {
       return publicOutcome(terminalOutcome);
@@ -3444,16 +3449,17 @@ export class RunIssue {
     active: ActiveRun,
     outcome: TerminalSeed,
     evidenceCode: string = outcome.status,
-    retainIntent = false,
     additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
   ): Promise<RunIssueResult> {
+    if (active.record.pendingEffect && active.record.pendingEffect.kind !== 'outcome-evidence') {
+      return this.invokedFailure(active, 'terminal-pending-effect-unsettled', 'Terminal state requires the existing effect postcondition to settle first.');
+    }
     const feedback = active.record.reviewFeedback;
-    if (feedback?.activeBatch && active.record.pendingEffect) active = await this.clearEffect(active);
     const terminalChanges = feedback?.activeBatch && !additionalChanges.reviewFeedback ? {
       ...additionalChanges,
       reviewFeedback: blockReviewFeedback(feedback, outcome.status === 'blocked' ? outcome.kind : 'safety', this.timestamp()),
     } : additionalChanges;
-    return this.persistTerminal(active, outcome, evidenceCode, retainIntent, terminalChanges);
+    return this.persistTerminal(active, outcome, evidenceCode, terminalChanges);
   }
 
   private async settleTerminalNotificationsBestEffort(starting: ActiveRun): Promise<ActiveRun> {
@@ -3561,26 +3567,22 @@ export class RunIssue {
     active: ActiveRun,
     outcome: TerminalSeed,
     evidenceCode: string,
-    retainIntent: boolean,
     additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
-    replaceConfirmedEffect = false,
   ): Promise<RunIssueResult> {
     const evidence = await this.observeOutcomeEvidenceEffect(
-      active, evidenceCode, canonicalJson(outcome), replaceConfirmedEffect,
+      active, evidenceCode, canonicalJson(outcome),
     );
     active = evidence.active;
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
     let terminalComments = active.record.issueSnapshot.comments ?? [];
-    if (!replaceConfirmedEffect && outcome.status !== 'transport-failed') {
+    if (outcome.status !== 'transport-failed') {
       try {
         terminalComments = (await this.readIssue(active.record.issueNumber))?.comments ?? terminalComments;
       } catch {
         // Terminal notification observation is best-effort and cannot change the Run outcome.
       }
     }
-    const notifications = replaceConfirmedEffect
-      ? active.record.terminalNotifications
-      : terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments);
+    const notifications = terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments);
     const changes: Partial<RunRecord> & { pendingEffect?: PendingEffect | undefined } = {
       ...additionalChanges,
       lifecycle: outcome.status,
@@ -3594,10 +3596,8 @@ export class RunIssue {
         : { status: outcome.status }, outcome.status === 'internal-error' ? outcome.code : undefined);
     }
     active = await this.persist(active, changes);
-    if (!retainIntent) {
-      try { active = await this.confirmEffect(active); } catch { return publicOutcome(terminalOutcome); }
-      active = await this.settleTerminalNotificationsBestEffort(active);
-    }
+    try { active = await this.confirmEffect(active); } catch { return publicOutcome(terminalOutcome); }
+    active = await this.settleTerminalNotificationsBestEffort(active);
     return publicOutcome(terminalOutcome);
   }
 

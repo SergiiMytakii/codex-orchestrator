@@ -171,7 +171,7 @@ export function containsCredentialEvidence(value: string): boolean {
 }
 
 export function containsHostIdentityEvidence(value: string): boolean {
-  return /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"']+|(?:^|[\s("'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/imu.test(value);
+  return /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"']+|(?:^|[\s("'=:])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/imu.test(value);
 }
 
 function tomlString(value: string): string {

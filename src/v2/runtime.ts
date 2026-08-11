@@ -1463,6 +1463,8 @@ export function createV2Runtime(input: {
           body: match.body,
           number: match.number,
           nodeId: match.nodeId,
+          headRefName: match.headRefName,
+          baseRefName: match.baseRefName,
           ...(reviewTarget ? { headSha: reviewTarget.headRefOid } : {}),
         };
       },

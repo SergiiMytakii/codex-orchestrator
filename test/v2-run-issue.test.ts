@@ -74,6 +74,35 @@ test('continuation worktree restoration proves exact local and remote refs befor
   await assert.rejects(readFile(join(fixture.worktreePath, 'feature.txt')));
 });
 
+test('restart settles an exactly created continuation worktree before validation dispatch', async () => {
+  const fixture = await runFixture();
+  await prepareActiveIssueFeedback(fixture);
+  fixture.options.ensureContinuationWorktreeThenRejectOnce = true;
+
+  const interrupted = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(interrupted, ['status', 'resumable']), { status: 'transport-failed', resumable: true },
+    JSON.stringify({ interrupted, state: await fixture.store.read(), events: fixture.events, evidence: fixture.evidence }));
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'continuation-worktree-create');
+  assert.equal(fixture.events.filter((event) => event === 'git:ensure-continuation-worktree').length, 1);
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 8585, processGroupId: 8585, launchedAt: '2026-07-16T12:10:03.000Z' });
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'answer-only', summary: 'Answered after recovery.', changedFiles: [], residualRisks: [], response: 'Recovered.',
+      } };
+    },
+  };
+
+  const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), evidence: fixture.evidence }));
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
+  assert.equal(fixture.events.filter((event) => event === 'git:ensure-continuation-worktree').length, 1);
+  assert.equal(fixture.evidence.some((entry) => entry.code === 'validation-progression-dispatch-invalid'), false);
+});
+
 test('proof freshness snapshot excludes only the configured untracked artifact root', async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-v2-proof-freshness-'));
   await execFileAsync('git', ['init', '-b', 'main', root]);
@@ -743,7 +772,7 @@ test('trusted issue question answers on the same Run and PR without code, checks
   } as unknown as ReviewFeedbackObserver;
   fixture.dependencies.pullRequests.findOpen = async () => ({
     url: initial.pullRequestUrl, body: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
-    number: 1, nodeId: 'PR_1', headSha: oldHead,
+    number: 1, nodeId: 'PR_1', headSha: oldHead, headRefName: before.branchName, baseRefName: 'main',
   });
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched, reviewFeedback, reviewFeedbackPullRequest }) => {
@@ -762,18 +791,21 @@ test('trusted issue question answers on the same Run and PR without code, checks
     },
   };
   let injectAcrossPublication = false;
-  const postResponse = fixture.dependencies.issues.postComment.bind(fixture.dependencies.issues);
-  fixture.dependencies.issues.postComment = async (issueNumber, responseBody) => {
-    await postResponse(issueNumber, responseBody);
+  const readResponseIssue = fixture.dependencies.issues.read.bind(fixture.dependencies.issues);
+  fixture.dependencies.issues.read = async (issueNumber) => {
     if (injectAcrossPublication) {
-      fixture.comments.push({
-        id: '90071992547409940001', body: 'New follow-up across answer publication', authorAssociation: 'OWNER',
-        createdAt: '2026-07-16T12:03:00.000Z', updatedAt: '2026-07-16T12:03:00.000Z',
-        author: 'writer', authorId: '42',
-      });
+      const persisted = (await fixture.store.read()).runs[0];
+      if (persisted?.activeAttempt?.stage === 'adopted' && persisted.reviewFeedback?.activeBatch === null) {
+        injectAcrossPublication = false;
+        fixture.comments.push({
+          id: '90071992547409940001', body: 'New follow-up across answer publication', authorAssociation: 'OWNER',
+          createdAt: '2026-07-16T12:03:00.000Z', updatedAt: '2026-07-16T12:03:00.000Z',
+          author: 'writer', authorId: '42',
+        });
+      }
     }
+    return readResponseIssue(issueNumber);
   };
-
   const responseStore = fixture.dependencies.runRecords;
   let rejectedResponseSettlement = false;
   fixture.dependencies.runRecords = {
@@ -857,7 +889,6 @@ test('trusted issue question answers on the same Run and PR without code, checks
   };
   injectAcrossPublication = true;
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  injectAcrossPublication = false;
   const afterSuccessfulResponse = (await fixture.store.read()).runs[0]!;
   assert.deepEqual(afterSuccessfulResponse.terminalNotifications?.commentCutoff, frozenPrePublicationBoundary);
   assert.equal(afterSuccessfulResponse.reviewFeedback?.consumedSourceIds.includes('issue-comment:90071992547409940001'), false);
@@ -914,6 +945,40 @@ test('trusted issue question answers on the same Run and PR without code, checks
   const closed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(closed.status, 'review-ready');
   assert.equal((await fixture.store.read()).runs[0]!.reviewFeedback?.history.length, boundaryRecord.reviewFeedback?.history.length);
+});
+
+test('answer-only fails closed when the discovered open PR no longer matches the frozen batch identity', async () => {
+  const fixture = await runFixture();
+  await prepareActiveIssueFeedback(fixture);
+  const before = (await fixture.store.read()).runs[0]!;
+  const originalFindOpen = fixture.dependencies.pullRequests.findOpen.bind(fixture.dependencies.pullRequests);
+  let discoveries = 0;
+  fixture.dependencies.pullRequests.findOpen = async (input) => {
+    discoveries += 1;
+    if (discoveries === 1) return originalFindOpen(input);
+    return {
+      url: 'https://example.invalid/pull/99', body: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
+      number: 99, nodeId: 'PR_REPLACEMENT', headSha: before.reviewFeedback!.previousPublishedHeadSha!,
+      headRefName: before.branchName, baseRefName: 'main',
+    };
+  };
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 8484, processGroupId: 8484, launchedAt: '2026-07-16T12:10:03.000Z' });
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'answer-only', summary: 'Answer ready.', changedFiles: [], residualRisks: [], response: 'The answer.',
+      } };
+    },
+  };
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.reviewFeedback?.consumedSourceIds.includes('issue-comment:terminal'), false);
+  assert.equal(JSON.stringify(after.terminalOutcome).includes('pull/99'), false);
+  assert.equal(fixture.comments.some((comment) => comment.body.includes(':issue-feedback:')), false);
 });
 
 test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
@@ -1010,6 +1075,8 @@ test('trusted issue-comment repair runs checks, proof, review, and updates the s
     number: 1,
     nodeId: 'PR_1',
     headSha: (await fixture.dependencies.git.getRemoteBranchSha(fixture.worktreePath, record.branchName))!,
+    headRefName: record.branchName,
+    baseRefName: 'main',
   });
   fixture.dependencies.pullRequests.listConversationComments = async () => structuredClone(prComments);
   fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => {
@@ -1213,6 +1280,7 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
     url: pullRequestUrl, body: `<!-- codex-orchestrator:run:${runId}:pr -->\n\nCloses #42`,
     number: 1, nodeId: 'PR_1',
     headSha: (await fixture.dependencies.git.getRemoteBranchSha(fixture.worktreePath, branchName))!,
+    headRefName: branchName, baseRefName: 'main',
   });
   fixture.dependencies.pullRequests.listConversationComments = async () => structuredClone(prComments);
   fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => {
@@ -1318,7 +1386,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
     fixture.dependencies.pullRequests.findOpen = async () => ({
       url: initial.pullRequestUrl,
       body: `<!-- codex-orchestrator:run:${record.runId}:pr -->\n\nCloses #42`,
-      number: 1, nodeId: 'PR_1', headSha: oldHead,
+      number: 1, nodeId: 'PR_1', headSha: oldHead, headRefName: record.branchName, baseRefName: 'main',
     });
     const batch = createFrozenReviewFeedbackBatch({
       runId: record.runId, canonicalRepository: record.canonicalRepository,
@@ -2039,7 +2107,9 @@ test('blocked terminal publishes its reason before labels and does not duplicate
 test('blocked terminal publishes bounded public text without host paths or credential evidence', async () => {
   for (const unsafeSummary of [
     'path=/Users/example/.ssh/id_rsa',
+    'cwd:/Users/example/.ssh/id_rsa',
     String.raw`failed(C:\Users\alice\.ssh\id_rsa)`,
+    String.raw`root:C:\Users\alice\.ssh\id_rsa`,
     'file:///C:/Users/alice/.ssh/id_rsa',
     'token=credential-material-12345',
     '"token":"credential-material-12345"',
@@ -2854,6 +2924,7 @@ interface FixtureOptions {
   configuredChecks?: Record<string, string>;
   createWorktreeRejectOnce?: string;
   createIncompleteWorktreeThenRejectOnce?: boolean;
+  ensureContinuationWorktreeThenRejectOnce?: boolean;
   inspectWorktreeDivergedOnce?: boolean;
   diffTreesUnisolatable?: boolean;
   diffTreeOverride?: { changedFiles: string[]; patch: string };
@@ -2942,6 +3013,7 @@ async function runFixture(options: FixtureOptions = {}) {
     authorId?: string;
   }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
+  let removedBeforeContinuation = false;
   let rejectTerminalCutoffRead = false;
   let reads = 0;
   let authReads = 0;
@@ -2999,6 +3071,10 @@ async function runFixture(options: FixtureOptions = {}) {
         if (claim && shouldReject('claim-labels')) throw new Error('claim labels rejected');
         if (!claim && shouldReject('labels')) throw new Error('labels rejected');
         labels = [...new Set([...labels.filter((label) => !label.startsWith('agent:')), ...next])];
+        if (claim && pullRequest && options.ensureContinuationWorktreeThenRejectOnce && !removedBeforeContinuation) {
+          removedBeforeContinuation = true;
+          await execFileAsync('git', ['-C', targetRoot, 'worktree', 'remove', worktreePath]);
+        }
       },
       reconcileTerminalLabels: async (_issueNumber, policy) => {
         events.push('effect:terminal-labels');
@@ -3399,7 +3475,7 @@ async function prepareActiveIssueFeedback(fixture: Awaited<ReturnType<typeof run
   } as unknown as ReviewFeedbackObserver;
   fixture.dependencies.pullRequests.findOpen = async () => ({
     url: initial.pullRequestUrl, body: `<!-- codex-orchestrator:run:${record.runId}:pr -->`,
-    number: 1, nodeId: 'PR_1', headSha: head,
+    number: 1, nodeId: 'PR_1', headSha: head, headRefName: record.branchName, baseRefName: 'main',
   });
 }
 
@@ -3458,6 +3534,7 @@ function traceGit(
   let createWorktreeRejected = false;
   let inspectWorktreeDiverged = false;
   let getBaseShaRejected = false;
+  let ensureContinuationWorktreeRejected = false;
   let candidateNormalizeRejected = false;
   let candidateReleaseRejected = false;
   const shouldReject = (effect: string) => {
@@ -3517,6 +3594,16 @@ function traceGit(
         throw new Error(options.createWorktreeRejectOnce);
       }
       return delegate.createWorktree(input);
+    },
+    ensureContinuationWorktree: async (input) => {
+      if (options.ensureContinuationWorktreeThenRejectOnce && !ensureContinuationWorktreeRejected) {
+        ensureContinuationWorktreeRejected = true;
+        events.push('git:ensure-continuation-worktree');
+        await delegate.ensureContinuationWorktree(input);
+        throw new Error('continuation worktree result became unknown');
+      }
+      events.push('git:ensure-continuation-worktree');
+      return delegate.ensureContinuationWorktree(input);
     },
     inspectWorktree: async (input) => {
       if (options.inspectWorktreeDivergedOnce && !inspectWorktreeDiverged) {
