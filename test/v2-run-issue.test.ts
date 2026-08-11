@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
-import { canonicalJson, sha256 } from '../src/v2/containment.js';
+import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from '../src/v2/containment.js';
 import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import { CheckProcessQuiescenceError } from '../src/v2/issue-check-policy.js';
@@ -1290,6 +1290,7 @@ test('review update revalidation settles the exact publication effect before map
     { name: 'push authorization', effect: 'review-update-push', epoch: 'pre-update' },
     { name: 'post-push', effect: undefined, epoch: 'post-push' },
     { name: 'summary authorization', effect: 'review-summary', epoch: 'post-push' },
+    { name: 'final labels authorization', effect: 'review-final-labels', epoch: 'post-push' },
   ] as const;
   for (const stage of stages) {
     for (const authorityStatus of ['blocked', 'retryable'] as const) {
@@ -1323,7 +1324,10 @@ test('review update revalidation settles the exact publication effect before map
             : { status: 'transport-failed', resumable: true },
           JSON.stringify({ stage, authorityStatus, result, state: await fixture.store.read() }),
         );
-        assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
+        assert.equal(
+          (await fixture.store.read()).runs[0]?.pendingEffect?.kind,
+          authorityStatus === 'retryable' ? stage.effect : undefined,
+        );
       });
     }
   }
@@ -1439,7 +1443,7 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.equal(result.status, 'review-ready', JSON.stringify({ round, result, state: await fixture.store.read(), events: fixture.events.slice(eventStart) }));
     if (result.status !== 'review-ready') throw new Error(`feedback round ${round} did not publish`);
-    assert.match(result.pullRequestUrl, /\/pull\/1$/u);
+    assert.equal(result.pullRequestUrl, 'https://example.invalid/pull/1');
     const after = (await fixture.store.read()).runs[0]!;
     assert.equal(after.runId, runId);
     assert.equal(after.reviewFeedback?.history.length, round);
@@ -2205,12 +2209,44 @@ test('blocked terminal publishes its reason before labels and does not duplicate
 });
 
 test('blocked terminal publishes bounded public text without host paths or credential evidence', async () => {
-  for (const unsafeSummary of [
-    'path=/Users/example/.ssh/id_rsa',
+  const unsafeSummary = 'path=/Users/example/.ssh/id_rsa';
+  const fixture = await runFixture({
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: unsafeSummary,
+      attempted: Array.from({ length: 4 }, () => 'x'.repeat(3_000)), resumable: false,
+    }, receipt: receipt() }),
+  });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked', JSON.stringify({ unsafeSummary, result, evidence: fixture.evidence, state: await fixture.store.read() }));
+  const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
+  assert.ok(comment);
+  assert.ok(comment.body.length < 16_384);
+  assert.equal(comment.body.includes(unsafeSummary), false, unsafeSummary);
+});
+
+test('host identity detection covers generic and Markdown-delimited paths without rejecting artifact text', () => {
+  for (const value of [
     'cwd:/Users/example/.ssh/id_rsa',
     String.raw`failed(C:\Users\alice\.ssh\id_rsa)`,
     String.raw`root:C:\Users\alice\.ssh\id_rsa`,
     'file:///C:/Users/alice/.ssh/id_rsa',
+    'failed while reading /var/lib/codex/private.log',
+    '/root/.ssh/id_rsa',
+    '/workspace/project/output.txt',
+    '/nix/store/private-output',
+    'build failed at `/root/.ssh/id_rsa`',
+    'see [/workspace/project/output.txt]',
+  ]) assert.equal(containsHostIdentityEvidence(value), true, value);
+  for (const value of [
+    '<hierarchy><node text="Android proof ready" /></hierarchy>',
+    'proofs/proof-android/final.xml',
+    'I/flutter: Android proof ready',
+    'https://example.invalid/issues/42',
+  ]) assert.equal(containsHostIdentityEvidence(value), false, value);
+});
+
+test('credential detection covers public terminal credential forms', () => {
+  for (const value of [
     'token=credential-material-12345',
     '"token":"credential-material-12345"',
     'ghp_abcdefghijklmnopqrstuvwxyz123456',
@@ -2219,20 +2255,7 @@ test('blocked terminal publishes bounded public text without host paths or crede
     'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE',
     'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
     'NPM_TOKEN=npm-credential-material-12345',
-    'failed while reading /var/lib/codex/private.log',
-  ]) {
-    const fixture = await runFixture({
-      proof: async () => ({ status: 'external-block', blocker: {
-        kind: 'service', summary: unsafeSummary,
-        attempted: Array.from({ length: 4 }, () => 'x'.repeat(3_000)), resumable: false,
-      }, receipt: receipt() }),
-    });
-    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
-    const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
-    assert.ok(comment);
-    assert.ok(comment.body.length < 16_384);
-    assert.equal(comment.body.includes(unsafeSummary), false, unsafeSummary);
-  }
+  ]) assert.equal(containsCredentialEvidence(value), true, value);
 });
 
 test('blocked comment settlement never posts after the issue closes', async () => {

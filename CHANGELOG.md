@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Terminal outcomes now persist before independent best-effort issue comments
+  and managed-label reconciliation, with bounded restart-safe recovery.
+- Trusted issue comments can answer questions or continue in-scope repairs on
+  the same Run, branch, and draft PR through fresh checks, proof, and review.
+
+### Fixed
+- Feedback publication retains exact durable effects across retryable
+  authorization checks and preserves the freshly observed PR identity and URL.
+- Public terminal and feedback text redacts credential material and generic
+  host paths without rejecting relative artifact references or XML evidence.
+
 ## [2.0.14] - 2026-08-10
 
 ### Fixed

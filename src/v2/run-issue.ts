@@ -730,6 +730,9 @@ export class RunIssue {
         },
       });
       if (settlement.status === 'unauthorized') {
+        if (authorizationValidation?.status === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-precommit-revalidation-failed-retryable');
+        }
         active = await this.confirmEffect(active);
         if (authorizationValidation) {
           const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-precommit-revalidation-failed');
@@ -787,6 +790,9 @@ export class RunIssue {
         },
       });
       if (settlement.status === 'unauthorized') {
+        if (authorizationValidation?.status === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-precommit-revalidation-failed-retryable');
+        }
         active = await this.confirmEffect(active);
         if (authorizationValidation) {
           const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-precommit-revalidation-failed');
@@ -843,6 +849,9 @@ export class RunIssue {
         }),
       });
       if (settlement.status === 'unauthorized') {
+        if (authorizationValidation?.status === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-prepush-revalidation-failed-retryable');
+        }
         active = await this.confirmEffect(active);
         if (authorizationValidation) {
           const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-prepush-revalidation-failed');
@@ -909,6 +918,9 @@ export class RunIssue {
         },
       });
       if (settlement.status === 'unauthorized') {
+        if (authorizationValidation?.status === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-summary-revalidation-failed-retryable');
+        }
         active = await this.confirmEffect(active);
         if (authorizationValidation) {
           const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-summary-revalidation-failed');
@@ -965,6 +977,9 @@ export class RunIssue {
         invoke: () => this.dependencies.issues.setLabels(issueNumber, finalLabels),
       });
       if (settlement.status === 'unauthorized') {
+        if (authorizationValidation?.status === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-final-labels-revalidation-failed-retryable');
+        }
         active = await this.confirmEffect(active);
         if (authorizationValidation) {
           const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-final-labels-revalidation-failed');
@@ -992,9 +1007,16 @@ export class RunIssue {
       summaryCommentId: summaryId,
       publishedAt: this.timestamp(),
     };
-    const pullRequestUrl = `https://github.com/${active.record.canonicalRepository}/pull/${batch.pullRequest.number}`;
+    const pullRequest = await this.dependencies.pullRequests.findOpen({
+      headBranch: active.record.branchName,
+      baseBranch: config.github.baseBranch,
+    });
+    if (!pullRequest || pullRequest.number !== batch.pullRequest.number || pullRequest.nodeId !== batch.pullRequest.nodeId
+      || pullRequest.headSha !== head) {
+      return this.blockReviewFeedback(active, 'safety', 'review-feedback-published-pr-identity-diverged');
+    }
     return this.terminal(active, {
-      status: 'review-ready', pullRequestUrl, continuationEpoch: head,
+      status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: head,
     }, 'review-ready', {
       reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
     });
@@ -3999,8 +4021,7 @@ function managedLabelProjection(labels: string[], config: AgentAutoConfig): stri
 }
 
 function publicBlockedText(value: string, fallback: string, maxLength: number): string {
-  if (containsCredentialEvidence(value) || containsHostIdentityEvidence(value)
-    || /["']?token["']?\s*[:=]\s*["']?[^\s"']{8,}/iu.test(value)) return fallback;
+  if (containsCredentialEvidence(value) || containsHostIdentityEvidence(value)) return fallback;
   const normalized = value.replace(/[\r\n]+/gu, ' ').trim();
   if (normalized.length === 0) return fallback;
   return normalized.length <= maxLength
