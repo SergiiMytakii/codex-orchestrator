@@ -703,7 +703,7 @@ export class RunIssue {
         || pendingEffect.message !== message || pendingEffect.candidateRef !== candidateBinding.candidateRef) {
         return this.persistRetainedCommitIntentTerminal(active, 'review-feedback-candidate-pendingEffect-diverged');
       }
-      let authorizationFailure: RunIssueResult | undefined;
+      let authorizationValidation: Awaited<ReturnType<ReviewFeedbackObserver['revalidate']>> | undefined;
       const settlement = await settleCommitEffect(pendingEffect, {
         observe: async () => {
           const observed = await candidate.createOrObserveCommit({
@@ -717,9 +717,8 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
-          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
-          return !authorizationFailure;
+          authorizationValidation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
+          return authorizationValidation.status === 'valid';
         },
         invoke: async () => {
           const invoked = await candidate.createOrObserveCommit({
@@ -731,8 +730,12 @@ export class RunIssue {
         },
       });
       if (settlement.status === 'unauthorized') {
-        return authorizationFailure
-          ?? this.persistRetainedCommitIntentTerminal(active, 'review-feedback-publication-authority-revoked');
+        active = await this.confirmEffect(active);
+        if (authorizationValidation) {
+          const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-precommit-revalidation-failed');
+          if (failure) return failure;
+        }
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') {
         return this.invokedFailure(active, 'candidate-ref-update-unknown', 'Candidate update outcome is unknown; retain and observe the exact commit effect.');
@@ -763,7 +766,7 @@ export class RunIssue {
         || pendingEffect.parentSha !== oldHead || pendingEffect.message !== message) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-pendingEffect-diverged');
       }
-      let authorizationFailure: RunIssueResult | undefined;
+      let authorizationValidation: Awaited<ReturnType<ReviewFeedbackObserver['revalidate']>> | undefined;
       const settlement = await settleCommitEffect(pendingEffect, {
         observe: async () => {
           const observed = await this.dependencies.git.inspectHead(active.record.worktreePath);
@@ -776,17 +779,20 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
-          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-precommit-revalidation-failed');
-          return !authorizationFailure;
+          authorizationValidation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
+          return authorizationValidation.status === 'valid';
         },
         invoke: async () => {
           await this.dependencies.git.commit({ worktreePath: active.record.worktreePath, message: pendingEffect.message });
         },
       });
       if (settlement.status === 'unauthorized') {
-        return authorizationFailure
-          ?? this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
+        active = await this.confirmEffect(active);
+        if (authorizationValidation) {
+          const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-precommit-revalidation-failed');
+          if (failure) return failure;
+        }
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown');
       if (settlement.status === 'diverged') {
@@ -820,7 +826,7 @@ export class RunIssue {
         || pendingEffect.treeSha !== commit.treeSha || pendingEffect.branch !== active.record.branchName || pendingEffect.priorRemoteSha !== oldHead) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-pendingEffect-diverged');
       }
-      let authorizationFailure: RunIssueResult | undefined;
+      let authorizationValidation: Awaited<ReturnType<ReviewFeedbackObserver['revalidate']>> | undefined;
       const settlement = await settlePushEffect(pendingEffect, {
         observe: async () => {
           remote = await this.dependencies.git.getRemoteBranchSha(active.record.worktreePath, active.record.branchName);
@@ -828,9 +834,8 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
-          authorizationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-prepush-revalidation-failed');
-          return !authorizationFailure;
+          authorizationValidation = await coordinator.revalidate({ batch, issueNumber, epoch: 'pre-update', expectedHeadSha: oldHead });
+          return authorizationValidation.status === 'valid';
         },
         invoke: () => this.dependencies.git.push({
           worktreePath: active.record.worktreePath,
@@ -838,8 +843,12 @@ export class RunIssue {
         }),
       });
       if (settlement.status === 'unauthorized') {
-        return authorizationFailure
-          ?? this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
+        active = await this.confirmEffect(active);
+        if (authorizationValidation) {
+          const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-prepush-revalidation-failed');
+          if (failure) return failure;
+        }
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-push-delivery-unknown');
       if (settlement.status === 'diverged') {
@@ -848,6 +857,7 @@ export class RunIssue {
       if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-observation-diverged');
       }
+      active = await this.confirmEffect(active);
     }
 
     const postPush = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
@@ -880,9 +890,7 @@ export class RunIssue {
         || pendingEffect.marker !== marker || pendingEffect.bodySha256 !== sha256(body) || pendingEffect.epochHeadSha !== head) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-pendingEffect-diverged');
       }
-      const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
-      const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-summary-revalidation-failed');
-      if (validationFailure) return validationFailure;
+      let authorizationValidation: Awaited<ReturnType<ReviewFeedbackObserver['revalidate']>> | undefined;
       let matches: Array<{ id: string; body: string }> = [];
       const settlement = await settleCommentEffect(pendingEffect, {
         observe: async () => {
@@ -891,13 +899,22 @@ export class RunIssue {
           if (matches.length === 0) return 'absent';
           return matches.length === 1 && matches[0]!.body === body ? 'confirmed' : 'diverged';
         },
-        authorize: () => this.authorized(active, config),
+        authorize: async () => {
+          if (!await this.authorized(active, config)) return false;
+          authorizationValidation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
+          return authorizationValidation.status === 'valid';
+        },
         invoke: async () => {
           await this.dependencies.pullRequests.postConversationComment!(batch.pullRequest.number, body);
         },
       });
       if (settlement.status === 'unauthorized') {
-        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
+        active = await this.confirmEffect(active);
+        if (authorizationValidation) {
+          const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-summary-revalidation-failed');
+          if (failure) return failure;
+        }
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown');
       if (settlement.status === 'diverged') {
@@ -934,7 +951,7 @@ export class RunIssue {
         || !sameStrings(pendingEffect.expected, finalLabels)) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-pendingEffect-diverged');
       }
-      let authorizationFailure: 'retryable' | 'blocked' | undefined;
+      let authorizationValidation: Awaited<ReturnType<ReviewFeedbackObserver['revalidate']>> | undefined;
       const settlement = await settleLabelsEffect(pendingEffect, {
         observe: async () => {
           const issue = await this.readIssue(issueNumber);
@@ -942,20 +959,18 @@ export class RunIssue {
         },
         authorize: async () => {
           if (!await this.authorized(active, config)) return false;
-          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
-          authorizationFailure = validation.status === 'valid' ? undefined : validation.status;
-          return !authorizationFailure;
+          authorizationValidation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
+          return authorizationValidation.status === 'valid';
         },
         invoke: () => this.dependencies.issues.setLabels(issueNumber, finalLabels),
       });
       if (settlement.status === 'unauthorized') {
         active = await this.confirmEffect(active);
-        if (authorizationFailure === 'retryable') {
-          return this.invokedFailure(active, 'review-feedback-final-labels-revalidation-failed-retryable');
+        if (authorizationValidation) {
+          const failure = await this.mapFeedbackRevalidation(active, authorizationValidation, 'review-feedback-final-labels-revalidation-failed');
+          if (failure) return failure;
         }
-        return this.blockReviewFeedback(active, 'safety', authorizationFailure === 'blocked'
-          ? 'review-feedback-final-labels-revalidation-failed'
-          : 'review-feedback-publication-authority-revoked');
+        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown');
       if (settlement.status === 'diverged') {
@@ -1002,6 +1017,9 @@ export class RunIssue {
     });
     if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
       return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-pr-identity-missing') };
+    }
+    if (pullRequest.url !== terminal.pullRequestUrl) {
+      return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-prior-handoff-identity-mismatch') };
     }
     const expectedHeadSha = feedback.previousPublishedHeadSha === null
       ? pullRequest.headSha

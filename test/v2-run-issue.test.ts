@@ -981,6 +981,41 @@ test('answer-only fails closed when the discovered open PR no longer matches the
   assert.equal(fixture.comments.some((comment) => comment.body.includes(':issue-feedback:')), false);
 });
 
+test('review-ready rejects a replacement open PR before feedback discovery or freezing', async () => {
+  const fixture = await runFixture();
+  const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(initial.status, 'review-ready');
+  if (initial.status !== 'review-ready') return;
+  const before = (await fixture.store.read()).runs[0]!;
+  let observations = 0;
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => {
+      observations += 1;
+      throw new Error('replacement PR must block before feedback observation');
+    },
+    revalidate: async () => ({ status: 'valid', observedHeadSha: before.reviewFeedback!.previousPublishedHeadSha! }),
+  } as unknown as ReviewFeedbackObserver;
+  fixture.dependencies.pullRequests.findOpen = async () => ({
+    url: 'https://example.invalid/pull/99',
+    body: `<!-- codex-orchestrator:run:${before.runId}:pr -->`,
+    number: 99,
+    nodeId: 'PR_REPLACEMENT',
+    headSha: before.reviewFeedback!.previousPublishedHeadSha!,
+    headRefName: before.branchName,
+    baseRefName: 'main',
+  });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'safety', resumable: false,
+  });
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(observations, 0);
+  assert.deepEqual(after.reviewFeedback?.consumedSourceIds, before.reviewFeedback?.consumedSourceIds);
+  assert.equal(after.reviewFeedback?.activeBatch, null);
+});
+
 test('review-ready observation safety block retains the feedback baseline and history owner', async () => {
   const fixture = await runFixture();
   const recovered = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1247,6 +1282,67 @@ test('trusted issue-comment repair runs checks, proof, review, and updates the s
   assert.equal(blockedRecord.reviewFeedback?.history[0]?.kind, 'published');
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked', 'extra', 'manual:keep']);
+});
+
+test('review update revalidation settles the exact publication effect before mapping authority failure', async (t) => {
+  const stages = [
+    { name: 'commit authorization', effect: 'review-update-commit', epoch: 'pre-update' },
+    { name: 'push authorization', effect: 'review-update-push', epoch: 'pre-update' },
+    { name: 'post-push', effect: undefined, epoch: 'post-push' },
+    { name: 'summary authorization', effect: 'review-summary', epoch: 'post-push' },
+  ] as const;
+  for (const stage of stages) {
+    for (const authorityStatus of ['blocked', 'retryable'] as const) {
+      await t.test(`${stage.name} ${authorityStatus}`, async () => {
+        const fixture = await runFixture();
+        await prepareActiveIssueFeedback(fixture);
+        const comments: Array<{ id: string; body: string }> = [];
+        fixture.dependencies.pullRequests.listConversationComments = async () => structuredClone(comments);
+        fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => {
+          const comment = { id: String(comments.length + 1), body };
+          comments.push(comment);
+          return comment;
+        };
+        let matched = false;
+        fixture.dependencies.reviewFeedback!.revalidate = async ({ epoch, expectedHeadSha }) => {
+          const effect = (await fixture.store.read()).runs[0]?.pendingEffect?.kind;
+          if (!matched && effect === stage.effect && epoch === stage.epoch) {
+            matched = true;
+            return { status: authorityStatus, reason: `${stage.name} authority ${authorityStatus}` };
+          }
+          return { status: 'valid', observedHeadSha: expectedHeadSha };
+        };
+
+        const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+        assert.equal(matched, true, stage.name);
+        assert.deepEqual(
+          pick(result, authorityStatus === 'blocked' ? ['status', 'kind', 'resumable'] : ['status', 'resumable']),
+          authorityStatus === 'blocked'
+            ? { status: 'blocked', kind: 'safety', resumable: false }
+            : { status: 'transport-failed', resumable: true },
+          JSON.stringify({ stage, authorityStatus, result, state: await fixture.store.read() }),
+        );
+        assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
+      });
+    }
+  }
+});
+
+test('unknown review-summary observation retains the exact durable intent', async () => {
+  const fixture = await runFixture();
+  await prepareActiveIssueFeedback(fixture);
+  fixture.dependencies.pullRequests.postConversationComment = async (_number, body) => ({ id: '1', body });
+  fixture.dependencies.pullRequests.listConversationComments = async () => {
+    const effect = (await fixture.store.read()).runs[0]?.pendingEffect;
+    if (effect?.kind === 'review-summary') throw new Error('summary observation unavailable');
+    return [];
+  };
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'review-summary');
 });
 
 test('deferred check and proof prevent every later publication effect and terminal return', async () => {

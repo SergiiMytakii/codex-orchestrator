@@ -36,11 +36,10 @@ type EffectIdentity = { effectId: string };
 
 export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
-  | { kind: 'claim-comment' | 'handoff-comment'; issueNumber: number; marker: string; bodySha256: string }
+  | { kind: 'claim-comment'; issueNumber: number; marker: string; bodySha256: string }
   | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
-  | { kind: 'final-labels'; issueNumber: number; expected: string[] }
   | {
     kind: 'terminal-comment'; issueNumber: number; marker: string; bodySha256: string;
     outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; attempt: number;
@@ -566,8 +565,7 @@ function validatePendingEffect(value: unknown, field: string): void {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`${field} is invalid`);
   const kind = (value as { kind?: unknown }).kind;
   const identity = ['effectId', 'kind'];
-  if (kind === 'claim-labels' || kind === 'final-labels'
-    ) {
+  if (kind === 'claim-labels') {
     assertExactObject(value, [...identity, 'issueNumber', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     validateStringArray(value.expected, `${field}.expected`);
@@ -585,7 +583,7 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertExactObject(value, [...identity, 'owner', 'repo', 'head', 'base', 'issueNumber', 'marker'], field);
     for (const key of ['owner', 'repo', 'head', 'base', 'marker'] as const) assertNonEmptyString(value[key], `${field}.${key}`);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-  } else if (kind === 'claim-comment' || kind === 'handoff-comment') {
+  } else if (kind === 'claim-comment') {
     assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);

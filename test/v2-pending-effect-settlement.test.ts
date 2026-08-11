@@ -23,14 +23,8 @@ test('every finite handler observes a confirmed postcondition without repeating 
       kind: 'draft-pr', owner: 'owner', repo: 'repo', head: 'codex/issue-1', base: 'main', issueNumber: 1, marker: 'marker',
     }), adapter('confirmed')),
     () => settleCommentEffect(createPendingEffect({
-      kind: 'handoff-comment', issueNumber: 1, marker: 'marker', bodySha256: sha('d'),
-    }), adapter('confirmed')),
-    () => settleCommentEffect(createPendingEffect({
       kind: 'terminal-comment', issueNumber: 1, marker: 'marker', bodySha256: sha('d'),
       outcome: 'review-ready', attempt: 1,
-    }), adapter('confirmed')),
-    () => settleLabelsEffect(createPendingEffect({
-      kind: 'final-labels', issueNumber: 1, expected: ['agent:review'],
     }), adapter('confirmed')),
     () => settleLabelsEffect(createPendingEffect({
       kind: 'terminal-labels', issueNumber: 1, add: ['agent:review'], remove: ['agent:running'],
@@ -98,7 +92,7 @@ test('diverged and unobserved postconditions fail closed with the intent unchang
 test('typed handlers reject the wrong finite effect kind before observation or invocation', async () => {
   let calls = 0;
   assert.throws(() => settlePushEffect(createPendingEffect({
-    kind: 'final-labels', issueNumber: 1, expected: ['agent:review'],
+    kind: 'claim-labels', issueNumber: 1, expected: ['agent:running'],
   }) as never, {
     observe: async () => { calls += 1; return 'confirmed'; },
     invoke: async () => { calls += 1; },

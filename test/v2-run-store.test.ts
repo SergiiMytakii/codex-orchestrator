@@ -147,6 +147,8 @@ test('run state rejects retired legacy blocked terminal effects', async () => {
   for (const pendingEffect of [
     { kind: 'blocked-comment', issueNumber: 42, marker: '<!-- blocked -->', bodySha256: 'a'.repeat(64), blockKind: 'external', resumable: true, evidenceCode: 'proof-external-block' },
     { kind: 'blocked-labels', issueNumber: 42, expected: ['agent:auto', 'agent:blocked'], blockKind: 'external', resumable: true, evidenceCode: 'proof-external-block' },
+    { kind: 'handoff-comment', issueNumber: 42, marker: '<!-- handoff -->', bodySha256: 'b'.repeat(64) },
+    { kind: 'final-labels', issueNumber: 42, expected: ['agent:review'] },
   ]) {
     const effect = { ...pendingEffect, effectId: sha256(canonicalJson(pendingEffect)) };
     const active = { ...record(), pendingEffect: effect } as unknown as RunRecord;
