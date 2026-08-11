@@ -325,10 +325,11 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
     'state:publishing:draft-pr',
     'issue-read:authorize',
     'effect:pr',
-    'state:publishing:handoff-comment',
+    'state:review-ready:none',
+    'state:review-ready:terminal-comment',
     'issue-read:authorize',
     'effect:handoff-comment',
-    'state:publishing:final-labels',
+    'state:review-ready:terminal-labels',
     'issue-read:authorize',
     'effect:terminal-labels',
     'state:review-ready:none',
@@ -343,6 +344,160 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
   assert.ok(fixture.events.indexOf('state:publication-watermark') < fixture.events.indexOf('git:commit'));
+});
+
+test('review-ready persists before independent bounded terminal notifications', async () => {
+  const fixture = await runFixture({ permanentlyRejectEffect: 'comment', initialLabels: ['agent:auto', 'manual:keep'] });
+
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'review-ready', JSON.stringify({ first, evidence: fixture.evidence, events: fixture.events }));
+  const persisted = (await fixture.store.read()).runs[0]!;
+  assert.equal(persisted.terminalOutcome?.status, 'review-ready');
+  assert.equal(persisted.terminalNotifications?.comment.status, 'pending');
+  assert.equal(persisted.terminalNotifications?.labels.status, 'delivered', JSON.stringify({
+    notifications: persisted.terminalNotifications, events: fixture.events,
+    issue: await fixture.dependencies.issues.read(42),
+  }));
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:review', 'manual:keep']);
+  assert.ok(
+    fixture.events.indexOf('state:review-ready:none') < fixture.events.indexOf('effect:handoff-comment'),
+    fixture.events.join('\n'),
+  );
+
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  const exhausted = (await fixture.store.read()).runs[0]!;
+  assert.equal(exhausted.terminalOutcome?.status, 'review-ready');
+  assert.deepEqual(exhausted.terminalNotifications?.comment, {
+    status: 'exhausted', attempts: 3, diagnostic: 'terminal-comment-delivery-unknown',
+  });
+  const attempts = fixture.events.filter((event) => event === 'effect:handoff-comment').length;
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(fixture.events.filter((event) => event === 'effect:handoff-comment').length, attempts);
+});
+
+test('terminal comment succeeds when managed-label reconciliation permanently fails', async () => {
+  const fixture = await runFixture({ permanentlyRejectEffect: 'labels' });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(result.status, 'review-ready');
+  const persisted = (await fixture.store.read()).runs[0]!;
+  assert.equal(persisted.terminalOutcome?.status, 'review-ready');
+  assert.equal(persisted.terminalNotifications?.comment.status, 'delivered');
+  assert.equal(persisted.terminalNotifications?.labels.status, 'pending');
+  const comment = (await fixture.dependencies.issues.read(42))?.comments.find((entry) => entry.body.includes(':handoff -->'));
+  assert.match(comment?.body ?? '', /## Summary/u);
+  assert.match(comment?.body ?? '', /## Pull request/u);
+  assert.match(comment?.body ?? '', /## Passed checks/u);
+  assert.match(comment?.body ?? '', /## Publishable proof/u);
+  assert.match(comment?.body ?? '', /## Not verified/u);
+  assert.match(comment?.body ?? '', /## Known risks/u);
+  assert.match(comment?.body ?? '', /## Review focus/u);
+  assert.match(comment?.body ?? '', /comment on this issue/u);
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual((await fixture.store.read()).runs[0]?.terminalNotifications?.labels, {
+    status: 'exhausted', attempts: 3, diagnostic: 'terminal-labels-delivery-unknown',
+  });
+  const attempts = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, attempts);
+});
+
+test('blocked, internal-error, and cancelled outcomes finalize before best-effort notifications', async () => {
+  const cases: Array<{
+    name: string;
+    options: FixtureOptions;
+    status: 'blocked' | 'internal-error' | 'cancelled';
+    labels: string[];
+  }> = [
+    {
+      name: 'blocked',
+      options: { proof: async () => ({ status: 'external-block', blocker: {
+        kind: 'service', summary: 'proof service is down', attempted: ['bounded probe'], resumable: false,
+      }, receipt: receipt() }) },
+      status: 'blocked', labels: ['agent:auto', 'agent:blocked', 'manual:keep'],
+    },
+    { name: 'internal-error', options: { agentWrites: false }, status: 'internal-error', labels: ['agent:auto', 'manual:keep'] },
+    {
+      name: 'cancelled', options: { implementationResult: { kind: 'cancelled' } },
+      status: 'cancelled', labels: ['manual:keep'],
+    },
+  ];
+  for (const entry of cases) {
+    const fixture = await runFixture({
+      ...entry.options,
+      initialLabels: ['agent:auto', 'manual:keep'],
+      permanentlyRejectEffect: 'comment',
+    });
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, entry.status, entry.name);
+    const persisted = (await fixture.store.read()).runs[0]!;
+    assert.equal(persisted.terminalOutcome?.status, entry.status, entry.name);
+    assert.equal(persisted.terminalNotifications?.comment.status, 'pending', entry.name);
+    assert.equal(persisted.terminalNotifications?.labels.status, 'delivered', entry.name);
+    assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, entry.labels, entry.name);
+    const terminalCommentEvent = entry.status === 'blocked'
+      ? 'effect:blocked-comment' : `effect:${entry.status}-comment`;
+    assert.ok(
+      fixture.events.findIndex((event) => event === `state:${entry.status}:none`)
+        < fixture.events.findIndex((event) => event === terminalCommentEvent),
+      entry.name,
+    );
+  }
+});
+
+test('terminal cutoff and marker remain stable across failed delivery and restart replay', async () => {
+  const fixture = await runFixture({
+    rejectEffect: 'comment',
+    initialComments: [{
+      id: '90071992547409931234', body: 'before terminal', authorAssociation: 'OWNER',
+      createdAt: '2026-07-16T11:00:00.000Z', updatedAt: '2026-07-16T11:00:00.000Z',
+    }, {
+      id: '12', body: 'older id returned later', authorAssociation: 'OWNER',
+      createdAt: '2026-07-16T11:01:00.000Z', updatedAt: '2026-07-16T11:01:00.000Z',
+    }],
+  });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const first = (await fixture.store.read()).runs[0]!;
+  const cutoff = structuredClone(first.terminalNotifications?.commentCutoff);
+  assert.equal(cutoff?.commentId, '90071992547409931234');
+
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  const replay = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(replay.terminalNotifications?.commentCutoff, cutoff);
+  assert.equal(replay.pendingEffect, undefined);
+  const handoffs = (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':handoff -->')) ?? [];
+  assert.equal(handoffs.length, 1);
+  assert.match(handoffs[0]!.body.split('\n')[0]!, /:cycle:1:handoff -->$/u);
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(
+    (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':handoff -->')).length,
+    1,
+  );
+});
+
+test('terminal cutoff includes comments added after claim and survives cutoff observation failure', async () => {
+  const comment = {
+    id: '90071992547409939999', body: 'follow-up before handoff', authorAssociation: 'OWNER',
+    createdAt: '2026-07-16T12:30:00.000Z', updatedAt: '2026-07-16T12:30:00.000Z',
+  };
+  const fixture = await runFixture({ commentBeforeTerminal: comment, rejectTerminalCutoffRead: true });
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(result.status, 'review-ready');
+  const persisted = (await fixture.store.read()).runs[0]!;
+  assert.equal(persisted.terminalOutcome?.status, 'review-ready');
+  assert.equal(persisted.terminalNotifications?.commentCutoff.commentId, null);
+
+  const replayFixture = await runFixture({ commentBeforeTerminal: comment, rejectEffect: 'comment' });
+  assert.equal((await replayFixture.runner.runIssue({ targetRoot: replayFixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const cutoff = structuredClone((await replayFixture.store.read()).runs[0]!.terminalNotifications?.commentCutoff);
+  assert.equal(cutoff?.commentId, comment.id);
+  await replayFixture.runner.runIssue({ targetRoot: replayFixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual((await replayFixture.store.read()).runs[0]!.terminalNotifications?.commentCutoff, cutoff);
 });
 
 test('direct run executes issue-scoped verification checks instead of repository-wide configured checks', async () => {
@@ -360,7 +515,9 @@ test('direct run executes issue-scoped verification checks instead of repository
 test('invalid issue Verification is an exact semantic blocker and replays without duplicate work', async () => {
   const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned', rejectStoreEvent: 'state:blocked:none' });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(first, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'decision-delta', resumable: false,
+  });
   assert.equal(fixture.events.some((event) => event.startsWith('check:')), false);
   assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
@@ -376,7 +533,9 @@ test('invalid issue Verification is an exact semantic blocker and replays withou
 test('rejected initial Review preserves exact decision evidence across restart', async () => {
   const fixture = await runFixture({ reviewRejectedOnce: true, rejectStoreEvent: 'state:blocked:none' });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(first, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'decision-delta', resumable: false,
+  });
   assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
   const reviews = fixture.events.filter((event) => event === 'review:code-review').length;
   const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1448,7 +1607,7 @@ test('ordinary external and safety terminals publish the blocked issue status', 
     assert.deepEqual(pick(result, ['status', 'kind']), { status: 'blocked', kind: entry.kind }, entry.name);
     assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked'], entry.name);
     const comment = (await fixture.dependencies.issues.read(42))?.comments.find((item) => item.body.includes(':blocked -->'));
-    assert.match(comment?.body ?? '', /Reason: .+\n\nAttempted:\n- .+/u, entry.name);
+    assert.match(comment?.body ?? '', /## Reason\nReason: .+\n\nAttempted:\n- .+/u, entry.name);
   }
 });
 
@@ -1492,17 +1651,18 @@ test('authority blocker outcome evidence replays exact detail after the terminal
       },
     });
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    assert.deepEqual(pick(first, ['status', 'kind', 'resumable']), {
+      status: 'blocked', kind, resumable: false,
+    });
     assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
     const workCalls = fixture.events.filter((event) => event === 'agent').length;
-    const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
 
     const replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable', 'blocker']), {
       status: 'blocked', kind, resumable: false, blocker,
     });
     assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
-    assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
+    assert.equal((await fixture.store.read()).runs[0]?.terminalNotifications?.labels.status, 'delivered');
   }
 });
 
@@ -1539,11 +1699,12 @@ test('blocked label delivery resumes from its durable pendingEffect without reru
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual(
-    pick(first, ['status', 'resumable']),
-    { status: 'transport-failed', resumable: true },
+    pick(first, ['status', 'kind', 'resumable']),
+    { status: 'blocked', kind: 'external', resumable: false },
     JSON.stringify({ first, evidence: fixture.evidence, events: fixture.events }),
   );
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-labels');
+  assert.equal((await fixture.store.read()).runs[0]?.terminalNotifications?.labels.status, 'pending');
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1572,7 +1733,8 @@ test('blocked terminal publishes its reason before labels and does not duplicate
   assert.match(blockedComments[0]!.body, /Kind: external/u);
   assert.match(blockedComments[0]!.body, /Resumable: no/u);
   assert.ok(
-    fixture.events.indexOf('effect:blocked-comment') < fixture.events.indexOf('effect:terminal-labels'),
+    fixture.events.indexOf('state:blocked:none') < fixture.events.indexOf('effect:blocked-comment')
+      && fixture.events.indexOf('effect:blocked-comment') < fixture.events.indexOf('effect:terminal-labels'),
     fixture.events.join('\n'),
   );
 
@@ -1616,7 +1778,7 @@ test('blocked comment settlement never posts after the issue closes', async () =
       kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
     }, receipt: receipt() }),
   });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
   const readOpen = fixture.dependencies.issues.read;
   fixture.dependencies.issues.read = async (issueNumber) => {
     const observed = await readOpen(issueNumber);
@@ -1625,10 +1787,13 @@ test('blocked comment settlement never posts after the issue closes', async () =
   const postAttempts = fixture.events.filter((event) => event === 'effect:blocked-comment').length;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
   }
   assert.equal(fixture.events.filter((event) => event === 'effect:blocked-comment').length, postAttempts);
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
+  assert.deepEqual((await fixture.store.read()).runs[0]?.terminalNotifications?.comment, {
+    status: 'exhausted', attempts: 3, diagnostic: 'terminal-comment-observation-diverged',
+  });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
 });
 
 test('blocked comment delivery resumes from its durable intent without rerunning work', async () => {
@@ -1639,8 +1804,8 @@ test('blocked comment delivery resumes from its durable intent without rerunning
     }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
+  assert.deepEqual(pick(first, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal((await fixture.store.read()).runs[0]?.terminalNotifications?.comment.status, 'pending');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -1654,14 +1819,14 @@ test('blocked comment delivery resumes from its durable intent without rerunning
 
 test('blocked comment survives a crash after remote publication without duplication or rerunning work', async () => {
   const fixture = await runFixture({
-    rejectStoreEvent: 'state:proving:blocked-labels',
+    rejectStoreTransition: { from: 'terminal-comment', to: 'none' },
     proof: async () => ({ status: 'external-block', blocker: {
       kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
     }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-comment');
+  assert.deepEqual(pick(first, ['status', 'kind']), { status: 'blocked', kind: 'external' });
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'terminal-comment');
   assert.equal(
     (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
     1,
@@ -1679,13 +1844,13 @@ test('blocked comment survives a crash after remote publication without duplicat
 
 test('blocked label delivery survives a crash after the remote effect without duplicating work or labels', async () => {
   const fixture = await runFixture({
-    rejectStoreEvent: 'state:blocked:none',
+    rejectStoreTransition: { from: 'terminal-labels', to: 'none' },
     proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(first, ['status', 'kind']), { status: 'blocked', kind: 'external' });
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'terminal-labels');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
   const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
 
@@ -1737,14 +1902,13 @@ test('blocked transition preserves concurrent labels and never restores revoked 
 test('blocked transition resumes when the post-effect projection write fails', async () => {
   const fixture = await runFixture({
     blockedTransitionLabels: ['agent:running'],
-    rejectStoreEvent: 'state:proving:blocked-labels',
-    rejectStoreOccurrence: 2,
+    rejectStoreTransition: { from: 'terminal-labels', to: 'none' },
     proof: async () => ({ status: 'external-block', blocker: { kind: 'service', summary: 'down', attempted: ['retry'], resumable: false }, receipt: receipt() }),
   });
   const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(first, ['status', 'kind']), { status: 'blocked', kind: 'external' });
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked']);
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'blocked-labels');
+  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'terminal-labels');
   const workCalls = fixture.events.filter((event) => event === 'agent').length;
   const labelEffects = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
 
@@ -1882,14 +2046,20 @@ test('every invoked effect rejection stays resumable with its exact durable pend
     { effect: 'claim-labels', pendingEffect: 'claim-labels' },
     { effect: 'claim-comment', pendingEffect: 'claim-comment' },
     { effect: 'pr', pendingEffect: 'draft-pr' },
-    { effect: 'comment', pendingEffect: 'handoff-comment' },
-    { effect: 'labels', pendingEffect: 'final-labels' },
   ];
   for (const entry of remoteCases) {
     const fixture = await runFixture({ rejectEffect: entry.effect });
     const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.effect);
     assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, entry.pendingEffect, entry.effect);
+  }
+  for (const effect of ['comment', 'labels'] as const) {
+    const fixture = await runFixture({ rejectEffect: effect });
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'review-ready', effect);
+    const notifications = (await fixture.store.read()).runs[0]?.terminalNotifications;
+    assert.equal(notifications?.[effect].status, 'pending', effect);
+    assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined, effect);
   }
   const local = await runFixture({ rejectEffect: 'commit' });
   assert.deepEqual(
@@ -2069,13 +2239,18 @@ test('restart after effect-before-confirmation reconciles publication without du
     { from: 'candidate-pin-release', to: 'initial-push' },
     { from: 'initial-push', to: 'none' },
     { from: 'draft-pr', to: 'none' },
-    { from: 'handoff-comment', to: 'none' },
-    { from: 'final-labels', to: 'none' },
+    { from: 'terminal-comment', to: 'none' },
+    { from: 'terminal-labels', to: 'none' },
   ];
   for (const transition of transitions) {
     const fixture = await runFixture({ rejectStoreTransition: transition });
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, JSON.stringify({ transition, first, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
+    const terminalNotification = transition.from === 'terminal-comment' || transition.from === 'terminal-labels';
+    assert.deepEqual(
+      pick(first, terminalNotification ? ['status'] : ['status', 'resumable']),
+      terminalNotification ? { status: 'review-ready' } : { status: 'transport-failed', resumable: true },
+      JSON.stringify({ transition, first, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }),
+    );
     const countsBefore = effectCounts(fixture.events);
 
     const second = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
@@ -2347,6 +2522,7 @@ interface FixtureOptions {
   storeReadReject?: boolean;
   storeReadError?: Error;
   rejectEffect?: 'claim-labels' | 'claim-comment' | 'commit' | 'push' | 'pr' | 'comment' | 'labels';
+  permanentlyRejectEffect?: 'comment' | 'labels';
   commitUnknownAfterEffect?: boolean;
   candidateNormalizeFailOnce?: boolean;
   candidateReleaseFailOnce?: boolean;
@@ -2360,6 +2536,16 @@ interface FixtureOptions {
     author?: string;
     authorId?: string;
   }>;
+  commentBeforeTerminal?: {
+    id?: string;
+    body: string;
+    authorAssociation: string;
+    createdAt?: string;
+    updatedAt?: string;
+    author?: string;
+    authorId?: string;
+  };
+  rejectTerminalCutoffRead?: boolean;
   workflowVerificationReject?: boolean;
   reviewMalformedOnce?: boolean;
   reviewMalformedCount?: number;
@@ -2462,6 +2648,7 @@ async function runFixture(options: FixtureOptions = {}) {
     authorId?: string;
   }> = structuredClone(options.initialComments ?? []);
   let pullRequest: { url: string; body: string } | undefined;
+  let rejectTerminalCutoffRead = false;
   let reads = 0;
   let authReads = 0;
   let reviewCalls = 0;
@@ -2499,6 +2686,10 @@ async function runFixture(options: FixtureOptions = {}) {
     issues: {
       read: async () => {
         reads += 1;
+        if (rejectTerminalCutoffRead) {
+          rejectTerminalCutoffRead = false;
+          throw new Error('terminal cutoff read rejected');
+        }
         if (options.issueReadRejectAt === reads) throw new Error('issue read rejected');
         if (reads === 1) events.push('issue-read:initial');
         else {
@@ -2513,7 +2704,7 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push(claim ? 'effect:claim-labels' : 'effect:terminal-labels');
         if (claim && shouldReject('claim-labels')) throw new Error('claim labels rejected');
         if (!claim && shouldReject('labels')) throw new Error('labels rejected');
-        labels = [...next];
+        labels = [...new Set([...labels.filter((label) => !label.startsWith('agent:')), ...next])];
       },
       transitionToBlocked: async (_issueNumber, policy) => {
         events.push('effect:terminal-labels');
@@ -2526,12 +2717,30 @@ async function runFixture(options: FixtureOptions = {}) {
         labels = labels.filter((label) => label !== policy.running && label !== policy.review);
         if (!labels.includes(policy.blocked)) labels.push(policy.blocked);
       },
+      reconcileTerminalLabels: async (_issueNumber, policy) => {
+        events.push('effect:terminal-labels');
+        if (options.permanentlyRejectEffect === 'labels' || shouldReject('labels')) throw new Error('labels rejected');
+        if (!blockedTransitionMutated && options.blockedTransitionLabels) {
+          blockedTransitionMutated = true;
+          labels = [...options.blockedTransitionLabels];
+        }
+        const hasManagedStatus = labels.some((label) => label.startsWith('agent:'));
+        labels = labels.filter((label) => !policy.remove.includes(label));
+        if (hasManagedStatus) {
+          for (const label of policy.add) if (!labels.includes(label)) labels.push(label);
+        }
+      },
       postComment: async (_issueNumber, body) => {
         const claim = body.split('\n')[0]?.endsWith(':claim -->') ?? false;
         const blocked = body.split('\n')[0]?.endsWith(':blocked -->') ?? false;
-        events.push(claim ? 'effect:claim-comment' : blocked ? 'effect:blocked-comment' : 'effect:handoff-comment');
+        const internalError = body.split('\n')[0]?.endsWith(':internal-error -->') ?? false;
+        const cancelled = body.split('\n')[0]?.endsWith(':cancelled -->') ?? false;
+        events.push(claim ? 'effect:claim-comment'
+          : blocked ? 'effect:blocked-comment'
+            : internalError ? 'effect:internal-error-comment'
+              : cancelled ? 'effect:cancelled-comment' : 'effect:handoff-comment');
         if (claim && shouldReject('claim-comment')) throw new Error('claim comment rejected');
-        if (!claim && shouldReject('comment')) throw new Error('comment rejected');
+        if (!claim && (options.permanentlyRejectEffect === 'comment' || shouldReject('comment'))) throw new Error('comment rejected');
         comments.push({ id: `comment-${nextCommentId++}`, body, authorAssociation: 'OWNER' });
       },
       getRepositoryPermission: async (_login, expectedUserId) => {
@@ -2546,6 +2755,8 @@ async function runFixture(options: FixtureOptions = {}) {
         events.push('effect:pr');
         if (shouldReject('pr')) throw new Error('pr rejected');
         pullRequest = { url: 'https://example.invalid/pull/1', body };
+        if (options.commentBeforeTerminal) comments.push(structuredClone(options.commentBeforeTerminal));
+        rejectTerminalCutoffRead = options.rejectTerminalCutoffRead ?? false;
         return { url: pullRequest.url };
       },
     },

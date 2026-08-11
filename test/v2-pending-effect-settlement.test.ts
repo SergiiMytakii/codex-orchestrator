@@ -25,8 +25,16 @@ test('every finite handler observes a confirmed postcondition without repeating 
     () => settleCommentEffect(createPendingEffect({
       kind: 'handoff-comment', issueNumber: 1, marker: 'marker', bodySha256: sha('d'),
     }), adapter('confirmed')),
+    () => settleCommentEffect(createPendingEffect({
+      kind: 'terminal-comment', issueNumber: 1, marker: 'marker', bodySha256: sha('d'),
+      outcome: 'review-ready', attempt: 1,
+    }), adapter('confirmed')),
     () => settleLabelsEffect(createPendingEffect({
       kind: 'final-labels', issueNumber: 1, expected: ['agent:review'],
+    }), adapter('confirmed')),
+    () => settleLabelsEffect(createPendingEffect({
+      kind: 'terminal-labels', issueNumber: 1, add: ['agent:review'], remove: ['agent:running'],
+      outcome: 'review-ready', attempt: 1,
     }), adapter('confirmed')),
     () => settleCleanupEffect(createPendingEffect({
       kind: 'candidate-pin-release', bindingId: 'f'.repeat(64), expectedPinnedCommitSha: sha('e'),

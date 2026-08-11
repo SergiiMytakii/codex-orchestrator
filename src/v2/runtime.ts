@@ -1429,9 +1429,11 @@ export function createV2Runtime(input: {
       },
       setLabels: async (issueNumber, labels) => {
         const current = await input.issues.getLabels(issueNumber);
+        const policy = requireConfig(currentConfig).github.labels;
+        const managed = new Set([policy.auto.name, policy.running.name, policy.blocked.name, policy.review.name]);
         await input.issues.updateIssue(issueNumber, {
           addLabels: labels.filter((label) => !current.includes(label)),
-          removeLabels: current.filter((label) => !labels.includes(label)),
+          removeLabels: current.filter((label) => managed.has(label) && !labels.includes(label)),
         });
       },
       getRepositoryPermission: (login, expectedUserId) => input.issues.getRepositoryPermission(login, expectedUserId),
@@ -1444,6 +1446,18 @@ export function createV2Runtime(input: {
         await input.issues.updateIssue(issueNumber, {
           addLabels: current.includes(labels.blocked) ? [] : [labels.blocked],
           removeLabels: [labels.running, labels.review].filter((label) => current.includes(label)),
+        });
+      },
+      reconcileTerminalLabels: async (issueNumber, labels) => {
+        const current = await input.issues.getLabels(issueNumber);
+        const policy = requireConfig(currentConfig).github.labels;
+        const hasManagedStatus = current.some((label) => (
+          label === policy.auto.name || label === policy.running.name
+          || label === policy.blocked.name || label === policy.review.name
+        ));
+        await input.issues.updateIssue(issueNumber, {
+          addLabels: !hasManagedStatus ? [] : labels.add.filter((label) => !current.includes(label)),
+          removeLabels: labels.remove.filter((label) => current.includes(label)),
         });
       },
       postComment: async (issueNumber, body) => { await input.issues.postComment(issueNumber, body); },

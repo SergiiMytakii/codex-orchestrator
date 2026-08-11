@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { canonicalJson, sha256 } from '../src/v2/containment.js';
+import { createIssueDeliveryAuthority } from '../src/v2/delivery-authority.js';
 import {
   FileRunRecordWriter,
   InMemoryRunRecordWriter,
@@ -166,6 +167,41 @@ test('run state round-trips the durable blocked-label pending effect exactly', a
   await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /blockKind/u);
 });
 
+test('run state round-trips bounded terminal notification diagnostics and cutoff', async () => {
+  const root = await temporaryRoot();
+  const active: RunRecord = {
+    ...reviewReadyRecord(),
+    terminalNotifications: {
+      version: 1,
+      commentCutoff: { commentId: '90071992547409931234', observedAt: timestamp() },
+      report: {
+        version: 1, outcome: 'review-ready', summary: 'Implemented behavior.',
+        pullRequestUrl: 'https://github.com/owner/repo/pull/17',
+        passedChecks: ['typecheck'], publishableProof: ['proof-1: screenshot'], unverified: [],
+        risks: [], reviewFocus: ['correctness'], nextAction: 'Review the draft PR.',
+      },
+      comment: { status: 'pending', attempts: 2, diagnostic: 'terminal-comment-delivery-unknown' },
+      labels: { status: 'delivered', attempts: 1 },
+    },
+    pendingEffect: createPendingEffect({
+      kind: 'terminal-comment', issueNumber: 42, marker: '<!-- marker -->', bodySha256: '9'.repeat(64),
+      outcome: 'review-ready', attempt: 3,
+    }),
+  };
+  const path = join(root, 'run-state.json');
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  await writer.compareAndSwap(0, body([active]));
+  assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0], active);
+
+  const invalid = structuredClone(active);
+  invalid.terminalNotifications!.comment.attempts = 4;
+  await assert.rejects(
+    new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions())
+      .compareAndSwap(0, body([invalid])),
+    /attempts/u,
+  );
+});
+
 
 test('pre-rename faults preserve prior generation and post-rename faults reconcile exact committed bytes', async () => {
   for (const point of ['before-file-fsync', 'before-rename'] as const) {
@@ -251,6 +287,13 @@ function reviewReadyRecord(): RunRecord {
   return {
     ...record(),
     lifecycle: 'review-ready',
+    deliveryAuthority: createIssueDeliveryAuthority({
+      issueNumber: 42,
+      issueUrl: 'https://example.invalid/issues/42',
+      title: 'Implement behavior',
+      body: 'Acceptance criteria',
+      authorizationLabel: 'agent:auto',
+    }),
     proofReceipt: {
       proofId: 'proof-1', bindingSha256: '8'.repeat(64), summary: 'Passed.',
       publishableEvidence: [], localEvidenceId: 'evidence-1',

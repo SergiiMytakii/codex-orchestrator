@@ -43,6 +43,8 @@ import type {
   RunStateInspection,
   RunStateFile,
   RunTerminalOutcome,
+  TerminalNotificationStateV1,
+  TerminalReportSnapshotV1,
 } from './run-store.js';
 import { createPendingEffect } from './run-store.js';
 import type { ReviewFeedbackObserver } from './review-feedback-coordinator.js';
@@ -189,6 +191,9 @@ export interface RunIssueDependencies {
       running: string;
       blocked: string;
       review: string;
+    }): Promise<void>;
+    reconcileTerminalLabels?(issueNumber: number, labels: {
+      outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; add: string[]; remove: string[];
     }): Promise<void>;
     postComment(issueNumber: number, body: string): Promise<void>;
     getRepositoryPermission?(login: string, expectedUserId: string): Promise<{ permission: 'none' | 'read' | 'write' | 'admin'; checkedAt: string; userId: string }>;
@@ -369,7 +374,7 @@ export class RunIssue {
     if (!observation || observation.state !== 'OPEN' || !this.hasTrustedClaim(observation, active.record)) {
       return { result: await this.publicationDiverged(active, 'claim-comment-observation-diverged') };
     }
-    if (sameStrings(observation.labels, expectedLabels)) return { active };
+    if (claimLabelProjectionSettled(observation.labels, config)) return { active };
     const labels = new Set(observation.labels);
     if (!labels.has(config.github.labels.auto.name)
       || labels.has(config.github.labels.blocked.name)
@@ -388,7 +393,7 @@ export class RunIssue {
       observe: async () => {
         observation = await this.readIssue(issueNumber);
         if (!observation || !this.hasTrustedClaim(observation, active.record)) return 'diverged';
-        return sameStrings(observation.labels, expectedLabels) ? 'confirmed' : 'absent';
+        return claimLabelProjectionSettled(observation.labels, config) ? 'confirmed' : 'absent';
       },
       invoke: () => this.dependencies.issues.setLabels(issueNumber, expectedLabels),
     });
@@ -609,65 +614,6 @@ export class RunIssue {
     const pullRequest = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
     if (!pullRequest || pullRequest.body !== prBody) return await this.publicationDiverged(active, 'pr-missing-before-handoff');
 
-    const handoffMarker = `<!-- codex-orchestrator:run:${runId}:handoff -->`;
-    const handoffBody = `${handoffMarker}\nReview-ready draft PR: ${pullRequest.url}`;
-    if (active.record.pendingEffect?.kind === 'handoff-comment' || !active.record.pendingEffect) {
-      if (!active.record.pendingEffect) {
-        active = await this.persist(active, {
-          pendingEffect: { kind: 'handoff-comment', issueNumber, marker: handoffMarker, bodySha256: sha256(handoffBody) },
-        });
-      }
-      const pendingEffect = active.record.pendingEffect;
-      if (pendingEffect?.kind !== 'handoff-comment' || pendingEffect.issueNumber !== issueNumber
-        || pendingEffect.marker !== handoffMarker || pendingEffect.bodySha256 !== sha256(handoffBody)) {
-        return this.publicationDiverged(active, 'handoff-comment-pendingEffect-diverged');
-      }
-      const settlement = await settleCommentEffect(pendingEffect, {
-        observe: async () => {
-          const observation = await this.readIssue(issueNumber);
-          if (!observation) return 'diverged';
-          const matching = commentsWithMarker(observation, handoffMarker);
-          if (matching.length === 0) return 'absent';
-          return matching.length === 1 && sha256(matching[0]!.body) === sha256(handoffBody) ? 'confirmed' : 'diverged';
-        },
-        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
-        invoke: () => this.dependencies.issues.postComment(issueNumber, handoffBody),
-      });
-      if (settlement.status === 'unauthorized') {
-        return this.signal.aborted
-          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
-          : await this.revoked(active);
-      }
-      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'handoff-comment-delivery-unknown');
-      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'handoff-comment-observation-diverged');
-      active = await this.confirmEffect(active);
-    }
-
-    const terminalLabels = [config.github.labels.review.name];
-    if (active.record.pendingEffect?.kind === 'final-labels' || !active.record.pendingEffect) {
-      if (!active.record.pendingEffect) active = await this.persist(active, { pendingEffect: { kind: 'final-labels', issueNumber, expected: terminalLabels } });
-      const pendingEffect = active.record.pendingEffect;
-      if (pendingEffect?.kind !== 'final-labels' || pendingEffect.issueNumber !== issueNumber
-        || !sameStrings(pendingEffect.expected, terminalLabels)) {
-        return this.publicationDiverged(active, 'terminal-labels-pendingEffect-diverged');
-      }
-      const settlement = await settleLabelsEffect(pendingEffect, {
-        observe: async () => {
-          const observation = await this.readIssue(issueNumber);
-          return !observation ? 'diverged' : sameStrings(observation.labels, terminalLabels) ? 'confirmed' : 'absent';
-        },
-        authorize: async () => !this.signal.aborted && await this.authorized(active, config),
-        invoke: () => this.dependencies.issues.setLabels(issueNumber, terminalLabels),
-      });
-      if (settlement.status === 'unauthorized') {
-        return this.signal.aborted
-          ? await this.terminal(await this.clearEffect(active), { status: 'cancelled' })
-          : await this.revoked(active);
-      }
-      if (settlement.status === 'unknown') return await this.invokedFailure(active, 'terminal-labels-delivery-unknown');
-      if (settlement.status !== 'confirmed') return await this.publicationDiverged(active, 'terminal-labels-diverged');
-      active = await this.confirmEffect(active);
-    }
     return this.persistTerminal(active, {
       status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: commitSha,
     }, 'review-ready', false, {
@@ -1263,8 +1209,9 @@ export class RunIssue {
               active.record.pendingEffect.code,
               active.record.pendingEffect.summary,
             );
-            await this.confirmEffect(observed.active);
-            return publicOutcome(active.record.terminalOutcome);
+            active = await this.confirmEffect(observed.active);
+            active = await this.settleTerminalNotificationsBestEffort(active);
+            return publicOutcome(active.record.terminalOutcome!);
           }
           const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
           return await this.persistTerminal(active, seed, active.record.pendingEffect.code, false);
@@ -1293,7 +1240,13 @@ export class RunIssue {
             active.record.pendingEffect.evidenceCode,
           );
         }
+        if (active.record.terminalOutcome && (active.record.terminalNotifications
+          || active.record.pendingEffect?.kind === 'terminal-comment'
+          || active.record.pendingEffect?.kind === 'terminal-labels')) {
+          active = await this.settleTerminalNotificationsBestEffort(active);
+        }
         if (existing.terminalOutcome?.status === 'blocked'
+          && !existing.terminalNotifications
           && issue?.state === 'OPEN'
           && blockedLabelProjection(issue.labels, config).status !== 'settled') {
           return await this.reconcilePersistedBlockedTerminal(active, issue, existing.terminalOutcome);
@@ -1618,6 +1571,7 @@ export class RunIssue {
         active = await this.adoptAttempt(active, sha256(canonicalJson(report)), {
           transportRetries: active.record.transportRetries,
           reportRepairs: 0,
+          implementationResult: { summary: report.summary, residualRisks: report.residualRisks },
         });
         active = await this.clearAttempt(active);
       }
@@ -2142,7 +2096,9 @@ export class RunIssue {
     }
     const record = { ...active.record, ...normalized, updatedAt: this.timestamp() } as RunRecord;
     if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt'] as const) {
+    if (Object.hasOwn(changes, 'terminalOutcome') && changes.terminalOutcome === undefined
+      && !Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
@@ -3345,9 +3301,6 @@ export class RunIssue {
         outcome,
       );
     }
-    if (outcome.status === 'blocked') {
-      return this.publishBlockedTerminal(active, outcome, evidenceCode);
-    }
     return this.persistTerminal(active, outcome, evidenceCode, retainIntent);
   }
 
@@ -3492,6 +3445,107 @@ export class RunIssue {
     return publicOutcome(outcome);
   }
 
+  private async settleTerminalNotificationsBestEffort(starting: ActiveRun): Promise<ActiveRun> {
+    let active = starting;
+    if (!active.record.terminalOutcome || !active.record.terminalNotifications) return active;
+    if (active.record.pendingEffect && active.record.pendingEffect.kind !== 'terminal-comment'
+      && active.record.pendingEffect.kind !== 'terminal-labels') return active;
+    try { active = await this.settleTerminalComment(active); } catch { return active; }
+    try { active = await this.settleTerminalLabels(active); } catch { return active; }
+    return active;
+  }
+
+  private async settleTerminalComment(starting: ActiveRun): Promise<ActiveRun> {
+    let active = starting;
+    const notifications = active.record.terminalNotifications!;
+    if (notifications.comment.status !== 'pending' || notifications.comment.attempts >= TERMINAL_NOTIFICATION_ATTEMPTS) return active;
+    const body = terminalComment(active.record.runId, active.record.cycle, notifications.report);
+    const marker = body.split('\n')[0]!;
+    const attempt = notifications.comment.attempts + 1;
+    if (!active.record.pendingEffect) {
+      active = await this.persist(active, { pendingEffect: {
+        kind: 'terminal-comment', issueNumber: active.record.issueNumber, marker, bodySha256: sha256(body),
+        outcome: notifications.report.outcome, attempt,
+      } });
+    }
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== 'terminal-comment' || effect.issueNumber !== active.record.issueNumber
+      || effect.marker !== marker || effect.bodySha256 !== sha256(body)
+      || effect.outcome !== notifications.report.outcome || effect.attempt !== attempt) return active;
+    const settlement = await settleCommentEffect(effect, {
+      observe: async () => {
+        const issue = await this.readIssue(effect.issueNumber);
+        if (!issue || issue.state !== 'OPEN') return 'diverged';
+        const matching = commentsWithMarker(issue, marker);
+        if (matching.length === 0) return 'absent';
+        return matching.length === 1 && sha256(matching[0]!.body) === effect.bodySha256 ? 'confirmed' : 'diverged';
+      },
+      invoke: () => this.dependencies.issues.postComment(effect.issueNumber, body),
+    });
+    const delivered = settlement.status === 'confirmed';
+    const status = delivered ? 'delivered' as const
+      : attempt >= TERMINAL_NOTIFICATION_ATTEMPTS ? 'exhausted' as const : 'pending' as const;
+    const diagnostic = delivered ? {} : { diagnostic: terminalNotificationDiagnostic('comment', settlement.status) };
+    return this.persist(active, {
+      terminalNotifications: {
+        ...notifications,
+        comment: { status, attempts: attempt, ...diagnostic },
+      },
+      pendingEffect: undefined,
+    });
+  }
+
+  private async settleTerminalLabels(starting: ActiveRun): Promise<ActiveRun> {
+    let active = starting;
+    let notifications = active.record.terminalNotifications!;
+    const policy = terminalLabelChanges(active.config, notifications.report.outcome);
+    if (notifications.labels.status === 'delivered') {
+      const issue = await this.readIssue(active.record.issueNumber);
+      const settled = issue && policy.add.every((label) => issue.labels.includes(label))
+        && policy.remove.every((label) => !issue.labels.includes(label));
+      if (settled) return active;
+      notifications = { ...notifications, labels: { status: 'pending', attempts: 0 } };
+      active = await this.persist(active, { terminalNotifications: notifications });
+    }
+    if (notifications.labels.status !== 'pending' || notifications.labels.attempts >= TERMINAL_NOTIFICATION_ATTEMPTS) return active;
+    const attempt = notifications.labels.attempts + 1;
+    if (!active.record.pendingEffect) {
+      active = await this.persist(active, { pendingEffect: {
+        kind: 'terminal-labels', issueNumber: active.record.issueNumber, ...policy,
+        outcome: notifications.report.outcome, attempt,
+      } });
+    }
+    const effect = active.record.pendingEffect;
+    if (effect?.kind !== 'terminal-labels' || effect.issueNumber !== active.record.issueNumber
+      || effect.outcome !== notifications.report.outcome || effect.attempt !== attempt
+      || !sameStrings(effect.add, policy.add) || !sameStrings(effect.remove, policy.remove)) return active;
+    const settlement = await settleLabelsEffect(effect, {
+      observe: async () => {
+        const issue = await this.readIssue(effect.issueNumber);
+        if (!issue) return 'diverged';
+        return effect.add.every((label) => issue.labels.includes(label))
+          && effect.remove.every((label) => !issue.labels.includes(label)) ? 'confirmed' : 'absent';
+      },
+      invoke: async () => {
+        if (!this.dependencies.issues.reconcileTerminalLabels) throw new Error('terminal label reconciliation unavailable');
+        await this.dependencies.issues.reconcileTerminalLabels(effect.issueNumber, {
+          outcome: effect.outcome, add: effect.add, remove: effect.remove,
+        });
+      },
+    });
+    const delivered = settlement.status === 'confirmed';
+    const status = delivered ? 'delivered' as const
+      : attempt >= TERMINAL_NOTIFICATION_ATTEMPTS ? 'exhausted' as const : 'pending' as const;
+    const diagnostic = delivered ? {} : { diagnostic: terminalNotificationDiagnostic('labels', settlement.status) };
+    return this.persist(active, {
+      terminalNotifications: {
+        ...notifications,
+        labels: { status, attempts: attempt, ...diagnostic },
+      },
+      pendingEffect: undefined,
+    });
+  }
+
   private async persistTerminal(
     active: ActiveRun,
     outcome: TerminalSeed,
@@ -3505,11 +3559,23 @@ export class RunIssue {
     );
     active = evidence.active;
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
+    let terminalComments = active.record.issueSnapshot.comments ?? [];
+    if (!replaceConfirmedEffect && outcome.status !== 'transport-failed') {
+      try {
+        terminalComments = (await this.readIssue(active.record.issueNumber))?.comments ?? terminalComments;
+      } catch {
+        // Terminal notification observation is best-effort and cannot change the Run outcome.
+      }
+    }
+    const notifications = replaceConfirmedEffect
+      ? active.record.terminalNotifications
+      : terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments);
     const changes: Partial<RunRecord> & { pendingEffect?: PendingEffect | undefined } = {
       ...additionalChanges,
       lifecycle: outcome.status,
       terminalOutcome,
       outcomeEvidenceId: evidence.id,
+      ...(notifications ? { terminalNotifications: notifications } : {}),
     };
     if (outcome.status !== 'review-ready' && active.record.directReview && active.record.directReview.status !== 'terminal') {
       changes.directReview = projectTerminalDirectReview(active.record.directReview, outcome.status === 'blocked'
@@ -3517,7 +3583,10 @@ export class RunIssue {
         : { status: outcome.status }, outcome.status === 'internal-error' ? outcome.code : undefined);
     }
     active = await this.persist(active, changes);
-    if (!retainIntent) active = await this.confirmEffect(active);
+    if (!retainIntent) {
+      try { active = await this.confirmEffect(active); } catch { return publicOutcome(terminalOutcome); }
+      active = await this.settleTerminalNotificationsBestEffort(active);
+    }
     return publicOutcome(terminalOutcome);
   }
 
@@ -3557,6 +3626,158 @@ class PostEffectStateError extends Error {
   constructor(readonly active: ActiveRun) {
     super('post-effect state write failed');
   }
+}
+const TERMINAL_NOTIFICATION_ATTEMPTS = 3;
+
+function terminalNotificationState(
+  record: RunRecord,
+  outcome: TerminalSeed,
+  observedAt: string,
+  comments: Array<{ id?: string }>,
+): TerminalNotificationStateV1 | undefined {
+  if (outcome.status === 'transport-failed') return undefined;
+  const commentId = issueCommentHighWaterMark(comments);
+  return {
+    version: 1,
+    commentCutoff: { commentId, observedAt },
+    report: terminalReportSnapshot(record, outcome),
+    comment: { status: 'pending', attempts: 0 },
+    labels: { status: 'pending', attempts: 0 },
+  };
+}
+
+function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed, { status: 'transport-failed' }>): TerminalReportSnapshotV1 {
+  const summary = outcome.status === 'blocked'
+    ? outcome.blocker?.summary ?? `The run stopped at ${outcome.kind}.`
+    : outcome.status === 'internal-error'
+      ? internalErrorSummary(outcome.code)
+      : outcome.status === 'cancelled'
+        ? 'The run was cancelled before completion.'
+        : record.implementationResult?.summary ?? record.proofReceipt?.summary ?? 'The authorized implementation is ready for review.';
+  const nextAction = outcome.status === 'review-ready'
+    ? 'Review the draft PR. To request an in-scope follow-up, comment on this issue.'
+    : outcome.status === 'blocked'
+      ? outcome.resumable
+        ? 'Resolve the stated blocker, then rerun the same issue.'
+        : 'Provide the missing decision or authority in this issue before continuing.'
+      : outcome.status === 'internal-error'
+        ? 'Inspect the package-owned evidence for the code above, correct the runner condition, and retry the same issue.'
+        : 'Re-add the authorization label and rerun the same issue if the work should continue.';
+  return {
+    version: 1,
+    outcome: outcome.status,
+    summary: publicTerminalText(summary, 'Terminal summary is unavailable.'),
+    ...(outcome.status === 'review-ready' ? { pullRequestUrl: outcome.pullRequestUrl } : {}),
+    passedChecks: record.checks.filter((check) => check.status === 'passed').slice(0, 16)
+      .map((check) => publicTerminalText(check.id, 'Unnamed check.', 200)),
+    publishableProof: (record.proofReceipt?.publishableEvidence ?? []).slice(0, 4).map((proof) => publicTerminalText(
+      `${proof.ref}: ${proof.description}`, 'Publishable proof detail is unavailable.', 500,
+    )),
+    unverified: record.proofReceipt ? [] : ['No publishable Acceptance Proof receipt was retained.'],
+    risks: (record.implementationResult?.residualRisks ?? []).slice(0, 4)
+      .map((risk) => publicTerminalText(risk, 'Risk detail is unavailable.', 500)),
+    reviewFocus: (record.directReview?.review.coverage ?? []).slice(0, 8)
+      .map((focus) => publicTerminalText(focus, 'Review focus is unavailable.', 250)),
+    nextAction,
+    ...(outcome.status === 'blocked' ? { blocker: {
+      kind: outcome.kind,
+      resumable: outcome.resumable,
+      attempted: (outcome.blocker?.attempted ?? []).slice(0, 8)
+        .map((attempt) => publicTerminalText(attempt, 'Attempt detail is unavailable.', 500)),
+    } } : {}),
+  };
+}
+
+function internalErrorSummary(code: string): string {
+  return code === 'implementation-change-set-invalid'
+    ? 'The implementation report declared changed files, but the runner found no matching worktree changes.'
+    : `The runner encountered an internal failure (${code}) and could not complete this run.`;
+}
+
+function terminalComment(runId: string, cycle: number, report: TerminalReportSnapshotV1): string {
+  const markerKind = report.outcome === 'review-ready' ? 'handoff' : report.outcome;
+  const marker = `<!-- codex-orchestrator:run:${runId}:cycle:${cycle}:${markerKind} -->`;
+  if (report.outcome === 'review-ready') {
+    return [
+      marker,
+      'codex-orchestrator completed this run.',
+      '',
+      '## Summary', report.summary,
+      '',
+      '## Pull request', report.pullRequestUrl ?? 'Draft PR URL is unavailable.',
+      '',
+      '## Passed checks', ...terminalList(report.passedChecks),
+      '',
+      '## Publishable proof', ...terminalList(report.publishableProof),
+      '',
+      '## Not verified', ...terminalList(report.unverified),
+      '',
+      '## Known risks', ...terminalList(report.risks),
+      '',
+      '## Review focus', ...terminalList(report.reviewFocus),
+      '',
+      '## Follow-up', report.nextAction,
+    ].join('\n');
+  }
+  const title = report.outcome === 'blocked' ? 'blocked' : report.outcome === 'internal-error' ? 'stopped after an internal error' : 'was cancelled';
+  return [
+    marker,
+    `codex-orchestrator ${title} this run.`,
+    '',
+    ...(report.blocker ? [`Kind: ${report.blocker.kind}`, `Resumable: ${report.blocker.resumable ? 'yes' : 'no'}`, ''] : []),
+    '## Reason', `Reason: ${report.summary}`,
+    ...(report.blocker ? ['', 'Attempted:', ...terminalList(report.blocker.attempted)] : []),
+    '',
+    '## Retained work and state',
+    ...terminalList([
+      ...report.passedChecks.map((check) => `Passed check: ${check}`),
+      ...report.publishableProof.map((proof) => `Proof: ${proof}`),
+    ]),
+    '',
+    '## Next action', report.nextAction,
+  ].join('\n');
+}
+
+function terminalList(values: string[]): string[] {
+  return values.length > 0 ? values.map((value) => `- ${value}`) : ['- None recorded.'];
+}
+
+function terminalNotificationDiagnostic(kind: 'comment' | 'labels', status: string): string {
+  return status === 'unknown'
+    ? `terminal-${kind}-delivery-unknown`
+    : `terminal-${kind}-observation-${status}`;
+}
+
+function terminalLabelChanges(
+  config: AgentAutoConfig,
+  outcome: TerminalReportSnapshotV1['outcome'],
+): { add: string[]; remove: string[] } {
+  const labels = config.github.labels;
+  if (outcome === 'review-ready') return {
+    add: [labels.review.name], remove: [labels.auto.name, labels.running.name, labels.blocked.name].sort(),
+  };
+  if (outcome === 'blocked') return { add: [labels.blocked.name], remove: [labels.running.name, labels.review.name].sort() };
+  return {
+    add: [],
+    remove: [labels.running.name, labels.blocked.name, labels.review.name, ...(outcome === 'cancelled' ? [labels.auto.name] : [])].sort(),
+  };
+}
+
+function claimLabelProjectionSettled(labels: string[], config: AgentAutoConfig): boolean {
+  const policy = config.github.labels;
+  return labels.includes(policy.auto.name) && labels.includes(policy.running.name)
+    && !labels.includes(policy.blocked.name) && !labels.includes(policy.review.name);
+}
+
+function issueCommentHighWaterMark(comments: Array<{ id?: string }>): string | null {
+  const ids = comments.map((comment) => comment.id).filter((id): id is string => Boolean(id));
+  const decimal = ids.filter((id) => /^\d+$/u.test(id));
+  if (decimal.length > 0) return decimal.reduce((highest, id) => BigInt(id) > BigInt(highest) ? id : highest);
+  return ids.at(-1) ?? null;
+}
+
+function publicTerminalText(value: string, fallback: string, maxLength = 2_000): string {
+  return publicBlockedText(value, fallback, maxLength);
 }
 function lifecycleForAttempt(operationId: string): RunRecord['lifecycle'] {
   if (operationId === 'configured-check') return 'checking';

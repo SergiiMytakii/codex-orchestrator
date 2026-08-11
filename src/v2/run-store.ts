@@ -52,6 +52,14 @@ export type PendingEffect = EffectIdentity & (
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
   | { kind: 'final-labels'; issueNumber: number; expected: string[] }
   | {
+    kind: 'terminal-comment'; issueNumber: number; marker: string; bodySha256: string;
+    outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; attempt: number;
+  }
+  | {
+    kind: 'terminal-labels'; issueNumber: number; add: string[]; remove: string[];
+    outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; attempt: number;
+  }
+  | {
     kind: 'blocked-labels';
     issueNumber: number;
     expected: string[];
@@ -85,6 +93,28 @@ export type RunTerminalOutcome =
   | { status: 'transport-failed'; resumable: boolean; evidencePath: string }
   | { status: 'cancelled'; evidencePath: string }
   | { status: 'internal-error'; code: string; evidencePath: string };
+
+export interface TerminalReportSnapshotV1 {
+  version: 1;
+  outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled';
+  summary: string;
+  pullRequestUrl?: string;
+  passedChecks: string[];
+  publishableProof: string[];
+  unverified: string[];
+  risks: string[];
+  reviewFocus: string[];
+  nextAction: string;
+  blocker?: { kind: string; resumable: boolean; attempted: string[] };
+}
+
+export interface TerminalNotificationStateV1 {
+  version: 1;
+  commentCutoff: { commentId: string | null; observedAt: string };
+  report: TerminalReportSnapshotV1;
+  comment: { status: 'pending' | 'delivered' | 'exhausted'; attempts: number; diagnostic?: string };
+  labels: { status: 'pending' | 'delivered' | 'exhausted'; attempts: number; diagnostic?: string };
+}
 
 export interface PersistedIssueSnapshotV1 {
   number: number;
@@ -156,6 +186,8 @@ export interface RunRecord {
     reportRepairFindings: string[];
   };
   proofReceipt?: ProofReceipt;
+  implementationResult?: { summary: string; residualRisks: string[] };
+  terminalNotifications?: TerminalNotificationStateV1;
   pendingEffect?: PendingEffect;
   outcomeEvidenceId?: string;
   terminalOutcome?: RunTerminalOutcome;
@@ -288,6 +320,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'proofId',
     'proofExecution',
     'proofReceipt',
+    'implementationResult',
+    'terminalNotifications',
     'pendingEffect',
     'outcomeEvidenceId',
     'terminalOutcome',
@@ -352,6 +386,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'proofId')) assertNonEmptyString(value.proofId, `${field}.proofId`);
   if (hasOwn(value, 'proofExecution')) validateProofExecution(value.proofExecution, `${field}.proofExecution`);
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
+  if (hasOwn(value, 'implementationResult')) validateImplementationResult(value.implementationResult, `${field}.implementationResult`);
+  if (hasOwn(value, 'terminalNotifications')) validateTerminalNotifications(value.terminalNotifications, `${field}.terminalNotifications`);
   if (hasOwn(value, 'pendingEffect')) validatePendingEffect(value.pendingEffect, `${field}.pendingEffect`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
   if (hasOwn(value, 'terminalOutcome')) validateTerminalOutcome(value.terminalOutcome, `${field}.terminalOutcome`);
@@ -414,7 +450,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
-    || ['review-activation-labels', 'blocked-comment', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence'].includes(reviewReadyEffect);
+    || ['review-activation-labels', 'blocked-comment', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence',
+      'terminal-comment', 'terminal-labels'].includes(reviewReadyEffect);
   if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || !reviewReadyEffectAllowed)) {
     throw new Error(`${field} review-ready requires proofReceipt and only a review continuation or terminal effect`);
   }
@@ -425,9 +462,10 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     && hasOwn(value, 'candidateBinding')
     && ((value.pendingEffect as PendingEffect | undefined)?.kind === 'initial-commit' || (value.pendingEffect as PendingEffect | undefined)?.kind === 'review-update-commit');
   const settlingOutcomeEvidence = (value.pendingEffect as PendingEffect | undefined)?.kind === 'outcome-evidence';
+  const settlingTerminalNotification = reviewReadyEffect === 'terminal-comment' || reviewReadyEffect === 'terminal-labels';
   if (terminal && hasOwn(value, 'pendingEffect') && value.lifecycle !== 'transport-failed'
     && !(value.lifecycle === 'review-ready' && reviewReadyEffectAllowed)
-    && !retainedCandidateEffect && !settlingOutcomeEvidence) throw new Error(`${field} terminal lifecycle cannot retain pending effect`);
+    && !retainedCandidateEffect && !settlingOutcomeEvidence && !settlingTerminalNotification) throw new Error(`${field} terminal lifecycle cannot retain pending effect`);
   if (value.lifecycle === 'transport-failed' && hasOwn(value, 'pendingEffect')
     && !settlingOutcomeEvidence
     && (value.terminalOutcome as Extract<RunTerminalOutcome, { status: 'transport-failed' }>).resumable) {
@@ -552,6 +590,20 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
     assertSha256(value.bodySha256, `${field}.bodySha256`);
+  } else if (kind === 'terminal-comment') {
+    assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256', 'outcome', 'attempt'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertNonEmptyString(value.marker, `${field}.marker`);
+    assertSha256(value.bodySha256, `${field}.bodySha256`);
+    assertTerminalNotificationOutcome(value.outcome, `${field}.outcome`);
+    assertPositiveInteger(value.attempt, `${field}.attempt`);
+  } else if (kind === 'terminal-labels') {
+    assertExactObject(value, [...identity, 'issueNumber', 'add', 'remove', 'outcome', 'attempt'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    validateStringArray(value.add, `${field}.add`);
+    validateStringArray(value.remove, `${field}.remove`);
+    assertTerminalNotificationOutcome(value.outcome, `${field}.outcome`);
+    assertPositiveInteger(value.attempt, `${field}.attempt`);
   } else if (kind === 'blocked-comment') {
     assertExactObject(value, [
       ...identity, 'issueNumber', 'marker', 'bodySha256', 'blockKind', 'resumable', 'evidenceCode',
@@ -642,6 +694,63 @@ function validatePendingEffect(value: unknown, field: string): void {
   assertSha256(value.effectId, `${field}.effectId`);
   const { effectId, ...payload } = value;
   if (effectId !== sha256(canonicalJson(payload))) throw new Error(`${field}.effectId does not match its payload`);
+}
+
+function validateImplementationResult(value: unknown, field: string): void {
+  assertExactObject(value, ['summary', 'residualRisks'], field);
+  assertNonEmptyString(value.summary, `${field}.summary`);
+  validateStringList(value.residualRisks, `${field}.residualRisks`);
+}
+
+function validateTerminalNotifications(value: unknown, field: string): void {
+  assertExactObject(value, ['version', 'commentCutoff', 'report', 'comment', 'labels'], field);
+  if (value.version !== 1) throw new Error(`${field}.version is invalid`);
+  assertExactObject(value.commentCutoff, ['commentId', 'observedAt'], `${field}.commentCutoff`);
+  if (value.commentCutoff.commentId !== null) assertNonEmptyString(value.commentCutoff.commentId, `${field}.commentCutoff.commentId`);
+  assertTimestamp(value.commentCutoff.observedAt, `${field}.commentCutoff.observedAt`);
+  validateTerminalReport(value.report, `${field}.report`);
+  validateTerminalDelivery(value.comment, `${field}.comment`);
+  validateTerminalDelivery(value.labels, `${field}.labels`);
+}
+
+function validateTerminalReport(value: unknown, field: string): void {
+  const pullRequestUrl = hasOwn(value, 'pullRequestUrl') ? ['pullRequestUrl'] : [];
+  const blocker = hasOwn(value, 'blocker') ? ['blocker'] : [];
+  assertExactObject(value, [
+    'version', 'outcome', 'summary', ...pullRequestUrl, 'passedChecks', 'publishableProof', 'unverified',
+    'risks', 'reviewFocus', 'nextAction', ...blocker,
+  ], field);
+  if (value.version !== 1) throw new Error(`${field}.version is invalid`);
+  assertTerminalNotificationOutcome(value.outcome, `${field}.outcome`);
+  assertNonEmptyString(value.summary, `${field}.summary`);
+  if (hasOwn(value, 'pullRequestUrl')) assertNonEmptyString(value.pullRequestUrl, `${field}.pullRequestUrl`);
+  for (const key of ['passedChecks', 'publishableProof', 'unverified', 'risks', 'reviewFocus'] as const) {
+    validateStringList(value[key], `${field}.${key}`);
+  }
+  assertNonEmptyString(value.nextAction, `${field}.nextAction`);
+  if (hasOwn(value, 'blocker')) {
+    assertExactObject(value.blocker, ['kind', 'resumable', 'attempted'], `${field}.blocker`);
+    assertNonEmptyString(value.blocker.kind, `${field}.blocker.kind`);
+    if (typeof value.blocker.resumable !== 'boolean') throw new Error(`${field}.blocker.resumable is invalid`);
+    validateStringList(value.blocker.attempted, `${field}.blocker.attempted`);
+  }
+}
+
+function validateTerminalDelivery(value: unknown, field: string): void {
+  const diagnostic = hasOwn(value, 'diagnostic') ? ['diagnostic'] : [];
+  assertExactObject(value, ['status', 'attempts', ...diagnostic], field);
+  if (!['pending', 'delivered', 'exhausted'].includes(value.status as string)) throw new Error(`${field}.status is invalid`);
+  if (!Number.isSafeInteger(value.attempts) || (value.attempts as number) < 0 || (value.attempts as number) > 3) {
+    throw new Error(`${field}.attempts is invalid`);
+  }
+  if (hasOwn(value, 'diagnostic')) assertNonEmptyString(value.diagnostic, `${field}.diagnostic`);
+  if (value.status === 'delivered' && hasOwn(value, 'diagnostic')) throw new Error(`${field}.diagnostic is invalid`);
+}
+
+function assertTerminalNotificationOutcome(value: unknown, field: string): void {
+  if (!['review-ready', 'blocked', 'internal-error', 'cancelled'].includes(value as string)) {
+    throw new Error(`${field} is invalid`);
+  }
 }
 
 function validateTerminalOutcome(value: unknown, field: string): void {
