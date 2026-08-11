@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.15] - 2026-08-11
+
 ### Added
 - Terminal outcomes now persist before independent best-effort issue comments
   and managed-label reconciliation, with bounded restart-safe recovery.
