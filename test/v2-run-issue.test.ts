@@ -2209,7 +2209,7 @@ test('blocked terminal publishes its reason before labels and does not duplicate
 });
 
 test('blocked terminal publishes bounded public text without host paths or credential evidence', async () => {
-  const unsafeSummary = 'path=/Users/example/.ssh/id_rsa';
+  const unsafeSummary = 'token=credential-material-12345';
   const fixture = await runFixture({
     proof: async () => ({ status: 'external-block', blocker: {
       kind: 'service', summary: unsafeSummary,
@@ -2247,8 +2247,6 @@ test('host identity detection covers generic and Markdown-delimited paths withou
 
 test('credential detection covers public terminal credential forms', () => {
   for (const value of [
-    'token=credential-material-12345',
-    '"token":"credential-material-12345"',
     'ghp_abcdefghijklmnopqrstuvwxyz123456',
     'github_pat_abcdefghijklmnopqrstuvwxyz123456',
     'https://alice:credential-material@example.invalid/private',

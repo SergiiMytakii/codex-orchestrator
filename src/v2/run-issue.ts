@@ -4021,7 +4021,8 @@ function managedLabelProjection(labels: string[], config: AgentAutoConfig): stri
 }
 
 function publicBlockedText(value: string, fallback: string, maxLength: number): string {
-  if (containsCredentialEvidence(value) || containsHostIdentityEvidence(value)) return fallback;
+  if (containsCredentialEvidence(value) || containsHostIdentityEvidence(value)
+    || /["']?token["']?\s*[:=]\s*["']?[^\s"']{8,}/iu.test(value)) return fallback;
   const normalized = value.replace(/[\r\n]+/gu, ' ').trim();
   if (normalized.length === 0) return fallback;
   return normalized.length <= maxLength

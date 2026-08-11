@@ -167,7 +167,6 @@ export function containsCredentialEvidence(value: string): boolean {
     /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
     /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu,
     /["']?(?:GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|AZURE_CLIENT_SECRET)["']?\s*[:=]\s*["']?[^\s"']{8,}/u,
-    /["']?token["']?\s*[:=]\s*["']?[^\s"']{8,}/iu,
   ].some((pattern) => pattern.test(value));
 }
 
