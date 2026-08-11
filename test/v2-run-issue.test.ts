@@ -1239,6 +1239,10 @@ test('trusted issue-comment repair runs checks, proof, review, and updates the s
     1,
   );
   const blockedRecord = (await fixture.store.read()).runs[0]!;
+  assert.equal(blockedRecord.pendingEffect, undefined);
+  assert.deepEqual(pick(blockedRecord.terminalOutcome!, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'safety', resumable: false,
+  });
   assert.equal(blockedRecord.reviewFeedback?.history.length, 2);
   assert.equal(blockedRecord.reviewFeedback?.history[0]?.kind, 'published');
   assert.equal(blockedRecord.reviewFeedback?.history[1]?.kind, 'blocked-safety');

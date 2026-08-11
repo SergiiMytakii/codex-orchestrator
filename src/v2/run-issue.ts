@@ -786,9 +786,12 @@ export class RunIssue {
       });
       if (settlement.status === 'unauthorized') {
         return authorizationFailure
-          ?? this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+          ?? this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-commit-delivery-unknown');
+      if (settlement.status === 'diverged') {
+        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-commit-observation-diverged');
+      }
       if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-commit-observation-diverged');
       }
@@ -836,9 +839,12 @@ export class RunIssue {
       });
       if (settlement.status === 'unauthorized') {
         return authorizationFailure
-          ?? this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+          ?? this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-push-delivery-unknown');
+      if (settlement.status === 'diverged') {
+        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-push-observation-diverged');
+      }
       if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-push-observation-diverged');
       }
@@ -891,9 +897,12 @@ export class RunIssue {
         },
       });
       if (settlement.status === 'unauthorized') {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-summary-delivery-unknown');
+      if (settlement.status === 'diverged') {
+        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-summary-observation-diverged');
+      }
       if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-summary-observation-diverged');
       }
@@ -925,21 +934,33 @@ export class RunIssue {
         || !sameStrings(pendingEffect.expected, finalLabels)) {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-pendingEffect-diverged');
       }
-      const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
-      const validationFailure = await this.mapFeedbackRevalidation(active, validation, 'review-feedback-final-labels-revalidation-failed');
-      if (validationFailure) return validationFailure;
+      let authorizationFailure: 'retryable' | 'blocked' | undefined;
       const settlement = await settleLabelsEffect(pendingEffect, {
         observe: async () => {
           const issue = await this.readIssue(issueNumber);
           return !issue ? 'diverged' : sameStrings(managedLabelProjection(issue.labels, config), finalLabels) ? 'confirmed' : 'absent';
         },
-        authorize: () => this.authorized(active, config),
+        authorize: async () => {
+          if (!await this.authorized(active, config)) return false;
+          const validation = await coordinator.revalidate({ batch, issueNumber, epoch: 'post-push', expectedHeadSha: head });
+          authorizationFailure = validation.status === 'valid' ? undefined : validation.status;
+          return !authorizationFailure;
+        },
         invoke: () => this.dependencies.issues.setLabels(issueNumber, finalLabels),
       });
       if (settlement.status === 'unauthorized') {
-        return this.blockReviewFeedback(active, 'safety', 'review-feedback-publication-authority-revoked');
+        active = await this.confirmEffect(active);
+        if (authorizationFailure === 'retryable') {
+          return this.invokedFailure(active, 'review-feedback-final-labels-revalidation-failed-retryable');
+        }
+        return this.blockReviewFeedback(active, 'safety', authorizationFailure === 'blocked'
+          ? 'review-feedback-final-labels-revalidation-failed'
+          : 'review-feedback-publication-authority-revoked');
       }
       if (settlement.status === 'unknown') return this.invokedFailure(active, 'review-feedback-final-labels-delivery-unknown');
+      if (settlement.status === 'diverged') {
+        return this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-final-labels-diverged');
+      }
       if (settlement.status !== 'confirmed') {
         return this.blockReviewFeedback(active, 'safety', 'review-feedback-final-labels-diverged');
       }
@@ -1106,6 +1127,9 @@ export class RunIssue {
       });
       if (settlement.status === 'unknown') {
         return { result: await this.invokedFailure(active, 'review-feedback-activation-labels-delivery-unknown') };
+      }
+      if (settlement.status === 'diverged') {
+        return { result: await this.blockReviewFeedback(await this.confirmEffect(active), 'safety', 'review-feedback-activation-labels-diverged') };
       }
       if (settlement.status !== 'confirmed') {
         return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-labels-diverged') };
