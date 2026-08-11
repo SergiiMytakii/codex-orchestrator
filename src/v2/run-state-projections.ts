@@ -111,27 +111,6 @@ export function claimComment(runId: string, issueNumber: number, branchName: str
   return `<!-- codex-orchestrator:run:${runId}:claim -->\ncodex-orchestrator claimed #${issueNumber} for branch ${branchName}`;
 }
 
-export function blockedLabelPolicy(config: AgentAutoConfig) {
-  return {
-    auto: config.github.labels.auto.name, running: config.github.labels.running.name,
-    blocked: config.github.labels.blocked.name, review: config.github.labels.review.name,
-  };
-}
-
-export function blockedLabelProjection(
-  labels: string[], config: AgentAutoConfig,
-): { status: 'settled'; expected: string[] } | { status: 'transition' | 'diverged' } {
-  const policy = blockedLabelPolicy(config);
-  const present = new Set(labels);
-  if (present.has(policy.review)) return { status: 'transition' };
-  const auto = present.has(policy.auto);
-  const running = present.has(policy.running);
-  const blocked = present.has(policy.blocked);
-  if (running || (auto && !blocked)) return { status: 'transition' };
-  if (blocked) return { status: 'settled', expected: auto ? [policy.auto, policy.blocked].sort() : [policy.blocked] };
-  return { status: 'settled', expected: [] };
-}
-
 export function sameStrings(left: string[], right: string[]): boolean {
   const a = [...left].sort();
   const b = [...right].sort();

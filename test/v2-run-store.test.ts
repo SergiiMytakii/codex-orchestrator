@@ -143,28 +143,16 @@ test('run state accepts unbounded semantic revisions and resumable infrastructur
   }
 });
 
-test('run state round-trips the durable blocked-label pending effect exactly', async () => {
-  const root = await temporaryRoot();
-  const path = join(root, 'run-state.json');
-  const active = {
-    ...record(),
-    pendingEffect: createPendingEffect({
-      kind: 'blocked-labels' as const,
-      issueNumber: 42,
-      expected: ['agent:auto', 'agent:blocked'],
-      blockKind: 'external' as const,
-      resumable: true,
-      evidenceCode: 'proof-external-block',
-    }),
-  };
-  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
-  await writer.compareAndSwap(0, body([active]));
-  assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0]?.pendingEffect, active.pendingEffect);
-
-  const invalid = structuredClone(active) as RunRecord;
-  (invalid.pendingEffect as { blockKind: string }).blockKind = 'unknown';
-  const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
-  await assert.rejects(rejected.compareAndSwap(0, body([invalid])), /blockKind/u);
+test('run state rejects retired legacy blocked terminal effects', async () => {
+  for (const pendingEffect of [
+    { kind: 'blocked-comment', issueNumber: 42, marker: '<!-- blocked -->', bodySha256: 'a'.repeat(64), blockKind: 'external', resumable: true, evidenceCode: 'proof-external-block' },
+    { kind: 'blocked-labels', issueNumber: 42, expected: ['agent:auto', 'agent:blocked'], blockKind: 'external', resumable: true, evidenceCode: 'proof-external-block' },
+  ]) {
+    const effect = { ...pendingEffect, effectId: sha256(canonicalJson(pendingEffect)) };
+    const active = { ...record(), pendingEffect: effect } as unknown as RunRecord;
+    const rejected = new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions());
+    await assert.rejects(rejected.compareAndSwap(0, body([active])), /pendingEffect\.kind is invalid/u, pendingEffect.kind);
+  }
 });
 
 test('run state round-trips bounded terminal notification diagnostics and cutoff', async () => {

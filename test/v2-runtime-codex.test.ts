@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 import { sha256 } from '../src/v2/containment.js';
-import { observeAttemptReadViewCleanup, resolveCodexExecutable } from '../src/v2/runtime.js';
+import { managedLabelUpdate, observeAttemptReadViewCleanup, resolveCodexExecutable } from '../src/v2/runtime.js';
 import { mkdtemp } from './mission-test-temp.js';
 
 test('runtime resolves the installed Codex executable only from its safe path', async () => {
@@ -73,4 +73,25 @@ test('runtime cleanup rejects forged and symlink-redirected attempt roots withou
     identity: { runId: 'run-1', attemptId: 'attempt-1', resultPath: join(linkedAttemptRoot, 'report.json') },
   }), 'pending');
   assert.equal(await readFile(join(victimReadView, 'keep.txt'), 'utf8'), 'keep\n');
+});
+
+test('production issue composition mutates only lifecycle-managed labels', () => {
+  const policy = {
+    auto: { name: 'agent:auto', color: '000000', description: 'auto' },
+    running: { name: 'agent:running', color: '000000', description: 'running' },
+    blocked: { name: 'agent:blocked', color: '000000', description: 'blocked' },
+    review: { name: 'agent:review', color: '000000', description: 'review' },
+  };
+  assert.deepEqual(
+    managedLabelUpdate(['agent:auto', 'manual:keep'], ['agent:auto', 'agent:running'], policy),
+    { addLabels: ['agent:running'], removeLabels: [] },
+  );
+  assert.deepEqual(
+    managedLabelUpdate(['agent:auto', 'agent:running', 'manual:keep'], ['agent:review'], policy),
+    { addLabels: ['agent:review'], removeLabels: ['agent:auto', 'agent:running'] },
+  );
+  assert.deepEqual(
+    managedLabelUpdate(['manual:keep'], ['manual:keep', 'agent:blocked'], policy, true),
+    { addLabels: [], removeLabels: [] },
+  );
 });

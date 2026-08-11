@@ -166,11 +166,12 @@ export function containsCredentialEvidence(value: string): boolean {
     /\bgh[pousr]_[A-Za-z0-9]{20,}\b/u,
     /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
     /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu,
+    /["']?(?:GH_TOKEN|GITHUB_TOKEN|NPM_TOKEN|NODE_AUTH_TOKEN|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|AZURE_CLIENT_SECRET)["']?\s*[:=]\s*["']?[^\s"']{8,}/u,
   ].some((pattern) => pattern.test(value));
 }
 
 export function containsHostIdentityEvidence(value: string): boolean {
-  return /(?:\/Users\/[^/\s"']+|\/home\/[^/\s"']+|[A-Za-z]:[\\/]Users[\\/][^\\/\s"']+)/mu.test(value);
+  return /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"']+|(?:^|[\s("'=])(?:\/(?!\/)[^\s"']+|[A-Za-z]:[\\/][^\s"']+)/imu.test(value);
 }
 
 function tomlString(value: string): string {

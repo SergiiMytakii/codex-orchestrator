@@ -61,8 +61,6 @@ import type { CandidateGitV2 } from './candidate.js';
 import type { CandidateBindingV2, CandidateBoundaryV2, CandidateMaterializationV2 } from './candidate.js';
 import { createIssueDeliveryAuthority, type DeliveryAuthority } from './delivery-authority.js';
 import {
-  blockedLabelPolicy,
-  blockedLabelProjection,
   claimComment,
   claimRunId,
   freezeCriteria,
@@ -188,12 +186,6 @@ export interface RunIssueDependencies {
   issues: {
     read(issueNumber: number): Promise<RunIssueSnapshot | undefined>;
     setLabels(issueNumber: number, labels: string[]): Promise<void>;
-    transitionToBlocked?(issueNumber: number, labels: {
-      auto: string;
-      running: string;
-      blocked: string;
-      review: string;
-    }): Promise<void>;
     reconcileTerminalLabels?(issueNumber: number, labels: {
       outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; add: string[]; remove: string[];
     }): Promise<void>;
@@ -617,7 +609,7 @@ export class RunIssue {
     const pullRequest = await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch });
     if (!pullRequest || pullRequest.body !== prBody) return await this.publicationDiverged(active, 'pr-missing-before-handoff');
 
-    return this.persistTerminal(active, {
+    return this.terminal(active, {
       status: 'review-ready', pullRequestUrl: pullRequest.url, continuationEpoch: commitSha,
     }, 'review-ready', false, {
       reviewFeedback: initializeReviewFeedback(
@@ -936,7 +928,7 @@ export class RunIssue {
       const settlement = await settleLabelsEffect(pendingEffect, {
         observe: async () => {
           const issue = await this.readIssue(issueNumber);
-          return !issue ? 'diverged' : sameStrings(issue.labels, finalLabels) ? 'confirmed' : 'absent';
+          return !issue ? 'diverged' : sameStrings(managedLabelProjection(issue.labels, config), finalLabels) ? 'confirmed' : 'absent';
         },
         authorize: () => this.authorized(active, config),
         invoke: () => this.dependencies.issues.setLabels(issueNumber, finalLabels),
@@ -962,7 +954,7 @@ export class RunIssue {
       publishedAt: this.timestamp(),
     };
     const pullRequestUrl = `https://github.com/${active.record.canonicalRepository}/pull/${batch.pullRequest.number}`;
-    return this.persistTerminal(active, {
+    return this.terminal(active, {
       status: 'review-ready', pullRequestUrl, continuationEpoch: head,
     }, 'review-ready', false, {
       reviewFeedback: publishReviewFeedback(active.record.reviewFeedback!, receipt),
@@ -1058,7 +1050,7 @@ export class RunIssue {
       activation.changes.proofId = ready.record.proofId;
       activation.changes.proofReceipt = structuredClone(ready.record.proofReceipt);
       activation.changes.implementationResult = structuredClone(ready.record.implementationResult);
-      activation.changes.terminalNotifications = structuredClone(ready.record.terminalNotifications);
+      activation.changes.terminalNotifications = undefined;
     }
     const active = await this.persistValidationTransition(ready, activation);
     return this.resumeActivatedReviewFeedback(active, targetRoot, config);
@@ -1086,9 +1078,9 @@ export class RunIssue {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-pendingEffect-diverged') };
     }
     const issue = await this.readIssue(active.record.issueNumber);
-    const labelsAreRunning = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, runningLabels)
+    const labelsAreRunning = !!issue && issue.state === 'OPEN' && sameStrings(managedLabelProjection(issue.labels, config), runningLabels)
       && this.hasTrustedClaim(issue, active.record);
-    const labelsAreReview = !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, reviewLabels)
+    const labelsAreReview = !!issue && issue.state === 'OPEN' && sameStrings(managedLabelProjection(issue.labels, config), reviewLabels)
       && this.hasTrustedClaim(issue, active.record);
     if (!labelsAreRunning && !labelsAreReview) {
       return { result: await this.blockReviewFeedback(active, 'safety', 'review-feedback-activation-authority-revoked') };
@@ -1103,8 +1095,8 @@ export class RunIssue {
         observe: async () => {
           const observed = await this.readIssue(active.record.issueNumber);
           if (!observed || !this.hasTrustedClaim(observed, active.record)) return 'diverged';
-          if (sameStrings(observed.labels, runningLabels)) return 'confirmed';
-          return sameStrings(observed.labels, reviewLabels) ? 'absent' : 'diverged';
+          if (sameStrings(managedLabelProjection(observed.labels, config), runningLabels)) return 'confirmed';
+          return sameStrings(managedLabelProjection(observed.labels, config), reviewLabels) ? 'absent' : 'diverged';
         },
         invoke: () => this.dependencies.issues.setLabels(active.record.issueNumber, runningLabels),
       });
@@ -1236,42 +1228,12 @@ export class RunIssue {
             return publicOutcome(active.record.terminalOutcome!);
           }
           const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
-          return await this.persistTerminal(active, seed, active.record.pendingEffect.code, false);
-        }
-        if (active.record.pendingEffect?.kind === 'blocked-comment') {
-          return await this.publishBlockedTerminal(
-            active,
-            {
-              status: 'blocked',
-              kind: active.record.pendingEffect.blockKind,
-              resumable: active.record.pendingEffect.resumable,
-              ...(active.record.pendingEffect.blocker ? { blocker: active.record.pendingEffect.blocker } : {}),
-            },
-            active.record.pendingEffect.evidenceCode,
-          );
-        }
-        if (active.record.pendingEffect?.kind === 'blocked-labels') {
-          return await this.publishBlockedTerminal(
-            active,
-            {
-              status: 'blocked',
-              kind: active.record.pendingEffect.blockKind,
-              resumable: active.record.pendingEffect.resumable,
-              ...(active.record.pendingEffect.blocker ? { blocker: active.record.pendingEffect.blocker } : {}),
-            },
-            active.record.pendingEffect.evidenceCode,
-          );
+          return await this.terminal(active, seed, active.record.pendingEffect.code, false);
         }
         if (active.record.terminalOutcome && (active.record.terminalNotifications
           || active.record.pendingEffect?.kind === 'terminal-comment'
           || active.record.pendingEffect?.kind === 'terminal-labels')) {
           active = await this.settleTerminalNotificationsBestEffort(active);
-        }
-        if (existing.terminalOutcome?.status === 'blocked'
-          && !existing.terminalNotifications
-          && issue?.state === 'OPEN'
-          && blockedLabelProjection(issue.labels, config).status !== 'settled') {
-          return await this.reconcilePersistedBlockedTerminal(active, issue, existing.terminalOutcome);
         }
         if (active.record.terminalOutcome?.status === 'transport-failed'
           && !active.record.terminalOutcome.resumable
@@ -2250,7 +2212,7 @@ export class RunIssue {
     expectedLabels: string[],
   ): Promise<boolean> {
     const issue = await this.readIssue(active.record.issueNumber);
-    return !!issue && issue.state === 'OPEN' && sameStrings(issue.labels, expectedLabels)
+    return !!issue && issue.state === 'OPEN' && sameStrings(managedLabelProjection(issue.labels, active.config), expectedLabels)
       && this.hasTrustedClaim(issue, active.record);
   }
 
@@ -3227,11 +3189,7 @@ export class RunIssue {
     evidenceCode: string,
     outcome: Extract<TerminalSeed, { status: 'blocked' }> = { status: 'blocked', kind, resumable: false },
   ): Promise<RunIssueResult> {
-    const feedback = active.record.reviewFeedback;
-    if (!feedback?.activeBatch) return this.terminal(active, { status: 'blocked', kind, resumable: false }, evidenceCode);
-    return this.publishBlockedTerminal(active, outcome, evidenceCode, {
-      reviewFeedback: blockReviewFeedback(feedback, kind, this.timestamp()),
-    }, true);
+    return this.terminal(active, outcome, evidenceCode);
   }
 
   private async mapImplementationFailure(
@@ -3360,13 +3318,16 @@ export class RunIssue {
       review: { ...structuredClone(directReview.review), disposition: 'clear' as const },
       repairFindings: directReview.repairFindings.filter((finding) => !sourceIds.includes(finding.sourceId)),
     };
-    const priorReport = active.record.terminalNotifications?.report;
-    if (priorReport?.outcome !== 'review-ready' || !priorReport.pullRequestUrl) {
+    const pullRequest = await this.dependencies.pullRequests.findOpen({
+      headBranch: active.record.branchName,
+      baseBranch: config.github.baseBranch,
+    });
+    if (!pullRequest?.url) {
       return this.terminal(active, { status: 'internal-error', code: 'issue-feedback-prior-handoff-missing' });
     }
     const terminalSeed = {
       status: 'review-ready' as const,
-      pullRequestUrl: priorReport.pullRequestUrl,
+      pullRequestUrl: pullRequest.url,
       continuationEpoch: batch.priorPublishedHeadSha,
     };
     const terminalOutcome = {
@@ -3385,6 +3346,9 @@ export class RunIssue {
       diagnostic: 'issue-feedback-response-publication-not-settled',
       respondedAt,
     };
+    let comments = active.record.issueSnapshot.comments ?? [];
+    try { comments = (await this.readIssue(active.record.issueNumber))?.comments ?? comments; } catch { /* bounded fallback */ }
+    const freshNotifications = terminalNotificationState(active.record, terminalSeed, this.timestamp(), comments)!;
     const consumedChanges = {
       lifecycle: 'review-ready' as const,
       terminalOutcome,
@@ -3394,6 +3358,11 @@ export class RunIssue {
       reworkFindings: [],
       reportRepairs: 0,
       transportRetries: 0,
+      terminalNotifications: {
+        ...freshNotifications,
+        comment: { status: 'delivered' as const, attempts: 0 },
+        labels: { status: 'delivered' as const, attempts: 0 },
+      },
     };
     active = isAdoptableAttempt(active.record.activeAttempt)
       ? await this.adoptAttempt(active, sha256(canonicalJson(report)), consumedChanges)
@@ -3476,157 +3445,15 @@ export class RunIssue {
     outcome: TerminalSeed,
     evidenceCode: string = outcome.status,
     retainIntent = false,
-  ): Promise<RunIssueResult> {
-    if (active.record.reviewFeedback?.activeBatch && outcome.status === 'blocked') {
-      return this.blockReviewFeedback(
-        active,
-        outcome.kind,
-        evidenceCode,
-        outcome,
-      );
-    }
-    return this.persistTerminal(active, outcome, evidenceCode, retainIntent);
-  }
-
-  private async publishBlockedTerminal(
-    starting: ActiveRun,
-    outcome: Extract<TerminalSeed, { status: 'blocked' }>,
-    evidenceCode: string,
     additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
-    replaceExistingIntent = false,
   ): Promise<RunIssueResult> {
-    let active = starting;
-    const body = blockedComment(active.record.runId, outcome, evidenceCode);
-    const marker = body.split('\n')[0]!;
-    const commentIntent = {
-      kind: 'blocked-comment' as const,
-      issueNumber: active.record.issueNumber,
-      marker,
-      bodySha256: sha256(body),
-      blockKind: outcome.kind,
-      resumable: outcome.resumable,
-      evidenceCode,
-      ...(outcome.blocker ? { blocker: outcome.blocker } : {}),
-    };
-    const autoBlocked = [active.config.github.labels.auto.name, active.config.github.labels.blocked.name].sort();
-    const blockedOnly = [active.config.github.labels.blocked.name];
-    let expected = autoBlocked;
-    let existing = active.record.pendingEffect;
-    if (!existing || replaceExistingIntent) {
-      active = await this.persist(active, { ...additionalChanges, pendingEffect: commentIntent });
-      existing = active.record.pendingEffect;
-    }
-    if (existing?.kind === 'blocked-comment') {
-      if (existing.issueNumber !== commentIntent.issueNumber || existing.marker !== marker
-        || existing.bodySha256 !== sha256(body) || existing.blockKind !== outcome.kind
-        || existing.resumable !== outcome.resumable || existing.evidenceCode !== evidenceCode) {
-        return this.invokedFailure(active, 'blocked-comment-pendingEffect-diverged');
-      }
-      const settlement = await settleCommentEffect(existing, {
-        observe: async () => {
-          const observation = await this.readIssue(active.record.issueNumber);
-          if (!observation || observation.state !== 'OPEN') return 'diverged';
-          const matching = observation ? commentsWithMarker(observation, marker) : [];
-          if (matching.length === 0) return 'absent';
-          return matching.length === 1 && sha256(matching[0]!.body) === sha256(body)
-            ? 'confirmed' : 'diverged';
-        },
-        invoke: () => this.dependencies.issues.postComment(active.record.issueNumber, body),
-      });
-      if (settlement.status === 'unknown') return this.invokedFailure(active, 'blocked-comment-delivery-unknown');
-      if (settlement.status !== 'confirmed') return this.invokedFailure(active, 'blocked-comment-observation-diverged');
-      try {
-        active = await this.persist(active, { pendingEffect: {
-          kind: 'blocked-labels',
-          issueNumber: active.record.issueNumber,
-          expected,
-          blockKind: outcome.kind,
-          resumable: outcome.resumable,
-          evidenceCode,
-          ...(outcome.blocker ? { blocker: outcome.blocker } : {}),
-        } });
-      } catch {
-        throw new PostEffectStateError(active);
-      }
-      existing = active.record.pendingEffect;
-    }
-    if (existing?.kind !== 'blocked-labels'
-      || existing.issueNumber !== active.record.issueNumber
-      || existing.blockKind !== outcome.kind
-      || existing.resumable !== outcome.resumable
-      || existing.evidenceCode !== evidenceCode) {
-      return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
-    } else {
-      expected = existing.expected;
-      if (!sameStrings(expected, autoBlocked) && !sameStrings(expected, blockedOnly) && expected.length !== 0) {
-        return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
-      }
-    }
-
-    let issue = await this.readIssue(active.record.issueNumber);
-    if (!issue) return this.invokedFailure(active, 'blocked-labels-issue-missing');
-    let projection = blockedLabelProjection(issue.labels, active.config);
-    if (issue.state === 'OPEN' && projection.status === 'transition') {
-      if (!this.dependencies.issues.transitionToBlocked) {
-        return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
-      }
-      try {
-
-        await this.dependencies.issues.transitionToBlocked(
-          active.record.issueNumber,
-          blockedLabelPolicy(active.config),
-        );
-      }
-      catch { return this.invokedFailure(active, 'blocked-labels-delivery-unknown'); }
-      issue = await this.readIssue(active.record.issueNumber);
-      projection = issue ? blockedLabelProjection(issue.labels, active.config) : { status: 'diverged' };
-    }
-    if (!issue) return this.invokedFailure(active, 'blocked-labels-observation-missing');
-    if (issue.state === 'OPEN') {
-      if (projection.status !== 'settled') {
-        return this.invokedFailure(active, 'blocked-labels-observation-diverged');
-      }
-      if (!sameStrings(expected, projection.expected)) {
-        expected = projection.expected;
-        const pendingEffect = active.record.pendingEffect;
-        if (pendingEffect?.kind !== 'blocked-labels') return this.invokedFailure(active, 'blocked-labels-pendingEffect-diverged');
-        try {
-          const { effectId: _effectId, ...intent } = pendingEffect;
-          active = await this.persist(active, { pendingEffect: { ...intent, expected } });
-        } catch {
-          throw new PostEffectStateError(active);
-        }
-      }
-    }
-    try {
-      return await this.persistTerminal(active, outcome, evidenceCode, false, {}, true);
-    } catch {
-      throw new PostEffectStateError(active);
-    }
-  }
-
-  private async reconcilePersistedBlockedTerminal(
-    active: ActiveRun,
-    issue: RunIssueSnapshot,
-    outcome: Extract<RunTerminalOutcome, { status: 'blocked' }>,
-  ): Promise<RunIssueResult> {
-    if (!this.dependencies.issues.transitionToBlocked) {
-      return this.invokedFailure(active, 'blocked-labels-transition-unavailable');
-    }
-    try {
-
-      await this.dependencies.issues.transitionToBlocked(
-        active.record.issueNumber,
-        blockedLabelPolicy(active.config),
-      );
-    }
-    catch { return this.invokedFailure(active, 'blocked-labels-delivery-unknown'); }
-    const observation = await this.readIssue(active.record.issueNumber);
-    if (!observation || observation.state !== 'OPEN'
-      || blockedLabelProjection(observation.labels, active.config).status !== 'settled') {
-      return this.invokedFailure(active, 'blocked-labels-observation-diverged');
-    }
-    return publicOutcome(outcome);
+    const feedback = active.record.reviewFeedback;
+    if (feedback?.activeBatch && active.record.pendingEffect) active = await this.clearEffect(active);
+    const terminalChanges = feedback?.activeBatch && !additionalChanges.reviewFeedback ? {
+      ...additionalChanges,
+      reviewFeedback: blockReviewFeedback(feedback, outcome.status === 'blocked' ? outcome.kind : 'safety', this.timestamp()),
+    } : additionalChanges;
+    return this.persistTerminal(active, outcome, evidenceCode, retainIntent, terminalChanges);
   }
 
   private async settleTerminalNotificationsBestEffort(starting: ActiveRun): Promise<ActiveRun> {
@@ -4123,44 +3950,10 @@ function commentsWithMarker(issue: RunIssueSnapshot, marker: string): Array<{ id
   return issue.comments.filter((comment) => comment.body.split('\n')[0] === marker);
 }
 
-function blockedComment(
-  runId: string,
-  outcome: Extract<TerminalSeed, { status: 'blocked' }>,
-  evidenceCode: string,
-): string {
-  const lines = [
-    `<!-- codex-orchestrator:run:${runId}:blocked -->`,
-    'codex-orchestrator blocked this run.',
-    '',
-    `Kind: ${outcome.kind}`,
-    `Resumable: ${outcome.resumable ? 'yes' : 'no'}`,
-  ];
-  if (outcome.blocker) {
-    lines.push('', `Reason: ${publicBlockedText(outcome.blocker.summary, evidenceCode, 2_000)}`);
-    if (outcome.blocker.reviewerRejectionDetail) {
-      lines.push(`Detail: ${publicBlockedText(
-        outcome.blocker.reviewerRejectionDetail,
-        'Review detail was unsafe or unavailable.',
-        2_000,
-      )}`);
-    }
-    if (outcome.blocker.attempted.length > 0) {
-      const attempted: string[] = [];
-      let remaining = 8_000;
-      for (const attempt of outcome.blocker.attempted.slice(0, 16)) {
-        if (remaining <= 0) break;
-        const text = publicBlockedText(attempt, 'Unsafe or unavailable attempted action.', Math.min(2_000, remaining));
-        attempted.push(`- ${text}`);
-        remaining -= text.length;
-      }
-      lines.push('', 'Attempted:', ...attempted);
-    } else {
-      lines.push('', 'Attempted:', '- No attempted actions were recorded.');
-    }
-  } else {
-    lines.push('', `Reason: ${evidenceCode}`, '', 'Attempted:', '- No attempted actions were recorded.');
-  }
-  return lines.join('\n');
+function managedLabelProjection(labels: string[], config: AgentAutoConfig): string[] {
+  const policy = config.github.labels;
+  const managed = new Set([policy.auto.name, policy.running.name, policy.blocked.name, policy.review.name]);
+  return labels.filter((label) => managed.has(label)).sort();
 }
 
 function publicBlockedText(value: string, fallback: string, maxLength: number): string {

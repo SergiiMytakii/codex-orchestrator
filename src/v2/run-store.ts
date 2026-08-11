@@ -37,16 +37,6 @@ type EffectIdentity = { effectId: string };
 export type PendingEffect = EffectIdentity & (
   | { kind: 'claim-labels'; issueNumber: number; expected: string[] }
   | { kind: 'claim-comment' | 'handoff-comment'; issueNumber: number; marker: string; bodySha256: string }
-  | {
-    kind: 'blocked-comment';
-    issueNumber: number;
-    marker: string;
-    bodySha256: string;
-    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
-    resumable: boolean;
-    evidenceCode: string;
-    blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string };
-  }
   | { kind: 'initial-commit'; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'initial-push'; branch: string; sha: string }
   | { kind: 'draft-pr'; owner: string; repo: string; head: string; base: string; issueNumber: number; marker: string }
@@ -58,15 +48,6 @@ export type PendingEffect = EffectIdentity & (
   | {
     kind: 'terminal-labels'; issueNumber: number; add: string[]; remove: string[];
     outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; attempt: number;
-  }
-  | {
-    kind: 'blocked-labels';
-    issueNumber: number;
-    expected: string[];
-    blockKind: 'external' | 'safety' | 'decision-delta' | 'out-of-scope' | 'authority-boundary';
-    resumable: boolean;
-    evidenceCode: string;
-    blocker?: { kind: string; summary: string; attempted: string[]; resumable: boolean; reviewerRejectionDetail?: string };
   }
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
   | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string; candidateRef?: string }
@@ -450,7 +431,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (value.lifecycle === 'safe-halt' && !hasOwn(value, 'activeAttempt')) throw new Error(`${field} safe-halt requires an active attempt`);
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
-    || ['review-activation-labels', 'blocked-comment', 'blocked-labels', 'continuation-worktree-create', 'outcome-evidence',
+    || ['review-activation-labels', 'continuation-worktree-create', 'outcome-evidence',
       'terminal-comment', 'terminal-labels'].includes(reviewReadyEffect);
   if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || !reviewReadyEffectAllowed)) {
     throw new Error(`${field} review-ready requires proofReceipt and only a review continuation or terminal effect`);
@@ -604,20 +585,6 @@ function validatePendingEffect(value: unknown, field: string): void {
     validateStringArray(value.remove, `${field}.remove`);
     assertTerminalNotificationOutcome(value.outcome, `${field}.outcome`);
     assertPositiveInteger(value.attempt, `${field}.attempt`);
-  } else if (kind === 'blocked-comment') {
-    assertExactObject(value, [
-      ...identity, 'issueNumber', 'marker', 'bodySha256', 'blockKind', 'resumable', 'evidenceCode',
-      ...(hasOwn(value, 'blocker') ? ['blocker'] : []),
-    ], field);
-    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-    assertNonEmptyString(value.marker, `${field}.marker`);
-    assertSha256(value.bodySha256, `${field}.bodySha256`);
-    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) {
-      throw new Error(`${field}.blockKind is invalid`);
-    }
-    if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
-    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
-    if (hasOwn(value, 'blocker')) validateBlockerDetail(value.blocker, `${field}.blocker`);
   } else if (kind === 'review-activation-labels') {
     assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'expected'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -653,17 +620,6 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertNonEmptyString(value.pullRequestNodeId, `${field}.pullRequestNodeId`);
     assertGitSha(value.epochHeadSha, `${field}.epochHeadSha`);
     validateStringArray(value.expected, `${field}.expected`);
-  } else if (kind === 'blocked-labels') {
-    assertExactObject(value, [
-      ...identity, 'issueNumber', 'expected', 'blockKind', 'resumable', 'evidenceCode',
-      ...(hasOwn(value, 'blocker') ? ['blocker'] : []),
-    ], field);
-    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
-    validateStringArray(value.expected, `${field}.expected`);
-    if (!['external', 'safety', 'decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.blockKind as string)) throw new Error(`${field}.blockKind is invalid`);
-    if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
-    assertNonEmptyString(value.evidenceCode, `${field}.evidenceCode`);
-    if (hasOwn(value, 'blocker')) validateBlockerDetail(value.blocker, `${field}.blocker`);
   } else if (kind === 'worktree-create') {
     assertExactObject(value, [...identity, 'worktreePath', 'branchName', 'baseBranch', 'baseSha'], field);
     assertAbsolutePath(value.worktreePath, `${field}.worktreePath`);
@@ -872,9 +828,9 @@ function validateReviewFeedbackRunInvariant(run: RunRecord, field: string): void
     || batch.priorPublishedHeadSha !== feedback.previousPublishedHeadSha)) {
     throw new Error(`${field}.reviewFeedback active batch identity binding is invalid`);
   }
-  const blockedPublication = ['blocked-comment', 'blocked-labels', 'outcome-evidence'].includes(run.pendingEffect?.kind ?? '');
   const retainedQuiescentHistory = !batch && (
-    (run.lifecycle === 'blocked' && run.terminalOutcome?.status === 'blocked') || blockedPublication
+    ['review-ready', 'blocked', 'cancelled', 'internal-error'].includes(run.lifecycle)
+    || run.pendingEffect?.kind === 'outcome-evidence'
   );
   if (!batch && run.lifecycle !== 'review-ready' && !retainedQuiescentHistory) {
     throw new Error(`${field}.reviewFeedback quiescent data requires review-ready lifecycle`);
