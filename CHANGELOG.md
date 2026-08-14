@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.16] - 2026-08-14
+
 ### Changed
 - Synced the packaged Plan and To Tickets workflows with the current local
   skills: tickets now record only confirmed binding decisions at incompatible
