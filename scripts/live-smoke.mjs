@@ -307,9 +307,6 @@ async function runReviewReadyScenario(context, scenario) {
   if (scenario === 'incomplete-progress-rework' && record.transportRetries !== 1) {
     throw new Error(`${scenario}: expected one durable transport retry`);
   }
-  if (scenario === 'report-repair' && record.reportRepairs !== 1) {
-    throw new Error(`${scenario}: expected one durable report repair`);
-  }
   if (scenario === 'browser-proof') {
     const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
     if (screenshots.length !== 2) throw new Error(`${scenario}: expected two publishable responsive screenshots`);
@@ -880,8 +877,13 @@ function normalizeReviewFeedbackImplementation(reportPath, prompt) {
 function applyFault(scenario, operation, prompt) {
   const reportPath = args[args.indexOf('--output-last-message') + 1];
   if (!reportPath) throw new Error('missing report path');
-  if (operation === 'implementation' && scenario === 'report-repair' && !prompt.includes('Report repair only')) {
-    writeFileSync(reportPath, '{bad json'); return;
+  if (operation === 'implementation' && scenario === 'report-repair') {
+    const marker = auditPath + '.report-retry';
+    try { readFileSync(marker); } catch {
+      writeFileSync(marker, 'attempted\\n');
+      writeFileSync(reportPath, '{bad json');
+      return;
+    }
   }
   if (operation === 'implementation' && scenario === 'commit-policy') {
     runGit(['add', '-A']);
@@ -1055,25 +1057,29 @@ function writeReview(reportPath, prompt) {
 }
 
 function writeImplementation(scenario, reportPath, prompt) {
-  if (scenario === 'report-repair' && !prompt.includes('Report repair only')) {
-    writeChange(scenario); writeFileSync(reportPath, '{bad json'); return;
+  if (scenario === 'report-repair') {
+    const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-report-retry'], { encoding: 'utf8' }).trim();
+    try { readFileSync(marker); } catch {
+      writeFileSync(marker, 'attempted\\n');
+      writeChange(scenario);
+      writeFileSync(reportPath, '{bad json');
+      return;
+    }
   }
-  if (!prompt.includes('Report repair only')) {
-    if (scenario === 'incomplete-progress-rework') {
-      const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
-      try { readFileSync(marker); } catch {
-        writeFileSync(marker, 'attempted\\n');
-        process.stderr.write('stream disconnected before completion\\n');
-        process.exitCode = 1;
-        return;
-      }
+  if (scenario === 'incomplete-progress-rework') {
+    const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
+    try { readFileSync(marker); } catch {
+      writeFileSync(marker, 'attempted\\n');
+      process.stderr.write('stream disconnected before completion\\n');
+      process.exitCode = 1;
+      return;
     }
-    if (scenario === 'safety-negative') writeFileSync('.env', 'blocked fixture\\n');
-    else writeChange(scenario);
-    if (scenario === 'commit-policy') {
-      execFileSync('git', ['add', '-A']);
-      execFileSync('git', ['-c', 'user.name=fake-agent', '-c', 'user.email=fake@example.invalid', 'commit', '-m', 'forbidden agent commit']);
-    }
+  }
+  if (scenario === 'safety-negative') writeFileSync('.env', 'blocked fixture\\n');
+  else writeChange(scenario);
+  if (scenario === 'commit-policy') {
+    execFileSync('git', ['add', '-A']);
+    execFileSync('git', ['-c', 'user.name=fake-agent', '-c', 'user.email=fake@example.invalid', 'commit', '-m', 'forbidden agent commit']);
   }
   const changedFiles = scenario === 'commit-policy'
     ? execFileSync('git', ['diff', '--name-only', 'HEAD^', 'HEAD'], { encoding: 'utf8' }).trim().split('\\n').filter(Boolean).sort()
@@ -1343,7 +1349,10 @@ const reportPath = args[args.indexOf('--output-last-message') + 1];
 process.stdin.resume();
 process.stdin.on('end', () => {
   mkdirSync(dirname(reportPath), { recursive: true });
-  writeFileSync(reportPath, JSON.stringify({ report: { version: 1, status: 'completed' } }));
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: 'external-block', summary: 'Self-test service blocker.', changedFiles: [], residualRisks: [],
+    blocker: { kind: 'service', summary: 'Self-test service blocker.', attempted: ['self-test'], resumable: true },
+  } }));
 });
 `);
     await chmod(stubPath, 0o700);
@@ -1354,8 +1363,15 @@ process.stdin.on('end', () => {
       cwd: root, env, stdin: `Implement issue.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
     });
     if (await readFile(reportPath, 'utf8') !== '{bad json') throw new Error('live Codex fault injection did not run after the model');
+    await runCommand(wrapperPath, ['exec', '--output-last-message', reportPath, '-c', `model="${liveSmokeModel}"`], {
+      cwd: root, env, stdin: `Implement issue.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
+    });
+    const recovered = JSON.parse(await readFile(reportPath, 'utf8')).report;
+    if (recovered.status !== 'external-block' || recovered.blocker?.kind !== 'service') {
+      throw new Error('live Codex full implementation retry did not preserve the second valid report');
+    }
     const audit = (await readFile(auditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-    if (audit.length !== 1 || audit[0].model !== liveSmokeModel || audit[0].scenario !== 'report-repair') {
+    if (audit.length !== 2 || audit.some((entry) => entry.model !== liveSmokeModel || entry.scenario !== 'report-repair')) {
       throw new Error('live Codex model audit contract failed');
     }
     const missingPin = await runCommand(wrapperPath, ['exec', '--output-last-message', join(root, 'missing.json')], {
@@ -1391,6 +1407,19 @@ async function selfTestFakeAgent() {
     if (implementation.version !== 1 || implementation.status !== 'completed'
       || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
       throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
+    }
+    const retryCriteria = [{ id: 'ac-retry', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=report-repair' }];
+    const retryPath = join(root, 'implementation-retry.json');
+    await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
+      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\n`,
+    });
+    if (await readFile(retryPath, 'utf8') !== '{bad json') throw new Error('fake agent did not inject the first malformed report');
+    await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
+      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\n`,
+    });
+    const retriedImplementation = JSON.parse(await readFile(retryPath, 'utf8')).report;
+    if (retriedImplementation.status !== 'completed' || !retriedImplementation.changedFiles.includes('src/live-smoke/report-repair.txt')) {
+      throw new Error('fake agent full implementation retry did not produce a valid cumulative report');
     }
     const reviewPath = join(root, 'review.json');
     const reviewCapsule = {

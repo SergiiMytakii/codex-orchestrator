@@ -214,7 +214,6 @@ export interface RunIssueDependencies {
       deliveryAuthority: DeliveryAuthority;
       cycle: number;
       reworkFindings: string[];
-      repairOnly: boolean;
       workflowGeneration: WorkflowGenerationReceipt;
       reviewFeedbackRound?: number;
       reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
@@ -1526,8 +1525,6 @@ export class RunIssue {
         },
       };
       const deniedPathsBaseline = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
-      const reportOnlyRecovery = active.record.reportRepairs > 0;
-      const reportOnlyBaseline = reportOnlyRecovery ? await this.dependencies.git.snapshot(worktreePath) : null;
       if (!active.record.activeAttempt) {
         active = await this.prepareAttempt(
           active,
@@ -1550,10 +1547,7 @@ export class RunIssue {
           frozenCriteria,
           deliveryAuthority: active.record.deliveryAuthority!,
           cycle: active.record.cycle,
-          reworkFindings: reportOnlyRecovery
-            ? ['Emit a schema-valid implementation report for the existing exact product result.']
-            : active.record.reworkFindings,
-          repairOnly: reportOnlyRecovery,
+          reworkFindings: active.record.reworkFindings,
           workflowGeneration: active.record.workflowGeneration,
           signal: this.signal,
           ...implementationLaunch,
@@ -1581,9 +1575,6 @@ export class RunIssue {
           'Implementation infrastructure is temporarily unavailable; a later bounded invocation may retry.');
       }
       if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
-      if (reportOnlyBaseline && !sameFreshness(reportOnlyBaseline, await this.dependencies.git.snapshot(worktreePath))) {
-        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'report-repair-modified-worktree');
-      }
       let report;
       try {
         report = validateImplementationReport(implementation.report);
@@ -1595,7 +1586,7 @@ export class RunIssue {
           active = await this.persist(active, { reportRepairs: active.record.reportRepairs + 1 });
         }
         return this.invokedFailure(active, 'implementation-report-retryable',
-          'The implementation report was malformed; a later bounded invocation will retry report-only.');
+          'The implementation report was malformed; a later bounded invocation will retry implementation.');
       }
       if (report.status === 'external-block') {
         if (report.blocker!.resumable) {
@@ -1629,7 +1620,7 @@ export class RunIssue {
           active = await this.persist(active, { reportRepairs: active.record.reportRepairs + 1 });
         }
         return this.invokedFailure(active, 'implementation-change-set-report-retryable',
-          `The implementation report must describe the current exact change set ${canonicalJson(changedFiles)}; a later bounded invocation will retry report-only.`);
+          `The implementation report must describe the current exact change set ${canonicalJson(changedFiles)}; a later bounded invocation will retry implementation.`);
       }
 
       if (isAdoptableAttempt(active.record.activeAttempt)) {

@@ -28,8 +28,8 @@ Its scenarios are intentionally bound to these current owner behaviors:
 - `commit-policy`: an agent-authored commit is rejected and never published.
 - `incomplete-progress-rework`: one interrupted transport attempt resumes once
   and reaches review-ready without opening a new implementation cycle.
-- `report-repair`: one invalid report is repaired as report-only work and then
-  reaches review-ready.
+- `report-repair`: one invalid report causes a full implementation retry that
+  reaches review-ready without opening a new semantic cycle.
 - `diagnostics`: `doctor` and `status` inspect without changing target state,
   after which the normal delivery path still succeeds.
 - `authoritative-candidate-publication`: a deliberately stale shared-index entry

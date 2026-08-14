@@ -2403,7 +2403,7 @@ test('blocked transition resumes when the post-effect projection write fails', a
   assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, labelEffects);
 });
 
-test('malformed report repair and clean transport retry use separate budgets without consuming a cycle', async () => {
+test('malformed report and clean transport failures retry full implementation without consuming a cycle', async () => {
   const malformed = await runFixture({
     implementationResults: [
       { kind: 'completed', report: { status: 'completed' } },
@@ -2413,7 +2413,6 @@ test('malformed report repair and clean transport retry use separate budgets wit
   assert.equal((await malformed.runner.runIssue({ targetRoot: malformed.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await malformed.runner.runIssue({ targetRoot: malformed.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(malformed.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(malformed.implementationRepairOnly, [false, true]);
   assert.deepEqual(pick((await malformed.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
 
   const transport = await runFixture({
@@ -2428,7 +2427,7 @@ test('malformed report repair and clean transport retry use separate budgets wit
   assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 });
 });
 
-test('incomplete cumulative changedFiles gets one report-only repair without consuming a cycle', async () => {
+test('incomplete cumulative changedFiles retries full implementation without consuming a cycle', async () => {
   const fixture = await runFixture({
     implementationResults: [
       { kind: 'completed', report: { version: 1, status: 'completed', summary: 'delta only', changedFiles: ['repair-only.txt'], residualRisks: [] } },
@@ -2439,11 +2438,10 @@ test('incomplete cumulative changedFiles gets one report-only repair without con
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-  assert.deepEqual(fixture.implementationRepairOnly, [false, true]);
   assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'reportRepairs']), { cycle: 1, reportRepairs: 0 });
 });
 
-test('six malformed implementation reports remain bounded report-only recovery for one product result', async () => {
+test('six malformed implementation reports retry full implementation for one product result', async () => {
   const malformed = { kind: 'completed' as const, report: { status: 'completed' } };
   const fixture = await runFixture({
     implementationResults: [
@@ -2459,7 +2457,6 @@ test('six malformed implementation reports remain bounded report-only recovery f
     );
   }
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.deepEqual(fixture.implementationRepairOnly, [false, true, true, true, true, true, true]);
   assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 7);
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
 });
@@ -3119,7 +3116,6 @@ async function runFixture(options: FixtureOptions = {}) {
   const localGit = new LocalGitRunIssueAdapter();
   const candidateAuthorityHashes: string[] = [];
   const implementationAttemptIds: string[] = [];
-  const implementationRepairOnly: boolean[] = [];
   const git = traceGit(localGit, events, options, candidateAuthorityHashes);
   let labels = [...(options.initialLabels ?? ['agent:auto'])];
   let blockedTransitionMutated = false;
@@ -3242,9 +3238,8 @@ async function runFixture(options: FixtureOptions = {}) {
     },
     git,
     implementationAgent: {
-      run: async ({ attemptId, worktreePath: path, deliveryAuthority, cycle, reworkFindings, repairOnly, onPrepared, onLaunched }) => {
+      run: async ({ attemptId, worktreePath: path, deliveryAuthority, cycle, reworkFindings, onPrepared, onLaunched }) => {
         implementationAttemptIds.push(attemptId);
-        implementationRepairOnly.push(repairOnly);
         implementationAuthorities.push(structuredClone(deliveryAuthority));
         events.push('agent');
         events.push('agent:implementation');
@@ -3274,7 +3269,7 @@ async function runFixture(options: FixtureOptions = {}) {
           await writeFile(join(path, 'feature.txt'), 'partial implementation\n');
         }
         if (selected?.kind !== 'completed' && selected) return selected;
-        if (options.agentWrites !== false && !repairOnly) {
+        if (options.agentWrites !== false) {
           await writeFile(join(path, 'feature.txt'), cycle > 1 ? `implemented repair ${reworkFindings.join('|')}\n` : 'implemented\n');
         }
         if (options.agentWritesDeniedIgnoredPath) await writeFile(join(path, '.env'), 'ignored denied fixture\n');
@@ -3557,7 +3552,7 @@ async function runFixture(options: FixtureOptions = {}) {
     events, evidence, store: rawStore, comments, implementationAuthorities, reviewAuthorities,
     candidateAuthorityHashes, checkedChangePayloads, reviewInputs,
     reviewReportRepairInputs,
-    implementationAttemptIds, implementationRepairOnly,
+    implementationAttemptIds,
     setIssueState: (state: 'OPEN' | 'CLOSED') => { issueState = state; },
   };
 }

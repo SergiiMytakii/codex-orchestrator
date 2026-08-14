@@ -330,7 +330,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
       version: 2, kind: 'issue', issueNumber: 42, issueUrl: 'https://example.invalid/42',
       issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64),
     },
-    cycle: 1, reworkFindings: [], repairOnly: false, workflowGeneration,
+    cycle: 1, reworkFindings: [], workflowGeneration,
     reviewFeedbackRound: 1,
     reviewFeedback: [{
       id: 'issue-comment:105', sourceUrl: 'https://github.com/owner/repo/issues/42#issuecomment-105',

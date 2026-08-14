@@ -175,6 +175,18 @@ test('implementation output schema and runtime validator have parity across stat
         status: 'external-block',
         changedFiles: [],
         blocker: {
+          kind: 'out-of-scope', summary: 'The required file is outside authority.', attempted: ['inspected scope'],
+          resumable: true,
+        },
+      },
+      accepted: false,
+    },
+    {
+      value: {
+        ...completedImplementation,
+        status: 'external-block',
+        changedFiles: [],
+        blocker: {
           kind: 'decision-delta', summary: 'Product choice is required.', attempted: ['inspected issue authority'],
           resumable: false,
           reviewerRejectionDetail: 'Reviewer rejected guessing the missing choice.',

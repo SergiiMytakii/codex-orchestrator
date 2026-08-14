@@ -150,14 +150,24 @@ function validateExternalBlocker(value: unknown, field: string): asserts value i
 }
 
 function externalBlockerSchema(): Record<string, unknown> {
-  const properties = {
-    kind: { type: 'string', enum: ['credential', 'tool', 'service', 'decision-delta', 'out-of-scope', 'authority-boundary'] },
+  const commonProperties = {
     summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
     attempted: stringArraySchema(),
-    resumable: { type: 'boolean' },
   };
+  const variants = [
+    {
+      ...commonProperties,
+      kind: { type: 'string', enum: ['credential', 'tool', 'service'] },
+      resumable: { type: 'boolean' },
+    },
+    {
+      ...commonProperties,
+      kind: { type: 'string', enum: ['decision-delta', 'out-of-scope', 'authority-boundary'] },
+      resumable: { type: 'boolean', const: false },
+    },
+  ];
   return {
-    anyOf: [
+    anyOf: variants.flatMap((properties) => [
       { type: 'object', additionalProperties: false, required: Object.keys(properties), properties },
       {
         type: 'object',
@@ -165,7 +175,7 @@ function externalBlockerSchema(): Record<string, unknown> {
         required: [...Object.keys(properties), 'reviewerRejectionDetail'],
         properties: { ...properties, reviewerRejectionDetail: boundedStringSchema(MAX_SUMMARY_LENGTH) },
       },
-    ],
+    ]),
   };
 }
 

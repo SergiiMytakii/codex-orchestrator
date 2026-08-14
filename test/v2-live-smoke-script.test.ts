@@ -397,7 +397,8 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   const text = await source();
   assert.match(text, /context\.cliPath = installedCliPath/u);
   assert.match(text, /expected one durable transport retry/u);
-  assert.match(text, /expected one durable report repair/u);
+  assert.doesNotMatch(text, /Report repair only/u);
+  assert.match(text, /v2-live-smoke-report-retry/u);
   assert.match(text, /expected two publishable responsive screenshots/u);
   assert.match(text, /read-only diagnostics mutated the target/u);
   assert.match(text, /denied-path-modified/u);

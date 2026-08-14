@@ -802,7 +802,6 @@ export class ContainedImplementationAgent {
     deliveryAuthority: DeliveryAuthority;
     cycle: number;
     reworkFindings: string[];
-    repairOnly: boolean;
     workflowGeneration: WorkflowGenerationReceipt;
     reviewFeedbackRound?: number;
     reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
@@ -865,7 +864,6 @@ export class ContainedImplementationAgent {
           `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
-          ...(input.repairOnly ? ['Report repair only: do not modify any worktree file; emit a schema-valid implementation report for the existing change.'] : []),
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
