@@ -40,8 +40,8 @@ For a requested spec-and-tickets outcome:
 2. keep the PRD draft in the current context;
 3. pass that draft directly to `$to-tickets`;
 4. do not publish or independently review the intermediate PRD;
-5. Let `$to-tickets` own executable slicing, one fresh semantic review of the
-   complete publish-ready packet, one explicit user approval, serialized
+5. Let `$to-tickets` own executable slicing, one fresh semantic review per
+   settled revision, one explicit user approval of the final packet, serialized
    publication, deterministic reconciliation, and authoritative tracker
    read-back.
 6. Stop before implementation.

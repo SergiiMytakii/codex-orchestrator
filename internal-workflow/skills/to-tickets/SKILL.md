@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Compile Plan's contextual PRD draft or approved product authority into the smallest executable ticket packet, run one fresh semantic packet review, obtain one approval, publish serially, verify authoritative tracker read-back, and stop before implementation.
+description: Compile Plan's contextual PRD draft or approved product authority into the smallest executable ticket packet, run fresh semantic review per settled revision, obtain one approval, publish serially, verify tracker read-back, and stop before implementation.
 ---
 
 # To Tickets
@@ -15,9 +15,8 @@ ticket contains only its local observable outcome, scope, blockers, proof, and
 Parent link. The approved ticket body plus Parent PRD is the final execution
 authority; no later planning pass is inserted.
 
-`$to-tickets` owns one fresh semantic reviewer, one explicit user approval,
-serialized publication, deterministic reconciliation, and authoritative
-tracker read-back for the complete packet.
+`$to-tickets` owns one fresh reviewer per settled revision, one explicit user
+approval, serialized publication, reconciliation, and tracker read-back.
 
 The primary route remains `planning-only` while compiling or publishing these
 artifacts. `ticket-graph` begins only after separate delivery authorization;
@@ -100,6 +99,14 @@ them exact. Acceptance criteria describe observable outcomes. Freeze an
 internal mechanism only when a public contract, ownership boundary, safety
 requirement, or inter-ticket dependency depends on it.
 
+Add `Binding implementation decisions` only when two locally valid
+implementations could conflict at a ticket edge, public contract,
+identity/cardinality, persisted or in-flight state, concurrency, shared
+behavior, or Parent proof. Record only confirmed boundary semantics; leave
+private structure to Implement. Omit the section when Parent and existing seams
+already determine the behavior. Return an unconfirmed product choice as a
+Decision Delta and missing technical evidence as blocking discovery.
+
 Keep unresolved product decisions with the user and unresolved external or
 technical discovery in a blocking AFK/HITL ticket. If the generated ticket
 would need a later planning artifact, it is not ready to publish.
@@ -132,12 +139,11 @@ workflow owner. Do not publish any intermediate PRD.
 
 ### 4. Run one fresh semantic packet review
 
-For the settled packet, launch exactly one fresh `standards_reviewer` without a
-history fork (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin its
-brief with `Assigned role: standards_reviewer`, provide the full source authority
-and complete publish-ready packet, and require all three internal lenses in the
-same review activation: source fidelity, ticket executability, and minimum
-solution and scope conservation.
+For each settled revision, launch exactly one fresh `standards_reviewer`
+without history (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin
+with `Assigned role: standards_reviewer`, provide the full authority and packet,
+and apply all three lenses in the same activation: source fidelity, ticket
+executability, and minimum solution and scope conservation.
 
 - **Source fidelity:** every product claim, decision, scope boundary,
   consequence, and blocker is grounded in the source; no behavior or ownership
@@ -145,7 +151,9 @@ solution and scope conservation.
 - **Ticket executability:** every ticket is a cohesive vertical outcome that a
   fresh implementation context can execute and prove from its body plus the
   Parent PRD; dependencies are real, proof observes the claim, and no later
-  planning artifact is required.
+  planning artifact is required. Ask whether the implementer can execute it
+  without independently choosing product behavior or incompatible system
+  semantics; require confirmed binding decisions only when the answer is no.
 - **Minimum solution and scope conservation:** reject Speculative Generality,
   Middle Man indirection, unsupported new or duplicate owners, proof-only
   runtime machinery, acceptance criteria without Parent/user/repository
@@ -153,12 +161,27 @@ solution and scope conservation.
   Prefer deletion or narrowing before adding machinery. The reviewer may not
   introduce a new runtime mechanism merely to make proof more exhaustive.
 
+Before verdict, traverse each applicable seam:
+
+- Parent obligation to owning ticket and proof;
+- producer and consumer across each edge: data, identity/cardinality, state,
+  timing, and failure semantics;
+- changed persistence or namespace to existing and in-flight state;
+- reused behavior to equal semantics or an explicit delta;
+- UI promise to its API or DTO source;
+- child-added choice to Parent, user, or repository authority.
+
+Return concise evidence for applicable seams and omit `N/A` seams. This is
+review output, not another packet artifact.
+
 The reviewer is read-only and returns `APPROVE` or `NEEDS_WORK` with exact
 source/artifact evidence. Capture a non-empty fresh child identity and wait for
 that same child. Do not split the lenses across children and do not launch the
-delivery Standards review. A missing, failed, or non-approving review
-blocks approval and publication. If repairs change a product decision, return
-that decision to the user rather than resolving it in review.
+delivery Standards review. After `NEEDS_WORK`, repair the packet and launch a
+new reviewer without prior review history over the complete revised packet. A
+same-context or findings-only recheck cannot approve. Repeat until the latest
+revision receives one full approval. Missing or failed review blocks
+publication; product-changing repairs return to the user.
 
 ### 5. Get one explicit approval
 

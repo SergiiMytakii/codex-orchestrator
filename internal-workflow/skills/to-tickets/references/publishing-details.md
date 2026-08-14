@@ -9,6 +9,8 @@ planning artifact. Keep the body local and include only:
 - the local observable outcome and acceptance criteria;
 - in-scope and out-of-scope boundaries;
 - confirmed owner/public seam when needed for zero-guess execution;
+- only the confirmed binding implementation decisions needed to prevent
+  incompatible interpretations, when any exist;
 - blockers and native dependency links;
 - behavior proof or exact non-TDD proof;
 - AFK/HITL final state, which never authorizes implementation.
@@ -60,6 +62,16 @@ AFK: `ready-for-agent`; HITL: `ready-for-human`. State does not authorize
 implementation.
 ```
 
+Only when the Parent and existing seam leave incompatible implementations
+possible, insert this short section after `Owner and proof seam`:
+
+```md
+## Binding implementation decisions
+
+- <only confirmed choice required to prevent incompatible implementations>
+- Implementation freedom: <material choices intentionally left to Implement>
+```
+
 ## Serialized publication
 
 The single current root publisher performs every tracker effect. Do not create
@@ -100,8 +112,8 @@ approved packet. Verify:
 - exact AFK/HITL labels and absence of conflicting planning or delivery state;
 - absence of duplicate or partial packets;
 - every ticket remains executable from its body plus the Parent PRD;
-- the publication event trace contains one semantic review, one approval, and
-  no implementation action.
+- the final packet revision has fresh full semantic approval, one user approval,
+  and no implementation action.
 
 Post-publication read-back is integrity proof. It does not launch another
 semantic reviewer and does not request another approval.

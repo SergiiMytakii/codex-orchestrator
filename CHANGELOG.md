@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Synced the packaged Plan and To Tickets workflows with the current local
+  skills: tickets now record only confirmed binding decisions at incompatible
+  seams, and every repaired packet revision receives a fresh semantic review.
+
+### Fixed
+- Invalid implementation reports now retry the full implementation operation
+  after the bounded report-repair path cannot produce a valid report.
+
 ## [2.0.15] - 2026-08-11
 
 ### Added

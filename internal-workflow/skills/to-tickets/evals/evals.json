@@ -15,9 +15,9 @@
       "forbidden": ["create duplicate durable planning state", "request another execution artifact"]
     },
     {
-      "id": "complete-packet-gets-one-semantic-review",
+      "id": "complete-packet-gets-one-review-per-revision",
       "prompt": "Prepare a publish-ready PRD and three-ticket graph after Plan passed the combined PRD draft to you.",
-      "expected": ["launch one fresh semantic reviewer over the complete packet", "apply source fidelity and ticket executability in that one review", "obtain one explicit user approval before publication"],
+      "expected": ["launch one fresh semantic reviewer over each settled complete revision", "apply source fidelity and ticket executability in that review", "obtain one explicit user approval before publication"],
       "forbidden": ["review the intermediate PRD", "launch separate workflow owners for each lens", "request multiple approvals"]
     },
     {
@@ -86,6 +86,42 @@
       "prompt": "Semantic packet review finds that one acceptance claim is stronger than the available proof seam.",
       "expected": ["narrow the unsupported claim or use an existing proof seam", "prefer deletion or narrowing before adding machinery"],
       "forbidden": ["automatically add middleware", "introduce a framework or runtime mechanism merely for exhaustive proof", "invent custom tooling"]
+    },
+    {
+      "id": "simple-ticket-omits-binding-decisions",
+      "prompt": "Compile a small approved change whose behavior is already determined by the Parent and an existing public seam.",
+      "expected": ["publish the ordinary short executable ticket", "omit Binding implementation decisions"],
+      "forbidden": ["add a technical contract", "request another approval", "freeze implementation details"]
+    },
+    {
+      "id": "incompatible-semantics-get-minimal-binding-decisions",
+      "prompt": "Two implementations could both satisfy the observable criteria but choose incompatible persisted identity and failure semantics across existing runtime paths.",
+      "expected": ["record only the necessary confirmed choices under Binding implementation decisions", "state the material implementation freedom"],
+      "forbidden": ["write a file-by-file implementation plan", "guess an unconfirmed choice", "add another workflow stage"]
+    },
+    {
+      "id": "repair-gets-fresh-full-packet-review",
+      "prompt": "Semantic review returns NEEDS_WORK and the packet is repaired before user approval.",
+      "expected": ["launch one new reviewer without prior review history", "review the complete revised packet", "keep one user approval for the final packet"],
+      "forbidden": ["continue with the same reviewer", "approve from a findings-only recheck", "launch multiple reviewers for one revision"]
+    },
+    {
+      "id": "cross-ticket-cardinality-must-match",
+      "prompt": "A predecessor emits multiple identities while its successor contract consumes one identity.",
+      "expected": ["reject the packet until producer and consumer cardinality agree through a minimal confirmed binding decision"],
+      "forbidden": ["approve each ticket in isolation", "choose a product outcome without authority"]
+    },
+    {
+      "id": "changed-state-covers-existing-work",
+      "prompt": "A ticket changes a persisted state contract under an existing namespace while records and jobs may already exist.",
+      "expected": ["require an explicit outcome for existing state and in-flight work"],
+      "forbidden": ["invent a compatibility layer", "approve only the new-state happy path"]
+    },
+    {
+      "id": "ui-promise-requires-data-contract",
+      "prompt": "UI acceptance requires dynamic content absent from the proposed API or DTO.",
+      "expected": ["reject the packet until an existing or authorized data contract supplies the content"],
+      "forbidden": ["let the UI invent the data", "add a new owner solely for proof"]
     }
   ]
 }

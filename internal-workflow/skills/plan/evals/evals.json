@@ -17,7 +17,7 @@
     {
       "id": "combined-multi-ticket-plan",
       "prompt": "Turn this multi-session product outcome into a spec and executable tickets.",
-      "expected": ["invoke to-spec in combined mode and keep the draft contextual", "pass the draft directly to to-tickets", "use one fresh semantic reviewer and one approval", "finish with authoritative tracker read-back", "stop before implementation"],
+      "expected": ["invoke to-spec in combined mode and keep the draft contextual", "pass the draft directly to to-tickets", "use one fresh semantic reviewer per settled revision and one final approval", "finish with authoritative tracker read-back", "stop before implementation"],
       "forbidden": ["publish or independently review the intermediate PRD", "launch delivery reviewers"]
     },
     {
