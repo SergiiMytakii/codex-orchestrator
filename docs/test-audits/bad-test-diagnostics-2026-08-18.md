@@ -1,5 +1,21 @@
 # Live-smoke scenario value audit — 2026-08-18
 
+## Implementation status
+
+Implemented after the audit:
+
+- removed `browser-proof` from the GitHub live registry while retaining local
+  browser proof-contract coverage;
+- rewrote `diagnostics` as a model-free check through an installed packed CLI;
+- added `configured-check-rework`, `initial-review-rework`,
+  `publication-reconciliation`, `authorization-revoked`,
+  `review-feedback-negative`, and `issue-verification`;
+- expanded the full registry from 12 to 17 scenarios and updated the profile
+  documentation.
+
+The classifications and gaps below record the evidence that motivated the
+implemented changes.
+
 ## Scope
 
 Reviewed all 12 scenarios registered in `scripts/live-smoke.mjs`, their profile

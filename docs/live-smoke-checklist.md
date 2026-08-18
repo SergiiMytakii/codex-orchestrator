@@ -11,7 +11,7 @@ npm run smoke:live
 The executable scenario and profile inventory is owned by
 `scripts/live-smoke.mjs`; use `npm run smoke:live -- --help` to inspect it.
 This checklist explains why the current scenarios exist and when to run them.
-The current registry contains 12 scenarios in total.
+The current registry contains 17 scenarios in total.
 
 The default `core-release` profile has two default scenarios:
 
@@ -22,7 +22,7 @@ The default `core-release` profile has two default scenarios:
   is available, and a fast-forward-only publication update.
 
 The default `core-release` profile contains 2 scenarios. The supplemental
-non-mobile `v2-regression` profile contains 9 scenarios, including
+non-mobile `v2-regression` profile contains 15 scenarios, including
 `review-feedback-continuation`, which is also part of the default gate. The
 latter profile remains available through
 `--profile v2-regression` or explicit `--scenario` values. It covers each
@@ -38,8 +38,9 @@ Its scenarios are intentionally bound to these current owner behaviors:
   and reaches review-ready without opening a new implementation cycle.
 - `report-repair`: one invalid report causes a full implementation retry that
   reaches review-ready without opening a new semantic cycle.
-- `diagnostics`: `doctor` and `status` inspect without changing target state,
-  after which the normal delivery path still succeeds.
+- `diagnostics`: the installed packed CLI runs `doctor` and `status` without
+  changing target config, Git state, or scratch-repository state. It is
+  intentionally model-free.
 - `authoritative-candidate-publication`: a deliberately stale shared-index entry
   loses to final worktree bytes; exact-schema check receipts, the published commit tree,
   released candidate pin, and removed immutable execution worktrees prove the
@@ -48,14 +49,25 @@ Its scenarios are intentionally bound to these current owner behaviors:
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
+- `configured-check-rework`: one real configured check fails, the next
+  implementation repairs it, and only the freshly checked candidate reaches
+  proof, Review, and publication.
+- `initial-review-rework`: the first complete Review returns one in-scope
+  blocker; the targeted repair is reviewed against its exact delta before the
+  repaired candidate is published.
+- `publication-reconciliation`: transport is lost after `gh pr create` has
+  completed; restart adopts the exact existing PR without repeating model work
+  or creating another PR.
+- `authorization-revoked`: authorization is removed at a resumable proof
+  boundary and the next invocation stops without publication.
+- `review-feedback-negative`: a resolved inline review thread remains
+  effect-free on daemon replay.
+- `issue-verification`: an issue-scoped `Verification:` command replaces the
+  configured fallback and its passing receipt is bound to the candidate.
 
-Two additional focused scenarios are intentionally available only by explicit
+One additional focused scenario is intentionally available only by explicit
 `--scenario` selection or through `--profile full`:
 
-- `browser-proof`: validates current-run responsive screenshot receipts and
-  their proof-contract bindings. It is a deterministic contract smoke and does
-  not drive a real browser; real browser UI proof remains a separate workflow
-  with browser-owned evidence.
 - `safety-negative`: modifies a denied path and proves the Runner returns the
   exact `denied-path-modified` safety block without publishing a branch or PR.
   This is distinct from `commit-policy`, which rejects agent-created commits.
@@ -71,9 +83,11 @@ local tests must not substitute a production repository. Repair and reviewer
 counts have no semantic round limit; each invocation remains bounded and a
 later invocation resumes durable work.
 
-The `full` profile runs all 12 registered scenarios: the core release
-gate, the supplemental V2 regression matrix, and the focused browser-proof and
-safety-negative contracts. Fixture-specific Android and iOS real gates are not
+The `full` profile runs all 17 registered scenarios: the core release gate, the
+supplemental V2 regression matrix, and the focused safety-negative contract.
+Synthetic browser receipts are covered by local proof-contract tests, not by a
+GitHub live-smoke scenario; real browser UI proof remains a separate workflow
+with browser-owned evidence. Fixture-specific Android and iOS real gates are not
 GitHub live-smoke scenarios: they require explicit runner-owned device, fixture,
 lease, and artifact inputs and remain under their dedicated mobile proof
 procedures and tests.
@@ -81,8 +95,9 @@ procedures and tests.
 Every model-backed scenario launches the real Codex CLI with
 `gpt-5.6-luna`, overriding package role defaults. Deterministic recovery and
 negative cases inject their fault only around the real model result. The report
-records the observed Luna invocation count per scenario. Discovery is
-explicitly model-free and fails if it unexpectedly launches a model.
+records the observed Luna invocation count per scenario. Discovery and
+diagnostics are explicitly model-free and fail if they unexpectedly launch a
+model.
 
 ## Preconditions
 

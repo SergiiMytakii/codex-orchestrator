@@ -22,12 +22,17 @@ const scenarioDefinitions = new Map([
   ['incomplete-progress-rework', runReviewReadyScenario],
   ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
-  ['browser-proof', runReviewReadyScenario],
   ['authoritative-candidate-publication', runReviewReadyScenario],
   ['acceptance-proof-rework', runReviewReadyScenario],
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
   ['safety-negative', runSafetyNegativeScenario],
+  ['configured-check-rework', runConfiguredCheckReworkScenario],
+  ['initial-review-rework', runReviewReadyScenario],
+  ['publication-reconciliation', runPublicationReconciliationScenario],
+  ['authorization-revoked', runAuthorizationRevokedScenario],
+  ['review-feedback-negative', runReviewFeedbackNegativeScenario],
+  ['issue-verification', runIssueVerificationScenario],
 ]);
 
 const scenarioProfiles = new Map([
@@ -37,7 +42,9 @@ const scenarioProfiles = new Map([
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'review-feedback-continuation',
+    'acceptance-proof-negative', 'review-feedback-continuation', 'configured-check-rework',
+    'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
+    'review-feedback-negative', 'issue-verification',
   ]],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
@@ -281,8 +288,8 @@ async function configureTarget(context, overrides = {}) {
   config.codex.command = context.liveCodexPath;
   config.codex.timeoutMs = 600_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
-  config.checks = overrides.failingCheck
-    ? { smoke: `${process.execPath} -e "process.exit(1)"` }
+  config.checks = overrides.reworkCheck
+    ? { smoke: `test -f src/live-smoke/configured-check-rework-fixed.txt` }
     : overrides.authoritativeCandidate
       ? { smoke: 'if [ -e src/live-smoke/authoritative-candidate-publication.txt ]; then [ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ] && git diff --cached --quiet; else git diff --cached --quiet; fi' }
       : { smoke: `${process.execPath} --version` };
@@ -291,7 +298,12 @@ async function configureTarget(context, overrides = {}) {
 
 async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
-  const issue = await createIssue(context, scenario, true);
+  const extraCriteria = scenario === 'initial-review-rework' ? [
+    `Create src/live-smoke/${scenario}.txt as one line containing ${scenario}, followed by one LF newline.`,
+    `Create test/live-smoke/${scenario}.txt as one line containing proof for ${scenario}, followed by one LF newline.`,
+    'Create src/live-smoke/initial-review-rework-fixed.txt as one line containing fixed, followed by one LF newline.',
+  ] : [];
+  const issue = await createIssue(context, scenario, true, extraCriteria);
   const result = await continueRepairReady(() => runIssue(context, issue.number));
   if (result.status !== 'review-ready') {
     const failedRecord = await readRunRecord(context, issue.number);
@@ -307,11 +319,23 @@ async function runReviewReadyScenario(context, scenario) {
   if (scenario === 'incomplete-progress-rework' && record.transportRetries !== 1) {
     throw new Error(`${scenario}: expected one durable transport retry`);
   }
-  if (scenario === 'browser-proof') {
-    const screenshots = record.proofReceipt?.publishableEvidence?.filter((item) => item.kind === 'screenshot') ?? [];
-    if (screenshots.length !== 2) throw new Error(`${scenario}: expected two publishable responsive screenshots`);
+  if (scenario === 'initial-review-rework' && record.cycle !== 2) {
+    throw new Error(`${scenario}: expected one targeted Review repair cycle`);
   }
   const publication = await recordPublication(context, issue.number);
+  await assertValidationBindings(context, record, publication.headSha, scenario);
+  if (scenario === 'initial-review-rework') {
+    const review = record.directReview;
+    const calls = (await readModelAudit(context)).filter((call) => call.scenario === scenario);
+    if (review?.status !== 'clear' || review.targetRevision !== 2 || review.previousTarget?.targetRevision !== 1
+      || review.review.disposition !== 'clear' || !review.review.acceptedReportSha256
+      || calls.filter((call) => call.operation === 'proof').length !== 2
+      || calls.filter((call) => call.operation === 'code-review').length !== 2) {
+      throw new Error(`${scenario}: targeted Review repair did not refresh exact proof and independent Review`);
+    }
+    const repaired = (await runCommand('git', ['-C', context.targetRoot, 'show', `${publication.headSha}:src/live-smoke/initial-review-rework-fixed.txt`], { timeoutMs: context.options.timeoutMs })).stdout;
+    if (repaired !== 'fixed\n') throw new Error(`${scenario}: published repair delta is missing`);
+  }
   if (scenario === 'authoritative-candidate-publication') {
     await assertAuthoritativeCandidatePublication(context, record, publication.headSha);
   }
@@ -455,17 +479,22 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
 }
 
 async function runPackageInstallScenario(context, scenario) {
-  const external = join(context.root, 'consumer');
+  const installedCliPath = await installPackedConsumer(context, 'consumer');
+  const packedCliPath = context.cliPath;
+  context.cliPath = installedCliPath;
+  try { await runReviewReadyScenario(context, scenario); }
+  finally { context.cliPath = packedCliPath; }
+}
+
+async function installPackedConsumer(context, name) {
+  const external = join(context.root, name);
   await mkdir(external, { recursive: true });
   await writeFile(join(external, 'package.json'), '{"private":true,"type":"module"}\n');
   const packageRoot = resolve(dirname(context.cliPath), '../../..');
   await runCommand('npm', ['install', packageRoot, '--ignore-scripts'], { cwd: external, timeoutMs: context.options.timeoutMs });
   const installedCliPath = join(external, 'node_modules', 'codex-orchestrator', 'dist', 'src', 'v2', 'cli.js');
   await readFile(installedCliPath);
-  const packedCliPath = context.cliPath;
-  context.cliPath = installedCliPath;
-  try { await runReviewReadyScenario(context, scenario); }
-  finally { context.cliPath = packedCliPath; }
+  return installedCliPath;
 }
 
 async function throwResultWithEvidence(context, result, scenario) {
@@ -500,11 +529,15 @@ async function runCommitPolicyScenario(context, scenario) {
 
 async function runDiagnosticsScenario(context, scenario) {
   await configureTarget(context);
+  const packedCliPath = context.cliPath;
+  context.cliPath = await installPackedConsumer(context, 'diagnostics-consumer');
+  try {
   const configPath = join(context.targetRoot, '.codex-orchestrator', 'config.json');
   const configBefore = await readFile(configPath, 'utf8');
   const statusBefore = (await runCommand('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
+  const remoteBefore = await readRemoteSnapshot(context);
   for (const command of ['doctor', 'status']) {
     const envelope = await requireTypedSetup(context, [command, '--target', context.targetRoot]);
     if (envelope.result.status !== 'inspected') throw new Error(`${command} did not return an inspected Setup result`);
@@ -512,10 +545,113 @@ async function runDiagnosticsScenario(context, scenario) {
   const statusAfter = (await runCommand('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
-  if (await readFile(configPath, 'utf8') !== configBefore || statusAfter !== statusBefore) {
+  if (await readFile(configPath, 'utf8') !== configBefore || statusAfter !== statusBefore
+    || await readRemoteSnapshot(context) !== remoteBefore) {
     throw new Error(`${scenario}: read-only diagnostics mutated the target`);
   }
-  await runReviewReadyScenario(context, scenario);
+  } finally { context.cliPath = packedCliPath; }
+}
+
+async function runConfiguredCheckReworkScenario(context, scenario) {
+  await configureTarget(context, { reworkCheck: true });
+  const issue = await createIssue(context, scenario, true);
+  const first = await runIssue(context, issue.number);
+  assertResult(first, { status: 'repair-ready', source: 'check' }, scenario);
+  const result = await continueRepairReady(() => runIssue(context, issue.number));
+  assertResult(result, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.cycle !== 2 || record.checks.length !== 1 || record.checks.some((check) => check.status !== 'passed')) {
+    throw new Error(`${scenario}: failed check did not produce one repaired, fully checked candidate`);
+  }
+  const publication = await recordPublication(context, issue.number);
+  await assertValidationBindings(context, record, publication.headSha, scenario);
+}
+
+async function runPublicationReconciliationScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const fault = await writeFaultingGh(context, scenario);
+  const first = await runIssue(context, issue.number, { PATH: `${dirname(fault)}:${process.env.PATH ?? ''}` });
+  if (first.status !== 'transport-failed' || first.resumable !== true) {
+    throw new Error(`${scenario}: publication transport fault was not resumable`);
+  }
+  const callsBefore = (await readModelAudit(context)).length;
+  const result = await continueRepairReady(() => runIssue(context, issue.number, { PATH: `${dirname(fault)}:${process.env.PATH ?? ''}` }));
+  assertResult(result, { status: 'review-ready' }, scenario);
+  const publication = await recordPublication(context, issue.number);
+  const callsAfter = (await readModelAudit(context)).length;
+  if (callsAfter !== callsBefore) throw new Error(`${scenario}: reconciliation repeated model work`);
+  const pulls = JSON.parse((await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--head', `codex/issue-${issue.number}`, '--state', 'all', '--json', 'number', '--limit', '2'], { timeoutMs: context.options.timeoutMs })).stdout);
+  if (pulls.length !== 1 || pulls[0].number !== publication.number) throw new Error(`${scenario}: reconciliation duplicated the pull request`);
+  const record = await readRunRecord(context, issue.number);
+  const handoffMarker = `<!-- codex-orchestrator:run:${record.runId}:cycle:${record.cycle}:handoff -->`;
+  const issueComments = await listIssueComments(context, issue.number);
+  if (issueComments.filter((comment) => comment.body?.split('\n')[0] === handoffMarker).length !== 1) {
+    throw new Error(`${scenario}: reconciliation did not preserve exactly one handoff comment`);
+  }
+}
+
+async function runAuthorizationRevokedScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const first = await runIssue(context, issue.number);
+  assertResult(first, { status: 'repair-ready', source: 'proof' }, scenario);
+  await runCommand('gh', ['issue', 'edit', String(issue.number), '--repo', context.repo, '--remove-label', 'agent:auto'], { timeoutMs: context.options.timeoutMs });
+  const result = await runIssue(context, issue.number);
+  assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
+  await assertEvidenceCode(context, result, 'authorization-revoked');
+  await assertNoPublication(context, issue.number, scenario);
+}
+
+async function runReviewFeedbackNegativeScenario(context, scenario) {
+  await configureTarget(context);
+  const issue = await createIssue(context, scenario, true);
+  const initial = await continueRepairReady(() => runIssue(context, issue.number));
+  assertResult(initial, { status: 'review-ready' }, scenario);
+  const publication = await recordPublication(context, issue.number);
+  const comment = await postTrustedReviewThread(context, publication.number, publication.headSha, `src/live-smoke/${scenario}.txt`, 'Resolved feedback must be ignored.');
+  await resolveReviewThread(context, publication.number, comment.id);
+  const callsBefore = (await readModelAudit(context)).length;
+  const stateBefore = JSON.stringify(await readRunRecord(context, issue.number));
+  const remoteBefore = await readRemoteSnapshot(context);
+  const issueCommentsBefore = JSON.stringify(await listIssueComments(context, issue.number));
+  const prCommentsBefore = JSON.stringify(await listConversationComments(context, publication.number));
+  assertResult(await runDaemonOnce(context, issue.number), { status: 'review-ready' }, scenario);
+  if ((await readModelAudit(context)).length !== callsBefore
+    || JSON.stringify(await readRunRecord(context, issue.number)) !== stateBefore
+    || await readRemoteSnapshot(context) !== remoteBefore
+    || JSON.stringify(await listIssueComments(context, issue.number)) !== issueCommentsBefore
+    || JSON.stringify(await listConversationComments(context, publication.number)) !== prCommentsBefore) {
+    throw new Error(`${scenario}: resolved feedback produced work or durable state`);
+  }
+}
+
+async function runIssueVerificationScenario(context, scenario) {
+  await configureTarget(context);
+  const verification = 'npm --prefix test/live-smoke test';
+  const issue = await createIssue(context, scenario, true, [], true, verification);
+  const result = await continueRepairReady(() => runIssue(context, issue.number));
+  assertResult(result, { status: 'review-ready' }, scenario);
+  const record = await readRunRecord(context, issue.number);
+  if (record.checks.length !== 1 || record.checks[0].command !== verification || record.checks[0].status !== 'passed') {
+    throw new Error(`${scenario}: issue-scoped Verification did not own the check receipt`);
+  }
+  const publication = await recordPublication(context, issue.number);
+  await assertValidationBindings(context, record, publication.headSha, scenario);
+}
+
+async function assertValidationBindings(context, record, publishedHeadSha, scenario) {
+  const checks = record.checks.filter((check) => check.status === 'passed');
+  const bindingIds = new Set(checks.map((check) => check.bindingId));
+  const candidateTrees = new Set(checks.map((check) => check.candidateTreeSha));
+  const publishedTree = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  if (checks.length === 0 || bindingIds.size !== 1 || bindingIds.has(undefined)
+    || candidateTrees.size !== 1 || !candidateTrees.has(publishedTree)
+    || !record.checkedChangeSha256 || !record.proofId || record.proofReceipt?.proofId !== record.proofId
+    || record.directReview?.status !== 'clear' || record.directReview.review.disposition !== 'clear'
+    || !record.directReview.review.acceptedReportSha256) {
+    throw new Error(`${scenario}: check, proof, Review, and published candidate bindings are incomplete`);
+  }
 }
 
 async function runAcceptanceProofNegativeScenario(context, scenario) {
@@ -535,7 +671,7 @@ async function runSafetyNegativeScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function createIssue(context, scenario, eligible, extraCriteria = [], markersAsCriteria = true) {
+async function createIssue(context, scenario, eligible, extraCriteria = [], markersAsCriteria = true, verification = null) {
   const title = `[live-smoke:${context.runId}] ${scenario}`;
   const markers = [`LIVE_SMOKE_SCENARIO=${scenario}`, `LIVE_SMOKE_RUN_ID=${context.runId}`];
   const behaviorCriteria = extraCriteria.length > 0 || !eligible ? extraCriteria : [
@@ -546,6 +682,7 @@ async function createIssue(context, scenario, eligible, extraCriteria = [], mark
   const args = ['issue', 'create', '--repo', context.repo, '--title', title, '--body', [
     'V2 packed live-smoke fixture.', ...markers.map((value) => `${value}`), '',
     '## Acceptance Criteria', ...criteria.map((value) => `- ${value}`),
+    ...(verification ? ['', '## Verification', `- \`${verification}\``] : []),
   ].join('\n')];
   if (eligible) args.push('--label', 'agent:auto');
   const created = await runCommand('gh', args, { timeoutMs: context.options.timeoutMs });
@@ -555,10 +692,10 @@ async function createIssue(context, scenario, eligible, extraCriteria = [], mark
   return { number };
 }
 
-async function runIssue(context, issueNumber) {
+async function runIssue(context, issueNumber, extraEnv = {}) {
   const command = await runCommand(process.execPath, [context.cliPath, 'run', '--target', context.targetRoot, '--issue', String(issueNumber)], {
     cwd: context.targetRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 21, 70, 130],
-    env: liveSmokeEnv(context),
+    env: liveSmokeEnv(context, extraEnv),
   });
   return parseRunIssueEnvelope(command.stdout, command.status);
 }
@@ -638,6 +775,22 @@ async function postTrustedReviewThread(context, pullRequestNumber, commitSha, pa
   ], { timeoutMs: context.options.timeoutMs });
   const comment = JSON.parse(result.stdout);
   if (!comment.id || comment.body !== body) throw new Error('trusted review thread was not created');
+  return comment;
+}
+
+async function resolveReviewThread(context, pullRequestNumber, commentId) {
+  const query = await runCommand('gh', [
+    'api', 'graphql', '-f', `owner=${ownerOf(context.repo)}`, '-f', `repo=${repoOf(context.repo)}`,
+    '-F', `number=${pullRequestNumber}`,
+    '-f', 'query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{id comments(first:100){nodes{databaseId}}}}}}}',
+  ], { timeoutMs: context.options.timeoutMs });
+  const threads = JSON.parse(query.stdout).data.repository.pullRequest.reviewThreads.nodes;
+  const thread = threads.find((candidate) => candidate.comments.nodes.some((comment) => comment.databaseId === commentId));
+  if (!thread) throw new Error('review feedback thread could not be resolved');
+  await runCommand('gh', [
+    'api', 'graphql', '-f', `threadId=${thread.id}`,
+    '-f', 'query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}',
+  ], { timeoutMs: context.options.timeoutMs });
 }
 
 async function assertReviewFeedbackObservable(context, issueNumber, pullRequestNumber, headSha, record) {
@@ -671,6 +824,23 @@ async function listConversationComments(context, pullRequestNumber) {
     'api', '--paginate', `repos/${context.repo}/issues/${pullRequestNumber}/comments`,
   ], { timeoutMs: context.options.timeoutMs });
   return JSON.parse(result.stdout);
+}
+
+async function listIssueComments(context, issueNumber) {
+  const result = await runCommand('gh', [
+    'api', '--paginate', `repos/${context.repo}/issues/${issueNumber}/comments`,
+  ], { timeoutMs: context.options.timeoutMs });
+  return JSON.parse(result.stdout);
+}
+
+async function readRemoteSnapshot(context) {
+  const [refs, labels, issues, pulls] = await Promise.all([
+    runCommand('git', ['-C', context.targetRoot, 'ls-remote', 'origin'], { timeoutMs: context.options.timeoutMs }),
+    runCommand('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', 'sort_by(.name)|map({name,color,description})'], { timeoutMs: context.options.timeoutMs }),
+    runCommand('gh', ['issue', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,labels'], { timeoutMs: context.options.timeoutMs }),
+    runCommand('gh', ['pr', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,headRefName,baseRefName,isDraft'], { timeoutMs: context.options.timeoutMs }),
+  ]);
+  return JSON.stringify({ refs: refs.stdout, labels: labels.stdout, issues: issues.stdout, pulls: pulls.stdout });
 }
 
 async function requireTypedSetup(context, args) {
@@ -737,11 +907,30 @@ async function writeLiveCodex(context) {
   return path;
 }
 
-function liveSmokeEnv(context) {
+async function writeFaultingGh(context, scenario) {
+  const directory = join(context.root, `faulting-gh-${scenario}`);
+  const path = join(directory, 'gh');
+  const realGh = (await runCommand('which', ['gh'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  const marker = join(directory, 'pr-create-effect-observed');
+  await mkdir(directory, { recursive: true });
+  await writeFile(path, `#!${process.execPath}\n`
+    + `import { spawnSync } from 'node:child_process';\n`
+    + `import { existsSync, writeFileSync } from 'node:fs';\n`
+    + `const args = process.argv.slice(2);\n`
+    + `const result = spawnSync(${JSON.stringify(realGh)}, args, { encoding: 'utf8' });\n`
+    + `const firstCreate = args[0] === 'pr' && args[1] === 'create' && result.status === 0 && !existsSync(${JSON.stringify(marker)});\n`
+    + `if (firstCreate) { writeFileSync(${JSON.stringify(marker)}, 'created\\n'); process.stderr.write('injected transport loss after gh pr create\\n'); process.exit(1); }\n`
+    + `process.stdout.write(result.stdout ?? ''); process.stderr.write(result.stderr ?? ''); process.exit(result.status ?? 1);\n`, 'utf8');
+  await chmod(path, 0o700);
+  return path;
+}
+
+function liveSmokeEnv(context, extra = {}) {
   return {
     ...process.env,
     CODEX_ORCHESTRATOR_HOME: context.orchestratorHome,
     CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL: liveSmokeModel,
+    ...extra,
   };
 }
 
@@ -752,7 +941,7 @@ async function readModelAudit(context) {
 }
 
 function assertScenarioModelUsage(scenario, calls) {
-  const modelBacked = scenario !== 'discovery-matrix';
+  const modelBacked = !['discovery-matrix', 'diagnostics'].includes(scenario);
   if (modelBacked && calls.length === 0) throw new Error(`${scenario}: no real Codex model invocation was observed`);
   if (!modelBacked && calls.length !== 0) throw new Error(`${scenario}: model was invoked on a model-free gate`);
   if (calls.some((call) => call.model !== liveSmokeModel)) {
@@ -826,11 +1015,14 @@ function forward(prompt) {
       }
       if (code === 0 && !administrative) {
         const reportPath = args[args.indexOf('--output-last-message') + 1];
-        if (operation === 'code-review') normalizeCodeReview(reportPath, prompt);
+        if (operation === 'code-review') normalizeCodeReview(reportPath, prompt, scenario);
         if (operation === 'implementation' && scenario === 'review-feedback-continuation') {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
         applyFault(scenario, operation, prompt);
+        if (operation === 'implementation' && ['configured-check-rework', 'initial-review-rework', 'issue-verification'].includes(scenario)) {
+          normalizeImplementationReport(reportPath, scenario);
+        }
       }
       process.exitCode = code ?? (signal ? 1 : 0);
     });
@@ -838,7 +1030,7 @@ function forward(prompt) {
   }
 }
 
-function normalizeCodeReview(reportPath, prompt) {
+function normalizeCodeReview(reportPath, prompt, scenario) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
   const target = capsule.target?.current ?? {};
@@ -846,6 +1038,28 @@ function normalizeCodeReview(reportPath, prompt) {
     ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
   const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
   const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
+  if (scenario === 'initial-review-rework') {
+    const marker = auditPath + '.initial-review-rework';
+    try { readFileSync(marker); } catch {
+      writeFileSync(marker, 'reviewed\\n');
+      const defect = {
+        id: 'live-review-finding', class: 'blocker', severity: 'high', confidence: 'high', status: 'open',
+        invariant: 'The reviewed candidate includes the required repair marker.',
+        failure: 'The initial candidate lacks the required repair marker.', evidence: ['immutable candidate Review'],
+        repair: 'Create src/live-smoke/initial-review-rework-fixed.txt.',
+        affectedTargets: ['path:src/live-smoke/initial-review-rework-fixed.txt'],
+        introducedTargetRevision: target.targetRevision, statusTargetRevision: target.targetRevision, supersededBy: null,
+      };
+      writeFileSync(reportPath, JSON.stringify({ report: {
+        version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
+        targetFingerprint: target.targetFingerprint, verdict: 'needs-work', coverage: capsule.reviewFocus ?? [],
+        defects: [defect], residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
+        reviewers: reviewerRoles.map((role) => ({ role, sessionId: capsule.reviewerSessionId + ':' + role, verdict: 'block' })),
+        repairFindingOutcomes: [],
+      } }));
+      return;
+    }
+  }
   const report = {
     version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
     targetFingerprint: target.targetFingerprint, verdict: 'approved',
@@ -874,6 +1088,14 @@ function normalizeReviewFeedbackImplementation(reportPath, prompt) {
   } }));
 }
 
+function normalizeImplementationReport(reportPath, scenario) {
+  const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
+  writeFileSync(reportPath, JSON.stringify({ report: {
+    version: 1, status: 'completed', summary: scenario + ' fixture prepared.', changedFiles, residualRisks: [],
+  } }));
+}
+
 function applyFault(scenario, operation, prompt) {
   const reportPath = args[args.indexOf('--output-last-message') + 1];
   if (!reportPath) throw new Error('missing report path');
@@ -884,6 +1106,22 @@ function applyFault(scenario, operation, prompt) {
       writeFileSync(reportPath, '{bad json');
       return;
     }
+  }
+  if (operation === 'implementation' && scenario === 'configured-check-rework') {
+    const marker = auditPath + '.configured-check-rework';
+    try { readFileSync(marker); writeFileSync('src/live-smoke/configured-check-rework-fixed.txt', 'fixed\\n'); }
+    catch { writeFileSync(marker, 'attempted\\n'); }
+  }
+  if (operation === 'implementation' && scenario === 'initial-review-rework') {
+    const marker = auditPath + '.initial-review-implementation';
+    const path = 'src/live-smoke/initial-review-rework-fixed.txt';
+    try { readFileSync(marker); mkdirSync('src/live-smoke', { recursive: true }); writeFileSync(path, 'fixed\\n'); }
+    catch { writeFileSync(marker, 'attempted\\n'); rmSync(path, { force: true }); }
+  }
+  if (operation === 'implementation' && scenario === 'issue-verification') {
+    mkdirSync('test/live-smoke', { recursive: true });
+    writeFileSync('test/live-smoke/package.json', JSON.stringify({ private: true, scripts: { test: 'node verify.mjs' } }) + '\\n');
+    writeFileSync('test/live-smoke/verify.mjs', "import { readFileSync } from 'node:fs';\\nif (readFileSync('../../src/live-smoke/issue-verification.txt', 'utf8') !== 'issue-verification\\\\n') process.exit(1);\\n");
   }
   if (operation === 'implementation' && scenario === 'commit-policy') {
     runGit(['add', '-A']);
@@ -928,6 +1166,18 @@ function applyFault(scenario, operation, prompt) {
       }); return;
     }
   }
+  if (scenario === 'authorization-revoked') {
+    const marker = gitPath('v2-live-smoke-authorization-revoked');
+    try { readFileSync(marker); } catch {
+      writeFileSync(marker, 'attempted\\n');
+      discardProofArtifacts(prompt);
+      writeProofReport(reportPath, {
+        version: 1, status: 'needs-rework', decision: { mode: 'non-visual', targets: [] },
+        criteria: criteria.map((item) => ({ id: item.id, status: 'failed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'A bounded authorization checkpoint is required.' })),
+        checks: [], artifacts: [], findings: ['Create the authorization repair marker.'], residualRisks: [],
+      }); return;
+    }
+  }
   if (scenario === 'review-feedback-continuation') {
     discardProofArtifacts(prompt);
     writePassingNonVisualProof(criteria, reportPath, prompt);
@@ -935,15 +1185,13 @@ function applyFault(scenario, operation, prompt) {
   }
   if ([
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'authoritative-candidate-publication', 'acceptance-proof-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework', 'configured-check-rework',
+    'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
+    'review-feedback-negative', 'issue-verification',
   ].includes(scenario)) {
     discardProofArtifacts(prompt);
     writePassingNonVisualProof(criteria, reportPath, prompt);
     return;
-  }
-  if (scenario === 'browser-proof') {
-    discardProofArtifacts(prompt);
-    writeBrowserProof(criteria, reportPath, prompt);
   }
 }
 
@@ -966,40 +1214,6 @@ function writePassingNonVisualProof(criteria, reportPath, prompt) {
       evidenceRefs, analysis: 'Current checked change satisfies this criterion.',
     })),
     checks: [], artifacts: [], findings: [], residualRisks: [],
-  });
-}
-
-function writeBrowserProof(criteria, reportPath, prompt) {
-  const artifactRoot = prompt.match(/Write evidence only below (.+)\\.\\n/u)?.[1];
-  if (!artifactRoot) throw new Error('missing browser artifact root');
-  const root = join(artifactRoot, 'browser-live-smoke'); mkdirSync(root, { recursive: true });
-  const definitions = [
-    ['shot-wide', 'screenshot', 'wide.png', true], ['dom-wide', 'dom-snapshot', 'wide.json', false],
-    ['shot-narrow', 'screenshot', 'narrow.png', true], ['dom-narrow', 'dom-snapshot', 'narrow.json', false],
-    ['console', 'console-log', 'console.json', false], ['network', 'network-log', 'network.json', false],
-  ];
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
-  const artifacts = definitions.map(([id, kind, name, publishable]) => {
-    const relativePath = join(artifactRoot, 'browser-live-smoke', name);
-    const bytes = kind === 'screenshot' ? png : Buffer.from(JSON.stringify({ scenario: 'browser-proof', id }));
-    writeFileSync(relativePath, bytes);
-    return { id, kind, relativePath, sha256: createHash('sha256').update(bytes).digest('hex'), publishable, description: 'Current V2 browser live-smoke evidence.' };
-  });
-  const ids = criteria.map((item) => item.id);
-  writeProofReport(reportPath, {
-    version: 1, status: 'passed', decision: { mode: 'visual', targets: ['browser'] },
-    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['browser'], evidenceRefs: ['shot-wide', 'dom-wide', 'shot-narrow', 'dom-narrow'], analysis: 'Both current responsive captures satisfy this criterion.' })),
-    checks: [], artifacts,
-    visualEvidence: {
-      workflow: { entrypoint: 'http://127.0.0.1:4173/', steps: ['Open fixture', 'Inspect final state'], finalState: 'V2 browser proof ready' },
-      captures: [
-        { target: 'browser', name: 'wide', width: 1280, height: 720, criteriaRefs: ids, screenshotRef: 'shot-wide', stateRef: 'dom-wide' },
-        { target: 'browser', name: 'narrow', width: 390, height: 844, criteriaRefs: ids, screenshotRef: 'shot-narrow', stateRef: 'dom-narrow' },
-      ],
-      diagnostics: { consoleRef: 'console', networkRef: 'network' }, freshness: { capturedAfterFinalInteraction: true },
-      layoutReview: [{ summary: 'Spacing, clipping, overlap, and alignment are correct.', evidenceRefs: ['shot-wide', 'shot-narrow'] }],
-      copyReview: [{ summary: 'Visible copy matches the frozen criteria.', evidenceRefs: ['dom-wide', 'dom-narrow'] }],
-    }, findings: [], residualRisks: [],
   });
 }
 

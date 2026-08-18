@@ -32,9 +32,11 @@ async function source(): Promise<string> {
 
 const retainedScenarios = [
   'package-install', 'discovery-matrix', 'commit-policy',
-  'incomplete-progress-rework', 'report-repair', 'diagnostics', 'browser-proof',
+  'incomplete-progress-rework', 'report-repair', 'diagnostics',
   'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'review-feedback-continuation', 'safety-negative',
+  'review-feedback-continuation', 'safety-negative', 'configured-check-rework',
+  'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
+  'review-feedback-negative', 'issue-verification',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
@@ -53,7 +55,9 @@ test('V2 regression profile covers each supplemental non-mobile behavior once', 
     [
       'v2-regression', 'discovery-matrix', 'commit-policy', 'incomplete-progress-rework',
       'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-      'acceptance-proof-negative', 'review-feedback-continuation',
+      'acceptance-proof-negative', 'review-feedback-continuation', 'configured-check-rework',
+      'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
+      'review-feedback-negative', 'issue-verification',
     ],
   );
 });
@@ -308,12 +312,59 @@ test('every live code review is normalized from the runner-owned review capsule'
   assert.doesNotMatch(normalization, /readFileSync\(reportPath/u);
 });
 
-test('browser proof fixture uses an HTTP workflow entrypoint accepted by the proof contract', async () => {
+test('synthetic browser proof is not a GitHub live-smoke scenario', async () => {
   const text = await source();
-  const fixture = text.slice(text.indexOf('function writeBrowserProof'), text.indexOf('function writeAgentReport'));
-  assert.match(fixture, /entrypoint: 'http:\/\/127\.0\.0\.1:/u);
-  const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
-  assert.match(applyFault, /scenario === 'browser-proof'\) \{\s*discardProofArtifacts\(prompt\);/u);
+  const registry = text.slice(text.indexOf('const scenarioDefinitions'), text.indexOf('const scenarioProfiles'));
+  const faults = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
+  assert.doesNotMatch(registry, /browser-proof/u);
+  assert.doesNotMatch(faults, /browser-proof|writeBrowserProof/u);
+});
+
+test('diagnostics uses an installed packed CLI and remains model-free', async () => {
+  const text = await source();
+  const scenario = text.slice(text.indexOf('async function runDiagnosticsScenario'), text.indexOf('async function runConfiguredCheckReworkScenario'));
+  assert.match(scenario, /installPackedConsumer\(context, 'diagnostics-consumer'\)/u);
+  assert.match(scenario, /read-only diagnostics mutated the target/u);
+  assert.match(scenario, /readRemoteSnapshot/u);
+  assert.doesNotMatch(scenario, /runReviewReadyScenario|createIssue/u);
+  assert.match(text, /!\['discovery-matrix', 'diagnostics'\]\.includes\(scenario\)/u);
+});
+
+test('new regression scenarios exercise distinct owner boundaries', async () => {
+  const text = await source();
+  const checks = text.slice(text.indexOf('async function runConfiguredCheckReworkScenario'), text.indexOf('async function runPublicationReconciliationScenario'));
+  assert.match(checks, /status: 'repair-ready', source: 'check'/u);
+  assert.match(checks, /record\.cycle !== 2/u);
+  assert.match(checks, /record\.checks\.length !== 1/u);
+  assert.match(checks, /assertValidationBindings/u);
+
+  const publication = text.slice(text.indexOf('async function runPublicationReconciliationScenario'), text.indexOf('async function runAuthorizationRevokedScenario'));
+  assert.match(publication, /writeFaultingGh/u);
+  assert.match(publication, /publication transport fault was not resumable/u);
+  assert.match(publication, /reconciliation repeated model work/u);
+  assert.match(publication, /reconciliation duplicated the pull request/u);
+  assert.match(publication, /exactly one handoff comment/u);
+
+  const authorization = text.slice(text.indexOf('async function runAuthorizationRevokedScenario'), text.indexOf('async function runReviewFeedbackNegativeScenario'));
+  assert.match(authorization, /--remove-label', 'agent:auto'/u);
+  assert.match(authorization, /assertNoPublication/u);
+
+  const feedback = text.slice(text.indexOf('async function runReviewFeedbackNegativeScenario'), text.indexOf('async function runIssueVerificationScenario'));
+  assert.match(feedback, /resolveReviewThread/u);
+  assert.match(feedback, /resolved feedback produced work or durable state/u);
+  assert.match(feedback, /readRemoteSnapshot/u);
+  assert.match(feedback, /listIssueComments/u);
+  assert.match(feedback, /listConversationComments/u);
+
+  const verification = text.slice(text.indexOf('async function runIssueVerificationScenario'), text.indexOf('async function runAcceptanceProofNegativeScenario'));
+  assert.match(verification, /npm --prefix test\/live-smoke test/u);
+  assert.match(verification, /record\.checks\[0\]\.command !== verification/u);
+
+  const reviewFault = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
+  assert.match(reviewFault, /initial-review-rework/u);
+  assert.match(reviewFault, /verdict: 'needs-work'/u);
+  assert.match(reviewFault, /live-review-finding/u);
+  assert.match(text, /targeted Review repair did not refresh exact proof and independent Review/u);
 });
 
 test('incomplete-progress retry uses a deterministic clean transport failure before the retry', async () => {
@@ -328,7 +379,7 @@ test('incomplete-progress retry uses a deterministic clean transport failure bef
 test('proof rework fault discards transient proof evidence before a minimal needs-rework report', async () => {
   const text = await source();
   const applyFault = text.indexOf('function applyFault');
-  const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-rework'", applyFault), text.indexOf("if (scenario === 'browser-proof')", applyFault));
+  const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-rework'", applyFault), text.indexOf("if (scenario === 'authorization-revoked')", applyFault));
   assert.match(fixture, /discardProofArtifacts\(prompt\)/u);
   assert.match(text, /rmSync\(artifactRoot, \{ recursive: true, force: true \}\)/u);
   assert.match(fixture, /src\/live-smoke\/acceptance-proof-rework-complete\.txt/u);
@@ -399,7 +450,6 @@ test('scenario assertions bind live smoke outcomes to their current owner behavi
   assert.match(text, /expected one durable transport retry/u);
   assert.doesNotMatch(text, /Report repair only/u);
   assert.match(text, /v2-live-smoke-report-retry/u);
-  assert.match(text, /expected two publishable responsive screenshots/u);
   assert.match(text, /read-only diagnostics mutated the target/u);
   assert.match(text, /denied-path-modified/u);
   assert.match(text, /negative scenario published a branch or PR/u);
@@ -411,7 +461,9 @@ test('fixture happy paths normalize proof semantics after real model invocation'
   const applyFault = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
   for (const scenario of [
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'authoritative-candidate-publication', 'acceptance-proof-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework', 'configured-check-rework',
+    'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
+    'review-feedback-negative', 'issue-verification',
   ]) assert.match(applyFault, new RegExp(`'${scenario}'`, 'u'));
   assert.match(applyFault, /writePassingNonVisualProof\(criteria, reportPath, prompt\)/u);
   assert.match(text, /Configured check receipts:/u);
