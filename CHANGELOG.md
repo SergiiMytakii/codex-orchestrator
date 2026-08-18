@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.17] - 2026-08-18
+
+### Changed
+- Simplified the agent workflow scope and refreshed the packaged implementer
+  profile and workflow contracts around the authorized outcome.
+- Expanded the live-smoke matrix to 17 distinct scenarios and strengthened its
+  contract coverage, documentation, and test-audit evidence.
+
 ## [2.0.16] - 2026-08-14
 
 ### Changed
