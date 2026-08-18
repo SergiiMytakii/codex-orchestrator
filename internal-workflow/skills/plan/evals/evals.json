@@ -31,6 +31,30 @@
       "prompt": "Compose a durable PRD and executable ticket packet without duplicating workflow mechanics across skills.",
       "expected": ["keep Plan as the sole composition owner", "delegate PRD synthesis to to-spec", "delegate ticket count, slicing, review, approval, publication, and read-back to to-tickets"],
       "forbidden": ["let to-spec determine ticket count", "duplicate publication mechanics in Plan"]
+    },
+    {
+      "id": "local-fix-conserves-scope",
+      "prompt": "Plan a fix for one proven subcategory pairing defect while other search modes already work.",
+      "expected": ["state the direct fix in the existing owner", "keep other search modes unchanged", "delete a universal resolver and legacy reconstruction unless evidence requires them"],
+      "forbidden": ["promote agent proposals into approved architecture", "redesign every search mode for completeness"]
+    },
+    {
+      "id": "simple-fix-skips-planning",
+      "prompt": "Fix one clear local behavior with no product or ownership decision gap and no durable handoff need.",
+      "expected": ["route directly to Implement"],
+      "forbidden": ["create a PRD", "launch plan review"]
+    },
+    {
+      "id": "independent-plan-review-separates-authority",
+      "prompt": "Repository policy requires independent review of a plan-only durable draft that adds an unconfirmed runtime registry before it is saved.",
+      "expected": ["remove the registry or return it for explicit approval before review", "review only the settled draft expected to approve", "provide authority and draft separately", "keep Plan as composition owner"],
+      "forbidden": ["launch review while the registry is unconfirmed", "treat the draft as its own authority", "invoke implementation code-review"]
+    },
+    {
+      "id": "review-waits-for-settled-plan",
+      "prompt": "Prepare a durable plan while repository source inventory and one ownership decision are still unresolved.",
+      "expected": ["finish discovery or expose the unresolved decision before review", "launch independent review only for a settled draft expected to approve"],
+      "forbidden": ["use the reviewer to complete discovery", "let the reviewer design the solution"]
     }
   ]
 }

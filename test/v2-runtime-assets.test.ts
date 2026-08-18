@@ -26,6 +26,12 @@ import {
 const packageRoot = join(import.meta.dirname, '..', '..');
 const execFileAsync = promisify(execFile);
 
+test('implementer profile treats listed files as starting points for the authorized outcome', async () => {
+  const profile = await readFile(join(packageRoot, 'internal-workflow', 'profiles', 'implementer.toml'), 'utf8');
+  assert.match(profile, /listed files as starting points, not an exhaustive allowlist/u);
+  assert.match(profile, /directly affected callers, tests, fixtures, and wiring/u);
+});
+
 test('production proof freshness binds one selected affected check to current two-check authority', () => {
   const authority = { typecheck: 'npm run typecheck', lint: 'npm run lint' };
   const selected = [{ id: 'typecheck', command: 'npm run typecheck' }];

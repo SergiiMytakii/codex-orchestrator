@@ -8,15 +8,23 @@ The live smoke validates the packed npm artifact against a scratch GitHub reposi
 npm run smoke:live
 ```
 
+The executable scenario and profile inventory is owned by
+`scripts/live-smoke.mjs`; use `npm run smoke:live -- --help` to inspect it.
+This checklist explains why the current scenarios exist and when to run them.
+The current registry contains 12 scenarios in total.
+
 The default `core-release` profile has two default scenarios:
 
-- `package-install`: pack, install in a clean consumer, and run the public CLI.
+- `package-install`: pack, install in a clean consumer, then complete the normal
+  delivery path through the installed public CLI.
 - `review-feedback-continuation`: freeze trusted feedback and update the same PR
   through affected checks and proof, targeted repair Review when the exact repair delta
   is available, and a fast-forward-only publication update.
 
-The two normal profiles are `core-release` and the supplemental non-mobile
-`v2-regression` profile. The latter remains available through
+The default `core-release` profile contains 2 scenarios. The supplemental
+non-mobile `v2-regression` profile contains 9 scenarios, including
+`review-feedback-continuation`, which is also part of the default gate. The
+latter profile remains available through
 `--profile v2-regression` or explicit `--scenario` values. It covers each
 distinct discovery, policy, recovery, diagnostics, non-visual proof, and
 quality-gate behavior once. Use it when those surfaces change.
@@ -41,9 +49,16 @@ Its scenarios are intentionally bound to these current owner behaviors:
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
 
-`browser-proof` is a deterministic contract smoke for current-run responsive
-screenshot receipts; it does not claim to drive a real browser. Real browser UI
-proof remains a separate workflow with browser-owned evidence.
+Two additional focused scenarios are intentionally available only by explicit
+`--scenario` selection or through `--profile full`:
+
+- `browser-proof`: validates current-run responsive screenshot receipts and
+  their proof-contract bindings. It is a deterministic contract smoke and does
+  not drive a real browser; real browser UI proof remains a separate workflow
+  with browser-owned evidence.
+- `safety-negative`: modifies a denied path and proves the Runner returns the
+  exact `denied-path-modified` safety block without publishing a branch or PR.
+  This is distinct from `commit-policy`, which rejects agent-created commits.
 
 The `review-feedback-continuation` regression scenario proves: trusted
 unresolved feedback is frozen,
@@ -56,11 +71,12 @@ local tests must not substitute a production repository. Repair and reviewer
 counts have no semantic round limit; each invocation remains bounded and a
 later invocation resumes durable work.
 
-The `full` profile is the union of core release and the supplemental V2
-regression scenarios. Fixture-specific Android and iOS real gates are not
-GitHub live-smoke scenarios: they require explicit runner-owned device,
-fixture, lease, and artifact inputs and remain under their dedicated mobile
-proof procedures and tests.
+The `full` profile runs all 12 registered scenarios: the core release
+gate, the supplemental V2 regression matrix, and the focused browser-proof and
+safety-negative contracts. Fixture-specific Android and iOS real gates are not
+GitHub live-smoke scenarios: they require explicit runner-owned device, fixture,
+lease, and artifact inputs and remain under their dedicated mobile proof
+procedures and tests.
 
 Every model-backed scenario launches the real Codex CLI with
 `gpt-5.6-luna`, overriding package role defaults. Deterministic recovery and

@@ -17,7 +17,10 @@ create a replacement plan, spec, ticket, workflow state, or compatibility path.
   forbids or reserves Git. Push and PR are separate and never implicit.
 - **Preservation:** read repository policy and current status before edits.
   Preserve unrelated work and user-owned runtimes. Stop on overlapping dirty
-  scope or a decision that changes behavior, ownership, or boundaries.
+  scope. Stop and ask the user before making any behavior, ownership, or
+  boundary decision not explicitly settled by the approved request;
+  implementation approval does not authorize decisions discovered during
+  implementation.
 - **Proof:** prove the final observable outcome through the real caller seam.
   Authority-defined proof cannot be replaced by weaker tests or a completion
   claim.
@@ -30,13 +33,14 @@ For one executable ticket, root launches exactly one fresh `implementer` child.
 The assignment must include:
 
 - the complete ticket;
-- the complete Parent PRD;
+- bounded Parent acceptance context and a read-only complete-PRD reference;
 - applicable repository policy;
 - bounded write scope and exclusions;
 - required proof and explicit delivery/Git boundaries.
 
-The assignment begins with `Assigned role: implementer` so the requested role,
-fresh child identity, and completed wait can be verified independently.
+Begin with `Assigned role: implementer`, name the ticket as the only executable
+scope, and put its complete body before Parent context. Include the complete
+Parent only when its relevant constraints cannot be separated safely.
 
 The worker performs no Git actions and returns changed files, observable proof,
 skipped checks, risks, decision deltas, overlap, and blockers. Root verifies a

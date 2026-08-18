@@ -19,8 +19,8 @@ proof and review path.
 
 Do not implement a planning-context Parent when executable children exist.
 Root must not implement a full child or merge ticket boundaries. A ticket that
-cannot execute from its body plus the Parent PRD is a ticket-packet defect and
-fails closed.
+cannot execute from its body plus a bounded Parent context packet is a
+ticket-packet defect and fails closed.
 
 Every child must authorize a committed product delta. Treat a transient-evidence
 or comment-only child as a ticket-packet defect: return it to `$to-tickets`
@@ -37,13 +37,11 @@ Before work, require:
 - repository policy, bounded child write scopes and exclusions; and
 - deterministic proof obligations that exercise the target coordinator state.
 
-Every child receives a unique fresh `implementer`. Begin every assignment with
-`Assigned role: implementer` and include the complete ticket, complete Parent
-PRD, repository policy, bounded write scope, exclusions, required proof, stop
-conditions, and explicit no-Git boundary. Capture a non-empty worker identity
-and wait for that same worker to complete. Workers perform no Git action and
-return changed files, local proof, skipped checks, risks, Decision Deltas,
-overlap, and blockers. Any worker Git event fails the child.
+Every child receives a unique fresh `implementer` under the brief contract in
+[delegate-integrate.md](references/delegate-integrate.md): the complete child
+ticket is its only executable scope; Parent material is bounded acceptance
+context. Capture a non-empty identity, wait for that same worker, and fail the
+child on any worker Git event.
 
 Root is the only integrator and Git writer. After the required gates pass, root
 automatically creates a scoped child or wave checkpoint. Push and PR always

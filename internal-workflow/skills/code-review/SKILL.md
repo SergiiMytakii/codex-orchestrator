@@ -32,6 +32,12 @@ file/line, trigger, impact, and evidence. Treat unsupported preferences,
 hypothetical hardening, and architecture or cleanup beyond the outcome as
 `OBSERVATION`.
 
+Treat unsupported machinery as a scope blocker when the target adds runtime
+behavior, ownership, persisted state, compatibility, or a public contract that
+neither the authorized outcome nor a proven failure path requires. Keep private
+implementation preferences as observations unless they cause a concrete
+defect.
+
 For Standards, read [standards-smells.md](references/standards-smells.md).
 Fowler smells remain non-blocking observations unless separate evidence meets the blocker
 threshold. Repository policy wins, and tooling-enforced rules need no duplicate
@@ -62,6 +68,8 @@ only when the authorized outcome requires it.
    - `standards_reviewer` checks correctness, failure paths, policy, cleanup,
      zero legacy, duplicate ownership, unnecessary machinery, and the smell
      baseline without inventing product obligations.
+   - Standards returns one compact `Minimum solution` line naming the direct
+     path, necessary additions, and removable additions, if any.
 4. Use fresh children without history fork (`fork_context=false` on V1;
    `fork_turns="none"` on V2). Capture every non-empty child identity and wait
    for those same children. An empty bounded wait means wait again, not failure.

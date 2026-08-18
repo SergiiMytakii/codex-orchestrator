@@ -210,7 +210,7 @@ async function assertInstalledContract(installed: string): Promise<void> {
   for (const contract of [
     'single deterministic ticket routes to `$implement`',
     'unique fresh `implementer`',
-    'Workers perform no Git action',
+    'fail the child on any worker Git event',
     'clean isolated integration worktree and pinned baseline',
     'one fresh `spec_reviewer` and one fresh `standards_reviewer`',
   ]) assert.match(flatGraph, new RegExp(contract.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu'));

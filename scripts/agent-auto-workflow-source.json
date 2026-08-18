@@ -27,7 +27,7 @@
   ],
   "sharedEvals": [],
   "profiles": {
-    "implementer": "implementer.toml",
+    "implementer": "./scripts/runtime-workflow-overlays/profiles/implementer.toml",
     "review_coordinator": "./scripts/runtime-workflow-overlays/profiles/review_coordinator.toml",
     "spec_reviewer": "spec-reviewer.toml",
     "standards_reviewer": "standards-reviewer.toml"

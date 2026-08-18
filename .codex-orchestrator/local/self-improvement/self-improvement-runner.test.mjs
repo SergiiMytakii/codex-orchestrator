@@ -519,6 +519,8 @@ test('discovery creates exactly one agent:auto self-improvement issue for the fi
     const bodyPath = createCalls[0].args.at(createCalls[0].args.indexOf('--body-file') + 1);
     const body = await readFile(bodyPath, 'utf8');
     assert.match(body, /Proof Strategy: non-visual-smoke/);
+    assert.match(body, /Likely files:\n- src\/runner\/example\.ts/);
+    assert.doesNotMatch(body, /Keep changes inside the files owned by the issue/);
     assert.match(body, /self-improvement-runner-id:codex-orchestrator-local-self-improvement/);
     assert.match(body, /source-candidate-fingerprint:/);
     assert.match(body, /## codex-orchestrator metadata/);

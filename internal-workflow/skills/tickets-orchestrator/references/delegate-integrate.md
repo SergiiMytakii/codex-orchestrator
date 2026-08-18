@@ -4,10 +4,35 @@
 
 Launch one unique fresh `implementer` per child. Root never keeps a ticket for
 itself, splits one child among workers, or reuses a prior worker context. Begin
-the assignment with `Assigned role: implementer` and provide the complete
-ticket, complete Parent PRD, repository policy, bounded write scope and
-exclusions, blocker state, proof, stop conditions, concurrent-work warning,
-and no-Git boundary.
+the assignment with the role and named child as its only executable scope, then
+put the complete ticket before scope, proof, stop/Git boundaries, Parent
+context, and repository policy.
+
+Parent context is acceptance authority, not scope. Quote only source-identified
+Parent sections that constrain the child and link the complete PRD for read-only
+inspection. Include the complete Parent only when those constraints cannot be
+separated safely or remain ambiguous.
+
+Use this compact brief shape:
+
+```text
+Assigned role: implementer
+Your only executable scope is ticket #<id>. Do not implement sibling tickets
+or other Parent requirements.
+
+COMPLETE CHILD TICKET #<id>
+<verbatim ticket>
+
+SCOPE / EXCLUSIONS / PROOF / STOP / NO-GIT
+<bounded instructions>
+
+PARENT CONTEXT — acceptance authority only
+<verbatim relevant sections with headings or anchors>
+Complete Parent PRD (read-only): <reference>
+
+REPOSITORY POLICY / CONCURRENT WORK
+<applicable instructions>
+```
 
 Record a non-empty identity and complete the wait for that same worker. Require
 changed files, local proof, skipped checks, risks, Decision Deltas, overlap, and

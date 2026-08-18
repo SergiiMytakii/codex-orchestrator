@@ -78,6 +78,31 @@
         "rerun Standards without an affected Standards surface",
         "repeat the complete review"
       ]
+    },
+    {
+      "id": "unsupported-runtime-machinery-blocks",
+      "prompt": "The settled diff adds a runtime registry and compatibility path that the authorized outcome and proven failure path do not require; deleting both preserves behavior and proof.",
+      "expected": [
+        "report scope blockers for the unsupported runtime machinery",
+        "prefer deletion",
+        "name the direct path and removable additions in Minimum solution"
+      ],
+      "forbidden": [
+        "downgrade the scope expansion to a style preference",
+        "harden the registry or compatibility path"
+      ]
+    },
+    {
+      "id": "approved-required-mechanism-remains",
+      "prompt": "The user explicitly approved a new persisted contract, and repository evidence proves the direct existing path cannot preserve required in-flight state.",
+      "expected": [
+        "treat the new contract as authorized and necessary",
+        "review its correctness and proof without deleting it"
+      ],
+      "forbidden": [
+        "remove the required contract solely to reduce complexity",
+        "classify confirmed authority as speculative generality"
+      ]
     }
   ]
 }

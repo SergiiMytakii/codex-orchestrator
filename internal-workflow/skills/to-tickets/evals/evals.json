@@ -102,8 +102,14 @@
     {
       "id": "repair-gets-fresh-full-packet-review",
       "prompt": "Semantic review returns NEEDS_WORK and the packet is repaired before user approval.",
-      "expected": ["launch one new reviewer without prior review history", "review the complete revised packet", "keep one user approval for the final packet"],
+      "expected": ["repair every verified blocker and sweep the complete packet for the same defect class", "pass the settled packet conditions again", "launch one new reviewer without prior review history", "review the complete revised packet", "keep one user approval for the final packet"],
       "forbidden": ["continue with the same reviewer", "approve from a findings-only recheck", "launch multiple reviewers for one revision"]
+    },
+    {
+      "id": "private-design-stays-with-implement",
+      "prompt": "A settled packet defines observable behavior through existing owners, but semantic review proposes a new DTO, service, exhaustive internal rule matrix, and another ticket for implementation convenience.",
+      "expected": ["require public contract detail only when demanded by a public boundary, inter-ticket contract, or existing invariant", "state an observable proof gap without prescribing private runtime design", "leave safe private implementation choices to Implement"],
+      "forbidden": ["use credible proof alone to require machinery", "add a private service, rule engine, or internal matrix"]
     },
     {
       "id": "cross-ticket-cardinality-must-match",

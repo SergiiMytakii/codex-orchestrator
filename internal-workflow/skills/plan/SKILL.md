@@ -28,6 +28,28 @@ without a planning artifact.
 The Parent PRD is the sole product and final-acceptance authority. Tickets are
 local executable slices; they do not duplicate that authority.
 
+## Minimum solution
+
+Before settling a plan:
+
+1. State the direct solution through existing owners and seams.
+2. Keep only mechanisms required by user authority, repository invariants, or
+   proven failure paths.
+3. Keep agent recommendations as proposals; saving a draft is not approval.
+4. Delete any mechanism whose removal preserves required behavior and credible
+   proof.
+
+Complete when every binding mechanism has authority and demonstrated necessity.
+
+When Plan composes a planning artifact, use one fresh `standards_reviewer` only
+when the user explicitly requests independent review of that artifact or
+repository policy requires it. Provide authority and draft separately; the
+draft is never its own authority. Review source fidelity and minimum solution,
+return `APPROVE` or `NEEDS_WORK`, and keep Plan as the sole composition owner.
+
+Review validates the settled artifact being composed; it does not apply to a
+read-only evaluation of an existing artifact.
+
 ## Durable composition
 
 Plan owns the composition sequence. `$to-spec` owns PRD synthesis,
@@ -53,7 +75,7 @@ through an alias, wrapper, adapter, fallback, or compatibility route.
 
 - Planning output, issue relationships, and labels never authorize delivery.
 - Do not create a second planning artifact after executable tickets exist.
-- Do not invoke implementation or delivery reviewers while planning.
+- Do not invoke `$code-review` or delivery Review while planning.
 - If behavior, scope, ownership, ticket boundaries, blockers, or proof
   obligations remain unresolved, keep them visible as a user decision or a
   blocking discovery/HITL ticket; never guess.

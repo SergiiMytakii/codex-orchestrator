@@ -62,7 +62,12 @@ explicit confirmation.
    behavior, proof, or ownership, and ask the user only when a seam choice
    changes scope, risk, or ownership.
 
-3. Write the template below, then follow the requested mode. A standalone
+3. Apply scope conservation before writing. Prefer the direct existing-seam
+   solution, delete unsupported machinery, and put unresolved behavior,
+   ownership, or architecture choices in `Decisions For Approval`. Complete
+   when no agent proposal appears as an approved implementation decision.
+
+4. Write the template below, then follow the requested mode. A standalone
    planning-context issue is marked `Artifact: planning-context`; it is not an
    implementation ticket and receives no triage state.
 

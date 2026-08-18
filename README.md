@@ -182,6 +182,10 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
   A failed check becomes a bounded finding for the next implementation cycle;
   there is no qualification operation or separate retry coordinator. Final
   checks must all pass; failures are never accepted by comparing output hashes.
+- File lists in issues are starting points, not exhaustive allowlists. The
+  authorized outcome owns scope: implementation may update directly affected
+  callers, tests, fixtures, and wiring needed to complete that same outcome;
+  unrelated behavior and new decisions remain out of scope.
 - `proof.artifactDir`: repository-relative location for proof artifacts inside the run worktree.
 - `proof.android`: optional Runner-owned Android recipe. It selects `avdName`, creates an ephemeral clean data directory, requires fixed `build apk` arguments, removes any old `apkPath`, snapshots a fresh no-symlink APK outside the worker-writable tree, and binds its digest to the checked change. It installs and launches that exact snapshot, repeatedly verifies emulator process identity, waits up to `navigationTimeoutMs` for each exact `tapText` accessibility label, and captures proof-bound screenshot, hierarchy, PID log, and lease artifacts. Commands are bounded, cancellable, and process-group quiescent; URI query/fragment credentials are rejected. The contained proof worker never receives `adb`, emulator, Flutter, or durable lease authority. Emulator or Android-tool startup failure is retained as an explicit unfinished-UI-proof warning and does not by itself block delivery.
 - `deny.readPaths`: paths the worker must not read or modify.

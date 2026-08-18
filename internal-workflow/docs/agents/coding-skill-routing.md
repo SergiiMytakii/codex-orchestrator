@@ -17,6 +17,10 @@ facts, runtime constraints, and domain language remain in repository policy.
 - **Proof** — claim only the observable outcome proved through the real caller
   seam. Missing required proof or independent-review approval blocks completion
   and the affected commit.
+- **Scope conservation** — start with the direct solution through existing
+  owners and seams. Add a mechanism only when confirmed authority or a proven
+  failure path cannot be satisfied directly. Delete anything removable without
+  losing required behavior, invariants, or credible proof.
 
 These principles are checks, not workflow state or durable artifacts.
 

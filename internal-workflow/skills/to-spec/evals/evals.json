@@ -25,6 +25,18 @@
       "prompt": "The agent proposed a facade and prerequisite refactor, then the user said to save the plan without explicitly approving either proposal.",
       "expected": ["keep the facade and refactor as proposals", "place any proposed runtime owner, abstraction, or prerequisite refactor in Decisions For Approval"],
       "forbidden": ["promote the facade or refactor to a confirmed decision", "treat save or publication as architectural approval"]
+    },
+    {
+      "id": "direct-fix-deletes-speculative-generality",
+      "prompt": "Write a Fix Brief for one proven planner mode defect. A universal resolver, legacy branch, and new registry are possible but not required by evidence.",
+      "expected": ["describe the direct existing-seam solution", "delete the unsupported resolver, legacy branch, and registry"],
+      "forbidden": ["freeze optional machinery as implementation decisions", "broaden the spec for hypothetical reuse"]
+    },
+    {
+      "id": "necessary-migration-survives-deletion-challenge",
+      "prompt": "Existing persisted records cannot satisfy the confirmed new contract without a migration, and repository evidence proves the incompatibility.",
+      "expected": ["retain the migration as a necessary mechanism", "tie it to the confirmed contract and persisted-state evidence"],
+      "forbidden": ["delete required migration work merely to minimize the spec", "add unrelated compatibility machinery"]
     }
   ]
 }

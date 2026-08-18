@@ -321,7 +321,7 @@ ${candidate.problem}
 Solution:
 ${candidate.solution}
 
-Files:
+Likely files:
 ${candidate.files.map((file) => `- ${file}`).join('\n')}
 
 Benefits:
@@ -341,7 +341,7 @@ ${candidate.adrConflict}
 Acceptance criteria:
 - Implement the proposed architecture improvement with the smallest safe blast radius.
 - Run the listed verification or document the blocker.
-- Keep changes inside the files owned by the issue.
+- Keep every change necessary for the same authorized outcome; avoid unrelated behavior.
 
 ## codex-orchestrator metadata
 - owner: local self-improvement runner

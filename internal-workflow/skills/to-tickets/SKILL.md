@@ -137,12 +137,18 @@ ticket body, plus:
 This packet is contextual planning data, not a separately published artifact or
 workflow owner. Do not publish any intermediate PRD.
 
+Freeze it only after product decisions, ticket boundaries, and the deletion
+challenge are complete, with every unresolved technical or external gap made
+an explicit blocking discovery outcome. The expected review verdict must be
+`APPROVE`; never use review to finish inventory, decisions, or composition.
+
 ### 4. Run one fresh semantic packet review
 
-For each settled revision, launch exactly one fresh `standards_reviewer`
-without history (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin
-with `Assigned role: standards_reviewer`, provide the full authority and packet,
-and apply all three lenses in the same activation: source fidelity, ticket
+For each settled revision composed by `$to-tickets` before approval or
+publication, launch exactly one fresh `standards_reviewer` without history
+(`fork_context=false` on V1; `fork_turns="none"` on V2). Begin with
+`Assigned role: standards_reviewer`, provide the full authority and packet, and
+apply all three lenses in the same activation: source fidelity, ticket
 executability, and minimum solution and scope conservation.
 
 - **Source fidelity:** every product claim, decision, scope boundary,
@@ -160,6 +166,11 @@ executability, and minimum solution and scope conservation.
   authority, and prefactors that can stay inside the real vertical outcome.
   Prefer deletion or narrowing before adding machinery. The reviewer may not
   introduce a new runtime mechanism merely to make proof more exhaustive.
+
+Require public contract detail only when a public boundary, inter-ticket
+contract, or existing invariant requires it. State proof gaps as observable
+obligations; never prescribe a private DTO, schema, service, rule engine, or
+exhaustive internal matrix to close them.
 
 Before verdict, traverse each applicable seam:
 
@@ -182,6 +193,11 @@ new reviewer without prior review history over the complete revised packet. A
 same-context or findings-only recheck cannot approve. Repeat until the latest
 revision receives one full approval. Missing or failed review blocks
 publication; product-changing repairs return to the user.
+
+Before re-review, repair every verified blocker and sweep the complete packet
+for the same defect class. If a blocker exposes unfinished inventory,
+authority, or composition, return to drafting and pass the freeze conditions
+again.
 
 ### 5. Get one explicit approval
 

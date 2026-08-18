@@ -11,7 +11,7 @@
     {
       "id": "fresh-worker-assignment-and-git-owner",
       "prompt": "Start two children in an approved graph from a clean isolated integration worktree.",
-      "expected": ["use a unique fresh implementer for every ticket", "include the complete ticket, Parent PRD, repository policy, and bounded write scope", "reserve all Git actions to root"],
+      "expected": ["use a unique fresh implementer for every ticket", "name the child as the only executable scope and put its complete ticket first", "include a minimum sufficient source-identified Parent context packet with a complete-PRD reference, repository policy, and bounded write scope", "reserve all Git actions to root"],
       "forbidden": ["reuse a worker context", "let a worker stage or commit", "implement a full child on root"]
     },
     {
