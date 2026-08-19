@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Compile Plan's contextual PRD draft or approved product authority into the smallest executable ticket packet, run fresh semantic review per settled revision, obtain one approval, publish serially, verify tracker read-back, and stop before implementation.
+description: Compile Plan's contextual PRD draft or approved product authority into the smallest executable ticket packet, run complete semantic review with one fresh final review after any consolidated repair, obtain one approval, publish serially, verify tracker read-back, and stop before implementation.
 ---
 
 # To Tickets
@@ -15,8 +15,9 @@ ticket contains only its local observable outcome, scope, blockers, proof, and
 Parent link. The approved ticket body plus Parent PRD is the final execution
 authority; no later planning pass is inserted.
 
-`$to-tickets` owns one fresh reviewer per settled revision, one explicit user
-approval, serialized publication, reconciliation, and tracker read-back.
+`$to-tickets` owns complete whole-packet semantic review, one fresh final review
+after any consolidated repair, one explicit user approval, serialized
+publication, reconciliation, and tracker read-back.
 
 The primary route remains `planning-only` while compiling or publishing these
 artifacts. `ticket-graph` begins only after separate delivery authorization;
@@ -144,8 +145,8 @@ an explicit blocking discovery outcome. The expected review verdict must be
 
 ### 4. Run one fresh semantic packet review
 
-For each settled revision composed by `$to-tickets` before approval or
-publication, launch exactly one fresh `standards_reviewer` without history
+After the complete packet satisfies the freeze conditions, launch exactly one
+fresh `standards_reviewer` without history
 (`fork_context=false` on V1; `fork_turns="none"` on V2). Begin with
 `Assigned role: standards_reviewer`, provide the full authority and packet, and
 apply all three lenses in the same activation: source fidelity, ticket
@@ -185,19 +186,24 @@ Before verdict, traverse each applicable seam:
 Return concise evidence for applicable seams and omit `N/A` seams. This is
 review output, not another packet artifact.
 
-The reviewer is read-only and returns `APPROVE` or `NEEDS_WORK` with exact
-source/artifact evidence. Capture a non-empty fresh child identity and wait for
-that same child. Do not split the lenses across children and do not launch the
-delivery Standards review. After `NEEDS_WORK`, repair the packet and launch a
-new reviewer without prior review history over the complete revised packet. A
-same-context or findings-only recheck cannot approve. Repeat until the latest
-revision receives one full approval. Missing or failed review blocks
-publication; product-changing repairs return to the user.
+The reviewer is read-only and returns `APPROVE` or `NEEDS_WORK` with every
+material blocker found after completing all applicable lenses and seam
+traversals, plus exact source/artifact evidence. It must complete the
+whole-packet review and must not stop after representative findings. Capture a
+non-empty fresh child identity and wait for that same child. Do not split the
+lenses across children and do not launch the delivery Standards review.
 
-Before re-review, repair every verified blocker and sweep the complete packet
-for the same defect class. If a blocker exposes unfinished inventory,
-authority, or composition, return to drafting and pass the freeze conditions
-again.
+After `NEEDS_WORK`, repair all verified blockers together and sweep the
+complete packet for every defect class they expose. Do not review intermediate
+repair edits. If a blocker exposes unfinished inventory, authority, or
+composition, return to drafting and pass the freeze conditions again. Once the
+complete revised packet satisfies the freeze conditions, launch one fresh
+final whole-packet reviewer without prior review history. A same-context or
+findings-only recheck cannot approve. Further review is justified only by a
+remaining material blocker; optional hardening, broader proof, stylistic
+refinement, or requirements without authority do not reopen the review cycle.
+Missing or failed review blocks publication; product-changing repairs return
+to the user.
 
 ### 5. Get one explicit approval
 

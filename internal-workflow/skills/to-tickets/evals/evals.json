@@ -15,10 +15,10 @@
       "forbidden": ["create duplicate durable planning state", "request another execution artifact"]
     },
     {
-      "id": "complete-packet-gets-one-review-per-revision",
+      "id": "complete-packet-review-after-freeze",
       "prompt": "Prepare a publish-ready PRD and three-ticket graph after Plan passed the combined PRD draft to you.",
-      "expected": ["launch one fresh semantic reviewer over each settled complete revision", "apply source fidelity and ticket executability in that review", "obtain one explicit user approval before publication"],
-      "forbidden": ["review the intermediate PRD", "launch separate workflow owners for each lens", "request multiple approvals"]
+      "expected": ["launch one fresh semantic reviewer only after the complete packet satisfies the freeze conditions", "apply source fidelity and ticket executability in that review", "obtain one explicit user approval before publication"],
+      "forbidden": ["review the intermediate PRD", "review intermediate repair edits", "launch separate workflow owners for each lens", "request multiple approvals"]
     },
     {
       "id": "serialized-publication-recovers-response-loss",
@@ -102,8 +102,8 @@
     {
       "id": "repair-gets-fresh-full-packet-review",
       "prompt": "Semantic review returns NEEDS_WORK and the packet is repaired before user approval.",
-      "expected": ["repair every verified blocker and sweep the complete packet for the same defect class", "pass the settled packet conditions again", "launch one new reviewer without prior review history", "review the complete revised packet", "keep one user approval for the final packet"],
-      "forbidden": ["continue with the same reviewer", "approve from a findings-only recheck", "launch multiple reviewers for one revision"]
+      "expected": ["repair all verified blockers together and sweep the complete packet for every defect class they expose", "pass the freeze conditions again", "launch one fresh final reviewer without prior review history", "review the complete revised packet", "keep one user approval for the final packet"],
+      "forbidden": ["review intermediate repair edits", "continue with the same reviewer", "approve from a findings-only recheck", "reopen review for optional hardening or requirements without authority"]
     },
     {
       "id": "private-design-stays-with-implement",

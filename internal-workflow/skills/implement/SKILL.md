@@ -70,6 +70,9 @@ never activates the graph coordinator.
    During substantial work, run the relevant typecheck or single test file as
    the seam settles. Run a full suite once at the end only when repository
    policy, risk, or the changed shared contract makes it proportionate.
+   Treat a broad-check failure as non-blocking only when targeted proof passes
+   and the failure is proven unrelated to and outside the current diff; report
+   the skipped check and residual risk.
 5. Classify the settled result by content:
    - substantial: behavior or contract beyond an obvious local edit, including
      public API, persistence, auth/payment, concurrency/shared state, or
