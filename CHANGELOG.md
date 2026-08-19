@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.18] - 2026-08-19
+
+### Changed
+- Synced the packaged Implement and To Tickets workflow guidance and evaluation
+  contracts with the current local skills.
+
+### Fixed
+- Invalid feedback reports now recover through the bounded implementation
+  continuation without losing the active issue-feedback contract.
+- Live-smoke proof fault markers now persist in the shared Git directory across
+  candidate worktrees.
+
 ## [2.0.17] - 2026-08-18
 
 ### Changed
