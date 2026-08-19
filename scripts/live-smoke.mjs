@@ -1151,7 +1151,7 @@ function applyFault(scenario, operation, prompt) {
     }); return;
   }
   if (scenario === 'acceptance-proof-rework') {
-    const marker = gitPath('v2-live-smoke-proof-rework');
+    const marker = gitCommonPath('v2-live-smoke-proof-rework');
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'attempted\\n');
       discardProofArtifacts(prompt);
@@ -1167,7 +1167,7 @@ function applyFault(scenario, operation, prompt) {
     }
   }
   if (scenario === 'authorization-revoked') {
-    const marker = gitPath('v2-live-smoke-authorization-revoked');
+    const marker = gitCommonPath('v2-live-smoke-authorization-revoked');
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'attempted\\n');
       discardProofArtifacts(prompt);
@@ -1224,6 +1224,7 @@ function writeProofReport(reportPath, report) {
 }
 
 function gitPath(name) { return runGit(['rev-parse', '--git-path', name]).trim(); }
+function gitCommonPath(name) { return join(runGit(['rev-parse', '--git-common-dir']).trim(), name); }
 function runGit(argv) { return execFileSync('git', argv, { encoding: 'utf8' }); }
 `;
 }

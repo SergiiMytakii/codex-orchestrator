@@ -380,6 +380,8 @@ test('proof rework fault discards transient proof evidence before a minimal need
   const text = await source();
   const applyFault = text.indexOf('function applyFault');
   const fixture = text.slice(text.indexOf("scenario === 'acceptance-proof-rework'", applyFault), text.indexOf("if (scenario === 'authorization-revoked')", applyFault));
+  assert.match(fixture, /gitCommonPath\('v2-live-smoke-proof-rework'\)/u);
+  assert.doesNotMatch(fixture, /gitPath\('v2-live-smoke-proof-rework'\)/u);
   assert.match(fixture, /discardProofArtifacts\(prompt\)/u);
   assert.match(text, /rmSync\(artifactRoot, \{ recursive: true, force: true \}\)/u);
   assert.match(fixture, /src\/live-smoke\/acceptance-proof-rework-complete\.txt/u);
