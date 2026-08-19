@@ -235,7 +235,22 @@ test('implementation output schema and runtime validator have parity across stat
     { value: { ...completedImplementation, extra: true }, accepted: false },
   ];
 
-  assertParity(fixtures, implementationReportOutputSchema(), validateImplementationReport);
+  assertParity(fixtures, implementationReportOutputSchema(), (value) => validateImplementationReport(value, {
+    issueFeedbackActive: true,
+  }));
+});
+
+test('answer-only and boundary reports require active issue feedback', () => {
+  const answer = {
+    version: 1 as const,
+    status: 'answer-only' as const,
+    summary: 'Answered trusted feedback.',
+    changedFiles: [],
+    residualRisks: [],
+    response: 'The answer.',
+  };
+  assert.equal(validateImplementationReport(answer, { issueFeedbackActive: true }).status, 'answer-only');
+  assert.throws(() => validateImplementationReport(answer), /requires active issue feedback/u);
 });
 
 test('canonical overlay and immutable packaged implementation schemas equal the runtime owner', async () => {

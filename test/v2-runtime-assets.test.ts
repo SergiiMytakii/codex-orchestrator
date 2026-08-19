@@ -353,6 +353,8 @@ test('contained implementation and proof map a settled launch-gate failure to re
   assert.match(implementationPrompt, /in-scope repair/u);
   assert.match(implementationPrompt, /answer-only/u);
   assert.match(implementationPrompt, /return boundary/u);
+  assert.match(implementationPrompt, /complete current candidate diff relative to the original HEAD/u);
+  assert.match(implementationPrompt, /verification-only repair with no new edits still returns completed/u);
 
   const proof = new ContainedProofAgent({
     config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin',

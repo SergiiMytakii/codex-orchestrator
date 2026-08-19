@@ -1577,7 +1577,9 @@ export class RunIssue {
       if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
       let report;
       try {
-        report = validateImplementationReport(implementation.report);
+        report = validateImplementationReport(implementation.report, {
+          issueFeedbackActive: feedbackBatch?.sources.every((source) => source.kind === 'issue-comment') === true,
+        });
       } catch {
         if (isAdoptableAttempt(active.record.activeAttempt)) {
           active = await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), { reportRepairs: active.record.reportRepairs + 1 });

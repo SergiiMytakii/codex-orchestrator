@@ -1902,6 +1902,51 @@ test('review blockers form one targeted repair batch bound to fresh affected pro
   assert.equal(initial.implementationAttemptId, repair.implementationAttemptId);
 });
 
+test('answer-only outside issue feedback retries the report instead of terminating review repair', async () => {
+  const fixture = await runFixture({ reviewNeedsWorkOnce: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'repair-ready');
+
+  fixture.dependencies.implementationAgent = {
+    run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      await onPrepared?.({
+        attemptId,
+        reportPath: `/tmp/${attemptId}-report.json`,
+        preparedAt: '2026-07-16T12:10:02.000Z',
+        baseline: await fixture.dependencies.git.snapshot(worktreePath),
+      });
+      await onLaunched?.({ attemptId, pid: 8485, processGroupId: 8485, launchedAt: '2026-07-16T12:10:03.000Z' });
+      return { kind: 'completed', attemptId, report: {
+        version: 1, status: 'answer-only', summary: 'Verification passed without new edits.',
+        changedFiles: [], residualRisks: [], response: 'The existing candidate is ready.',
+      } };
+    },
+  };
+
+  const retry = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(retry, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const retryState = (await fixture.store.read()).runs[0]!;
+  assert.equal(retryState.lifecycle, 'implementing');
+  assert.equal(retryState.terminalOutcome, undefined);
+  assert.equal(retryState.reviewFeedback?.activeBatch ?? null, null);
+
+  fixture.dependencies.implementationAgent.run = async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+    await onPrepared?.({
+      attemptId,
+      reportPath: `/tmp/${attemptId}-report.json`,
+      preparedAt: '2026-07-16T12:10:04.000Z',
+      baseline: await fixture.dependencies.git.snapshot(worktreePath),
+    });
+    await onLaunched?.({ attemptId, pid: 8486, processGroupId: 8486, launchedAt: '2026-07-16T12:10:05.000Z' });
+    return { kind: 'completed', attemptId, report: {
+      version: 1, status: 'completed', summary: 'Verification passed without new edits.',
+      changedFiles: ['feature.txt'], residualRisks: [],
+    } };
+  };
+
+  const completed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(completed.status, 'review-ready', JSON.stringify({ completed, state: await fixture.store.read() }));
+});
+
 test('check and proof blockers join the active review repair batch with exact source impact', async () => {
   for (const phase of ['check', 'proof'] as const) {
     let checkCalls = 0;

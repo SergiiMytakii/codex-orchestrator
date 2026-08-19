@@ -25,7 +25,10 @@ export interface ImplementationReportV1 {
   boundary?: { kind: 'decision-delta' | 'out-of-scope' | 'authority-boundary' };
 }
 
-export function validateImplementationReport(value: unknown): ImplementationReportV1 {
+export function validateImplementationReport(
+  value: unknown,
+  context: { issueFeedbackActive?: boolean } = {},
+): ImplementationReportV1 {
   assertRecord(value, 'implementation report');
   if (value.status === 'completed') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks'], 'implementation report');
@@ -60,6 +63,9 @@ export function validateImplementationReport(value: unknown): ImplementationRepo
     if (!['decision-delta', 'out-of-scope', 'authority-boundary'].includes(value.boundary.kind as string)) {
       throw new Error('implementation report.boundary.kind is invalid');
     }
+  }
+  if ((value.status === 'answer-only' || value.status === 'boundary') && context.issueFeedbackActive !== true) {
+    throw new Error(`${value.status} implementation report requires active issue feedback`);
   }
   return value as unknown as ImplementationReportV1;
 }
