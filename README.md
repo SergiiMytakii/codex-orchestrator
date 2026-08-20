@@ -177,8 +177,9 @@ All outcomes include structured evidence or a path to local evidence. Quiet term
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite fallback commands for issues without a command-only
-  `Verification:` section. They run before Review against the immutable candidate.
+- `checks`: finite fallback commands used when an issue has no safe npm command
+  bullets in its `Verification:` section. Unsupported or malformed entries are
+  ignored. Checks run before Review against the immutable candidate.
   A failed check becomes a bounded finding for the next implementation cycle;
   there is no qualification operation or separate retry coordinator. Final
   checks must all pass; failures are never accepted by comparing output hashes.

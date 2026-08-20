@@ -1657,21 +1657,7 @@ export class RunIssue {
       if (progression.phase !== 'checks' && progression.phase !== 'acceptance-proof') {
         return await this.terminal(active, { status: 'internal-error', code: 'validation-progression-checks-invalid' });
       }
-      let checkPolicy;
-      try { checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks); }
-      catch (error) {
-        const detail = error instanceof Error ? error.message : 'Verification policy is invalid.';
-        return await this.terminal(active, {
-          status: 'blocked', kind: 'decision-delta', resumable: false,
-          blocker: {
-            kind: 'decision-delta',
-            summary: 'The unchanged issue Verification policy is malformed or unsafe and cannot be executed as authority.',
-            attempted: ['Parsed the issue Verification section against the configured command safety policy.'],
-            resumable: false,
-            reviewerRejectionDetail: detail,
-          },
-        }, 'issue-verification-invalid');
-      }
+      const checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks);
       const finalBinding = active.record.candidateBinding;
       if (!finalBinding) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
       let reviewScope: ReviewValidationScope;

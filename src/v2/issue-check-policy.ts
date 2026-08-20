@@ -25,9 +25,15 @@ export function resolveIssueCheckPolicy(
   issueBody: string,
   configuredFallback: Record<string, string>,
 ): ResolvedIssueCheckPolicy {
-  const section = findVerificationSection(issueBody);
+  let section: string[] | undefined;
+  try { section = findVerificationSection(issueBody); }
+  catch (error) {
+    if (error instanceof InvalidIssueCheckPolicyError) return { source: 'configured', checks: configuredFallback };
+    throw error;
+  }
   if (!section) return { source: 'configured', checks: configuredFallback };
   const commands = parseVerificationCommands(section);
+  if (commands.length === 0) return { source: 'configured', checks: configuredFallback };
   return {
     source: 'issue',
     checks: Object.fromEntries(commands.map((command, index) => [
@@ -99,16 +105,21 @@ function findVerificationSection(issueBody: string): string[] | undefined {
 }
 
 function parseVerificationCommands(lines: string[]): string[] {
-  if (lines.length === 0) invalid('has no commands');
   const commands: string[] = [];
   for (const line of lines) {
     const match = line.match(/^[-*]\s+(.+?)\s*$/u);
-    if (!match) invalid('must contain only command bullets');
-    const command = unwrapInlineCode(match[1]!.trim());
-    parseIssueCheckInvocation(command);
-    if (commands.includes(command)) invalid('contains duplicate commands');
+    if (!match) continue;
+    let command: string;
+    try {
+      command = unwrapInlineCode(match[1]!.trim());
+      parseIssueCheckInvocation(command);
+    } catch (error) {
+      if (error instanceof InvalidIssueCheckPolicyError) continue;
+      throw error;
+    }
+    if (commands.includes(command)) continue;
     commands.push(command);
-    if (commands.length > MAX_ISSUE_CHECKS) invalid('exceeds 32 commands');
+    if (commands.length === MAX_ISSUE_CHECKS) break;
   }
   return commands;
 }

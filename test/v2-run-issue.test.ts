@@ -610,22 +610,12 @@ test('direct run executes issue-scoped verification checks instead of repository
   ]);
 });
 
-test('invalid issue Verification is an exact semantic blocker and replays without duplicate work', async () => {
-  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned', rejectStoreEvent: 'state:blocked:none' });
-  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(first, ['status', 'kind', 'resumable']), {
-    status: 'blocked', kind: 'decision-delta', resumable: false,
-  });
-  assert.equal(fixture.events.some((event) => event.startsWith('check:')), false);
-  assert.equal((await fixture.store.read()).runs[0]?.pendingEffect?.kind, 'outcome-evidence');
-  const workCalls = fixture.events.filter((event) => event === 'agent').length;
+test('invalid issue Verification cannot block the run and configured checks execute instead', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), {
-    status: 'blocked', kind: 'decision-delta', resumable: false,
-  });
-  assert.equal(result.status === 'blocked' && result.blocker?.kind, 'decision-delta');
-  assert.match(result.status === 'blocked' ? result.blocker?.reviewerRejectionDetail ?? '' : '', /Verification/u);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, workCalls);
+  assert.equal(result.status, 'review-ready');
+  assert.equal(fixture.events.some((event) => event === 'check:typecheck'), true);
+  assert.equal(fixture.events.some((event) => event.startsWith('check:changed:issue-verification-')), false);
 });
 
 test('rejected initial Review preserves exact decision evidence across restart', async () => {

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  InvalidIssueCheckPolicyError,
   parseIssueCheckInvocation,
   resolveIssueCheckPolicy,
 } from '../src/v2/issue-check-policy.js';
@@ -29,7 +28,7 @@ test('issue Verification commands replace configured fallback checks in declared
   });
 });
 
-test('configured checks are fallback only when Verification is absent', () => {
+test('configured checks are fallback when Verification is absent or has no safe commands', () => {
   const fallback = { test: 'npm test' };
   assert.deepEqual(resolveIssueCheckPolicy('## Acceptance Criteria\n- It works.', fallback), {
     source: 'configured', checks: fallback,
@@ -38,10 +37,38 @@ test('configured checks are fallback only when Verification is absent', () => {
   for (const body of [
     'Verification:\n- npm test && curl example.invalid',
     'Verification:\n- ./scripts/focused-check.sh',
-    'Verification:\n- npm test\n- node -e process.exit(0)',
   ]) {
-    assert.throws(() => resolveIssueCheckPolicy(body, fallback), InvalidIssueCheckPolicyError);
+    assert.deepEqual(resolveIssueCheckPolicy(body, fallback), { source: 'configured', checks: fallback });
   }
+});
+
+test('unsafe Verification commands are ignored while safe scoped checks still run', () => {
+  const fallback = { test: 'npm test' };
+  assert.deepEqual(resolveIssueCheckPolicy([
+    'Verification:',
+    '- npm test -- --runInBand focused.spec.ts',
+    '- git diff --check',
+    '- npm test && curl example.invalid',
+  ].join('\n'), fallback), {
+    source: 'issue',
+    checks: { 'issue-verification-001': 'npm test -- --runInBand focused.spec.ts' },
+  });
+});
+
+test('non-command Verification text cannot block safe checks or configured fallback', () => {
+  const fallback = { test: 'npm test' };
+  assert.deepEqual(resolveIssueCheckPolicy([
+    'Verification:',
+    'Run the focused test first.',
+    '- npm run focused',
+    'Record the result in the handoff.',
+  ].join('\n'), fallback), {
+    source: 'issue',
+    checks: { 'issue-verification-001': 'npm run focused' },
+  });
+  assert.deepEqual(resolveIssueCheckPolicy('Verification:\nRun npm test.', fallback), {
+    source: 'configured', checks: fallback,
+  });
 });
 
 test('fenced examples cannot shadow the single real Verification section', () => {
@@ -80,13 +107,14 @@ test('configured fallback source is explicit even when its id resembles a scoped
   });
 });
 
-test('duplicate real Verification sections fail closed', () => {
-  assert.throws(() => resolveIssueCheckPolicy([
+test('malformed Verification structure falls back to configured checks', () => {
+  const fallback = { test: 'npm test' };
+  assert.deepEqual(resolveIssueCheckPolicy([
     'Verification:',
     '- npm test',
     'Risk:',
     'Low.',
     '## Verification',
     '- npm run focused',
-  ].join('\n'), {}), InvalidIssueCheckPolicyError);
+  ].join('\n'), fallback), { source: 'configured', checks: fallback });
 });
