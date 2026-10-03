@@ -7,6 +7,7 @@ import type { DeliveryAuthority } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
+export const MAX_REVIEW_PATCH_BYTES = 1024 * 1024;
 const MAX_CAPSULE_BYTES = 1024 * 1024;
 
 export interface ImplementationReviewInvocation {
@@ -80,7 +81,7 @@ export class ContainedImplementationReviewer {
       assertSha256(input.targetFingerprint, 'target fingerprint');
       assertGitSha(input.currentTreeSha, 'current target tree');
       const targeted = input.repairPatch !== null;
-      assertText(input.targetPatch, 'review target patch');
+      assertPatch(input.targetPatch, 'review target patch');
       const changedFiles = sortedUnique(input.changedFiles, 'review changed files');
       if (changedFiles.length === 0) throw new Error('review changed files are empty');
       if (!targeted) {
@@ -89,7 +90,7 @@ export class ContainedImplementationReviewer {
         if (!input.previousTarget || (input.repairFindings.length === 0 && !input.defects.some((defect) => defect.status === 'fixed'))) {
           throw new Error('targeted review target is invalid');
         }
-        assertText(input.repairPatch, 'repair patch');
+        assertPatch(input.repairPatch, 'repair patch');
       }
       assertSha256(input.checkedChangeSha256, 'review checked change');
       promptFacts = [buildCapsule({ ...input, changedFiles })];
@@ -245,6 +246,12 @@ function sortedUnique(value: string[], field: string): string[] {
 
 function assertText(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 16 * 1024) throw new Error(`${field} is invalid`);
+}
+
+function assertPatch(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim().length === 0 || Buffer.byteLength(value, 'utf8') > MAX_REVIEW_PATCH_BYTES) {
+    throw new Error(`${field} is invalid`);
+  }
 }
 
 function assertSha256(value: unknown, field: string): asserts value is string {

@@ -26,7 +26,7 @@ import {
   directReviewCandidateTargetFingerprint,
   projectTerminalDirectReview,
 } from './direct-delivery.js';
-import type { ImplementationReviewerInput, ImplementationReviewerResult } from './implementation-reviewer.js';
+import { MAX_REVIEW_PATCH_BYTES, type ImplementationReviewerInput, type ImplementationReviewerResult } from './implementation-reviewer.js';
 import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
 import { CheckProcessQuiescenceError, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
@@ -2840,7 +2840,7 @@ export class RunIssue {
       binding.candidateTreeSha,
     );
     if (completeDiff.changedFiles.length === 0 || completeDiff.patch.trim().length === 0
-      || Buffer.byteLength(completeDiff.patch, 'utf8') > 1024 * 1024
+      || Buffer.byteLength(completeDiff.patch, 'utf8') > MAX_REVIEW_PATCH_BYTES
       || containsCredentialEvidence(completeDiff.patch)
       || completeDiff.changedFiles.some((path) => findDeniedPathMatch(path, deniedPaths))) {
       throw new Error('exact complete Review target is unavailable');
@@ -2896,7 +2896,7 @@ export class RunIssue {
         || defect.affectedTargets.some((target) => !directImpact.has(target)));
     const isolated = treeDiff.changedFiles.length > 0 && repairedBlockerIds.length > 0
       && treeDiff.patch.trim().length > 0
-      && Buffer.byteLength(treeDiff.patch, 'utf8') <= 1024 * 1024
+      && Buffer.byteLength(treeDiff.patch, 'utf8') <= MAX_REVIEW_PATCH_BYTES
       && !containsCredentialEvidence(treeDiff.patch)
       && !treeDiff.changedFiles.some((path) => findDeniedPathMatch(path, deniedPaths))
       && !retainedOutOfConeDefect;
@@ -3265,6 +3265,23 @@ export class RunIssue {
     }
     if (proof.status === 'transport-failed') return this.terminal(active, { status: 'transport-failed', resumable: proof.resumable });
     if (proof.status === 'cancelled') return this.terminal(active, { status: 'cancelled' });
+    if (proof.status === 'internal-error') {
+      try {
+        await this.dependencies.writeEvidence({
+          runId: active.record.runId,
+          code: 'acceptance-proof-diagnostic',
+          summary: canonicalJson({
+            summary: publicBlockedText(proof.receipt.summary, 'Proof failure detail was redacted.', 1024),
+            packageVersion: active.record.packageVersion,
+            workflowGenerationHash: active.record.workflowGeneration.generationHash,
+            workflowManifestSha256: active.record.workflowGeneration.manifestSha256,
+            candidateCommitSha: active.record.candidateBinding?.candidateCommitSha ?? null,
+          }),
+        });
+      } catch {
+        // Diagnostic storage is best-effort; it cannot authorize proof or prevent the safe terminal outcome.
+      }
+    }
     return this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
   }
 

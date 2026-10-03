@@ -22,6 +22,52 @@ import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
 
 const artifactBytes = Buffer.from('proof evidence\n');
 
+test('proof failure receipts retain the bounded cause for input, inspection, agent, and artifact failures', async () => {
+  const invalid = proofFixture();
+  const malformed = await invalid.proof.proveChange(invalid.input({ proofStartedAt: 'invalid' }));
+  assert.equal(malformed.status, 'internal-error');
+  if (malformed.status === 'internal-error') assert.match(malformed.receipt.summary, /input.*proofStartedAt/iu);
+  assert.equal(invalid.agentCalls.length, 0);
+
+  const inspection = proofFixture({ inspectFreshness: async () => { throw new Error('inspection unavailable'); } });
+  const failed = await inspection.proof.proveChange(inspection.input());
+  assert.equal(failed.status, 'internal-error');
+  if (failed.status === 'internal-error') assert.match(failed.receipt.summary, /inspection unavailable/u);
+
+  const agent = proofFixture();
+  const launch = await agent.proof.proveChange(agent.input({ beforeAgentLaunch: async () => { throw new Error('agent unavailable'); } }));
+  assert.equal(launch.status, 'internal-error');
+  if (launch.status === 'internal-error') assert.match(launch.receipt.summary, /agent unavailable/u);
+
+  const artifact = proofFixture({ artifactContent: Buffer.from('changed bytes') });
+  const mismatch = await artifact.proof.proveChange(artifact.input());
+  assert.equal(mismatch.status, 'internal-error');
+  if (mismatch.status === 'internal-error') assert.match(mismatch.receipt.summary, /artifact hash mismatch/u);
+});
+
+test('proof failure detail is bounded and sensitive text is redacted before truncation', async () => {
+  for (const message of [
+    'access_token=credential-material-12345',
+    'token=credential-material-12345',
+    'ENOENT /Users/example/private/evidence.json',
+    'x'.repeat(2000) + ' password=credential-material-12345',
+  ]) {
+    const fixture = proofFixture({ inspectFreshness: async () => { throw new Error(message); } });
+    const result = await fixture.proof.proveChange(fixture.input());
+    assert.equal(result.status, 'internal-error');
+    if (result.status !== 'internal-error') continue;
+    assert.match(result.receipt.summary, /\[redacted\]/u);
+    assert.ok(result.receipt.summary.length <= 1024);
+    assert.equal(result.receipt.summary.includes('credential-material'), false);
+    assert.equal(result.receipt.summary.includes('/Users/'), false);
+  }
+  const bounded = proofFixture({ inspectFreshness: async () => { throw new Error('unavailable\n' + 'x'.repeat(2000)); } });
+  const result = await bounded.proof.proveChange(bounded.input());
+  if (result.status !== 'internal-error') assert.fail('must fail closed');
+  assert.equal(result.receipt.summary.length, 1024);
+  assert.equal(result.receipt.summary.includes('\n'), false);
+});
+
 test('CheckedChange is nominal at compile time and rejects forged runtime objects', () => {
   // @ts-expect-error CheckedChange has a module-private nominal brand.
   const compileTimeForgery: CheckedChange = {};

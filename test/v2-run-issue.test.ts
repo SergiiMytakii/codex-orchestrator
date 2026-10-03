@@ -37,6 +37,24 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('Run retains proof failure diagnostics and existing candidate/workflow identity without launching Review or publication', async () => {
+  const fixture = await runFixture({ proof: async () => ({
+    status: 'internal-error', receipt: { ...passedProof().receipt, summary: 'Proof artifacts are invalid: proof artifact hash mismatch' },
+  }) });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'internal-error');
+  const diagnostic = fixture.evidence.find((entry) => entry.code === 'acceptance-proof-diagnostic');
+  assert.ok(diagnostic);
+  const detail = JSON.parse(diagnostic.summary);
+  assert.match(detail.summary, /artifact hash mismatch/u);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(detail.workflowGenerationHash, record.workflowGeneration.generationHash);
+  assert.equal(detail.packageVersion, record.packageVersion);
+  assert.equal(detail.candidateCommitSha, record.candidateBinding!.candidateCommitSha);
+  assert.equal(record.proofReceipt, undefined, 'failure receipt cannot become passed proof authority');
+  assert.equal(fixture.events.some((event) => event.startsWith('review:') || event === 'push'), false);
+});
+
 function reviewParticipants(coordinatorSessionId: string, verdict: 'approve' | 'block' = 'approve', targeted = false) {
   const reviewers = [
     { role: 'spec_reviewer', sessionId: `${coordinatorSessionId}:spec`, verdict },

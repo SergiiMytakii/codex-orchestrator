@@ -16,7 +16,7 @@ import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, t
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import type { DeliveryAuthority } from './delivery-authority.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
-import { ContainedImplementationReviewer } from './implementation-reviewer.js';
+import { ContainedImplementationReviewer, MAX_REVIEW_PATCH_BYTES } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import {
   canonicalJson,
@@ -528,7 +528,7 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   async diffTrees(worktreePath: string, previousTreeSha: string, candidateTreeSha: string): Promise<{ changedFiles: string[]; patch: string }> {
     const [names, patch] = await Promise.all([
       this.git(['-C', worktreePath, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', previousTreeSha, candidateTreeSha], { maxOutputBytes: 1024 * 1024 }),
-      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--'], { maxOutputBytes: 1024 * 1024 }),
+      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--'], { maxOutputBytes: MAX_REVIEW_PATCH_BYTES }),
     ]);
     return { changedFiles: names.split('\0').filter(Boolean).sort(), patch };
   }

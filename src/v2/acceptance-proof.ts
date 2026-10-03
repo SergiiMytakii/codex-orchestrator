@@ -143,6 +143,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     runnerPreparationWarnings?: string[];
   }): Promise<ProveChangeResult> {
     let bindingSha256 = sha256(canonicalJson({ proofId: input.proofId, invalid: true }));
+    let stage = 'input';
     try {
       assertNonEmptyString(input.proofId, 'proofId');
       assertNonEmptyString(input.attemptId, 'attemptId');
@@ -151,6 +152,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       validateSemanticState(input);
       validateIssue(input.issue);
       validateCriteria(input.frozenCriteria);
+      stage = 'binding';
       const checked = this.dependencies.checkedChangeReader.verifyAndRead(input.checkedChange);
       if (checked.payload.issueNumber !== input.issue.number) throw new Error('CheckedChange issue does not match proof issue');
       if (checked.payload.version === 2 && (!input.materialization
@@ -166,6 +168,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         checkedChangeSha256: checked.checkedChangeSha256,
         runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths ?? [],
       });
+      stage = 'execution';
       if (input.passedReceipt) {
         validateProofReceipt(input.passedReceipt);
         if (input.passedReceipt.proofId !== input.proofId || input.passedReceipt.bindingSha256 !== bindingSha256) {
@@ -182,7 +185,8 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       return await this.execute({ ...input, ...checked, bindingSha256 });
     } catch (error) {
       if (error instanceof CandidateProofInspectionError || error instanceof ProofLaunchAuthorizationError) throw error;
-      return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256, 'Acceptance proof failed internally.') };
+      return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256,
+        proofFailureSummary(`Acceptance proof ${stage} failed`, error)) };
     }
   }
 
@@ -249,7 +253,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       if (error instanceof CandidateProofInspectionError || error instanceof ProofLaunchAuthorizationError) throw error;
       return this.settle(input.proofId, {
         status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof agent failed internally.'),
+        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof agent failed', error)),
       });
     }
 
@@ -295,7 +299,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       }
       return this.settle(input.proofId, {
         status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof report is invalid.'),
+        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof report is invalid and checked change is stale', error)),
       });
     }
     try {
@@ -310,10 +314,10 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         input.checkedChangeSha256,
         input.payload.checks.map((check) => check.id),
       );
-    } catch {
+    } catch (error) {
       return this.settle(input.proofId, {
         status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof artifacts are invalid.'),
+        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof artifacts are invalid', error)),
       });
     }
     if (!await this.isFresh(input.payload, input.materialization)) {
@@ -625,6 +629,13 @@ function validateProofReceipt(value: unknown): asserts value is ProofReceipt {
     assertSha256(evidence.sha256, 'proof receipt evidence.sha256');
     assertNonEmptyString(evidence.description, 'proof receipt evidence.description');
   }
+}
+
+function proofFailureSummary(prefix: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : 'Unknown failure';
+  if (containsCredentialEvidence(detail) || containsHostIdentityEvidence(detail)
+    || /["']?token["']?\s*[:=]\s*["']?[^\s"']{8,}/iu.test(detail)) return `${prefix}: [redacted].`;
+  return `${prefix}: ${detail.replace(/[\x00-\x1f\x7f]/gu, ' ').trim() || 'Unknown failure'}`.slice(0, 1024);
 }
 
 function emptyReceipt(proofId: string, bindingSha256: string, summary: string): ProofReceipt {

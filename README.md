@@ -171,6 +171,35 @@ Important command results:
 
 All outcomes include structured evidence or a path to local evidence. Quiet terminal output is not the source of truth—the JSON result and persisted state are.
 
+On an internal Acceptance Proof failure, the Runner also attempts to retain an
+`acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.
+It contains a bounded, filtered cause, candidate commit, package version, and
+existing workflow generation/manifest hashes. Diagnostic storage is best-effort;
+failure still stops before Review or publication. The CLI's terminal evidence
+path retains the terminal outcome separately. Workflow hashes identify bundled
+instructions and schemas, not compiled Runner code: equal package versions and
+workflow hashes do not establish identical Runner behavior. Compare the actual
+installed compiled files when investigating a source/install discrepancy.
+
+Delivery guarantees depend on repository policy and issue format. Frozen
+criteria recognize a Markdown `Acceptance Criteria` heading and `-`/`*` bullets
+(including checkboxes); without those bullets, one criterion covers the entire
+title and body. Safe issue `Verification:` commands replace configured checks,
+rather than supplementing them. Unsupported entries are ignored, and no safe
+commands means configured fallback; that fallback can itself be empty. Android
+startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
+and static workflow evals do not establish live browser or agent behavior.
+
+Review receives the exact patch without truncation, bounded to 1 MiB of UTF-8
+bytes. Its encoded JSON capsule has a separate 1 MiB limit, so metadata,
+duplicated repair patches, and JSON escaping can cause a smaller patch to be
+rejected. Other text fields keep their existing limits.
+
+An owner-lock refusal does not prove a stale lock. Foreign host/boot ownership
+stays blocked even if the recorded PID is absent; a live Darwin worker cannot
+prove matching start identity. Do not remove locks or reset state to force
+progress. Unsupported run-state schemas fail closed without migration.
+
 ## Configuration you will usually edit
 
 `.codex-orchestrator/config.json` is intentionally strict: unknown keys are errors. The most useful fields are:
@@ -223,3 +252,11 @@ they never launch Codex or a real agent.
 `npm run smoke:live` packs the current package and mutates a configured scratch GitHub repository. Run it only when live smoke was explicitly requested. Releases are published by the GitHub release workflow after the release commit reaches `main`; do not run `npm publish` manually unless that workflow is unavailable.
 
 Human maintainers can find the complete lifecycle, state machine, containment boundary, retry budgets, review flow, proof contracts, and publication recovery model in [docs/deep-dive.md](docs/deep-dive.md). That guide is not agent context. For live release scenarios, see [docs/live-smoke-checklist.md](docs/live-smoke-checklist.md).
+
+An optional future reliability pilot starts with shadow verification of saved
+candidates, then 5–10 small tasks in one scratch repository with one scheduler
+and manual publication. Inject restart, duplicate dispatch, unknown effects,
+reboot, and foreign-branch faults only in scratch runs. Success means verifying
+the exact candidate SHA, no duplicate effects, clear blocker causes, and
+detection of a known defect. This procedure does not authorize execution or
+assume that native automation or an SDK guarantees the lifecycle.

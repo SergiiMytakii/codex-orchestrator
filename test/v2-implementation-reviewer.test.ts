@@ -20,6 +20,44 @@ const report = {
   reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [],
 };
 
+test('complete and targeted Review launch with the exact 19207-character candidate patch', async () => {
+  const patch = 'diff --git a/feature.txt b/feature.txt\n+' + 'я'.repeat(19167);
+  assert.equal(patch.length, 19207);
+  const capsules: string[] = [];
+  const reviewer = new ContainedImplementationReviewer({
+    operation: { run: async (call) => { capsules.push(call.promptFacts[0]!); return { status: 'cancelled' }; } },
+  });
+  assert.deepEqual(await reviewer.run(input({ targetPatch: patch })), { kind: 'cancelled' });
+  assert.deepEqual(await reviewer.run(input({
+    targetRevision: 2, targetPatch: patch, repairPatch: patch,
+    previousTarget: { targetRevision: 1, targetFingerprint: '4'.repeat(64), candidateTreeSha: '5'.repeat(40) },
+    repairFindings: [{ id: 'finding-1', sourceId: 'check-1', summary: 'Repair behavior', affectedContracts: ['feature.txt'] }],
+  })), { kind: 'cancelled' });
+  assert.equal(JSON.parse(capsules[0]!).target.patch, patch);
+  assert.equal(JSON.parse(capsules[1]!).target.repairPatch, patch);
+});
+
+test('Review bounds UTF-8 patch bytes and the encoded capsule while preserving other field limits', async () => {
+  let calls = 0;
+  const reviewer = new ContainedImplementationReviewer({
+    operation: { run: async () => { calls += 1; return { status: 'cancelled' }; } },
+  });
+  const admitted = 'я'.repeat(500_000);
+  assert.equal(Buffer.byteLength(admitted, 'utf8'), 1_000_000);
+  assert.deepEqual(await reviewer.run(input({ targetPatch: admitted })), { kind: 'cancelled' });
+  for (const overrides of [
+    { targetPatch: 'я'.repeat(524_289) }, // Under 1 MiB characters, over 1 MiB UTF-8 bytes.
+    { targetPatch: 'x'.repeat(1_048_576) }, // Exact patch limit still requires capsule overhead.
+    { targetPatch: '\n'.repeat(600_000) + '+' }, // JSON escaping also counts towards the capsule.
+    { targetPatch: ' ' },
+    { reviewerSessionId: 'x'.repeat(16_385) },
+    { repairFindings: [{ id: 'finding', sourceId: 'check', summary: 'x'.repeat(16_385), affectedContracts: [] }], previousTarget: { targetRevision: 1, targetFingerprint: '4'.repeat(64), candidateTreeSha: '5'.repeat(40) } },
+  ]) {
+    assert.equal((await reviewer.run(input(overrides))).kind, 'internal-error');
+  }
+  assert.equal(calls, 1, 'invalid inputs cannot launch a reviewer');
+});
+
 test('thin reviewer facade binds an independent attempt and delegates durable launch hooks', async () => {
   const calls: Parameters<ContainedReportOperation['run']>[0][] = [];
   const operation: ContainedReportOperation = {
