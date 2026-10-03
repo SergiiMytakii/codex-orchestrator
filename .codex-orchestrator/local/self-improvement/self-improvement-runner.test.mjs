@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmod, mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -1151,6 +1151,56 @@ test('state load/save preserves audit data', async () => {
     await runner.saveState({ created: [1] });
     assert.deepEqual(await runner.loadState(), { created: [1] });
     assert.equal(existsSync(path.join(runner.paths.localDir, 'state.json')), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('failed state write preserves the previous state and removes temporary files', async () => {
+  const { root, runner, cleanup } = await makeRunner();
+  try {
+    await runner.saveState({ created: [1], lastReview: { reused: [2] } });
+    const previousBytes = await readFile(runner.paths.state, 'utf8');
+    const previousEntries = await readdir(runner.paths.localDir);
+    const script = `
+      import assert from 'node:assert/strict';
+      import { createRunner } from ${JSON.stringify(new URL('./runner.mjs', import.meta.url).href)};
+      process.on('SIGXFSZ', () => {});
+      const runner = createRunner({ cwd: ${JSON.stringify(root)} });
+      await assert.rejects(runner.saveState({ audit: 'x'.repeat(100_000) }), { code: 'EFBIG' });
+    `;
+    const result = await new Promise((resolve, reject) => {
+      // Limit only the child so a real partial write fails without affecting the test process.
+      const child = spawn('/bin/bash', [
+        '-c', 'ulimit -f 1; exec "$@"', 'state-write-test',
+        process.execPath, '--input-type=module', '--eval', script,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code, signal) => resolve({ code, signal, stderr }));
+    });
+    assert.equal(result.code, 0, JSON.stringify(result));
+    assert.equal(await readFile(runner.paths.state, 'utf8'), previousBytes);
+    assert.deepEqual(await runner.loadState(), { created: [1], lastReview: { reused: [2] } });
+    assert.deepEqual(await readdir(runner.paths.localDir), previousEntries);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('successful state replacement reloads the complete new state without temporary files', async () => {
+  const { root, runner, cleanup } = await makeRunner();
+  try {
+    await runner.saveState({ created: [1], lastReview: { reused: [2] } });
+    const previousEntries = await readdir(runner.paths.localDir);
+    await runner.saveState({ created: [3, 4], lastLiveSmoke: { status: 'passed' } });
+    const freshRunner = createRunner({ cwd: root });
+    assert.deepEqual(await freshRunner.loadState(), {
+      created: [3, 4],
+      lastLiveSmoke: { status: 'passed' },
+    });
+    assert.deepEqual(await readdir(runner.paths.localDir), previousEntries);
   } finally {
     await cleanup();
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   mkdir,
@@ -7,6 +7,8 @@ import {
   rm,
   writeFile,
   mkdtemp,
+  open,
+  rename,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
@@ -455,7 +457,23 @@ export function createRunner(options = {}) {
 
   async function saveState(state) {
     await ensureDirs();
-    await writeFile(paths.state, `${JSON.stringify(state, null, 2)}\n`);
+    const contents = `${JSON.stringify(state, null, 2)}\n`;
+    const temporaryPath = path.join(path.dirname(paths.state), `.state-${randomUUID()}.tmp`);
+    const file = await open(temporaryPath, 'wx');
+    let closed = false;
+    try {
+      await file.writeFile(contents);
+      await file.sync();
+      await file.close();
+      closed = true;
+      await rename(temporaryPath, paths.state);
+    } finally {
+      try {
+        if (!closed) await file.close();
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
+    }
   }
 
   async function acquireLock() {
