@@ -89,6 +89,7 @@ test('semantic repair returns one CAS transition without a reworking lifecycle',
     checks: [],
     checkedChangeSha256: undefined,
     proofId: undefined,
+    proofExecution: undefined,
     proofReceipt: undefined,
   });
 });

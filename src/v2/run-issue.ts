@@ -54,7 +54,6 @@ import {
   projectReviewFeedbackBatch,
   publishReviewFeedback,
   respondReviewFeedback,
-  reserveNextReviewFeedbackRound,
   settleReviewFeedbackResponse,
 } from './review-feedback.js';
 import type { CandidateGitV2 } from './candidate.js';
@@ -681,14 +680,14 @@ export class RunIssue {
           if (recaptured.value.bindingId !== candidateBinding.bindingId) {
             await candidate.releasePin({ binding: recaptured.value, expectedPinnedCommitSha: recaptured.value.candidateCommitSha });
           }
-          const released = await this.clearAndReleaseCandidate(active);
-          if ('status' in released) return released;
-          const reopened = await this.persist(released.active, {
-            lifecycle: 'implementing',
-            reviewFeedback: reserveNextReviewFeedbackRound(feedback),
-            reworkFindings: ['The issue worktree changed after proof; rebuild and revalidate the review-feedback candidate.'],
-            checks: [], checkedChangeSha256: undefined, proofId: undefined, proofReceipt: undefined,
-          });
+          const summary = 'The issue worktree changed after proof; rebuild and revalidate the review-feedback candidate.';
+          const reopened = await this.startNextCycleFromCandidate(active, [summary], [{
+            provenance: 'proof',
+            sourceId: `proof:${active.record.proofId}:candidate-worktree-drift`,
+            summary,
+            affectedContracts: ['acceptance-proof'],
+          }]);
+          if ('status' in reopened) return reopened;
           return this.invokedFailure(reopened, 'review-feedback-candidate-worktree-drift', 'The next review-feedback repair round is ready.');
         }
         active = await this.persist(active, { pendingEffect: {
@@ -1111,6 +1110,7 @@ export class RunIssue {
       activation.changes.checks = structuredClone(ready.record.checks);
       activation.changes.checkedChangeSha256 = ready.record.checkedChangeSha256;
       activation.changes.proofId = ready.record.proofId;
+      activation.changes.proofExecution = structuredClone(ready.record.proofExecution);
       activation.changes.proofReceipt = structuredClone(ready.record.proofReceipt);
       activation.changes.implementationResult = structuredClone(ready.record.implementationResult);
       activation.changes.terminalNotifications = undefined;
@@ -1630,6 +1630,10 @@ export class RunIssue {
           transportRetries: active.record.transportRetries,
           reportRepairs: 0,
           implementationResult: { summary: report.summary, residualRisks: report.residualRisks },
+          checkedChangeSha256: undefined,
+          proofId: undefined,
+          proofExecution: undefined,
+          proofReceipt: undefined,
         });
         active = await this.clearAttempt(active);
       }
@@ -2142,7 +2146,7 @@ export class RunIssue {
     if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
     if (Object.hasOwn(changes, 'terminalOutcome') && changes.terminalOutcome === undefined
       && !Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications'] as const) {
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);

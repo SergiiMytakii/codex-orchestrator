@@ -168,6 +168,7 @@ export function projectValidationRepair(
     checks: [],
     checkedChangeSha256: undefined,
     proofId: undefined,
+    proofExecution: undefined,
     proofReceipt: undefined,
   });
 }
@@ -210,6 +211,7 @@ export function projectValidationReviewNeedsWork(
     checks: [],
     checkedChangeSha256: undefined,
     proofId: undefined,
+    proofExecution: undefined,
     proofReceipt: undefined,
   });
 }
@@ -336,6 +338,7 @@ export function projectValidationFeedbackActivation(
     checks: [],
     checkedChangeSha256: undefined,
     proofId: undefined,
+    proofExecution: undefined,
     proofReceipt: undefined,
     terminalOutcome: undefined,
     outcomeEvidenceId: undefined,
