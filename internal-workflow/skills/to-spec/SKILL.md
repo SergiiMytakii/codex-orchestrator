@@ -51,8 +51,10 @@ explicit confirmation.
 ## Process
 
 1. Explore the repo if needed. Use project domain language, respect relevant
-   ADRs, and reuse cited `$research` artifacts. Keep unsupported external facts
-   open instead of converting them into product scope.
+   ADRs, and reuse cited `$research` artifacts. Ground every material premise
+   in user input or an authoritative source independent of the proposed
+   solution. Keep unsupported premises unresolved; never present them as
+   confirmed authority.
 
 2. Sketch the seams at which the outcome will be proved. Prefer existing
    task-relevant seams and use the highest applicable seam. Add a new seam only

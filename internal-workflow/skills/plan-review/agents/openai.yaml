@@ -1,0 +1,6 @@
+interface:
+  display_name: "Plan Review"
+  short_description: "Challenge an implementation plan without rewriting it"
+  default_prompt: "Use $plan-review to deeply challenge this settled implementation plan, return evidence-backed findings only, and do not rewrite or implement it."
+policy:
+  allow_implicit_invocation: true

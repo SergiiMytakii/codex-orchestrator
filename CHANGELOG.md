@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Package the Plan Review skill and its static evals, including its references
+  from Plan, To Spec, To Tickets, and the implementation workflow closure.
+
+### Changed
+- Refresh packaged planning, implementation, review, and ticketing guidance to
+  match the current local skills.
+
 ## [2.0.18] - 2026-08-19
 
 ### Changed

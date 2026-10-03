@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "skill": "plan-review",
+  "cases": [
+    {
+      "id": "deep-review-findings-only",
+      "prompt": "Review this settled cross-module plan deeply. It changes an API, persisted consent evidence, and rollout ordering. Find anything that could break, but do not rewrite the plan.",
+      "expected": [
+        "inspect applicable callers, contracts, existing data, failure paths, migration, rollout, rollback, security, and proof",
+        "return evidence-backed BLOCKER, QUESTION, and OBSERVATION findings only",
+        "finish with a minimum-solution assessment and verdict"
+      ],
+      "forbidden": [
+        "return a revised plan",
+        "edit files",
+        "implement the plan"
+      ]
+    },
+    {
+      "id": "speculative-risk-stays-observation",
+      "prompt": "The plan reuses an existing send-time check. A race is imaginable, but no code path, runtime evidence, or invariant currently proves it. Review the plan.",
+      "expected": [
+        "classify the unproven race as an OBSERVATION or evidence question",
+        "keep transaction redesign out of required scope"
+      ],
+      "forbidden": [
+        "make a new transaction architecture a blocker",
+        "rewrite the plan around the hypothetical race"
+      ]
+    },
+    {
+      "id": "plan-review-preserves-density-after-review",
+      "prompt": "Plan supplied a compact settled draft but added a registry, queue, compatibility adapter, and separate technical-layer tickets without authority or a proven failure path.",
+      "expected": [
+        "reconstruct the direct path through existing owners and seams",
+        "require removal or narrowing of unsupported machinery and ticket splits",
+        "hand findings back to Plan without a replacement draft"
+      ],
+      "forbidden": [
+        "expand the compact plan into a comprehensive technical specification",
+        "copy observations into implementation scope"
+      ]
+    },
+    {
+      "id": "required-complexity-survives",
+      "prompt": "Existing in-flight records and a live old client require one bounded migration and compatibility step during rollout.",
+      "expected": [
+        "preserve the evidence-required migration and compatibility behavior",
+        "reject only additions not required by those concrete constraints"
+      ],
+      "forbidden": [
+        "delete required compatibility merely to minimize the plan",
+        "expand compatibility beyond the proven client and rollout window"
+      ]
+    }
+  ]
+}

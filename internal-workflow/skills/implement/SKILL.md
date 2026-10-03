@@ -16,11 +16,10 @@ create a replacement plan, spec, ticket, workflow state, or compatibility path.
   proof and applicable Review unless user or repository policy explicitly
   forbids or reserves Git. Push and PR are separate and never implicit.
 - **Preservation:** read repository policy and current status before edits.
-  Preserve unrelated work and user-owned runtimes. Stop on overlapping dirty
-  scope. Stop and ask the user before making any behavior, ownership, or
-  boundary decision not explicitly settled by the approved request;
-  implementation approval does not authorize decisions discovered during
-  implementation.
+  Preserve all pre-existing changes and user-owned runtimes. Work on top of
+  existing changes, including in overlapping files, without reverting or
+  altering them or asking for confirmation solely because of overlap. Stop on
+  a decision that changes behavior, ownership, or boundaries.
 - **Proof:** prove the final observable outcome through the real caller seam.
   Authority-defined proof cannot be replaced by weaker tests or a completion
   claim.
@@ -51,9 +50,12 @@ never activates the graph coordinator.
 ## Execution
 
 1. Confirm authority, repository policy, current status, owner code, caller
-   seam, and the smallest credible proof. Record pre-existing dirty paths; an
-   overlap with owned scope blocks edits, while disjoint dirty paths remain
-   untouched and unstaged.
+   seam, material premises, and the smallest credible proof. Verify each
+   premise against current evidence independent of the proposed implementation.
+   If a material premise is unsupported or contradicted, stop before edits and
+   return the decision or evidence gap. Read and record pre-existing changes;
+   preserve them while adding the authorized edits on top. Disjoint dirty paths
+   remain untouched and unstaged.
 2. Use `$tdd` where possible. Otherwise establish direct pre-change evidence
    when useful and apply the narrowest observable proof after the edit.
    When a diagnosis handoff exists, rerun the unchanged reproduction command
@@ -70,9 +72,6 @@ never activates the graph coordinator.
    During substantial work, run the relevant typecheck or single test file as
    the seam settles. Run a full suite once at the end only when repository
    policy, risk, or the changed shared contract makes it proportionate.
-   Treat a broad-check failure as non-blocking only when targeted proof passes
-   and the failure is proven unrelated to and outside the current diff; report
-   the skipped check and residual risk.
 5. Classify the settled result by content:
    - substantial: behavior or contract beyond an obvious local edit, including
      public API, persistence, auth/payment, concurrency/shared state, or
@@ -126,7 +125,7 @@ never activates the graph coordinator.
    unchanged. If user or repository policy explicitly forbids or reserves Git
    to another actor, return the proven uncommitted diff.
 
-Missing proof, terminally failed or interrupted review, dirty overlap, or
+Missing proof, terminally failed or interrupted review, or
 unisolatable scope produces no affected staging or commit. Never push or open a
 PR without separate authority.
 

@@ -30,6 +30,9 @@ The user-facing coding flow is Plan, Implement, Review.
 
 - [`$plan`](../../skills/plan/SKILL.md) owns product decisions and multi-ticket
   planning composition. It is the sole planning-composition entrypoint.
+- [`$plan-review`](../../skills/plan-review/SKILL.md) performs deep adversarial
+  read-only review of a settled local plan or complete Parent/ticket packet and
+  returns findings to Plan without rewriting the artifact.
 - [`$implement`](../../skills/implement/SKILL.md) is the single execution owner
   for clear features, fixes, obvious local edits, and executable tickets.
 - [`$code-review`](../../skills/code-review/SKILL.md) is the direct Review
@@ -163,6 +166,7 @@ central configuration details:
 | --- | --- |
 | Root dialogue, integration, and Git ownership | `root` |
 | One isolated executable ticket | `implementer` |
+| Deep adversarial review of a settled plan | `plan_reviewer` |
 | Requirement fidelity and scope drift | `spec_reviewer` |
 | Correctness and repository standards | `standards_reviewer` |
 | Bounded repository exploration | `explorer` |

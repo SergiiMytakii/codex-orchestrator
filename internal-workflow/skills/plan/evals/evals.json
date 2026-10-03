@@ -55,6 +55,33 @@
       "prompt": "Prepare a durable plan while repository source inventory and one ownership decision are still unresolved.",
       "expected": ["finish discovery or expose the unresolved decision before review", "launch independent review only for a settled draft expected to approve"],
       "forbidden": ["use the reviewer to complete discovery", "let the reviewer design the solution"]
+    },
+    {
+      "id": "review-and-save-preserves-density",
+      "prompt": "Deeply review this settled ten-point implementation plan, incorporate justified findings, and save it to a Markdown file.",
+      "expected": [
+        "invoke plan-review and receive findings rather than a replacement plan",
+        "apply only verified blockers through one minimal revision",
+        "preserve the original structure, order, and information density when saving"
+      ],
+      "forbidden": [
+        "turn questions or observations into implementation scope",
+        "rewrite the draft as a comprehensive technical specification",
+        "invoke to-spec or to-tickets"
+      ]
+    },
+    {
+      "id": "save-local-plan-runs-one-deep-review",
+      "prompt": "Save the compact implementation plan from this conversation as a local Markdown file.",
+      "expected": [
+        "route through Plan and invoke one plan-review before saving",
+        "keep the conversation draft as the fixed base",
+        "save one minimally reconciled Markdown artifact"
+      ],
+      "forbidden": [
+        "invoke to-spec or to-tickets",
+        "rewrite the draft as a comprehensive specification"
+      ]
     }
   ]
 }

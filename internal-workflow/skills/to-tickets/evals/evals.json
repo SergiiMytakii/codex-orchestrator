@@ -128,6 +128,31 @@
       "prompt": "UI acceptance requires dynamic content absent from the proposed API or DTO.",
       "expected": ["reject the packet until an existing or authorized data contract supplies the content"],
       "forbidden": ["let the UI invent the data", "add a new owner solely for proof"]
+    },
+    {
+      "id": "final-packet-uses-plan-review-once",
+      "prompt": "Compile an approved PRD into a complete publish-ready Parent and multi-ticket packet.",
+      "expected": [
+        "do not review the intermediate PRD",
+        "invoke one fresh plan-review over the complete frozen packet",
+        "cover source fidelity, ticket executability, and minimum solution in that review"
+      ],
+      "forbidden": [
+        "invoke standards_reviewer for planning review",
+        "review both the PRD and final packet"
+      ]
+    },
+    {
+      "id": "plan-review-question-returns-to-user",
+      "prompt": "The final packet review raises an unresolved ownership question but finds no verified blocker.",
+      "expected": [
+        "return the question through Plan to the user",
+        "resume only after the answer becomes authority and the packet is settled again"
+      ],
+      "forbidden": [
+        "guess the answer",
+        "repair or publish the packet"
+      ]
     }
   ]
 }

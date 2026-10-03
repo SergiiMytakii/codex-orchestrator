@@ -132,6 +132,7 @@ test('workflow packages only static target scenarios with no live execution meta
     'skill/grilling',
     'skill/implement',
     'skill/plan',
+    'skill/plan-review',
     'skill/prototype',
     'skill/research',
     'skill/tdd',

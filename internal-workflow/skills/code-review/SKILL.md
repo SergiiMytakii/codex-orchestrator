@@ -25,6 +25,11 @@ docs, copy, formatting, mechanical config, or corrections may use direct proof.
 - **Repair scope:** the smallest change that restores a proven obligation,
   invariant, or mandatory rule without widening the authorized outcome.
 
+Authority defines the required outcome; it does not prove premises about the
+current system. Require evidence independent of the implementation and its
+derived tests. Repeating one unsupported premise across the request, code,
+fixtures, tests, and docs is a proof gap, not corroboration.
+
 A reviewer verdict is evidence, not authority. Mark a finding `BLOCKER` only
 when evidence links a concrete defect or required-proof gap to an authorized
 obligation, existing invariant, or mandatory rule. Include its source,
