@@ -1889,6 +1889,14 @@ test('unsupported state is effect-free before owner lock and after authoritative
   assert.equal(postLock.events.some((event) => event.startsWith('effect:')), false);
 });
 
+test('unsupported-state diagnostics reach the public result without claiming the repository', async () => {
+  const reason = 'Legacy run records are incompatible; archive the journal before starting a new one.';
+  const fixture = await runFixture({ stateInspections: [{ status: 'unsupported', rawSha256: 'a'.repeat(64), reason }] });
+  assert.deepEqual(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), { status: 'state-schema-unsupported', reason });
+  assert.equal(fixture.events.includes('owner-acquire'), false);
+  assert.deepEqual(fixture.evidence, []);
+});
+
 test('real old, unknown, malformed, and missing-discriminator state bytes remain unchanged and effect-free', async () => {
   const cases = [
     Buffer.from('{malformed-json\n'),
@@ -1898,10 +1906,9 @@ test('real old, unknown, malformed, and missing-discriminator state bytes remain
   ];
   for (const bytes of cases) {
     const fixture = await runFixture({ rawRunStateBytes: bytes });
-    assert.deepEqual(
-      await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }),
-      { status: 'state-schema-unsupported' },
-    );
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'state-schema-unsupported');
+    assert.ok('reason' in result && result.reason?.includes('archive'));
     assert.deepEqual(await readFile(fixture.statePath), bytes);
     assert.deepEqual(await readdir(dirname(fixture.statePath)), ['run-state.json']);
     assert.equal(fixture.events.includes('owner-acquire'), false);

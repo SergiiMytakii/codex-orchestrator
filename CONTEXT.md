@@ -51,9 +51,9 @@ targeted Review of their delta and direct impact cone while untouched approval i
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
-- Durable state accepts only the exact `codex-orchestrator.run-state` schema.
-  Absence initializes it; unsupported bytes fail closed without compatibility,
-  migration, backup, dual-write, or progression effects.
+- Durable Run records must satisfy the current execution contract. Legacy envelopes
+  may carry those same records, but obsolete execution fields and missing authority
+  cannot authorize continuation. Unsupported state remains unchanged and blocks progression.
 - Plan, specification composition, ticket slicing, and graph coordination remain external owners.
 - Trusted PR feedback is frozen as Run data with an update epoch and uses the same targeted repair progression; it does not own a second lifecycle or round budget.
 - Transport, timeout, report-format, launch, observation, and tooling failures return resumable issue-local outcomes and do not consume semantic repair authority.

@@ -186,7 +186,7 @@ export type RunStateBody = Omit<RunStateFile, 'generation'>;
 export type RunStateInspection =
   | { status: 'absent'; rawSha256: null }
   | { status: 'supported'; rawSha256: string; state: RunStateFile }
-  | { status: 'unsupported'; rawSha256: string };
+  | { status: 'unsupported'; rawSha256: string; reason?: string };
 
 export interface RunRecordWriter {
   inspect(): Promise<RunStateInspection>;
@@ -221,11 +221,11 @@ export class FileRunRecordWriter implements RunRecordWriter {
     const bytes = await readOptionalStateFile(this.file.path);
     if (!bytes) return { status: 'absent', rawSha256: null };
     const rawSha256 = sha256(bytes);
-    if (bytes.length > this.maxBytes) return { status: 'unsupported', rawSha256 };
+    if (bytes.length > this.maxBytes) return { status: 'unsupported', rawSha256, reason: 'Run state exceeds the supported size limit; inspect and archive it before starting a new journal.' };
     try {
       return { status: 'supported', rawSha256, state: parseRawState(bytes) };
     } catch {
-      return { status: 'unsupported', rawSha256 };
+      return { status: 'unsupported', rawSha256, reason: unsupportedStateReason(bytes) };
     }
   }
 
@@ -233,7 +233,7 @@ export class FileRunRecordWriter implements RunRecordWriter {
     const inspection = await this.inspect();
     if (inspection.status === 'absent') return emptyRunState();
     if (inspection.status === 'supported') return inspection.state;
-    throw new Error('run state schema is unsupported');
+    throw new Error(`run state schema is unsupported: ${inspection.reason ?? 'inspect the saved journal'}`);
   }
 
   async compareAndSwap(expectedGeneration: number, next: RunStateBody): Promise<RunStateFile> {
@@ -270,6 +270,13 @@ export class InMemoryRunRecordWriter implements RunRecordWriter {
 }
 
 export function validateRunStateFile(value: unknown): RunStateFile {
+  // Older envelopes are harmless only when every record meets today's contract.
+  // Never discard execution, authority, or publication fields to make a record fit.
+  if (hasOwn(value, 'schema') && (value as Record<string, unknown>).schema === 'codex-orchestrator.agent-auto-state') {
+    assertExactObject(value, ['schema', 'version', 'generation', 'runs'], 'legacy run state');
+    if (value.version !== 2 && value.version !== 3) throw new Error('legacy run state version is invalid');
+    return validateRunStateFile({ schema: 'codex-orchestrator.run-state', generation: value.generation, runs: value.runs });
+  }
   assertExactObject(value, ['schema', 'generation', 'runs'], 'run state');
   if (value.schema !== 'codex-orchestrator.run-state') throw new Error('run state schema is invalid');
   if (!Number.isSafeInteger(value.generation) || (value.generation as number) <= 0) throw new Error('run state generation is invalid');
@@ -807,6 +814,16 @@ function validateStringArray(value: unknown, field: string): void {
 
 function emptyRunState(): RunStateFile {
   return { schema: 'codex-orchestrator.run-state', generation: 0, runs: [] };
+}
+
+function unsupportedStateReason(bytes: Buffer): string {
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString('utf8')); }
+  catch { return 'Run state contains malformed JSON; preserve the file and repair it or archive it before starting a new journal.'; }
+  if (hasOwn(value, 'schema') && (value as Record<string, unknown>).schema === 'codex-orchestrator.agent-auto-state') {
+    return 'Legacy run records are incompatible with the current execution contract. The old envelope is accepted only with fully valid current records; migrate the records or archive the journal before starting a new one.';
+  }
+  return 'Run state has an unknown format or invalid records. Inspect the journal; required lifecycle, authority, process, and publication fields cannot be ignored. Repair it or archive it before starting a new one.';
 }
 
 function parseRawState(bytes: Buffer): RunStateFile {

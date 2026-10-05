@@ -206,7 +206,12 @@ rejected. Other text fields keep their existing limits.
 An owner-lock refusal does not prove a stale lock. Foreign host/boot ownership
 stays blocked even if the recorded PID is absent; a live Darwin worker cannot
 prove matching start identity. Do not remove locks or reset state to force
-progress. Unsupported run-state schemas fail closed without migration.
+progress. Legacy `codex-orchestrator.agent-auto-state` envelopes (versions 2/3)
+are accepted only when every record fully validates against the current execution
+contract. Reads preserve original bytes; the next normal state write uses the current
+format. Removed execution fields and missing authority are never ignored. Unsupported
+state returns a bounded `reason` with repair/archive guidance, without progression effects.
+Starting a new journal requires preserving the old file and checking ownership/resources first.
 
 ## Configuration you will usually edit
 

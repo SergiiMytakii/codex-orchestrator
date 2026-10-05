@@ -73,6 +73,22 @@ test('run state inspection reports supported exact-schema state with its raw SHA
   });
 });
 
+test('legacy envelopes preserve current records and normalize only on the next CAS', async () => {
+  for (const version of [2, 3]) {
+    const root = await temporaryRoot();
+    const path = join(root, 'run-state.json');
+    const bytes = Buffer.from(`${canonicalJson({ schema: 'codex-orchestrator.agent-auto-state', version, generation: 7, runs: [record()] })}\n`);
+    await writeFile(path, bytes);
+    const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+    const current = await writer.read();
+    assert.deepEqual(current, { schema: 'codex-orchestrator.run-state', generation: 7, runs: [record()] });
+    assert.deepEqual(await readFile(path), bytes);
+    assert.equal((await writer.compareAndSwap(7, body(current.runs))).generation, 8);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).schema, 'codex-orchestrator.run-state');
+    assert.equal('version' in JSON.parse(await readFile(path, 'utf8')), false);
+  }
+});
+
 test('run state inspection reports malformed and unknown schemas as unsupported without effects', async () => {
   const { lifecycle: _missingDiscriminator, ...withoutLifecycle } = record();
   const unsupportedBytes = [
@@ -88,13 +104,45 @@ test('run state inspection reports malformed and unknown schemas as unsupported 
     const path = join(root, `run-state-${index}.json`);
     await writeFile(path, bytes);
     const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
-    assert.deepEqual(await writer.inspect(), {
-      status: 'unsupported',
-      rawSha256: sha256(bytes),
-    });
+    const inspection = await writer.inspect();
+    assert.equal(inspection.status, 'unsupported');
+    assert.equal(inspection.rawSha256, sha256(bytes));
+    assert.ok('reason' in inspection && inspection.reason);
     assert.deepEqual(await readFile(path), bytes);
     assert.deepEqual(await readdir(root), [`run-state-${index}.json`]);
   }
+});
+
+test('legacy compatibility never accepts future versions, removed execution fields, or missing authority', async () => {
+  const { deliveryAuthority: _authority, ...withoutAuthority } = record();
+  const cases = [
+    { version: 4, runs: [] },
+    { version: 2, runs: [{ ...record(), routeReceipt: {} }] },
+    { version: 3, runs: [{ ...withoutAuthority, lifecycle: 'implementing' }] },
+    { version: 2, runs: [{ ...record(), pendingEffect: { kind: 'unknown' } }] },
+  ];
+  for (const sample of cases) {
+    const root = await temporaryRoot();
+    const path = join(root, 'run-state.json');
+    const bytes = Buffer.from(`${canonicalJson({ schema: 'codex-orchestrator.agent-auto-state', generation: 7, ...sample })}\n`);
+    await writeFile(path, bytes);
+    const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+    assert.equal((await writer.inspect()).status, 'unsupported');
+    await assert.rejects(writer.compareAndSwap(7, body([record()])));
+    assert.deepEqual(await readFile(path), bytes);
+  }
+});
+
+test('incompatible legacy records explain the blocker without leaking their contents', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const bytes = Buffer.from(`${canonicalJson({ schema: 'codex-orchestrator.agent-auto-state', version: 2, generation: 7, runs: [{ ...record(), routeExecution: { privateText: 'do-not-print' } }] })}\n`);
+  await writeFile(path, bytes);
+  const result = await new FileRunRecordWriter(path, deterministicAtomicOptions()).inspect();
+  assert.equal(result.status, 'unsupported');
+  assert.match('reason' in result ? String(result.reason) : '', /Legacy run records.*archive/u);
+  assert.equal(JSON.stringify(result).includes('do-not-print'), false);
+  assert.deepEqual(await readFile(path), bytes);
 });
 
 test('run state rejects malformed and lifecycle-inconsistent records', async () => {

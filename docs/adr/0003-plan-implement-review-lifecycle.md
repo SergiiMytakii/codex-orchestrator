@@ -31,3 +31,13 @@ The cutover deletes seven production route/spec modules, four dedicated route/sp
 - Proof receipts and Review refer to the same immutable candidate; candidate drift invalidates affected proof before Review.
 - Trusted same-repository PR feedback uses the same targeted repair progression and fast-forward-only publication.
 - Legacy run-state bytes containing removed route or specification fields fail the exact schema instead of entering a compatibility path.
+
+## Envelope compatibility amendment (2026-10-05)
+
+The user authorized accepting harmless older journal envelopes while retaining
+current execution invariants. `codex-orchestrator.agent-auto-state` versions 2/3
+may be read only when every enclosed record validates against the current Run
+contract. Reads retain the original bytes; the next ordinary CAS writes the
+current envelope. Unknown keys, removed route/spec fields, and missing authority
+are still rejected. This does not restore removed execution owners or synthesize
+receipts. Rejection returns a bounded actionable reason without raw state contents.

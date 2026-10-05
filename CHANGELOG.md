@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Accept legacy run-state envelopes v2/v3 when their records satisfy the full
+  current contract, preserving bytes until the next normal state write.
+- Explain incompatible state with bounded public diagnostics; obsolete execution
+  records, missing authority, and unknown fields remain blocked.
+
 ## [2.0.19] - 2026-10-03
 
 ### Added

@@ -101,7 +101,7 @@ import {
 } from './pending-effect-settlement.js';
 
 export type RunIssueResult =
-  | { status: 'state-schema-unsupported' }
+  | { status: 'state-schema-unsupported'; reason?: string }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
   | { status: 'repair-ready'; source: 'check' | 'proof' | 'review'; blockerIds: string[]; evidencePath: string }
   | { status: 'not-eligible'; reason: string; evidencePath: string }
@@ -1197,7 +1197,7 @@ export class RunIssue {
       const initialConfig = await this.readStrictConfig(targetRoot);
       const canonicalRepository = `${initialConfig.config.github.owner.toLowerCase()}/${initialConfig.config.github.repo.toLowerCase()}`;
       const preflightState = await this.dependencies.runRecords.inspect();
-      if (preflightState.status === 'unsupported') return { status: 'state-schema-unsupported' };
+      if (preflightState.status === 'unsupported') return { status: 'state-schema-unsupported', ...(preflightState.reason ? { reason: preflightState.reason } : {}) };
       try {
         owner = await this.dependencies.ownerLock.acquire({ canonicalRepository, targetRoot });
       } catch (error) {
@@ -1226,10 +1226,10 @@ export class RunIssue {
       if (this.signal.aborted) return await this.preClaimCancelled(input.issueNumber);
 
       let authoritativeState = await this.dependencies.runRecords.inspect();
-      if (authoritativeState.status === 'unsupported') return { status: 'state-schema-unsupported' };
+      if (authoritativeState.status === 'unsupported') return { status: 'state-schema-unsupported', ...(authoritativeState.reason ? { reason: authoritativeState.reason } : {}) };
       if (!sameInspectionIdentity(preflightState, authoritativeState)) {
         const stableState = await this.dependencies.runRecords.inspect();
-        if (stableState.status === 'unsupported') return { status: 'state-schema-unsupported' };
+        if (stableState.status === 'unsupported') return { status: 'state-schema-unsupported', ...(stableState.reason ? { reason: stableState.reason } : {}) };
         if (!sameInspectionIdentity(authoritativeState, stableState)) {
           return { status: 'requeued', reason: 'state-changed' };
         }
