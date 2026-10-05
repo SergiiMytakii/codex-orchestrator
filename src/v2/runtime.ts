@@ -967,7 +967,7 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
           `Checked change digest: ${input.checkedChangeSha256}.`,
           `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
           `Configured check receipts: ${canonicalJson(input.checks)}.`,
-          `Write evidence only below ${config.proof.artifactDir}.`,
+          `Write evidence only below ${config.proof.artifactDir}/${input.proofId}/.`,
           'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
           'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
           ...(config.proof.android ? [

@@ -63,6 +63,135 @@ function reviewParticipants(coordinatorSessionId: string, verdict: 'approve' | '
   return targeted ? reviewers.slice(1) : reviewers;
 }
 
+test('explicit proof retry preserves the candidate and implementation while requiring fresh proof and Review', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({
+    status: 'internal-error', receipt: { ...passedProof().receipt, summary: 'Proof artifacts are invalid.' },
+  }) });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  const before = (await fixture.store.read()).runs[0]!;
+  const implementationCount = fixture.events.filter((event) => event === 'agent:implementation').length;
+  const proofCount = fixture.events.filter((event) => event === 'proof').length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, proofCount);
+  const proofInputs: ProofInput[] = [];
+  const original = fixture.dependencies.proof.proveChange;
+  fixture.dependencies.createProofId = () => 'proof-retry';
+  fixture.options.proof = async () => ({ ...passedProof(), receipt: { ...passedProof().receipt, proofId: 'proof-retry' } });
+  fixture.dependencies.proof.proveChange = async (input) => {
+    proofInputs.push(input);
+    return original(input);
+  };
+  const retry = { targetRoot: fixture.targetRoot, issueNumber: 42, retryProofRunId: before.runId };
+  const result = await fixture.runner.runIssue(retry);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence }));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.cycle, before.cycle);
+  assert.deepEqual((fixture.checkedChangePayloads.at(-1)! as { binding?: unknown }).binding, before.candidateBinding);
+  assert.deepEqual(after.workflowGeneration, before.workflowGeneration);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, implementationCount);
+  assert.equal(proofInputs.length, 1);
+  assert.equal(proofInputs[0]!.proofId, 'proof-retry');
+  assert.equal(proofInputs[0]!.recoverOnly, false);
+  assert.equal(proofInputs[0]!.reportRepairCount, 0);
+  assert.equal(proofInputs[0]!.transportRetryCount, 0);
+  assert.equal(proofInputs[0]!.passedReceipt, undefined);
+  assert.ok(fixture.events.some((event) => event.startsWith('review:')));
+  assert.ok(fixture.evidence.some((entry) => entry.code === 'acceptance-proof-retry-authorized'));
+});
+
+test('proof retry reopens a retained Review repair without losing its defect ledger', async () => {
+  let proofs = 0;
+  const fixture = await runFixture({ fileBackedStore: true, reviewNeedsWorkOnce: true, proof: async () => {
+    proofs += 1;
+    return proofs === 1 ? passedProof() : { status: 'internal-error', receipt: passedProof().receipt };
+  } });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+  assert.equal((await fixture.runner.runIssue(input)).status, 'internal-error');
+  const before = (await fixture.store.read()).runs[0]!;
+  assert.equal(before.directReview?.stage, 'review-repair');
+  assert.equal(before.directReview?.status, 'terminal');
+  fixture.options.proof = async () => ({ ...passedProof(), receipt: { ...passedProof().receipt, proofId: 'proof-retry' } });
+  fixture.dependencies.createProofId = () => 'proof-retry';
+  const agentCalls = fixture.events.filter((event) => event === 'agent:implementation').length;
+  const result = await fixture.runner.runIssue({ ...input, retryProofRunId: before.runId });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence }));
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, agentCalls);
+  assert.equal(fixture.reviewInputs.at(-1)!.defects[0]?.id,
+    before.directReview!.review.defects[0]!.id);
+});
+
+test('proof retry rejects a wrong run, revoked claim, changed HEAD, missing pin, and unrelated terminal without reopening', async () => {
+  for (const trigger of ['wrong-run', 'revoked', 'head-drift', 'missing-pin', 'unrelated-error'] as const) {
+    const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({ status: 'internal-error', receipt: passedProof().receipt }) });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'internal-error');
+    const state = await fixture.store.read();
+    const record = state.runs[0]!;
+    if (trigger === 'revoked') fixture.setIssueState('CLOSED');
+    if (trigger === 'head-drift') {
+      await execFileAsync('git', ['-C', fixture.worktreePath, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com',
+        'commit', '--allow-empty', '-m', 'unexpected head']);
+    }
+    if (trigger === 'missing-pin') await execFileAsync('git', ['-C', fixture.worktreePath, 'update-ref', '-d', record.candidateBinding!.candidateRef]);
+    if (trigger === 'unrelated-error') {
+      record.terminalOutcome = { ...record.terminalOutcome as Extract<NonNullable<typeof record.terminalOutcome>, { status: 'internal-error' }>, code: 'other-failure' };
+      await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+    }
+    const before = await fixture.store.read();
+    const proofCount = fixture.events.filter((event) => event === 'proof').length;
+    const result = await fixture.runner.runIssue({ ...input,
+      retryProofRunId: trigger === 'wrong-run' ? '00000000-0000-4000-8000-000000000002' : record.runId });
+    assert.equal(result.status, 'not-eligible', `${trigger}: ${JSON.stringify(result)}`);
+    assert.deepEqual(await fixture.store.read(), before, trigger);
+    assert.equal(fixture.events.filter((event) => event === 'proof').length, proofCount, trigger);
+  }
+});
+
+test('proof retry preserves the original terminal on validation uncertainty and succeeds after infrastructure recovery', async () => {
+  for (const boundary of ['workflow', 'pull-request', 'worktree'] as const) {
+    const fixture = await runFixture({ fileBackedStore: true,
+      proof: async () => ({ status: 'internal-error', receipt: passedProof().receipt }) });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'internal-error');
+    const before = await fixture.store.read();
+    const record = before.runs[0]!;
+    assert.equal((record.terminalOutcome as { code?: string }).code, 'acceptance-proof-internal-failure',
+      JSON.stringify({ boundary, outcome: record.terminalOutcome, evidence: fixture.evidence }));
+    const retry = { ...input, retryProofRunId: record.runId };
+    const fail = async (): Promise<never> => { throw new Error('temporarily unavailable'); };
+    const restore = boundary === 'workflow'
+      ? fixture.dependencies.verifyWorkflowGeneration
+      : boundary === 'pull-request' ? fixture.dependencies.pullRequests.findOpen : fixture.dependencies.git.inspectWorktree;
+    if (boundary === 'workflow') fixture.dependencies.verifyWorkflowGeneration = fail;
+    else if (boundary === 'pull-request') fixture.dependencies.pullRequests.findOpen = fail;
+    else fixture.dependencies.git.inspectWorktree = fail;
+    const proofCount = fixture.events.filter((event) => event === 'proof').length;
+    const paused = await fixture.runner.runIssue(retry);
+    assert.deepEqual(pick(paused, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, JSON.stringify({ boundary, paused }));
+    assert.deepEqual(await fixture.store.read(), before, boundary);
+    assert.equal(fixture.events.filter((event) => event === 'proof').length, proofCount, boundary);
+    if (boundary === 'workflow') fixture.dependencies.verifyWorkflowGeneration = restore as typeof fixture.dependencies.verifyWorkflowGeneration;
+    else if (boundary === 'pull-request') fixture.dependencies.pullRequests.findOpen = restore as typeof fixture.dependencies.pullRequests.findOpen;
+    else fixture.dependencies.git.inspectWorktree = restore as typeof fixture.dependencies.git.inspectWorktree;
+    fixture.options.proof = async () => passedProof();
+    assert.equal((await fixture.runner.runIssue(retry)).status, 'review-ready', boundary);
+  }
+});
+
+test('proof retry retains its terminal authority even when validation diagnostics cannot be stored', async () => {
+  const fixture = await runFixture({ fileBackedStore: true,
+    proof: async () => ({ status: 'internal-error', receipt: passedProof().receipt }) });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const failed = await fixture.runner.runIssue(input);
+  const before = await fixture.store.read();
+  fixture.dependencies.verifyWorkflowGeneration = async () => { throw new Error('workflow unavailable'); };
+  fixture.dependencies.writeEvidence = async () => { throw new Error('evidence unavailable'); };
+  assert.deepEqual(await fixture.runner.runIssue({ ...input, retryProofRunId: before.runs[0]!.runId }), failed);
+  assert.deepEqual(await fixture.store.read(), before);
+});
+
 test('continuation worktree restoration proves exact local and remote refs before creation', async () => {
   const fixture = await runFixture();
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');

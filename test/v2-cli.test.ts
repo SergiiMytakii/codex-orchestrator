@@ -35,6 +35,23 @@ test('CLI accepts only one exact direct run intent', () => {
   ]) assert.throws(() => parseRunArgs(argv));
 });
 
+test('CLI passes an explicit proof retry bound to one run and rejects malformed retry intents', async () => {
+  const runId = '0745819d-4020-49fe-a446-fd7331f89ac5';
+  const argv = ['run', '--target', '/tmp/target', '--issue', '17', '--retry-proof', runId];
+  const expected = { targetRoot: '/tmp/target', issueNumber: 17, retryProofRunId: runId };
+  assert.deepEqual(parseRunArgs(argv), expected);
+  assert.equal(await runCli(argv, {
+    executeRun: async (input) => {
+      assert.deepEqual(input, expected);
+      return { status: 'transport-failed', resumable: true, evidencePath: 'retry.json' };
+    },
+    write: () => {},
+  }), 70);
+  for (const suffix of [['--retry-proof'], ['--retry-proof', 'invalid'], ['--retry-proof', runId, '--again']]) {
+    assert.throws(() => parseRunArgs([...argv.slice(0, 5), ...suffix]));
+  }
+});
+
 test('CLI renders only the typed runIssue outcome and matching exit', async () => {
   const output: string[] = [];
   const exit = await runCli(['run', '--target', '/tmp/target', '--issue', '17'], {

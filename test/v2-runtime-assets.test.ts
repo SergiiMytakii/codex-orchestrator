@@ -261,6 +261,7 @@ test('contained Android proof receives only Runner-prepared evidence and no host
   assert.equal(result.kind, 'cancelled');
   assert.equal(proofCwd, candidateWorktree);
   assert.equal(launchPersisted, true);
+  assert.ok(prompt.includes('Write evidence only below .codex-orchestrator/v2/proofs/proof-177/.'));
   assert.match(prompt, /Runner-owned Android artifact paths/u);
   assert.match(prompt, /Do not invoke adb, emulator, Flutter run, or an Android lease helper/u);
   assert.match(prompt, /Android UI proof unfinished: emulator boot timed out/u);

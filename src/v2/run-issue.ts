@@ -1187,11 +1187,12 @@ export class RunIssue {
     return { active };
   }
 
-  async runIssue(input: { targetRoot: string; issueNumber: number }): Promise<RunIssueResult> {
+  async runIssue(input: { targetRoot: string; issueNumber: number; retryProofRunId?: string }): Promise<RunIssueResult> {
     let owner: { release(): Promise<void> } | undefined;
     let active: ActiveRun | undefined;
     try {
       assertPositiveInteger(input.issueNumber, 'issueNumber');
+      if (input.retryProofRunId !== undefined) assertUuid(input.retryProofRunId);
       const targetRoot = resolve(input.targetRoot);
       const initialConfig = await this.readStrictConfig(targetRoot);
       const canonicalRepository = `${initialConfig.config.github.owner.toLowerCase()}/${initialConfig.config.github.repo.toLowerCase()}`;
@@ -1264,6 +1265,13 @@ export class RunIssue {
       const matchingRuns = persisted.runs.filter((run) => run.issueNumber === input.issueNumber && run.canonicalRepository === canonicalRepository);
       if (matchingRuns.length > 1) return await this.preClaimInternal('ambiguous-run-state', input.issueNumber);
       const existing = matchingRuns[0];
+      if (input.retryProofRunId !== undefined && (existing?.runId !== input.retryProofRunId
+        || existing.terminalOutcome?.status !== 'internal-error'
+        || existing.terminalOutcome.code !== 'acceptance-proof-internal-failure')) {
+        const reason = 'Proof retry requires the exact run with a terminal Acceptance Proof internal failure.';
+        const evidence = await this.dependencies.writeEvidence({ runId: `issue-${input.issueNumber}`, code: 'proof-retry-not-eligible', summary: reason });
+        return { status: 'not-eligible', reason, evidencePath: evidence.path };
+      }
       let issueSnapshot: IssueSnapshot;
       let frozenCriteria: FrozenCriterion[];
       let runId: string;
@@ -1325,6 +1333,21 @@ export class RunIssue {
           const reconciled = await this.reconcilePersistedCandidateMaterialization(active, config);
           if ('status' in reconciled) return reconciled;
           active = reconciled.active;
+        }
+        if (input.retryProofRunId !== undefined) {
+          try {
+            const recovered = await this.retryTerminalProof(active, config);
+            if ('status' in recovered) return recovered;
+            active = recovered.active;
+          } catch {
+            // Recovery uncertainty must not replace the terminal outcome that authorizes this retry.
+            try {
+              return await this.invokedFailure(active, 'acceptance-proof-retry-validation-retryable',
+                'Proof retry validation or its state transition could not be confirmed; inspect durable state before retrying.');
+            } catch {
+              return publicOutcome(active.record.terminalOutcome!);
+            }
+          }
         }
         if (active.record.terminalOutcome) {
           if (active.record.terminalOutcome.status !== 'review-ready') {
@@ -1984,6 +2007,53 @@ export class RunIssue {
         }
       }
     }
+  }
+
+  private async retryTerminalProof(active: ActiveRun, config: AgentAutoConfig): Promise<{ active: ActiveRun } | RunIssueResult> {
+    const reject = async (reason: string): Promise<RunIssueResult> => {
+      const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'proof-retry-not-eligible', summary: reason });
+      return { status: 'not-eligible', reason, evidencePath: evidence.path };
+    };
+    const record = active.record;
+    const candidate = this.dependencies.git.candidateV2;
+    if (record.lifecycle !== 'internal-error' || record.terminalOutcome?.status !== 'internal-error'
+      || record.terminalOutcome.code !== 'acceptance-proof-internal-failure'
+      || !record.deliveryAuthority || !record.candidateBinding || !record.implementationResult || !candidate
+      || record.pendingEffect || record.activeAttempt || record.candidateMaterialization || record.proofReceipt
+      || record.reviewFeedback?.activeBatch) {
+      return reject('Proof retry requires a quiescent, unpublished candidate without passed proof or pending effects.');
+    }
+    if (!await this.authorized(active, config)) return reject('The existing trusted issue claim must still authorize execution.');
+    if (await this.dependencies.pullRequests.findOpen({ headBranch: record.branchName, baseBranch: config.github.baseBranch })) {
+      return reject('Proof retry cannot reopen a run with an open pull request.');
+    }
+    await this.dependencies.verifyWorkflowGeneration(record.workflowGeneration);
+    const worktree = await this.dependencies.git.inspectWorktree({
+      worktreePath: record.worktreePath, branchName: record.branchName, baseSha: expectedImplementationHead(record),
+    });
+    if (worktree !== 'matching') return reject('The existing issue worktree identity or HEAD has changed.');
+    const pin = await candidate.inspectPin(record.candidateBinding);
+    if (pin.kind === 'failed') return this.mapCandidateFailure(active, pin.code);
+    if (pin.value !== 'matching') return reject('The immutable candidate pin is missing or diverged.');
+    let directReview = record.directReview;
+    if (directReview) {
+      if (directReview.status !== 'terminal' || directReview.review.disposition !== 'active') {
+        return reject('The retained Review cannot resume validation of this candidate.');
+      }
+      const { terminalCode: _code, terminalOutcome: _outcome, ...retained } = structuredClone(directReview);
+      directReview = { ...retained, status: 'active' };
+    }
+    if (!await this.authorized(active, config)) return reject('Issue execution authority changed during proof retry validation.');
+    await this.dependencies.writeEvidence({
+      runId: record.runId, code: 'acceptance-proof-retry-authorized',
+      summary: canonicalJson({ previousOutcome: record.terminalOutcome, previousProofId: record.proofId ?? null,
+        candidateBindingId: record.candidateBinding.bindingId, cycle: record.cycle }),
+    });
+    return { active: await this.persist(active, {
+      lifecycle: 'checking', terminalOutcome: undefined, outcomeEvidenceId: undefined,
+      checks: [], checkedChangeSha256: undefined, proofId: undefined, proofExecution: undefined, proofReceipt: undefined,
+      ...(directReview ? { directReview } : {}),
+    }) };
   }
 
   async initializeClaimedRun(active: ActiveRun, issue?: RunIssueSnapshot): Promise<ActiveRun> {

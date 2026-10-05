@@ -17,17 +17,22 @@ import type { SetupIntent, SetupOutcome } from './setup.js';
 import type { RunIssueResult } from './run-issue.js';
 import type { GitHubIssue } from './adapters/issues.js';
 
-export interface RunIntent { targetRoot: string; issueNumber: number }
+export interface RunIntent { targetRoot: string; issueNumber: number; retryProofRunId?: string }
 export interface DaemonIntent { targetRoot: string; once: boolean; issueNumber?: number }
 
 export function parseRunArgs(argv: string[]): RunIntent {
-  if (argv.length !== 5 || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
-    throw new Error('usage: cli run --target <absolute-path> --issue <positive-integer>');
+  const retryProof = argv.length === 7 && argv[5] === '--retry-proof';
+  if ((argv.length !== 5 && !retryProof) || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
+    throw new Error('usage: cli run --target <absolute-path> --issue <positive-integer> [--retry-proof <run-id>]');
   }
   const targetRoot = argv[2]!;
   const issueNumber = Number(argv[4]);
   if (!isAbsolute(targetRoot) || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error('CLI run intent is invalid');
-  return { targetRoot: resolve(targetRoot), issueNumber };
+  const retryProofRunId = retryProof ? argv[6] : undefined;
+  if (retryProof && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(retryProofRunId!)) {
+    throw new Error('CLI proof retry run identity is invalid');
+  }
+  return { targetRoot: resolve(targetRoot), issueNumber, ...(retryProofRunId ? { retryProofRunId } : {}) };
 }
 
 export function parseDaemonArgs(argv: string[]): DaemonIntent {
@@ -241,7 +246,7 @@ function cliHelp(): string {
     '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels] [--dry-run]',
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
-    '  run --target <absolute-path> --issue <positive-integer>',
+    '  run --target <absolute-path> --issue <positive-integer> [--retry-proof <run-id>]',
     '  daemon --target <absolute-path> [--once [--issue <positive-integer>]]',
     '',
   ].join('\n');
