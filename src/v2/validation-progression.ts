@@ -230,7 +230,7 @@ export function projectValidationReviewApproved(
   });
 }
 
-export function projectValidationReviewReportRepair(run: Readonly<RunRecord>): ValidationCasTransition {
+export function projectValidationReviewReportRepair(run: Readonly<RunRecord>, reportCorrection: { path: string; sha256: string }): ValidationCasTransition {
   const current = run.directReview;
   if (!current) throw new Error('validation review result is orphaned');
   return casTransition(run, 'review-report-repair', {
@@ -239,6 +239,7 @@ export function projectValidationReviewReportRepair(run: Readonly<RunRecord>): V
       review: {
         ...current.review,
         reportRepairs: current.review.reportRepairs + 1,
+        reportCorrection: current.review.reportCorrection ?? structuredClone(reportCorrection),
       },
     },
   });
@@ -293,6 +294,11 @@ export function projectValidationProofPassed(
         targetFingerprint: input.targetFingerprint,
         codeReviewerSessionId: input.reviewerSessionId,
       });
+  if (directReview.review.validationContext?.reviewerSessionId !== input.reviewerSessionId) {
+    delete directReview.review.validationContext;
+    delete directReview.review.reportCorrection;
+    directReview.review.reportRepairs = 0;
+  }
   if (directReview.targetFingerprint !== input.targetFingerprint
     || directReview.review.reviewerSessionId !== input.reviewerSessionId) {
     throw new Error('proof-passed review target correlation mismatch');

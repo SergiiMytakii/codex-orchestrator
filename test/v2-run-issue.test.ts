@@ -12,6 +12,7 @@ import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from '../src/v2/containment.js';
+import { validateCompletedReport } from '../src/v2/contained-report-operation.js';
 import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
 import { CheckProcessQuiescenceError } from '../src/v2/issue-check-policy.js';
@@ -831,20 +832,60 @@ test('malformed code review returns one bounded resumable outcome before retryin
   assert.equal(record.directReview?.status, 'clear');
 });
 
-test('sixth malformed code review remains resumable without semantic exhaustion', async () => {
-  const fixture = await runFixture({ reviewMalformedCount: 6 });
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+test('retained complete review keeps its original coverage diagnostic across Runner restart', async () => {
+  const fixture = await runFixture({ reviewMissingCoverageOnce: true, fileBackedStore: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const restarted = new RunIssue(fixture.dependencies);
+  assert.equal((await restarted.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.reviewInputs[1].validationDiagnostic, 'approved review is missing required coverage');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+});
+
+test('coverage correction retains exact original report through pre-launch and transport failure across restart', async () => {
+  for (const failure of ['reviewPreLaunchTransportOnce', 'reviewTransportOnce'] as const) {
+    const fixture = await runFixture({ reviewMissingCoverageOnce: true, fileBackedStore: true });
+    assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+    fixture.options[failure] = true;
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+    assert.ok((await fixture.store.read()).runs[0]!.directReview!.review.reportCorrection);
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+    assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true, true]);
+    assert.deepEqual(fixture.reviewReportRepairInputs[2]?.bytes, fixture.reviewReportRepairInputs[1]?.bytes);
+    assert.equal(fixture.reviewInputs[2].validationDiagnostic, 'approved review is missing required coverage');
+    assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
+    assert.equal((await fixture.store.read()).runs[0]!.directReview!.review.reportCorrection, undefined);
   }
-  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready');
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 7);
-  assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true, true, true, true, true, true]);
-  for (const correction of fixture.reviewReportRepairInputs.slice(1)) {
-    assert.deepEqual(correction.bytes, Buffer.from('{"report":{"version":1}}'));
-  }
-  assert.equal((await fixture.store.read()).runs[0]?.directReview?.review.reportRepairs, 6);
+});
+
+test('missing retained reviewer authority stops as a Runner error without requesting another report', async () => {
+  const fixture = await runFixture({ reviewMissingCoverageOnce: true, fileBackedStore: true });
+  await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  const state = await fixture.store.read();
+  delete state.runs[0]!.directReview!.review.validationContext;
+  delete state.runs[0]!.directReview!.review.reportCorrection;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+  const result = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'internal-error');
+  assert.equal((await fixture.store.read()).runs[0]?.directReview?.terminalCode, 'review-validation-context-missing');
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 1);
+  assert.equal(fixture.events.includes('push'), false);
+});
+
+test('repeated malformed review stops after one correction and preserves the candidate across restart', async () => {
+  const fixture = await runFixture({ reviewMalformedCount: 6, fileBackedStore: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const result = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  if (result.status === 'blocked') assert.match(result.blocker?.summary ?? '', /report.*correction|correction.*report/iu);
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.directReview?.review.reportRepairs, 2);
+  assert.ok(record.candidateBinding);
+  assert.equal(record.cycle, 1);
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
+  assert.equal(fixture.events.includes('push'), false);
+  assert.equal(await readFile(join(record.worktreePath, 'feature.txt'), 'utf8'), 'implemented\n');
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
 });
 
 test('incoherent needs-work is repaired report-only instead of reaching terminal state', async () => {
@@ -3438,6 +3479,7 @@ interface FixtureOptions {
   };
   rejectTerminalCutoffRead?: boolean;
   workflowVerificationReject?: boolean;
+  reviewMissingCoverageOnce?: boolean;
   reviewMalformedOnce?: boolean;
   reviewMalformedCount?: number;
   reviewIncoherentNeedsWorkOnce?: boolean;
@@ -3707,7 +3749,13 @@ async function runFixture(options: FixtureOptions = {}) {
           reviewerSessionId: input.reviewerSessionId, targetRevision: input.targetRevision,
           targetFingerprint: input.targetFingerprint,
         };
-        await input.onPrepared(invocation);
+        await input.onPrepared({ ...invocation, validationContext: {
+          operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint,
+          reviewerSessionId: input.reviewerSessionId, availableReviewers: ['spec_reviewer', 'standards_reviewer'],
+          requiredCoverage: input.repairPatch === null ? input.reviewFocus : [],
+          previousFindingIds: [...input.defects.filter((d) => input.repairPatch === null || d.status === 'fixed').map((d) => d.id), ...input.repairFindings.map((f) => f.id)].sort(),
+          requireAllReviewers: input.repairPatch === null, requireReviewerEvidence: true,
+        } });
         if (options.reviewPreLaunchTransportOnce) {
           options.reviewPreLaunchTransportOnce = false;
           events.push('review:pre-launch-failed');
@@ -3731,6 +3779,24 @@ async function runFixture(options: FixtureOptions = {}) {
               },
             },
           };
+        }
+        if (options.reviewMissingCoverageOnce && reviewCalls === 1) {
+          const originalReportBytes = Buffer.from(JSON.stringify({ report: {
+            version: 1, operation: input.operation, targetRevision: input.targetRevision,
+            targetFingerprint: input.targetFingerprint, verdict: 'approved', coverage: ['correctness'],
+            defects: [], residualRisks: [], reviewerSessionId: input.reviewerSessionId,
+            reviewers: reviewParticipants(input.reviewerSessionId), repairFindingOutcomes: [],
+          } }));
+          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
+          const validation = validateCompletedReport(input.operation, input.attemptId, originalReportBytes, {
+            operation: input.operation, targetRevision: input.targetRevision,
+            targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
+            requiredCoverage: input.reviewFocus, availableReviewers: ['spec_reviewer', 'standards_reviewer'],
+            requireAllReviewers: true, requireReviewerEvidence: true,
+          });
+          assert.equal(validation.status, 'invalid');
+          return { kind: 'report-invalid', diagnostic: validation.status === 'invalid' ? validation.findings[0]! : '',
+            originalReportBytes, originalReportSha256: sha256(originalReportBytes) };
         }
         if ((options.reviewMalformedOnce && reviewCalls === 1)
           || (options.reviewMalformedCount ?? 0) > 0) {
@@ -3758,7 +3824,7 @@ async function runFixture(options: FixtureOptions = {}) {
             report: {
               version: 1 as const, operation: input.operation, targetRevision: input.targetRevision,
               targetFingerprint: input.targetFingerprint, verdict: 'needs-work' as const,
-              coverage: ['acceptance-criteria', 'correctness'],
+              coverage: ['requirements', 'correctness'],
               defects: [{
                 id: 'finding-1', class: 'blocker' as const, severity: 'high' as const, confidence: 'high' as const,
                 status: 'open' as const, invariant: 'behavior works', failure: 'edge case fails', evidence: ['focused test'],

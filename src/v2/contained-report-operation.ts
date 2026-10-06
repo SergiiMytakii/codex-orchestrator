@@ -3,6 +3,7 @@ import { decodeAgentReportForValidation } from './report-envelope.js';
 import {
   hashCodeReviewReport,
   validateCodeReviewReport,
+  validateReviewContext,
   type CodeReviewValidationContext,
 } from './code-review-report.js';
 import type {
@@ -28,7 +29,7 @@ export interface ContainedReportOperationInput {
   promptFacts: string[];
   signal: AbortSignal;
   reviewContext?: CodeReviewValidationContext;
-  onPrepared?: () => Promise<void>;
+  onPrepared?: (context: CodeReviewValidationContext) => Promise<void>;
   onLaunched?: (identity: { pid: number; processGroupId: number }) => Promise<void>;
 }
 
@@ -119,6 +120,19 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     if (!hasExactReadOnlyAuthority(attempt, input)) {
       launchResult = { status: 'blocked', kind: 'safety', code: 'report-operation-authority-drift' };
     } else {
+      if (input.reviewContext) {
+        try {
+          input = { ...input, reviewContext: validateReviewContext({
+            previousFindingIds: [], requiredCoverage: [], requireAllReviewers: true,
+            ...input.reviewContext, availableReviewers: attempt.reviewers,
+            requireReviewerEvidence: true,
+          }) };
+        } catch {
+          return this.finishWithSnapshot(input.worktreePath, before, {
+            status: 'blocked', kind: 'safety', code: 'review-validation-context-invalid',
+          });
+        }
+      }
       if (isImplementationReview(input.operation)) {
         if (!input.reviewContext || !input.onPrepared || !input.onLaunched) {
           return this.finishWithSnapshot(input.worktreePath, before, {
@@ -126,7 +140,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
           });
         }
         try {
-          await input.onPrepared();
+          await input.onPrepared(input.reviewContext);
         } catch {
           return this.finishWithSnapshot(input.worktreePath, before, {
             status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed',
@@ -151,7 +165,7 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
         },
       };
     }
-    return this.finishWithSnapshot(input.worktreePath, before, launchResult, input, attempt);
+    return this.finishWithSnapshot(input.worktreePath, before, launchResult, input);
   }
 
   private async finishWithSnapshot(
@@ -159,7 +173,6 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     before: ReportOnlyWorktreeSnapshot,
     launchResult: Exclude<ContainedReportLaunchResult, { status: 'safe-halt' }>,
     input?: ContainedReportOperationInput,
-    attempt?: PreparedContainedReportAttempt,
   ): Promise<ContainedReportOperationResult> {
     let after: ReportOnlyWorktreeSnapshot;
     try {
@@ -175,7 +188,6 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     if (!input) return { status: 'blocked', kind: 'external', code: 'report-operation-prepare-failed' };
     return validateCompletedReport(input.operation, input.attemptId, launchResult.reportBytes, {
       ...input.reviewContext!,
-      availableReviewers: [...(attempt?.reviewers ?? [])],
     });
   }
 }
@@ -209,6 +221,9 @@ export function validateCompletedReport(
   reportBytes: Buffer,
   reviewContext?: CodeReviewValidationContext,
 ): ContainedReportOperationResult {
+  if (reviewContext?.requireReviewerEvidence && !reviewContext.availableReviewers?.length) {
+    return { status: 'blocked', kind: 'safety', code: 'review-validation-context-missing' };
+  }
   const rawText = reportBytes.toString('utf8');
   const repairable = Buffer.from(rawText, 'utf8').equals(reportBytes)
     && !containsCredentialEvidence(rawText);

@@ -6,6 +6,15 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Persist and reuse the exact Review validation context after restart instead
+  of rejecting retained reviewer roles against an empty inventory.
+- Keep coverage category IDs identical in the generation schema and runtime
+  validator, and preserve independent verdicts and findings in coverage-only
+  report corrections.
+- Stop after one unsuccessful Review report correction, retaining all candidate
+  evidence instead of repeatedly launching reviewers without progress.
+
 ## [2.0.20] - 2026-10-06
 
 ### Fixed

@@ -119,7 +119,7 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
   const baseline = stableSnapshot();
   const dependencies: ContainedReportOperationDependencies = {
     snapshot: async () => structuredClone(baseline),
-    prepare: async () => ({ operation: 'code-review', generationHash, policy: readOnlyPolicy }),
+    prepare: async () => ({ operation: 'code-review', generationHash, policy: readOnlyPolicy, reviewers: ['spec_reviewer', 'standards_reviewer'] }),
     launch: async () => ({
       status: 'safe-halt',
       pid: 123,
@@ -233,3 +233,12 @@ function stableSnapshot() {
     worktreeIdentity: '5',
   };
 }
+
+test('missing workflow reviewer inventory blocks before launch and never becomes a report repair', async () => {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
+    prepared: { operation: 'code-review', generationHash, policy: readOnlyPolicy },
+  });
+  const result = await fixture.operation.run(reviewInput());
+  assert.deepEqual(result, { status: 'blocked', kind: 'safety', code: 'review-validation-context-invalid' });
+  assert.equal(fixture.events.some((event) => event.startsWith('launch:')), false);
+});

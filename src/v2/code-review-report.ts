@@ -5,6 +5,33 @@ import { agentReportEnvelopeSchema } from './report-envelope.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const MAX_TEXT = 16 * 1024;
+export const COMPLETE_REVIEW_COVERAGE = [
+  'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
+  'repository-standards', 'requirements', 'tests', 'zero-legacy',
+] as const;
+
+/** Exact Runner context persisted before launch and reused after restart. */
+export function validateReviewContext(value: unknown): CodeReviewValidationContext {
+  assertExactObject(value, ['operation', 'targetRevision', 'targetFingerprint', 'reviewerSessionId',
+    'previousFindingIds', 'requiredCoverage', 'availableReviewers', 'requireAllReviewers', 'requireReviewerEvidence'], 'review validation context');
+  assertOperation(value.operation);
+  assertPositiveInteger(value.targetRevision, 'review context revision');
+  assertSha256(value.targetFingerprint, 'review context fingerprint');
+  assertText(value.reviewerSessionId, 'review context session');
+  const previousFindingIds = sortedUniqueStrings(value.previousFindingIds, 'review context findings');
+  const requiredCoverage = sortedUniqueStrings(value.requiredCoverage, 'review context coverage');
+  if (requiredCoverage.some((category) => !(COMPLETE_REVIEW_COVERAGE as readonly string[]).includes(category))) {
+    throw new Error('review validation context has unknown coverage category');
+  }
+  const availableReviewers = sortedUniqueStrings(value.availableReviewers, 'review context roles');
+  if (availableReviewers.length === 0 || typeof value.requireAllReviewers !== 'boolean' || value.requireReviewerEvidence !== true) {
+    throw new Error('review validation context lacks reviewer authority');
+  }
+  return { operation: value.operation as ReviewOperation, targetRevision: value.targetRevision as number,
+    targetFingerprint: value.targetFingerprint as string, reviewerSessionId: value.reviewerSessionId as string,
+    previousFindingIds, requiredCoverage, availableReviewers,
+    requireAllReviewers: value.requireAllReviewers, requireReviewerEvidence: true };
+}
 
 export type ReviewOperation = 'code-review';
 export type ReviewVerdict = 'approved' | 'needs-work' | 'rejected';
@@ -74,6 +101,9 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
   assertSha256(value.targetFingerprint, 'code review report.targetFingerprint');
   if (!['approved', 'needs-work', 'rejected'].includes(value.verdict as string)) throw new Error('code review report.verdict is invalid');
   const coverage = sortedUniqueStrings(value.coverage, 'code review report.coverage');
+  if (coverage.some((category) => !(COMPLETE_REVIEW_COVERAGE as readonly string[]).includes(category))) {
+    throw new Error('code review report has unknown coverage category');
+  }
   const requiredCoverage = sortedUniqueStrings(context.requiredCoverage ?? [], 'required review coverage');
   const residualRisks = sortedUniqueStrings(value.residualRisks, 'code review report.residualRisks');
   assertText(value.reviewerSessionId, 'code review report.reviewerSessionId');
@@ -155,7 +185,7 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
       targetRevision: { type: 'integer', minimum: 1 },
       targetFingerprint: { type: 'string', pattern: '^[0-9a-f]{64}$' },
       verdict: { type: 'string', enum: ['approved', 'needs-work', 'rejected'] },
-      coverage: stringList,
+      coverage: { type: 'array', items: { type: 'string', enum: [...COMPLETE_REVIEW_COVERAGE] } },
       defects: { type: 'array', items: defect },
       residualRisks: stringList,
       reviewerSessionId: text,

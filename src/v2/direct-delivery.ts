@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 
 import { validateCandidateBinding, type CandidateBindingV2 } from './candidate.js';
 
 import { canonicalJson } from './containment.js';
-import { validateCodeReviewDefects, type CodeReviewDefectV1, type CodeReviewReportV1 } from './code-review-report.js';
+import { validateCodeReviewDefects, validateReviewContext, type CodeReviewValidationContext, type CodeReviewDefectV1, type CodeReviewReportV1 } from './code-review-report.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 export type DirectReviewStage = 'review' | 'review-repair';
@@ -18,6 +19,8 @@ export interface ReviewTrackV1 {
   coverage: string[];
   defects: CodeReviewDefectV1[];
   acceptedReportSha256: string | null;
+  validationContext?: CodeReviewValidationContext;
+  reportCorrection?: { path: string; sha256: string };
 }
 
 export interface DirectRepairFindingV1 {
@@ -118,6 +121,7 @@ export function acceptApprovedDirectReview(
     defects: defects.filter((defect) => defect.status !== 'verified' && defect.status !== 'superseded'),
     acceptedReportSha256: artifactSha256,
   };
+  delete clearTrack.reportCorrection;
   const outcomes = new Map(report.repairFindingOutcomes.map((outcome) => [outcome.id, outcome.status]));
   return {
     ...structuredClone(state),
@@ -159,7 +163,7 @@ export function acceptNeedsWorkDirectReview(
     ...state.review.coverage,
     ...report.coverage,
   ])].filter((coverage) => !blockedContracts.has(coverage)).sort();
-  return {
+  const nextState: DirectReviewV1 = {
     ...structuredClone(state),
     status: 'active',
     stage: 'review-repair',
@@ -180,6 +184,8 @@ export function acceptNeedsWorkDirectReview(
       return outcome ? { ...structuredClone(finding), status: outcome } : structuredClone(finding);
     }),
   };
+  delete nextState.review.reportCorrection;
+  return nextState;
 }
 
 function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): CodeReviewDefectV1[] {
@@ -293,6 +299,8 @@ export function prepareDirectReview(
     },
     repairFindings,
   };
+  delete nextState.review.validationContext;
+  delete nextState.review.reportCorrection;
   return nextState;
 }
 
@@ -350,6 +358,9 @@ export function validateDirectReview(value: unknown, context: DirectReviewValida
   assertSha256(value.targetFingerprint, 'direct review target fingerprint');
   const previousTarget = validatePreviousTarget(value.previousTarget, value.targetRevision as number);
   const review = validateTrack(value.review, 'review', value.targetRevision as number);
+  if (review.validationContext && review.validationContext.targetFingerprint !== value.targetFingerprint) {
+    throw new Error('review validation context target mismatch');
+  }
   const repairFindings = validateRepairFindings(value.repairFindings, value.targetRevision as number);
   const terminalCode = hasOwn(value, 'terminalCode') ? value.terminalCode : undefined;
   if (terminalCode !== undefined) assertText(terminalCode, 'direct review terminal code');
@@ -462,11 +473,26 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
   assertExactObject(value, [
     'version', 'disposition', 'profile', 'reviewerSessionId', 'reportRepairs', 'transportRetries',
     'coverage', 'defects', 'acceptedReportSha256',
+    ...(hasOwn(value, 'validationContext') ? ['validationContext'] : []),
+    ...(hasOwn(value, 'reportCorrection') ? ['reportCorrection'] : []),
   ], `direct review ${field} track`);
   if (value.version !== 1 || !['active', 'clear'].includes(value.disposition as string)
     || !['simple', 'medium', 'high'].includes(value.profile as string)
     || !isNonNegativeInteger(value.reportRepairs) || !isNonNegativeInteger(value.transportRetries)) throw new Error(`direct review ${field} track is invalid`);
   if (value.reviewerSessionId !== null) assertText(value.reviewerSessionId, `${field} reviewer session ID`);
+  let reportCorrection: ReviewTrackV1['reportCorrection'];
+  if (hasOwn(value, 'reportCorrection')) {
+    assertExactObject(value.reportCorrection, ['path', 'sha256'], 'review report correction');
+    assertText(value.reportCorrection.path, 'review report correction path');
+    if (!isAbsolute(value.reportCorrection.path)) throw new Error('review report correction path is not absolute');
+    assertSha256(value.reportCorrection.sha256, 'review report correction hash');
+    reportCorrection = { path: value.reportCorrection.path, sha256: value.reportCorrection.sha256 as string };
+    if (value.reportRepairs === 0 || !hasOwn(value, 'validationContext')) throw new Error('review report correction lacks validation authority');
+  }
+  const validationContext = hasOwn(value, 'validationContext') ? validateReviewContext(value.validationContext) : undefined;
+  if (validationContext && (validationContext.targetRevision !== targetRevision || validationContext.reviewerSessionId !== value.reviewerSessionId)) {
+    throw new Error('review validation context correlation mismatch');
+  }
   const coverage = sortedUniqueStrings(value.coverage, `${field} coverage`);
   const defects = validateCodeReviewDefects(value.defects, targetRevision);
   if (value.acceptedReportSha256 !== null) assertSha256(value.acceptedReportSha256, `${field} accepted report hash`);
@@ -484,6 +510,8 @@ function validateTrack(value: unknown, field: string, targetRevision: number): R
     coverage,
     defects,
     acceptedReportSha256: value.acceptedReportSha256 as string | null,
+    ...(validationContext ? { validationContext } : {}),
+    ...(reportCorrection ? { reportCorrection } : {}),
   };
 }
 

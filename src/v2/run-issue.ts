@@ -21,6 +21,7 @@ import {
   type ProcessStartIdentity,
 } from './active-attempt.js';
 import { validateImplementationReport, type ImplementationReportV1 } from './implementation-report.js';
+import { COMPLETE_REVIEW_COVERAGE, validateReviewContext } from './code-review-report.js';
 import { validateCompletedReport } from './contained-report-operation.js';
 import {
   directReviewCandidateTargetFingerprint,
@@ -3032,28 +3033,30 @@ export class RunIssue {
     let reportRepair: { originalReportSha256: string; originalReportBytes: Buffer; diagnostic: string } | undefined;
     const retainedAttempt = active.record.activeAttempt;
     const retainedReview = active.record.directReview;
-    if (retainedReview?.review.reportRepairs && retainedAttempt?.stage === 'adopted' && retainedAttempt.result) {
-      const stored = await this.dependencies.inspectAttemptResult(retainedAttempt.resultPath);
-      if (!stored || stored.sha256 !== retainedAttempt.result.sha256) {
+    if (retainedReview?.review.reportRepairs) {
+      const original = retainedReview.review.reportCorrection
+        ?? (retainedAttempt?.stage === 'adopted' ? retainedAttempt.result : undefined);
+      if (!original) return this.terminal(active, { status: 'internal-error', code: 'review-report-correction-result-missing' });
+      const stored = await this.dependencies.inspectAttemptResult(original.path);
+      if (!stored || stored.sha256 !== original.sha256) {
         return this.invokedFailure(active, 'direct-review-report-result-unavailable',
           'The exact malformed Review result is not currently observable; report-only recovery remains fenced.');
       }
-      const validation = validateCompletedReport('code-review', retainedAttempt.attemptId, stored.bytes, {
-        operation: 'code-review',
-        targetRevision: retainedReview.targetRevision,
-        targetFingerprint: retainedReview.targetFingerprint,
-        reviewerSessionId: retainedReview.review.reviewerSessionId!,
-        previousFindingIds: [
-          ...retainedReview.review.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id),
-          ...retainedReview.repairFindings.filter((finding) => finding.status === 'fixed').map((finding) => finding.id),
-        ].sort(),
-        requiredCoverage: reviewScope.mode === 'complete' ? [
-          'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
-          'repository-standards', 'requirements', 'tests', 'zero-legacy',
-        ] : [],
-        requireAllReviewers: reviewScope.mode === 'complete',
-        requireReviewerEvidence: true,
-      });
+      if (retainedReview.review.reportRepairs >= 2) {
+        return this.terminal(active, { status: 'blocked', kind: 'external', resumable: false, blocker: {
+          kind: 'external', resumable: false, summary: 'Review report correction limit reached; retained candidate and report require operator recovery.',
+          attempted: ['Preserved the candidate, checks, proof and retained report without launching another reviewer.'],
+        } });
+      }
+      let context;
+      try {
+        context = validateReviewContext(retainedReview.review.validationContext);
+        if (context.targetRevision !== retainedReview.targetRevision || context.targetFingerprint !== retainedReview.targetFingerprint
+          || context.reviewerSessionId !== retainedReview.review.reviewerSessionId) throw new Error('review context drift');
+      } catch {
+        return this.terminal(active, { status: 'internal-error', code: 'review-validation-context-missing' });
+      }
+      const validation = validateCompletedReport('code-review', retainedAttempt?.attemptId ?? active.record.runId, stored.bytes, context);
       if (validation.status !== 'invalid' || !validation.repairInput) {
         return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'direct-review-retained-result-diverged');
       }
@@ -3062,7 +3065,11 @@ export class RunIssue {
         originalReportBytes: Buffer.from(validation.repairInput.originalReportBytes),
         diagnostic: validation.findings[0] ?? 'review report is invalid',
       };
-      active = await this.clearAttempt(active);
+      if (!retainedReview.review.reportCorrection) {
+        active = await this.persist(active, { directReview: { ...retainedReview,
+          review: { ...retainedReview.review, reportCorrection: original } } });
+      }
+      if (retainedAttempt?.stage === 'adopted') active = await this.clearAttempt(active);
     }
     while (true) {
       const directReview = active.record.directReview;
@@ -3133,10 +3140,7 @@ export class RunIssue {
         frozenCriteria: reviewScope.criteria,
         deliveryAuthority: structuredClone(active.record.deliveryAuthority!),
         defects: structuredClone(directReview.review.defects),
-        reviewFocus: [
-          'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
-          'repository-standards', 'requirements', 'tests', 'zero-legacy',
-        ],
+        reviewFocus: [...COMPLETE_REVIEW_COVERAGE],
         workflowGeneration: structuredClone(active.record.workflowGeneration),
         repairOnly: reportRepair !== undefined,
         originalReportSha256: reportRepair?.originalReportSha256 ?? null,
@@ -3145,6 +3149,11 @@ export class RunIssue {
         signal: this.signal,
         onPrepared: async (invocation) => {
           if (!active.record.directReview) throw new Error('direct review disappeared before prepare');
+          const validationContext = validateReviewContext(invocation.validationContext);
+          if (validationContext.targetFingerprint !== directReview.targetFingerprint || validationContext.targetRevision !== directReview.targetRevision
+            || validationContext.reviewerSessionId !== reviewerSessionId) throw new Error('review validation context drift');
+          active = await this.persist(active, { directReview: { ...active.record.directReview,
+            review: { ...active.record.directReview.review, validationContext } } });
           if (invocation.attemptId !== active.record.activeAttempt?.attemptId
             || invocation.operation !== 'code-review'
             || invocation.reviewerSessionId !== reviewerSessionId) throw new Error('direct review prepare correlation mismatch');
@@ -3186,6 +3195,8 @@ export class RunIssue {
             completeReview.review.defects = structuredClone(result.report.defects);
             completeReview.review.reviewerSessionId = this.dependencies.createReviewSessionId();
             completeReview.review.reportRepairs = 0;
+            delete completeReview.review.validationContext;
+            delete completeReview.review.reportCorrection;
             completeReview.review.transportRetries = 0;
             active = await this.persist(settledExecution.active, {
               lifecycle: 'checking',
@@ -3256,8 +3267,16 @@ export class RunIssue {
         active = await this.adoptValidationTransition(
           active,
           result.originalReportSha256,
-          projectValidationReviewReportRepair(active.record),
+          projectValidationReviewReportRepair(active.record, { path: active.record.activeAttempt!.resultPath, sha256: result.originalReportSha256 }),
         );
+        if (active.record.directReview!.review.reportRepairs >= 2) {
+          const repeated = reportRepair?.originalReportSha256 === result.originalReportSha256;
+          return this.terminal(active, { status: 'blocked', kind: 'external', resumable: false, blocker: {
+            kind: 'external', resumable: false,
+            summary: `Review report correction failed${repeated ? ' without changing the report' : ''}: ${result.diagnostic}. Candidate and evidence are retained.`,
+            attempted: ['Reviewed the candidate and attempted one report-only correction.'],
+          } });
+        }
         return this.invokedFailure(active, 'direct-review-report-retryable',
           'The review report was malformed; a later bounded invocation may retry the same immutable candidate.');
       }
@@ -3820,7 +3839,9 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
     : outcome.status === 'blocked'
       ? outcome.resumable
         ? 'Resolve the stated blocker, then rerun the same issue.'
-        : 'Provide the missing decision or authority in this issue before continuing.'
+        : outcome.kind === 'external'
+          ? 'Inspect the retained report and Runner diagnostics, correct the reported condition, then explicitly retry the retained work.'
+          : 'Provide the missing decision or authority in this issue before continuing.'
       : outcome.status === 'internal-error'
         ? 'Inspect the package-owned evidence for the code above, correct the runner condition, and retry the same issue.'
         : 'Re-add the authorization label and rerun the same issue if the work should continue.';

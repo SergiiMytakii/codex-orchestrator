@@ -110,6 +110,18 @@ npx codex-orchestrator run --target "$PWD" --issue 123 --retry-proof <run-id>
 
 This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context and check receipts, then runs checks, fresh Acceptance Proof, and Review before publication. Other terminal outcomes cannot be reopened. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
 
+Review persists its exact validation context before launch, including reviewer
+roles, required coverage, finding IDs and target identity. Recovery checks a
+retained report against that same context. Missing context is a Runner error,
+not a request for the agent to invent reviewer authority.
+
+A malformed Review report receives at most one report-only correction per
+candidate revision. Coverage uses the schema's exact category IDs; coverage-only
+corrections retain independent reviewer identities, verdicts and findings.
+Repeated invalid reports stop with the candidate, checks, proof and report
+retained. Ordinary calls replay that terminal outcome without launching more
+reviewers; they do not automatically reopen it.
+
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
 ### `daemon`

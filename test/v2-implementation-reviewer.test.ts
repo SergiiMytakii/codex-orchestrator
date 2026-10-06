@@ -63,7 +63,7 @@ test('thin reviewer facade binds an independent attempt and delegates durable la
   const operation: ContainedReportOperation = {
     run: async (call) => {
       calls.push(call);
-      await call.onPrepared?.();
+      await call.onPrepared?.(call.reviewContext!);
       await call.onLaunched?.({ pid: 42, processGroupId: 42 });
       return { status: 'completed', attemptId: call.attemptId, validatedPayload: report, artifactSha256: 'e'.repeat(64) };
     },
@@ -148,6 +148,30 @@ test('report-only repair requires exact bounded secret-free original bytes and a
   }));
   assert.deepEqual(rejected, { kind: 'internal-error', code: 'review-report-repair-input-invalid' });
   assert.equal(calls.length, 1);
+});
+
+test('coverage-only correction retains independent verdicts and cannot erase findings or replace reviewers', async () => {
+  const original = { ...report, reviewers: [
+    { role: 'spec_reviewer', sessionId: 'original-spec', verdict: 'approve' as const },
+    { role: 'standards_reviewer', sessionId: 'original-standards', verdict: 'approve' as const },
+  ] };
+  const originalReportBytes = Buffer.from(JSON.stringify({ report: original }));
+  const correction = input({ repairOnly: true, originalReportBytes,
+    originalReportSha256: createHash('sha256').update(originalReportBytes).digest('hex'),
+    validationDiagnostic: 'approved review is missing required coverage' });
+  let capsule: any;
+  const reviewer = new ContainedImplementationReviewer({ operation: { run: async (call) => {
+    capsule = JSON.parse(call.promptFacts[0]!);
+    return { status: 'completed', attemptId: call.attemptId, artifactSha256: 'e'.repeat(64),
+      validatedPayload: { ...original, coverage: [...correction.reviewFocus] } };
+  } } });
+  assert.equal((await reviewer.run(correction)).kind, 'completed');
+  assert.equal(capsule.repair.retainReview, true);
+  const replacement = new ContainedImplementationReviewer({ operation: { run: async (call) => ({
+    status: 'completed', attemptId: call.attemptId, artifactSha256: 'e'.repeat(64),
+    validatedPayload: { ...original, coverage: [...correction.reviewFocus], reviewers: original.reviewers.map((r) => ({ ...r, sessionId: r.sessionId + '-new' })) },
+  }) } });
+  assert.deepEqual(await replacement.run(correction), { kind: 'internal-error', code: 'review-report-correction-changed-semantics' });
 });
 
 test('malformed Review admission has one exact encoded capsule boundary and every admitted result can be repaired', async () => {
@@ -249,6 +273,7 @@ test('actual contained Review operation maps temporary prepare, launch, and repo
   const prepared: PreparedContainedReportAttempt = {
     operation: 'code-review' as const,
     generationHash: workflowGeneration.generationHash,
+    reviewers: ['spec_reviewer', 'standards_reviewer'],
     policy: {
       sandboxMode: 'read-only' as const, cwdClass: 'worktree' as const, worktreeAccess: 'read-only' as const,
       writableRootClasses: [], runnerPostcondition: 'report-only' as const, network: 'deny' as const,

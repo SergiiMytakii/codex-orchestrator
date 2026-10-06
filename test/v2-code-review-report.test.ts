@@ -8,7 +8,7 @@ const fingerprint = 'a'.repeat(64);
 function report(overrides: Partial<CodeReviewReportV1> = {}): CodeReviewReportV1 {
   return {
     version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
-    verdict: 'approved', coverage: ['acceptance'], defects: [], residualRisks: [],
+    verdict: 'approved', coverage: ['correctness'], defects: [], residualRisks: [],
     reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [], ...overrides,
   };
 }
@@ -91,11 +91,11 @@ test('generated schema has no Full Closure or closure hash contract', () => {
 });
 
 test('review arrays are byte-bounded by the contained operation rather than semantic item counts', () => {
-  const coverage = Array.from({ length: 300 }, (_, index) => `coverage-${index}`);
-  assert.deepEqual(validateCodeReviewReport(report({ coverage }), {
+  const residualRisks = Array.from({ length: 300 }, (_, index) => `observation-${index}`);
+  assert.deepEqual(validateCodeReviewReport(report({ residualRisks }), {
     operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', previousFindingIds: [],
-  }).coverage, [...coverage].sort());
+  }).residualRisks, [...residualRisks].sort());
   assert.equal(JSON.stringify(codeReviewReportOutputSchema()).includes('maxItems'), false);
 });
 
@@ -125,4 +125,16 @@ test('needs-work requires an open or reopened defect or repair finding', () => {
     operation: 'code-review', targetRevision: 2, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', previousFindingIds: ['finding-1'],
   }), /needs-work.*open or reopened/u);
+});
+
+test('machine coverage rejects narrative prose and exposes the same categories in the schema', () => {
+  assert.throws(() => validateCodeReviewReport(report({ coverage: ['Checked requirements and tests.'] }), {
+    operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
+    reviewerSessionId: 'review-session-1',
+  }), /coverage category/u);
+  const schema = codeReviewReportOutputSchema() as any;
+  assert.deepEqual(schema.properties.report.properties.coverage.items.enum, [
+    'candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability',
+    'repository-standards', 'requirements', 'tests', 'zero-legacy',
+  ]);
 });

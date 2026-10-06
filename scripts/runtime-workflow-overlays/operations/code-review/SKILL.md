@@ -1,6 +1,16 @@
 # Code Review Operation
 
-You own one packaged Review invocation selected by the Runner. Follow the
+You own one packaged Review invocation selected by the Runner.
+
+If the capsule has `repairOnly: true` and `repair.retainReview: true`, correct
+only `coverage` in the supplied original report. Retain every other field,
+including reviewer identities, verdicts, defects and finding outcomes. The
+Runner has kept the same candidate and validated the retained semantic review;
+do not launch new reviewers for this format correction. Return the corrected
+schema-bound report. If `retainReview` is false, perform the Review procedure
+below and return a new independently reviewed report.
+
+For semantic Review, follow the
 procedural and lens semantics of packaged
 [Review](../../skills/code-review/SKILL.md). The available roles and their
 packaged profiles are the sole concrete role authority for this invocation;
@@ -39,4 +49,8 @@ independent reviewer results without erasing a verified blocker. Include every
 selected reviewer role, identity, and verdict in `reviewers`; approval requires
 all selected reviewers to approve. Complete Review selects every available
 reviewer.
+Use exact category IDs from the capsule's `reviewFocus` in `coverage`, never
+sentences or synonyms. A complete approved review includes every category.
+Put explanations in finding evidence and residual risks, keeping actual risks
+separate from descriptions of work. The schema lists the accepted category IDs.
 Return only `schemas/code-review-v1.json` with operation `code-review`.

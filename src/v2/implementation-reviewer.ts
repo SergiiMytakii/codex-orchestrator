@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 
 import { canonicalJson, containsCredentialEvidence } from './containment.js';
 import type { ContainedReportOperation, ContainedReportOperationResult, ReportOnlyWorktreeSnapshot } from './contained-report-operation.js';
-import type { CodeReviewDefectV1, CodeReviewReportV1, ReviewOperation } from './code-review-report.js';
+import { validateCodeReviewReport } from './code-review-report.js';
+import { decodeAgentReportForValidation } from './report-envelope.js';
+import type { CodeReviewDefectV1, CodeReviewReportV1, ReviewOperation, CodeReviewValidationContext } from './code-review-report.js';
 import type { DeliveryAuthority } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
@@ -51,7 +53,7 @@ export interface ImplementationReviewerInput {
   validationDiagnostic: string | null;
   originalReportBytes: Buffer | null;
   signal: AbortSignal;
-  onPrepared(invocation: ImplementationReviewInvocation): Promise<void>;
+  onPrepared(invocation: ImplementationReviewInvocation & { validationContext: CodeReviewValidationContext }): Promise<void>;
   onLaunched(invocation: ImplementationReviewInvocation & { pid: number; processGroupId: number }): Promise<void>;
 }
 
@@ -124,7 +126,7 @@ export class ContainedImplementationReviewer {
           requiredCoverage: input.repairPatch === null ? [...input.reviewFocus] : [],
           requireAllReviewers: input.repairPatch === null,
         },
-        onPrepared: () => input.onPrepared(structuredClone(invocation)),
+        onPrepared: (validationContext) => input.onPrepared({ ...structuredClone(invocation), validationContext }),
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
       });
     } catch {
@@ -174,7 +176,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     issue: input.issue, frozenCriteria: input.frozenCriteria,
     deliveryAuthority: input.deliveryAuthority, defects: input.defects,
     reviewFocus: sortedUnique(input.reviewFocus, 'review focus'),
-    repairOnly: input.repairOnly, repair,
+    repairOnly: input.repairOnly, repair: repair ? { ...repair, retainReview: retainedReview(input) !== undefined } : null,
   });
   if (Buffer.byteLength(text, 'utf8') > MAX_CAPSULE_BYTES || containsCredentialEvidence(text)) {
     throw new Error('review capsule is unsafe or oversized');
@@ -199,11 +201,40 @@ function rejectUnexpectedRepairInput(hash: string | null, diagnostic: string | n
   return null;
 }
 
+/** Only coverage format repairs can reuse a semantically valid independent Review. */
+function retainedReview(input: ImplementationReviewerInput): CodeReviewReportV1 | undefined {
+  if (!input.repairOnly || !input.originalReportBytes || ![
+    'approved review is missing required coverage', 'code review report has unknown coverage category',
+  ].includes(input.validationDiagnostic ?? '')) return undefined;
+  try {
+    const original = decodeAgentReportForValidation(input.originalReportBytes) as CodeReviewReportV1;
+    return validateCodeReviewReport({ ...original, coverage: [] }, {
+      operation: input.operation, targetRevision: input.targetRevision,
+      targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
+      availableReviewers: original.reviewers.map((reviewer) => reviewer.role),
+      requireAllReviewers: input.repairPatch === null, requireReviewerEvidence: true,
+      previousFindingIds: (input.repairPatch !== null
+        ? [...input.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]
+        : [...input.defects.map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]).sort(),
+    });
+  } catch { return undefined; }
+}
+
 function mapResult(result: ContainedReportOperationResult, input: ImplementationReviewerInput): ImplementationReviewerResult {
-  if (result.status === 'completed') return {
-    kind: 'completed', attemptId: result.attemptId, report: result.validatedPayload as CodeReviewReportV1,
-    artifactSha256: result.artifactSha256,
-  };
+  if (result.status === 'completed') {
+    const retained = retainedReview(input);
+    if (retained) {
+      const corrected = result.validatedPayload as CodeReviewReportV1;
+      const withoutCoverage = { ...corrected, coverage: [], reviewers: [...corrected.reviewers].sort((a, b) => a.role < b.role ? -1 : a.role > b.role ? 1 : 0) };
+      if (canonicalJson(retained) !== canonicalJson(withoutCoverage)) {
+        return { kind: 'internal-error', code: 'review-report-correction-changed-semantics' };
+      }
+    }
+    return {
+      kind: 'completed', attemptId: result.attemptId, report: result.validatedPayload as CodeReviewReportV1,
+      artifactSha256: result.artifactSha256,
+    };
+  }
   if (result.status === 'retryable') return { kind: 'transport-failed', resumable: true };
   if (result.status === 'safe-halt') return { kind: 'safe-halt', process: result.process };
   if (result.status === 'cancelled') return { kind: 'cancelled' };
