@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.21] - 2026-10-06
+
 ### Fixed
 - Persist and reuse the exact Review validation context after restart instead
   of rejecting retained reviewer roles against an empty inventory.
