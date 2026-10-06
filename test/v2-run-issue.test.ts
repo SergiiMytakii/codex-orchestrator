@@ -38,6 +38,19 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('new run persists GitHub comments through claim without leaking transport metadata', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, initialComments: [{
+    id: '6010397751', body: 'Historical discussion', authorAssociation: 'COLLABORATOR',
+    createdAt: '2026-07-15T12:00:00.000Z', updatedAt: '2026-07-15T12:00:00.000Z',
+    url: 'https://example.invalid/issues/42#issuecomment-6010397751',
+    author: { login: 'owner', id: '123' },
+  } as any] });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const saved = (await fixture.store.read()).runs[0]!.issueSnapshot.comments!.find(c => c.id === '6010397751');
+  assert.deepEqual(saved, { id: '6010397751', body: 'Historical discussion', authorAssociation: 'COLLABORATOR',
+    createdAt: '2026-07-15T12:00:00.000Z', updatedAt: '2026-07-15T12:00:00.000Z' });
+});
+
 test('Run retains proof failure diagnostics and existing candidate/workflow identity without launching Review or publication', async () => {
   const fixture = await runFixture({ proof: async () => ({
     status: 'internal-error', receipt: { ...passedProof().receipt, summary: 'Proof artifacts are invalid: proof artifact hash mismatch' },

@@ -76,7 +76,7 @@ export function refreshClaimedIssueSnapshot(baseline: RunRecord['issueSnapshot']
     comments: [
       ...(baseline.comments ?? []).filter(isClaimMarkerComment),
       ...issue.comments.filter((comment) => !isClaimMarkerComment(comment)),
-    ],
+    ].map(snapshotComment),
   };
 }
 
@@ -84,7 +84,16 @@ export function snapshotIssue(issue: IssueObservation): IssueSnapshot & Pick<Iss
   if (issue.state !== 'OPEN') throw new Error('cannot snapshot a closed issue');
   return {
     number: issue.number, title: issue.title, body: issue.body, url: issue.url, state: 'OPEN',
-    labels: sortedUnique(issue.labels), comments: structuredClone(issue.comments),
+    labels: sortedUnique(issue.labels), comments: issue.comments.map(snapshotComment),
+  };
+}
+
+function snapshotComment(comment: IssueObservation['comments'][number]): IssueObservation['comments'][number] {
+  return {
+    body: comment.body, authorAssociation: comment.authorAssociation,
+    ...(comment.id !== undefined ? { id: comment.id } : {}),
+    ...(comment.createdAt !== undefined ? { createdAt: comment.createdAt } : {}),
+    ...(comment.updatedAt !== undefined ? { updatedAt: comment.updatedAt } : {}),
   };
 }
 

@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Project GitHub comments into the exact persisted snapshot contract during
+  claim and refresh, preserving claim identity and timestamps without leaking
+  transport metadata into the run journal.
+
 ## [2.0.21] - 2026-10-06
 
 ### Fixed
