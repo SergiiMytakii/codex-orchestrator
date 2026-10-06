@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.20] - 2026-10-06
+
+### Fixed
+- Explicitly retry eligible terminal Acceptance Proof failures on the same
+  immutable candidate, requiring fresh checks, proof, and Review before
+  publication.
+- Permit only exact quoted dummy session-token fixtures while continuing to
+  detect credentials; credential-bearing Review targets now block durably
+  instead of retrying as transport failures.
+
 ### Changed
 - Accept legacy run-state envelopes v2/v3 when their records satisfy the full
   current contract, preserving bytes until the next normal state write.
