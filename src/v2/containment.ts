@@ -159,10 +159,20 @@ export function sha256(value: string | Buffer): string {
 }
 
 export function containsCredentialEvidence(value: string): boolean {
+  const assignments = value.matchAll(/["']?(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*(["']?)([^\s"']{8,})/giu);
+  for (const match of assignments) {
+    // These exact, quoted session fixtures cannot authenticate against a service.
+    const isDummySessionToken = !/[\p{ID_Continue}$-]$/u.test(value.slice(Math.max(0, match.index! - 2), match.index))
+      && /^(?:(["'])(?:access|refresh)[_-]?token\1|(?:access|refresh)[_-]?token)\s*[:=]/iu.test(match[0])
+      && match[2] !== ''
+      && value[match.index! + match[0].length] === match[2]
+      && /^[ \t]*(?:[,;)\]}]|$)/u.test(value.slice(match.index! + match[0].length + 1))
+      && (match[3] === 'test-token' || match[3] === 'test-refresh');
+    if (!isDummySessionToken) return true;
+  }
   return [
     /-----BEGIN [A-Z ]*PRIVATE KEY-----/iu,
     /["']?authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+/iu,
-    /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["']?\s*[:=]\s*["']?[^\s"']{8,}/iu,
     /\bgh[pousr]_[A-Za-z0-9]{20,}\b/u,
     /\bgithub_pat_[A-Za-z0-9_]{20,}\b/u,
     /https?:\/\/[^\s/@:]+:[^\s/@]+@/iu,

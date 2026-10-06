@@ -100,6 +100,12 @@ import {
   settlePushEffect,
 } from './pending-effect-settlement.js';
 
+class ReviewTargetCredentialError extends Error {
+  constructor() {
+    super('Review target contains potential credential material; remove real credentials or use explicit dummy session tokens.');
+  }
+}
+
 export type RunIssueResult =
   | { status: 'state-schema-unsupported'; reason?: string }
   | { status: 'review-ready'; pullRequestUrl: string; evidencePath: string; continuationEpoch?: string }
@@ -1691,6 +1697,11 @@ export class RunIssue {
       try {
         reviewScope = await this.reviewValidationScope(active, frozenCriteria, checkPolicy.checks, config.deny.readPaths);
       } catch (error) {
+        if (error instanceof ReviewTargetCredentialError) {
+          return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false, blocker: {
+            kind: 'safety', summary: error.message, attempted: ['Inspect exact candidate diff for credential material.'], resumable: false,
+          } }, 'review-target-credential-evidence');
+        }
         return this.invokedFailure(active, 'review-target-unavailable', error instanceof Error ? error.message : undefined);
       }
       const configuredChecks = Object.entries(reviewScope.checks);
@@ -2913,9 +2924,9 @@ export class RunIssue {
       active.record.baseSha,
       binding.candidateTreeSha,
     );
+    if (containsCredentialEvidence(completeDiff.patch)) throw new ReviewTargetCredentialError();
     if (completeDiff.changedFiles.length === 0 || completeDiff.patch.trim().length === 0
       || Buffer.byteLength(completeDiff.patch, 'utf8') > MAX_REVIEW_PATCH_BYTES
-      || containsCredentialEvidence(completeDiff.patch)
       || completeDiff.changedFiles.some((path) => findDeniedPathMatch(path, deniedPaths))) {
       throw new Error('exact complete Review target is unavailable');
     }
@@ -3011,6 +3022,11 @@ export class RunIssue {
         config.deny.readPaths,
       );
     } catch (error) {
+      if (error instanceof ReviewTargetCredentialError) {
+        return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false, blocker: {
+          kind: 'safety', summary: error.message, attempted: ['Inspect exact candidate diff for credential material.'], resumable: false,
+        } }, 'review-target-credential-evidence');
+      }
       return this.invokedFailure(active, 'review-scope-unavailable', error instanceof Error ? error.message : undefined);
     }
     let reportRepair: { originalReportSha256: string; originalReportBytes: Buffer; diagnostic: string } | undefined;

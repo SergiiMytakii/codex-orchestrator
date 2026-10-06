@@ -2388,12 +2388,35 @@ test('review waits when no exact complete or targeted tree delta can be supplied
   assert.equal(fixture.reviewInputs.length, 0);
 });
 
-test('Review waits when every available target patch is unsafe, oversized, or denied', async () => {
+test('Review accepts explicit dummy session tokens and proceeds through checks', async () => {
+  const fixture = await runFixture({
+    diffTreeOverride: { changedFiles: ['test/session_test.dart'], patch: "diff --git a/test/session_test.dart b/test/session_test.dart\n+tokens.storeTokens(accessToken: 'test-token', refreshToken: 'test-refresh');\n" },
+  });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence }));
+  assert.ok(fixture.reviewInputs.length > 0);
+});
+
+test('credential-bearing Review target blocks durably instead of retrying transport', async () => {
+  const fixture = await runFixture({
+    diffTreeOverride: { changedFiles: ['test/session_test.dart'], patch: 'diff --git a/test/session_test.dart b/test/session_test.dart\n+access_token=credential-material-12345\n' },
+  });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  assert.equal((await fixture.store.read()).runs[0]!.lifecycle, 'blocked');
+  assert.equal(fixture.reviewInputs.length, 0);
+  assert.equal(fixture.events.some((event) => event === 'proof' || event === 'push'), false);
+  assert.equal(result.status === 'blocked' && result.blocker?.summary, 'Review target contains potential credential material; remove real credentials or use explicit dummy session tokens.');
+  const issue = await fixture.dependencies.issues.read(42);
+  assert.ok(issue?.labels.includes('agent:blocked'));
+  assert.equal(issue?.labels.includes('agent:running'), false);
+  const before = fixture.events.length;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  assert.equal(fixture.events.slice(before).some((event) => event === 'agent:implementation' || event === 'proof' || event.startsWith('review:')), false);
+});
+
+test('Review waits when every available target patch is oversized or denied', async () => {
   const cases = [
-    {
-      name: 'secret evidence',
-      diffTreeOverride: { changedFiles: ['feature.txt'], patch: 'diff --git a/feature.txt b/feature.txt\n+access_token=credential-material-12345\n' },
-    },
     {
       name: 'oversized patch',
       diffTreeOverride: { changedFiles: ['feature.txt'], patch: `diff --git a/feature.txt b/feature.txt\n+${'x'.repeat(1024 * 1024)}` },
@@ -2604,6 +2627,30 @@ test('host identity detection covers generic and Markdown-delimited paths withou
     'I/flutter: Android proof ready',
     'https://example.invalid/issues/42',
   ]) assert.equal(containsHostIdentityEvidence(value), false, value);
+});
+
+test('dummy token exception is exact and does not suppress other credential evidence', () => {
+  assert.equal(containsCredentialEvidence("accessToken: 'test-token', refreshToken: 'test-refresh'"), false);
+  for (const value of [
+    "accessToken: 'test-token-real-credential'",
+    "accessToken: 'test-token' + privateSuffix",
+    "accessToken: 'test-token'\n  + privateSuffix",
+    "+accessToken: 'test-token'\n+  + privateSuffix,",
+    "accessToken: 'test-token', refreshToken: 'credential-material-12345'",
+    "password: 'test-token'",
+    "api_accessToken: 'test-token',",
+    "otherrefreshToken: 'test-refresh';",
+    `'api-accessToken': 'test-token',`,
+    `"other-refreshToken": "test-refresh"`,
+    `'other+accessToken': 'test-token',`,
+    `éaccessToken: 'test-token',`,
+    `𐐀accessToken: 'test-token',`,
+    `"пaccessToken": "test-token"`,
+    'accessToken: test-token',
+    'accessToken: "test-token\\escaped"',
+    "accessToken: 'test-token', GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456",
+    "accessToken: 'test-token', Authorization: 'Bearer credential-material-12345'",
+  ]) assert.equal(containsCredentialEvidence(value), true, value);
 });
 
 test('credential detection covers public terminal credential forms', () => {
