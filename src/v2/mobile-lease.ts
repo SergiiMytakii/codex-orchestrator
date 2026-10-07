@@ -3,7 +3,7 @@ import { open, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
-import { canonicalJson } from './containment.js';
+import { canonicalJson, sha256 } from './containment.js';
 
 export interface AndroidLeaseRecordV1 {
   schema: 'codex-orchestrator.android-lease';
@@ -31,6 +31,7 @@ export interface AndroidLeaseVerifier {
 
 export interface AndroidLeaseTargetController {
   release(record: AndroidLeaseRecordV1): Promise<void>;
+  releasePreparation?(proofId: string, preparationPath: string): Promise<void>;
 }
 
 export interface IosLeaseRecordV1 {
@@ -105,7 +106,14 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     try {
       external = parseAndroidLease(await readBoundedRegularFile(this.leasePath));
     } catch (error) {
-      if (isMissing(error)) return;
+      if (isMissing(error)) {
+        const preparationPath = join(dirname(this.leasePath), 'android.preparation.json');
+        try { await readBoundedRegularFile(preparationPath); }
+        catch (preparationError) { if (isMissing(preparationError)) return; throw preparationError; }
+        if (!this.targetController?.releasePreparation) throw new Error('Android preparation resource cleanup is unavailable');
+        await this.targetController.releasePreparation(proofId, preparationPath);
+        return;
+      }
       throw error;
     }
     if (external.proofId !== proofId) throw new Error('Android lease release identity is invalid');
@@ -114,6 +122,19 @@ export class FileAndroidLeaseVerifier implements AndroidLeaseVerifier {
     if (external.runnerCreated === true) {
       if (!this.targetController) throw new Error('Runner-created Android lease target controller is unavailable');
       await this.targetController.release(external);
+      const preparedPath = join(dirname(this.leasePath), `android.prepared.${sha256(proofId)}.json`);
+      let prepared;
+      try { prepared = JSON.parse((await readBoundedRegularFile(preparedPath)).toString('utf8')) as Record<string, unknown>; }
+      catch (error) { if (!isMissing(error)) throw error; }
+      if (prepared) {
+        if (prepared.schema !== 'codex-orchestrator.android-prepared' || prepared.version !== 1
+          || prepared.proofId !== proofId || prepared.leaseToken !== external.token) {
+          throw new Error('Android prepared state does not match released ownership');
+        }
+        await rm(preparedPath);
+      }
+      if (!/^[A-Za-z0-9_-]+$/u.test(external.token)) throw new Error('Android install snapshot token is invalid');
+      await rm(join(dirname(this.leasePath), `android-install-${external.token}.apk`), { force: true });
     }
     const released: AndroidLeaseRecordV1 = { ...external, status: 'released', updatedAt: this.now().toISOString() };
     await writeDurableAtomicFile(verified.artifactPath, `${canonicalJson(released)}\n`, 0o600);

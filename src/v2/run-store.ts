@@ -1,4 +1,5 @@
 import type { ProofReceipt } from './proof-report.js';
+import type { SettledProveChangeResult } from './acceptance-proof.js';
 import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
 import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
@@ -164,6 +165,7 @@ export interface RunRecord {
     transportRetryCount: number;
     reportRepairCount: number;
     reportRepairFindings: string[];
+    cleanupOutcome?: SettledProveChangeResult;
   };
   proofReceipt?: ProofReceipt;
   implementationResult?: { summary: string; residualRisks: string[] };
@@ -372,6 +374,10 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (hasOwn(value, 'checkedChangeSha256')) assertSha256(value.checkedChangeSha256, `${field}.checkedChangeSha256`);
   if (hasOwn(value, 'proofId')) assertNonEmptyString(value.proofId, `${field}.proofId`);
   if (hasOwn(value, 'proofExecution')) validateProofExecution(value.proofExecution, `${field}.proofExecution`);
+  const cleanupOutcome = (value.proofExecution as RunRecord['proofExecution'])?.cleanupOutcome;
+  if (cleanupOutcome && (cleanupOutcome.receipt.proofId !== value.proofId || !hasOwn(value, 'candidateMaterialization'))) {
+    throw new Error(`${field}.proofExecution cleanup identity is invalid`);
+  }
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
   if (hasOwn(value, 'implementationResult')) validateImplementationResult(value.implementationResult, `${field}.implementationResult`);
   if (hasOwn(value, 'terminalNotifications')) validateTerminalNotifications(value.terminalNotifications, `${field}.terminalNotifications`);
@@ -786,13 +792,27 @@ function validateReceipt(value: unknown, field: string): void {
 }
 
 function validateProofExecution(value: unknown, field: string): void {
-  assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings'], field);
+  assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings', ...(hasOwn(value, 'cleanupOutcome') ? ['cleanupOutcome'] : [])], field);
   assertTimestamp(value.startedAt, `${field}.startedAt`);
   if (!Number.isSafeInteger(value.transportRetryCount) || (value.transportRetryCount as number) < 0) throw new Error(`${field}.transportRetryCount is invalid`);
   if (!Number.isSafeInteger(value.reportRepairCount) || (value.reportRepairCount as number) < 0) throw new Error(`${field}.reportRepairCount is invalid`);
   validateStringList(value.reportRepairFindings, `${field}.reportRepairFindings`);
   if ((value.reportRepairCount === 0) !== (value.reportRepairFindings.length === 0)) {
     throw new Error(`${field} report repair state is invalid`);
+  }
+  if (hasOwn(value, 'cleanupOutcome')) {
+    const outcome = value.cleanupOutcome;
+    if (typeof outcome !== 'object' || outcome === null || Array.isArray(outcome)) throw new Error(`${field}.cleanupOutcome is invalid`);
+    const status = (outcome as { status?: unknown }).status;
+    if (!['passed', 'needs-rework', 'external-block', 'transport-failed', 'cancelled', 'internal-error'].includes(String(status))) {
+      throw new Error(`${field}.cleanupOutcome.status is invalid`);
+    }
+    const extras = status === 'needs-rework' ? ['findings'] : status === 'external-block' ? ['blocker'] : status === 'transport-failed' ? ['resumable'] : [];
+    assertExactObject(outcome, ['status', 'receipt', ...extras], `${field}.cleanupOutcome`);
+    validateReceipt(outcome.receipt, `${field}.cleanupOutcome.receipt`);
+    if (status === 'needs-rework') validateStringList(outcome.findings, `${field}.cleanupOutcome.findings`);
+    if (status === 'external-block') validateBlockerDetail(outcome.blocker, `${field}.cleanupOutcome.blocker`);
+    if (status === 'transport-failed' && outcome.resumable !== false) throw new Error(`${field}.cleanupOutcome.resumable is invalid`);
   }
 }
 

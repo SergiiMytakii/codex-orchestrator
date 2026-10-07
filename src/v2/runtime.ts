@@ -1289,29 +1289,35 @@ export function createV2Runtime(input: {
     },
   };
   const capabilities = createCheckedChangeCapabilities();
+  const proofMobileLeases = (canonicalRepository: string, worktreePath: string) => {
+    const config = requireConfig(currentConfig);
+    const leaseRoot = join(orchestratorHome, 'v2', sha256(canonicalRepository), 'leases');
+    return {
+      androidLease: new FileAndroidLeaseVerifier({
+        leaseRoot, worktreeRoot: worktreePath, now: () => new Date(now()),
+        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/android-lease.json`,
+        targetController: androidProofController,
+      }),
+      iosLease: new FileIosLeaseVerifier({
+        leaseRoot, worktreeRoot: worktreePath, now: () => new Date(now()),
+        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/ios-lease.json`,
+        targetController: { release: (record) => releaseIosSimulator(commandExecutor, iosXcrunPath, record) },
+      }),
+    };
+  };
   const proof = {
+    cleanupMobileLeases: async (input: { canonicalRepository: string; worktreePath: string; proofId: string }) => {
+      const leases = proofMobileLeases(input.canonicalRepository, input.worktreePath);
+      await leases.androidLease.release(input.proofId);
+      await leases.iosLease.release(input.proofId);
+    },
     proveChange: async (proofInput: Parameters<AcceptanceProof<import('./checked-change.js').CheckedChangePayload>['proveChange']>[0]) => {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
       const repoKey = sha256(checked.payload.canonicalRepository);
       const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
       const worktreePath = proofInput.materialization?.path ?? issueWorktreePath;
-      const androidLease = new FileAndroidLeaseVerifier({
-        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
-        worktreeRoot: worktreePath,
-        now: () => new Date(now()),
-        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/android-lease.json`,
-        targetController: androidProofController,
-      });
-      const iosLease = new FileIosLeaseVerifier({
-        leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
-        worktreeRoot: worktreePath,
-        now: () => new Date(now()),
-        artifactRelativePathForProof: (proofId) => `${config.proof.artifactDir}/${proofId}/ios-lease.json`,
-        targetController: {
-          release: (record) => releaseIosSimulator(commandExecutor, iosXcrunPath, record),
-        },
-      });
+      const { androidLease, iosLease } = proofMobileLeases(checked.payload.canonicalRepository, worktreePath);
       const acceptanceProof = new AcceptanceProof<import('./checked-change.js').CheckedChangePayload>({
         checkedChangeReader: capabilities,
         proofAgent,
@@ -1381,8 +1387,10 @@ export function createV2Runtime(input: {
           }
         },
       });
-      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && result.status === 'passed') {
-        const artifacts = result.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
+      const passed = result.status === 'passed' ? result
+        : result.status === 'cleanup-pending' && result.outcome.status === 'passed' ? result.outcome : undefined;
+      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && passed) {
+        const artifacts = passed.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
         const copied = await git.candidateV2.copyProofArtifacts({
           materialization: proofInput.materialization,
           issueWorktreePath,

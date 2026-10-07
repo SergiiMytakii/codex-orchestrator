@@ -255,6 +255,7 @@ export interface RunIssueDependencies {
     }>;
   };
   proof: {
+    cleanupMobileLeases?: (input: { canonicalRepository: string; worktreePath: string; proofId: string }) => Promise<void>;
     proveChange(input: {
       proofId: string;
       attemptId: string;
@@ -1845,7 +1846,15 @@ export class RunIssue {
       let proofLaunchFailure: RunIssueResult | undefined;
       let proofSettledBeforeLaunch = false;
       try {
-        proof = await this.dependencies.proof.proveChange({
+        if (proofExecutionState.cleanupOutcome) {
+          try {
+            if (!this.dependencies.proof.cleanupMobileLeases) throw new Error('Mobile cleanup capability is unavailable');
+            await this.dependencies.proof.cleanupMobileLeases({ canonicalRepository: active.record.canonicalRepository, worktreePath: proofMaterialization.path, proofId });
+          } catch {
+            return this.invokedFailure(active, 'acceptance-proof-cleanup-pending', 'Mobile proof resource cleanup remains pending; the next invocation will retry it.');
+          }
+          proof = proofExecutionState.cleanupOutcome;
+        } else proof = await this.dependencies.proof.proveChange({
           proofId,
           attemptId: proofAttempt.attemptId,
           recoverOnly: proofAttempt.stage !== 'prepared',
@@ -1892,6 +1901,11 @@ export class RunIssue {
           : this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
       }
       if (proofLaunchFailure) return proofLaunchFailure;
+      if (proof.status === 'cleanup-pending') {
+        active = await this.observeReturnedAttempt(active, proof.outcome);
+        active = await this.persist(active, { proofExecution: { ...proofExecutionState, cleanupOutcome: proof.outcome } });
+        return this.invokedFailure(active, 'acceptance-proof-cleanup-pending', 'Mobile proof resources have not been released; proof outcome and worktree are retained for cleanup retry.');
+      }
       if (proof.status === 'safe-halt') {
         active = await this.persist(active, { lifecycle: 'safe-halt' });
         return await this.invokedFailure(active, 'active-attempt-observation-deferred',
@@ -1925,7 +1939,7 @@ export class RunIssue {
       } else if (isAdoptableAttempt(active.record.activeAttempt)) {
         active = await this.adoptAttempt(active, sha256(canonicalJson(proof)), {});
       }
-      const settledProofMaterialization = await this.settleCandidateMaterialization(active, config);
+      const settledProofMaterialization = await this.settleCandidateMaterialization(active, config, active.record.activeAttempt?.stage === 'prepared');
       if ('status' in settledProofMaterialization) return settledProofMaterialization;
       active = settledProofMaterialization.active;
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
@@ -2796,7 +2810,13 @@ export class RunIssue {
     }
     const removed = await candidate.removeMaterialization({ materialization });
     if (removed.kind === 'failed') return this.mapCandidateFailure(active, removed.code);
-    let cleared = await this.persist(active, { candidateMaterialization: undefined });
+    const proofExecution = active.record.proofExecution;
+    const changes: Partial<RunRecord> = { candidateMaterialization: undefined };
+    if (proofExecution?.cleanupOutcome) {
+      const { cleanupOutcome: _cleanupOutcome, ...settledProofExecution } = proofExecution;
+      changes.proofExecution = settledProofExecution;
+    }
+    let cleared = await this.persist(active, changes);
     cleared = await this.clearAttempt(cleared);
     return { active: cleared };
   }
@@ -2835,11 +2855,7 @@ export class RunIssue {
       return { active: await this.persist(active, { candidateMaterialization: undefined }) };
     }
     if (active.record.activeAttempt?.stage !== 'adopted') return { active };
-    const removed = await candidate.removeMaterialization({ materialization });
-    if (removed.kind === 'failed') return this.mapCandidateFailure(active, removed.code);
-    let cleared = await this.persist(active, { candidateMaterialization: undefined });
-    cleared = await this.clearAttempt(cleared);
-    return { active: cleared };
+    return this.settleCandidateMaterialization(active, config);
   }
 
   private async clearAndReleaseCandidate(active: ActiveRun): Promise<{ active: ActiveRun } | RunIssueResult> {
@@ -3633,6 +3649,21 @@ export class RunIssue {
   ): Promise<RunIssueResult> {
     if (active.record.pendingEffect && active.record.pendingEffect.kind !== 'outcome-evidence') {
       return this.invokedFailure(active, 'terminal-pending-effect-unsettled', 'Terminal state requires the existing effect postcondition to settle first.');
+    }
+    if (active.record.proofId && active.record.candidateMaterialization
+      && active.record.activeAttempt?.operationId === 'acceptance-proof' && this.dependencies.proof.cleanupMobileLeases) {
+      try {
+        await this.dependencies.proof.cleanupMobileLeases({
+          canonicalRepository: active.record.canonicalRepository,
+          worktreePath: active.record.candidateMaterialization.path, proofId: active.record.proofId,
+        });
+        if (active.record.proofExecution?.cleanupOutcome) {
+          const { cleanupOutcome: _cleanupOutcome, ...settledProofExecution } = active.record.proofExecution;
+          active = await this.persist(active, { proofExecution: settledProofExecution });
+        }
+      } catch {
+        return this.invokedFailure(active, 'acceptance-proof-cleanup-pending', 'Mobile resources must be released before the Run can finish.');
+      }
     }
     const feedback = active.record.reviewFeedback;
     const terminalChanges = feedback?.activeBatch && !additionalChanges.reviewFeedback ? {

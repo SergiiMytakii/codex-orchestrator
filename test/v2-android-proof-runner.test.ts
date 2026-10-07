@@ -487,3 +487,30 @@ test('runner preserves an existing durable lease instead of starting a competing
 function ok(stdout: string) {
   return { stdout, stderr: '', exitCode: 0 };
 }
+
+test('failed emulator launch removes its unused data and preparation intent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-android-proof-launch-failure-'));
+  try {
+    const adbPath = join(root, 'adb');
+    const emulatorPath = join(root, 'emulator');
+    const dataDir = join(root, 'unused-data');
+    const leaseRoot = join(root, 'leases');
+    for (const path of [adbPath, emulatorPath]) { await writeFile(path, '#!/bin/sh\n'); await chmod(path, 0o700); }
+    const controller = new RunnerAndroidProofController({
+      adbPath, emulatorPath,
+      execute: async (file) => ok(file === emulatorPath ? `${config.avdName}\n` : 'List of devices attached\n'),
+      createDataDir: async () => { await mkdir(dataDir); return dataDir; },
+      removeDataDir: async (path) => { await rm(path, { recursive: true, force: true }); },
+      startEmulator: async () => { throw new Error('emulator spawn failed'); },
+    });
+    const result = await controller.prepare({
+      proofId: 'proof-launch-failure', worktreePath: join(root, 'worktree'), artifactDir: 'proofs', leaseRoot,
+      config, checks: [], checkedChangeSha256: 'a'.repeat(64), proofAgentBudgetMs: 900_000,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, 'blocked');
+    if (result.status === 'blocked') assert.match(result.summary, /emulator spawn failed/u);
+    await assert.rejects(stat(dataDir), { code: 'ENOENT' });
+    await assert.rejects(stat(join(leaseRoot, 'android.preparation.json')), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -2622,6 +2622,89 @@ test('temporary proof service unavailability resumes the same Run without duplic
   assert.equal(fixture.events.filter((event) => event === 'git:push').length, 1);
 });
 
+test('mobile cleanup failure retains the proof materialization and resumes cleanup before Review', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({ status: 'cleanup-pending', outcome: passedProof() }) });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.lifecycle, 'proving');
+  assert.ok(retained.candidateMaterialization);
+  assert.equal(retained.terminalOutcome, undefined);
+  assert.equal(fixture.events.includes('review:code-review'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
+  let cleanupCalls = 0;
+  Object.assign(fixture.dependencies.proof, { cleanupMobileLeases: async () => { if (++cleanupCalls === 1) throw new Error('still pending'); } });
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.deepEqual((await fixture.store.read()).runs[0]!.candidateMaterialization, retained.candidateMaterialization);
+  const resumed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal(cleanupCalls, 2);
+  assert.equal((await fixture.store.read()).runs[0]!.proofExecution?.cleanupOutcome, undefined);
+  assert.equal(fixture.events.filter(event => event === 'proof').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'agent').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'git:push').length, 1);
+});
+
+test('pre-launch mobile preparation blocker survives cleanup retry without launching proof or publication', async () => {
+  const fixture = await runFixture({ fileBackedStore: true });
+  fixture.dependencies.proof.proveChange = async () => ({ status: 'cleanup-pending', outcome: {
+    status: 'external-block', blocker: { kind: 'tool', summary: 'Build unavailable', attempted: ['APK build'], resumable: false }, receipt: receipt(),
+  } });
+  const invoke = () => new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal((await invoke()).status, 'transport-failed');
+  fixture.dependencies.proof.cleanupMobileLeases = async () => {};
+  assert.equal((await invoke()).status, 'blocked');
+  assert.equal(fixture.events.includes('proof'), false);
+  assert.equal(fixture.events.includes('review:code-review'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
+test('restart after cleanup outcome adoption removes materialization and continues Review without rerunning proof', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({ status: 'cleanup-pending', outcome: passedProof() }) });
+  const invoke = () => new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal((await invoke()).status, 'transport-failed');
+  fixture.dependencies.proof.cleanupMobileLeases = async () => {};
+  const originalRemove = fixture.dependencies.git.candidateV2!.removeMaterialization;
+  const originalWrite = fixture.dependencies.runRecords.compareAndSwap;
+  let crashCheckpoint: Awaited<ReturnType<typeof fixture.store.read>> | undefined;
+  fixture.dependencies.runRecords.compareAndSwap = async (generation, next) => {
+    if (next.runs.some(run => run.lifecycle === 'internal-error')) throw new Error('simulated process stopped before terminal persistence');
+    return originalWrite(generation, next);
+  };
+  let interrupt = true;
+  fixture.dependencies.git.candidateV2!.removeMaterialization = async input => {
+    if (interrupt) { interrupt = false; crashCheckpoint = await fixture.store.read(); throw new Error('simulated restart after proof adoption'); }
+    return originalRemove(input);
+  };
+  await invoke();
+  assert.ok(crashCheckpoint);
+  const afterInterrupt = await fixture.store.read();
+  await originalWrite(afterInterrupt.generation, { schema: crashCheckpoint.schema, runs: crashCheckpoint.runs });
+  const adopted = (await fixture.store.read()).runs[0]!;
+  assert.equal(adopted.lifecycle, 'reviewing');
+  assert.equal(adopted.activeAttempt?.stage, 'adopted');
+  assert.ok(adopted.proofExecution?.cleanupOutcome);
+  fixture.dependencies.runRecords.compareAndSwap = originalWrite;
+  const resumed = await invoke();
+  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal(fixture.events.filter(event => event === 'proof').length, 1);
+});
+
+test('revoked issue authority still releases retained mobile resources before terminal state', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({ status: 'cleanup-pending', outcome: passedProof() }) });
+  const invoke = () => new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal((await invoke()).status, 'transport-failed');
+  const originalRead = fixture.dependencies.issues.read;
+  fixture.dependencies.issues.read = async number => { const issue = await originalRead(number); return issue ? { ...issue, labels: [] } : issue; };
+  let cleanups = 0;
+  fixture.dependencies.proof.cleanupMobileLeases = async () => { if (++cleanups === 1) throw new Error('still pending'); };
+  assert.equal((await invoke()).status, 'transport-failed');
+  assert.equal((await fixture.store.read()).runs[0]!.terminalOutcome, undefined);
+  assert.equal((await invoke()).status, 'blocked');
+  assert.equal(cleanups, 2);
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
 test('blocked label delivery resumes from its durable pendingEffect without rerunning work', async () => {
   const fixture = await runFixture({
     rejectEffect: 'labels',

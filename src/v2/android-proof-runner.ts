@@ -400,6 +400,13 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
         } catch {
           // The process could not be proven stopped; retain its data directory.
         }
+      } else if (!emulatorStarted && dataDir) {
+        try {
+          await this.removeDataDir(dataDir);
+          released = true;
+        } catch {
+          // Retain the preparation intent when its unused data could not be removed.
+        }
       }
       if (activeLease && released) {
         try {
@@ -446,6 +453,19 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
       || !Number.isSafeInteger(record.emulatorPid) || !record.emulatorProcessIdentity) return;
     await this.stopOwnedEmulator(record.emulatorPid, record.emulatorProcessIdentity);
     if (record.dataDir) await this.removeDataDir(record.dataDir);
+  }
+
+  async releasePreparation(proofId: string, preparationPath: string): Promise<void> {
+    const preparation = await readPreparation(preparationPath);
+    if (!preparation) return;
+    if (preparation.proofId !== proofId) throw new Error('Android preparation belongs to another proof.');
+    if (!preparation.emulatorPid || !preparation.emulatorProcessIdentity) {
+      throw new Error('Android preparation requires operator recovery because emulator ownership is incomplete.');
+    }
+    await this.stopOwnedEmulator(preparation.emulatorPid, preparation.emulatorProcessIdentity);
+    await this.removeDataDir(preparation.dataDir);
+    await removeOwnedPreparation(preparationPath, preparation.token);
+    this.activePreparationTokens.delete(preparation.token);
   }
 
   private async acquirePreparation(path: string, intent: AndroidPreparationIntent): Promise<void> {
