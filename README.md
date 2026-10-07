@@ -55,6 +55,21 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 
 The command prints one JSON result. Successful delivery returns `review-ready` with the draft PR URL. Decision, authority, preservation, and proof boundaries return a precise blocked result with evidence.
 
+For external candidate discovery, use the package-owned remote baseline rather than the caller's local branch:
+
+```js
+import { withRemoteBaseWorktree } from 'codex-orchestrator';
+const { baseSha, result } = await withRemoteBaseWorktree(targetRoot, async ({ worktreePath }) => {
+  return analyzeRepository(worktreePath);
+});
+```
+
+The helper fetches the configured remote base, analyzes a temporary detached worktree, and removes it afterward.
+It rejects results if the remote base changes during analysis. Record `source-base-sha:<baseSha>` on its own
+line in the issue body. Both direct runs and the daemon reject a different fresh or persisted execution base
+before claiming a new run; they never reset an existing run to a new base. Issues without this metadata
+keep their normal configured-base behavior.
+
 ## Main commands
 
 ### `setup`

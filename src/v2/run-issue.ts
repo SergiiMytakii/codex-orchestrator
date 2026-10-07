@@ -1252,6 +1252,11 @@ export class RunIssue {
       } catch {
         return await this.preClaimTransport(input.issueNumber);
       }
+      const sourceBaseMarkers = issue?.body.match(/^source-base-sha:.*$/gmu) ?? [];
+      const expectedBaseSha = sourceBaseMarkers[0]?.slice('source-base-sha:'.length);
+      if (sourceBaseMarkers.length > 1 || (expectedBaseSha !== undefined && !/^[a-f0-9]{40}$/u.test(expectedBaseSha))) {
+        return await this.discoveryBaseMismatch(input.issueNumber);
+      }
       if (this.dependencies.git.candidateV2?.reconcileOrphans) {
         const reconciled = await this.dependencies.git.candidateV2.reconcileOrphans({
           repositoryRoot: targetRoot,
@@ -1272,6 +1277,9 @@ export class RunIssue {
       const matchingRuns = persisted.runs.filter((run) => run.issueNumber === input.issueNumber && run.canonicalRepository === canonicalRepository);
       if (matchingRuns.length > 1) return await this.preClaimInternal('ambiguous-run-state', input.issueNumber);
       const existing = matchingRuns[0];
+      if (existing && expectedBaseSha !== undefined && existing.baseSha !== expectedBaseSha) {
+        return await this.discoveryBaseMismatch(input.issueNumber);
+      }
       if (input.retryProofRunId !== undefined && (existing?.runId !== input.retryProofRunId
         || existing.terminalOutcome?.status !== 'internal-error'
         || existing.terminalOutcome.code !== 'acceptance-proof-internal-failure')) {
@@ -1469,6 +1477,9 @@ export class RunIssue {
           );
         }
         assertGitSha(baseSha, 'baseSha');
+        if (expectedBaseSha !== undefined && baseSha !== expectedBaseSha) {
+          return await this.discoveryBaseMismatch(input.issueNumber);
+        }
         const claimBody = claimComment(runId, input.issueNumber, branchName);
         active = await this.createRun({
           runId, issueNumber: input.issueNumber, canonicalRepository, baseSha, branchName, worktreePath,
@@ -3768,6 +3779,12 @@ export class RunIssue {
     try { active = await this.confirmEffect(active); } catch { return publicOutcome(terminalOutcome); }
     active = await this.settleTerminalNotificationsBestEffort(active);
     return publicOutcome(terminalOutcome);
+  }
+
+  private async discoveryBaseMismatch(issueNumber: number): Promise<RunIssueResult> {
+    const reason = 'The execution base differs from the analyzed commit; revalidate the issue on the current remote base.';
+    const evidence = await this.dependencies.writeEvidence({ runId: `issue-${issueNumber}`, code: 'discovery-base-mismatch', summary: reason });
+    return { status: 'not-eligible', reason, evidencePath: evidence.path };
   }
 
   private async preClaimInternal(code: string, issueNumber: number): Promise<RunIssueResult> {

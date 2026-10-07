@@ -2029,6 +2029,36 @@ test('base refresh failure is resumable and creates no claim or run state', asyn
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
 });
 
+test('a discovered base mismatch creates no claim, implementation worktree, or run state', async () => {
+  const fixture = await runFixture({ issueBody: `## Acceptance Criteria\n- The behavior works.\n\nsource-base-sha:${'f'.repeat(40)}\n` });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const result = await fixture.runner.runIssue(input);
+  assert.equal(result.status, 'not-eligible');
+  assert.equal((await fixture.store.read()).runs.length, 0);
+  assert.equal(fixture.events.some((event) => event.startsWith('effect:claim')), false);
+  assert.equal(fixture.evidence.at(-1)?.code, 'discovery-base-mismatch');
+});
+
+test('an existing run retains its pinned base and rejects a different discovery base without changing state', async () => {
+  const fixture = await runFixture();
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const readIssue = fixture.dependencies.issues.read;
+  let sourceBase = fixture.baseSha;
+  fixture.dependencies.issues.read = async (number) => {
+    const issue = await readIssue(number);
+    return issue ? { ...issue, body: `${issue.body}\nsource-base-sha:${sourceBase}\n` } : undefined;
+  };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+  const before = await fixture.store.read();
+  const effects = effectCounts(fixture.events);
+  sourceBase = 'f'.repeat(40);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'not-eligible');
+  assert.deepEqual(await fixture.store.read(), before);
+  assert.deepEqual(effectCounts(fixture.events), effects);
+  sourceBase = fixture.baseSha;
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+});
+
 test('partial worktree creation artifacts remain correctable in the same claimed run', async () => {
   const fixture = await runFixture({ createIncompleteWorktreeThenRejectOnce: true });
 

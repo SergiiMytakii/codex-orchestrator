@@ -32,5 +32,6 @@ export { RunIssue } from './v2/run-issue.js';
 export type { RunIssueDependencies, RunIssueResult } from './v2/run-issue.js';
 export { createV2Runtime } from './v2/runtime.js';
 export type { V2Runtime } from './v2/runtime.js';
+export { withRemoteBaseWorktree } from './v2/remote-base.js';
 export { Setup } from './v2/setup.js';
 export type { SetupIntent, SetupOutcome } from './v2/setup.js';

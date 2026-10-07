@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Analyze external discovery candidates in a package-owned remote-base worktree
+  and reject direct or daemon execution when issue source-base metadata differs
+  from the run's base.
+
 ## [2.0.22] - 2026-10-06
 
 ### Fixed
