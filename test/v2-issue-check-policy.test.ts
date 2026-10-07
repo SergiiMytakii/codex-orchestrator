@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import {
   parseIssueCheckInvocation,
-  resolveIssueCheckPolicy,
+  resolveIssueCheckPolicy, resolveIssueCheckInvocation,
 } from '../src/v2/issue-check-policy.js';
 
 test('issue Verification commands replace configured fallback checks in declared order', () => {
@@ -117,4 +117,15 @@ test('malformed Verification structure falls back to configured checks', () => {
     '## Verification',
     '- npm run focused',
   ].join('\n'), fallback), { source: 'configured', checks: fallback });
+});
+
+/** Flutter issue commands retain focused tests and resolve only the configured SDK. */
+test('focused Flutter Verification commands are executable without arbitrary issue shell authority', () => {
+  const configured = { 'flutter-pub-get': '/opt/sdk/bin/flutter pub get' };
+  const result = resolveIssueCheckPolicy('Verification:\n- flutter analyze\n- flutter test test/bloc/cubit_test.dart\n- flutter test ../private.dart\n- flutter test --update-goldens test/a.dart', configured);
+  assert.deepEqual(Object.values(result.checks), ['flutter analyze', 'flutter test test/bloc/cubit_test.dart']);
+  assert.deepEqual(resolveIssueCheckInvocation('flutter test test/bloc/cubit_test.dart', configured), {
+    file: '/opt/sdk/bin/flutter', args: ['test', '--no-pub', 'test/bloc/cubit_test.dart'],
+  });
+  assert.throws(() => resolveIssueCheckInvocation('flutter analyze', {}), /configured absolute Flutter/);
 });

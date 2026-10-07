@@ -12,7 +12,7 @@ export class CheckProcessQuiescenceError extends Error {
 }
 
 export interface IssueCheckInvocation {
-  file: 'npm';
+  file: string;
   args: string[];
 }
 
@@ -67,6 +67,29 @@ export function parseIssueCheckInvocation(command: string): IssueCheckInvocation
   return { file: 'npm', args };
 }
 
+/** Resolve focused Flutter commands through the repository's pinned SDK authority. */
+export function resolveIssueCheckInvocation(command: string, configured: Record<string, string>): IssueCheckInvocation {
+  if (!command.startsWith('flutter ')) return parseIssueCheckInvocation(command);
+  const args = parseFlutterCheck(command);
+  const sdk = Object.values(configured).map(value => value.match(/^(\/[^\s]+\/flutter) pub get$/u)?.[1]).filter(Boolean);
+  if (sdk.length !== 1) invalid('requires one configured absolute Flutter pub-get command');
+  return { file: sdk[0]!, args };
+}
+
+/** Recognize only analysis and focused test files, never device or publication commands. */
+function parseFlutterCheck(command: string): string[] {
+  const tokens = command.split(' ');
+  if (tokens[0] !== 'flutter') invalid('must invoke Flutter');
+  const operation = tokens[1];
+  const args = tokens.slice(2).filter(token => token !== '--no-pub');
+  if (operation === 'analyze' && args.length === 0) return ['analyze', '--no-pub'];
+  if (operation === 'test' && args.length > 0 && args.length <= 32 && args.every(value =>
+    /^test\/[A-Za-z0-9_./-]+\.dart$/u.test(value) && value === posix.normalize(value) && !value.split('/').includes('..'))) {
+    return ['test', '--no-pub', ...args];
+  }
+  invalid('requires flutter analyze or focused flutter test paths');
+}
+
 function findVerificationSection(issueBody: string): string[] | undefined {
   const lines = issueBody.split(/\r?\n/u);
   const headings: number[] = [];
@@ -112,7 +135,8 @@ function parseVerificationCommands(lines: string[]): string[] {
     let command: string;
     try {
       command = unwrapInlineCode(match[1]!.trim());
-      parseIssueCheckInvocation(command);
+      if (command.startsWith('flutter ')) parseFlutterCheck(command);
+      else parseIssueCheckInvocation(command);
     } catch (error) {
       if (error instanceof InvalidIssueCheckPolicyError) continue;
       throw error;

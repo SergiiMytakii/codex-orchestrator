@@ -1,3 +1,4 @@
+import { readIssueProofRequirements, type IssueProofRequirements } from './issue-proof-policy.js';
 import { posix } from 'node:path';
 
 import {
@@ -151,6 +152,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       assertIsoTimestamp(input.proofStartedAt, 'proofStartedAt');
       validateSemanticState(input);
       validateIssue(input.issue);
+      readIssueProofRequirements(input.issue.body);
       validateCriteria(input.frozenCriteria);
       stage = 'binding';
       const checked = this.dependencies.checkedChangeReader.verifyAndRead(input.checkedChange);
@@ -229,6 +231,16 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     let agentResult: ProofAgentResult;
     try {
       await input.beforeAgentLaunch?.();
+      const requirements = readIssueProofRequirements(input.issue.body);
+      if (requirements?.level === 'android-live' && (!(input.runnerPreparedArtifactPaths?.length)
+        || input.runnerPreparationWarnings?.length)) {
+        return this.settle(input.proofId, {
+          status: 'external-block',
+          blocker: { kind: 'tool', summary: 'Required live Android proof could not be prepared.',
+            attempted: [...(input.runnerPreparationWarnings ?? ['No Runner-owned Android evidence was prepared.'])], resumable: true },
+          receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Required live Android proof is unavailable.'),
+        });
+      }
       agentResult = await this.dependencies.proofAgent.run({
         attemptId: input.attemptId,
         recoverOnly: input.recoverOnly,
@@ -290,6 +302,14 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     try {
       report = validateProofReport(agentResult.report, input.payload.checks.map((check) => check.id));
       validateReportAgainstFrozenCriteria(report, input.frozenCriteria);
+      const requirements = readIssueProofRequirements(input.issue.body);
+      if (report.status === 'passed' && requirements) {
+        const requiredMode = requirements.level === 'tests-only' ? 'non-visual' : 'visual';
+        if (report.decision.mode !== requiredMode
+          || (requiredMode === 'visual' && report.decision.targets.join(',') !== 'android')) {
+          throw new Error('Proof report does not satisfy the issue proof level.');
+        }
+      }
       for (const warning of input.runnerPreparationWarnings ?? []) {
         if (!report.residualRisks.includes(warning) && report.residualRisks.length < 256) report.residualRisks.push(warning);
       }
@@ -313,6 +333,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         input.runnerPreparedArtifactSha256 ?? {},
         input.checkedChangeSha256,
         input.payload.checks.map((check) => check.id),
+        readIssueProofRequirements(input.issue.body),
       );
     } catch (error) {
       return this.settle(input.proofId, {
@@ -358,6 +379,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     runnerPreparedArtifactSha256: Record<string, string>,
     checkedChangeSha256: string,
     configuredCheckIds: string[],
+    requirements?: IssueProofRequirements,
   ): Promise<void> {
     if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
     if (!Array.isArray(runnerPreparedArtifactPaths) || runnerPreparedArtifactPaths.length > 256) {
@@ -435,6 +457,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
           proofId,
           checkedChangeSha256,
           configuredCheckIds,
+          requirements,
           runnerPreparedArtifactPaths,
           reportArtifactPaths: artifactPaths,
         });
@@ -526,13 +549,22 @@ function validateAndroidRunnerReceipt(input: {
   configuredCheckIds: string[];
   runnerPreparedArtifactPaths: string[];
   reportArtifactPaths: Set<string>;
+  requirements?: IssueProofRequirements;
 }): void {
   if (input.bytes.length === 0 || input.bytes.length > 64 * 1024) throw new Error('Android Runner receipt bytes are invalid');
   const value = JSON.parse(input.bytes.toString('utf8')) as unknown;
   assertExactObject(value, [
     'schema', 'version', 'status', 'proofId', 'configuredCheckIds', 'buildOutputSha256',
     'checkedChangeSha256', 'apkSha256', 'artifactRefs', 'navigation', 'capturedAt',
+    ...(input.requirements ? ['scenario'] : []),
+    ...(input.requirements?.authentication === 'dev-account' ? ['authentication'] : []),
   ], 'Android Runner receipt');
+  if (input.requirements && canonicalJson(value.scenario) !== canonicalJson(input.requirements.steps)) throw new Error('Android Runner scenario does not match the issue.');
+  if (input.requirements?.authentication === 'dev-account') {
+    assertExactObject(value.authentication, ['status', 'userIdSha256'], 'Android Runner authentication');
+    if (value.authentication.status !== 'authenticated' || typeof value.authentication.userIdSha256 !== 'string'
+      || !/^[0-9a-f]{64}$/u.test(value.authentication.userIdSha256)) throw new Error('Required account identity is unverified.');
+  }
   if (value.schema !== 'codex-orchestrator.runner-android-proof' || value.version !== 1
     || value.status !== 'prepared' || value.proofId !== input.proofId) {
     throw new Error('Android Runner receipt identity is invalid');

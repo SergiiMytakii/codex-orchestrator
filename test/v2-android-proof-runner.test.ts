@@ -20,7 +20,7 @@ const config: AndroidProofConfig = {
   settleMs: 1_000,
 };
 
-test('runner starts an isolated emulator and captures bound proof evidence without touching observed devices', async () => {
+for (const loginState of ['legacy', 'verified', 'unverified'] as const) test(`runner owns an isolated emulator and enforces ${loginState} proof`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'codex-android-proof-runner-'));
   const calls: Array<{ file: string; args: string[] }> = [];
   let emulatorStarted = false;
@@ -41,6 +41,7 @@ test('runner starts an isolated emulator and captures bound proof evidence witho
       emulatorPath,
       execute: async (file, args) => {
         calls.push({ file, args });
+        if (file === '/usr/bin/python3') return ok(JSON.stringify({ status: loginState === 'verified' ? 'authenticated_identity_verified' : 'callback_delivered_ui_verification_required', user_id: 'canonical-user', app_pid: 4242 }));
         if (file === emulatorPath && args[0] === '-list-avds') return ok('Pixel_8_API_35\nPixel_9_API_Baklava\n');
         if (file === adbPath && args[0] === 'devices') {
           return ok(`List of devices attached\nPHYSICAL device model:phone\n${emulatorStarted ? 'emulator-5554 device model:sdk\n' : ''}`);
@@ -74,7 +75,7 @@ test('runner starts an isolated emulator and captures bound proof evidence witho
           }
           return Buffer.from('<hierarchy><node text="" content-desc="Live" bounds="[10,20][110,80]" /></hierarchy>\n');
         }
-        if (args.includes('logcat')) return Buffer.from('I/flutter: Live screen rendered\n');
+        if (args.includes('logcat')) return Buffer.from('I/flutter: Live screen rendered\nI/flutter: Dart VM service is listening on http://127.0.0.1:1111/PRIVATE/\nI/flutter: magic-login?access_token=PRIVATE\n');
         throw new Error(`unexpected binary command: ${args.join(' ')}`);
       },
       startEmulator: async (_file, args) => {
@@ -106,13 +107,15 @@ test('runner starts an isolated emulator and captures bound proof evidence witho
       worktreePath,
       artifactDir: '.codex-orchestrator/v2/proofs',
       leaseRoot,
-      config,
+      config: loginState === 'legacy' ? config : { ...config, login: { command: '/usr/bin/python3', args: ['/private/login.py'] } },
+      ...(loginState !== 'legacy' ? { requirements: { version: 1 as const, level: 'android-live' as const, reason: 'Real authenticated interaction', authentication: 'dev-account' as const, steps: [{ action: 'tap' as const, text: 'Live' }, { action: 'expect' as const, text: 'Live' }] } } : {}),
       checks: [{ id: 'flutter-test', command: 'flutter test --no-pub', status: 'passed', outputSha256: 'a'.repeat(64) }],
       checkedChangeSha256: 'b'.repeat(64),
       proofAgentBudgetMs: 900_000,
       signal: new AbortController().signal,
     });
 
+    if (loginState === 'unverified') { assert.equal(result.status, 'blocked'); return; }
     assert.equal(result.status, 'prepared');
     assert.equal(result.serial, 'emulator-5554');
     assert.equal(result.appPid, 4242);
@@ -135,6 +138,8 @@ test('runner starts an isolated emulator and captures bound proof evidence witho
       join(worktreePath, '.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json'),
       'utf8',
     )) as Record<string, unknown>;
+    if (loginState === 'verified') { assert.deepEqual(receipt.authentication, { status: 'authenticated', userIdSha256: '56abf3a1721ff58f767d40fd5943bfa9ad4e79964ab26a9a0bdd05fc0d50c312' }); }
+    assert.equal((await readFile(join(worktreePath, '.codex-orchestrator/v2/proofs/proof-177/android-device-log.txt'), 'utf8')).includes('PRIVATE'), false);
     assert.equal(receipt.proofId, 'proof-177');
     assert.equal(receipt.apkSha256, 'be5e3b63462b8491c1466bdebf4cc0202d11dc1b2ef14e15d0af7d2b01658237');
     assert.equal(receipt.checkedChangeSha256, 'b'.repeat(64));

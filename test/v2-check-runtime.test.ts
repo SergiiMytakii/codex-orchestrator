@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -90,4 +90,18 @@ test('rejected launched ownership persistence terminates the gated check without
     async () => { throw new Error('state CAS rejected'); },
   ), /state CAS rejected/u);
   await assert.rejects(readFile(join(cwd, 'marker.txt')));
+});
+
+/** A new materialization receives package resolution before its --no-pub check. */
+test('Flutter checks initialize dependencies in the exact checked working directory', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-flutter-check-'));
+  const flutter = join(cwd, 'flutter');
+  try {
+    await writeFile(flutter, '#!/bin/sh\nif [ "$1" = pub ]; then mkdir .dart_tool; echo prepared > .dart_tool/package_config.json; exit 0; fi\n[ -f .dart_tool/package_config.json ] || exit 23\nprintf "checked:%s:%s" "$PWD" "$1"\n');
+    await chmod(flutter, 0o700);
+    const result = await runShellCheck(flutter + ' analyze --no-pub', cwd, new AbortController().signal, 5000);
+    assert.equal(result.status, 'passed');
+    assert.match(result.output.toString(), /checked:.*:analyze/);
+    assert.equal(await readFile(join(cwd, '.dart_tool/package_config.json'), 'utf8'), 'prepared\n');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });

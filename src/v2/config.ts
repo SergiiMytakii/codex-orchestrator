@@ -16,6 +16,7 @@ export interface AndroidProofConfig {
   flutterCommand: string;
   buildArgs: string[];
   apkPath: string;
+  login?: { command: string; args: string[] };
   launchUri?: string;
   tapText?: string[];
   bootTimeoutMs: number;
@@ -119,7 +120,7 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
 
 function validateAndroidProof(value: unknown, field: string): void {
   const optionalKeys = value && typeof value === 'object'
-    ? [...('launchUri' in value ? ['launchUri'] : []), ...('tapText' in value ? ['tapText'] : [])]
+    ? [...('launchUri' in value ? ['launchUri'] : []), ...('tapText' in value ? ['tapText'] : []), ...('login' in value ? ['login'] : [])]
     : [];
   assertExactObject(value, [
     'applicationId', 'avdName', 'flutterCommand', 'buildArgs', 'apkPath',
@@ -140,6 +141,12 @@ function validateAndroidProof(value: unknown, field: string): void {
   }
   if (value.buildArgs[0] !== 'build' || value.buildArgs[1] !== 'apk') {
     throw new Error(`${field}.buildArgs must invoke flutter build apk`);
+  }
+  if ('login' in value) {
+    assertExactObject(value.login, ['command', 'args'], `${field}.login`);
+    assertCanonicalAbsolutePath(value.login.command, `${field}.login.command`);
+    assertStringArray(value.login.args, `${field}.login.args`);
+    if (value.login.args.some(argument => /(?:token|password|secret)=/iu.test(argument))) throw new Error(`${field}.login forbids credentials`);
   }
   assertRepositoryRelativePath(value.apkPath, `${field}.apkPath`);
   if (!('launchUri' in value) && !('tapText' in value)) throw new Error(`${field} must configure launchUri or tapText`);

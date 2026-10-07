@@ -1,3 +1,4 @@
+import type { IssueProofRequirements } from './issue-proof-policy.js';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -118,11 +119,15 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
     artifactDir: string;
     leaseRoot: string;
     config: AndroidProofConfig;
+    requirements?: IssueProofRequirements;
     checks: CheckedChangePayloadV1['checks'];
     checkedChangeSha256: string;
     proofAgentBudgetMs: number;
     signal: AbortSignal;
   }): Promise<RunnerAndroidProofResult> {
+    if (input.requirements?.authentication === 'dev-account' && (!input.config.login || !input.config.buildArgs.includes('--debug'))) {
+      return { status: 'blocked', summary: 'Required DEV proof needs a configured login helper and debug APK.', runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {} };
+    }
     if (!/^[0-9a-f]{64}$/u.test(input.checkedChangeSha256)) throw new Error('Checked change digest is invalid.');
     const worktreePath = resolve(input.worktreePath);
     const proofRelativeRoot = `${input.artifactDir}/${input.proofId}`;
@@ -281,7 +286,51 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
       await writeDurableAtomicFile(leaseArtifactPath, `${canonicalJson(activeLease)}\n`, 0o600);
       await replaceOwnedLease(externalLeasePath, activeLease);
 
-      for (const text of input.config.tapText ?? []) {
+      let authentication: { status: 'authenticated'; userIdSha256: string } | undefined;
+      if (input.requirements?.authentication === 'dev-account') {
+        if (!input.config.login) throw new Error('Required DEV login is not configured.');
+        await this.assertOwnedEmulator(emulator.pid, emulatorProcessIdentity);
+        const login = await this.execute(input.config.login.command, input.config.login.args, {
+          cwd: worktreePath, timeoutMs: COMMAND_TIMEOUT_MS, processGroup: true, signal: input.signal,
+          maxOutputBytes: 16 * 1024,
+          stdin: JSON.stringify({ proofId: input.proofId, leasePath: externalLeasePath,
+            buildArgs: input.config.buildArgs, applicationId: input.config.applicationId,
+            adbPath: this.adbPath, serial, apkSha256 }),
+        });
+        if (login.exitCode !== 0) {
+          let reason = 'Required DEV login failed; no authenticated proof was recorded.';
+          try { const error = JSON.parse(login.stderr); if (typeof error.reason === 'string') reason += ' ' + safeCommandDiagnostic(error.reason); } catch { /* Private transport output is never retained. */ }
+          throw new Error(reason);
+        }
+        let identity: { status?: string; user_id?: string; app_pid?: number | string };
+        try { identity = JSON.parse(login.stdout); } catch { throw new Error('DEV login returned an invalid receipt.'); }
+        if (identity.status !== 'authenticated_identity_verified' || typeof identity.user_id !== 'string'
+          || !identity.user_id || Number(identity.app_pid) !== appPid) throw new Error('DEV login identity is unverified.');
+        authentication = { status: 'authenticated', userIdSha256: sha256(identity.user_id) };
+        await this.assertOwnedEmulator(emulator.pid, emulatorProcessIdentity);
+        if (await this.resolveAppPid(serial, input.config.applicationId, input.signal) !== appPid) throw new Error('Android proof application PID changed during login.');
+      }
+      for (const step of input.requirements?.steps ?? []) {
+        await this.assertOwnedEmulator(emulator.pid, emulatorProcessIdentity);
+        if (step.action === 'tap' || step.action === 'expect') {
+          const point = await this.waitForNavigationTarget({ serial, proofId: input.proofId, text: step.text,
+            timeoutMs: input.config.navigationTimeoutMs, signal: input.signal });
+          if (step.action === 'tap') await this.requireSuccess(this.adbPath, ['-s', serial, 'shell', 'input', 'tap', String(point.x), String(point.y)], undefined, COMMAND_TIMEOUT_MS, input.signal);
+        } else if (step.action === 'back') {
+          await this.requireSuccess(this.adbPath, ['-s', serial, 'shell', 'input', 'keyevent', '4'], undefined, COMMAND_TIMEOUT_MS, input.signal);
+        } else if (step.action === 'swipe') {
+          const hierarchy = (await this.readHierarchyWithIncompleteRetry(serial, input.proofId, input.signal)).toString();
+          const bounds = hierarchy.match(/scrollable="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u);
+          if (!bounds) throw new Error('Android proof step requires a scrollable UI node.');
+          const x = Math.round((Number(bounds[1]) + Number(bounds[3])) / 2);
+          const low = Math.round(Number(bounds[2]) + (Number(bounds[4]) - Number(bounds[2])) * 0.25);
+          const high = Math.round(Number(bounds[2]) + (Number(bounds[4]) - Number(bounds[2])) * 0.75);
+          await this.requireSuccess(this.adbPath, ['-s', serial, 'shell', 'input', 'swipe', String(x), String(step.direction === 'up' ? high : low), String(x), String(step.direction === 'up' ? low : high)], undefined, COMMAND_TIMEOUT_MS, input.signal);
+        }
+        await this.wait(input.config.settleMs, input.signal);
+        if (await this.resolveAppPid(serial, input.config.applicationId, input.signal) !== appPid) throw new Error('Android proof application PID changed during scenario.');
+      }
+      for (const text of input.requirements ? [] : input.config.tapText ?? []) {
         await this.assertOwnedEmulator(emulator.pid, emulatorProcessIdentity);
         const point = await this.waitForNavigationTarget({
           serial, proofId: input.proofId, text, timeoutMs: input.config.navigationTimeoutMs, signal: input.signal,
@@ -299,6 +348,8 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
         configuredCheckIds: input.checks.map((check) => check.id), buildOutputSha256: sha256(build.stdout + build.stderr),
         checkedChangeSha256: input.checkedChangeSha256, apkSha256,
         artifactRefs: [screenshotRelativePath, hierarchyRelativePath, logRelativePath, leaseRelativePath],
+        ...(authentication ? { authentication } : {}),
+        ...(input.requirements ? { scenario: input.requirements.steps } : {}),
         navigation: { launchUriConfigured: !!input.config.launchUri, tapText: input.config.tapText ?? [] },
         capturedAt: this.now().toISOString(),
       };
@@ -562,7 +613,7 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
     await ensureManagedProofRoot(input.worktreePath, input.proofRoot);
     await writeDurableAtomicFile(join(input.proofRoot, 'android-final.png'), screenshot, 0o600);
     await writeDurableAtomicFile(join(input.proofRoot, 'android-ui.xml'), hierarchy, 0o600);
-    await writeDurableAtomicFile(join(input.proofRoot, 'android-device-log.txt'), deviceLog, 0o600);
+    await writeDurableAtomicFile(join(input.proofRoot, 'android-device-log.txt'), redactDeviceLog(deviceLog), 0o600);
   }
 
   private async requireSuccess(
@@ -929,4 +980,10 @@ function validatePreparedReceipt(bytes: Buffer, expected: Record<string, unknown
   if (bytes.length === 0 || bytes.length > 64 * 1024) throw new Error('Android Runner receipt bytes are invalid.');
   const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
   if (canonicalJson(parsed) !== canonicalJson(expected)) throw new Error('Android Runner receipt validation failed.');
+}
+
+/** Keep auth callbacks and tokenized VM endpoints out of persisted proof logs. */
+function redactDeviceLog(bytes: Buffer): Buffer {
+  return Buffer.from(bytes.toString('utf8').split('\n').filter(line =>
+    !/magic-login|VM service|Dart DevTools|access_token|refresh_token|eyJ[A-Za-z0-9_-]+\./iu.test(line)).join('\n'));
 }

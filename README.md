@@ -272,6 +272,20 @@ The package separates two roles:
 
 Codex and native Codex subagents still run as your local OS user and may use your existing Codex authentication. This is containment of authority, not an OS-level secrecy boundary. Credentials are scrubbed from worker environments and rejected in reports and proof artifacts.
 
+## Explicit Flutter proof
+
+Flutter self-improvement issues may carry one `## Proof requirements` JSON block:
+
+```json
+{"version":1,"level":"tests-only","reason":"Focused tests establish the async completion contract.","authentication":"none","steps":[]}
+```
+
+`tests-only` runs the selected checks and non-visual Acceptance Proof without starting Android. `android-live` requires a Runner-owned emulator and fresh Android visual evidence; its `steps` are bounded `tap`/`expect` actions with exact UI text, `back`, or `swipe` (`up`/`down`). The final step must be an `expect`. `authentication: "dev-account"` additionally requires a configured `proof.android.login` command and args; the trusted helper receives the exact debug APK build arguments, digest, live emulator lease and serial on stdin, then must return `authenticated_identity_verified` with the same app PID and canonical user ID. These inputs and credential handling remain with the host Runner. Missing tools, login or required evidence blocks publication rather than becoming a warning. Issues without this block retain their existing proof policy.
+
+Safe `Verification:` commands can include `flutter analyze` and focused `flutter test test/..._test.dart` paths. The SDK is resolved from the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout.
+
+Delivery remains checks → Acceptance Proof → Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
+
 ## Development and release checks
 
 For package maintainers:

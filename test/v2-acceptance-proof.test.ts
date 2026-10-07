@@ -542,3 +542,18 @@ function passingReport(overrides: {
 
 const _canonicalProofFixture = canonicalJson(passingReport());
 void _canonicalProofFixture;
+
+/** An issue's mandatory device proof cannot be satisfied by a passing unit-test report. */
+test('explicit live Android proof rejects non-visual acceptance', async () => {
+  const fixture = proofFixture();
+  const issue: IssueSnapshot = {
+    number: 42, title: 'Implement behavior', state: 'OPEN', labels: ['agent:auto'],
+    url: 'https://example.invalid/issues/42',
+    body: '## Proof requirements\n```json\n' + JSON.stringify({
+      version: 1, level: 'android-live', reason: 'Verify the real authenticated interaction.',
+      authentication: 'dev-account', steps: [{ action: 'expect', text: 'Top Picks' }],
+    }) + '\n```',
+  };
+  const result = await fixture.proof.proveChange(fixture.input({ issue }));
+  assert.notEqual(result.status, 'passed');
+});

@@ -1,3 +1,4 @@
+import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -23,7 +24,7 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { CheckProcessQuiescenceError, parseIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, resolveIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -1366,6 +1367,7 @@ export function createV2Runtime(input: {
             artifactDir: config.proof.artifactDir,
             leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
             config: config.proof.android!,
+            requirements: readIssueProofRequirements(proofInput.issue.body),
             checks: checked.payload.checks,
             checkedChangeSha256: checked.checkedChangeSha256,
             proofAgentBudgetMs: config.codex.timeoutMs * 3,
@@ -1484,7 +1486,7 @@ export function createV2Runtime(input: {
       run: async ({ source, command, cwd, signal, onLaunched }) => {
         const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
         return source === 'issue'
-          ? runProcessCheck(parseIssueCheckInvocation(command), cwd, signal, timeoutMs, onLaunched)
+          ? runProcessCheck(resolveIssueCheckInvocation(command, requireConfig(currentConfig).checks), cwd, signal, timeoutMs, onLaunched)
           : runShellCheck(command, cwd, signal, timeoutMs, onLaunched);
       },
     },
@@ -1665,6 +1667,8 @@ export async function runShellCheck(
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<CheckExecutionResult> {
+  const flutter = command.match(/^(\/[^\s]+\/flutter) (analyze|test)(?: --no-pub)?$/u);
+  if (flutter) return runProcessCheck({ file: flutter[1]!, args: [flutter[2]!, '--no-pub'] }, cwd, signal, timeoutMs, onLaunched);
   return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
 }
 
@@ -1675,6 +1679,10 @@ async function runProcessCheck(
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<CheckExecutionResult> {
+  if (invocation.file.endsWith('/flutter') && ['analyze', 'test'].includes(invocation.args[0] ?? '')) {
+    // Each immutable materialization needs its own package resolution before --no-pub.
+    return runSpawnCheck('/bin/sh', ['-c', '"$1" pub get && exec "$@"', 'flutter-check', invocation.file, ...invocation.args], cwd, signal, timeoutMs, onLaunched);
+  }
   return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs, onLaunched);
 }
 
@@ -2148,6 +2156,8 @@ async function scrubReportReadView(directory: string): Promise<void> {
 }
 
 function isAndroidProofRelevant(issue: IssueSnapshot, criteria: FrozenCriterion[], changedFiles: string[]): boolean {
+  const requirements = readIssueProofRequirements(issue.body);
+  if (requirements) return requirements.level === 'android-live';
   return /\bandroid\b/iu.test([issue.title, issue.body, ...criteria.map((criterion) => criterion.text)].join('\n'))
     || changedFiles.some((path) => /^(?:android\/|lib\/|assets\/|fonts\/|pubspec\.(?:yaml|lock)$)/u.test(path));
 }
