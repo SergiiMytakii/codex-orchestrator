@@ -6,10 +6,20 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.23] - 2026-10-07
+
+### Added
+- Enforce explicit Flutter issue proof requirements for focused tests or live
+  Android scenarios, including trusted DEV-account authentication.
+
 ### Fixed
 - Analyze external discovery candidates in a package-owned remote-base worktree
   and reject direct or daemon execution when issue source-base metadata differs
   from the run's base.
+- Prepare Flutter dependencies inside every isolated analysis/test candidate.
+- Retain settled proof outcomes while mobile cleanup is pending, recover owned
+  emulator preparation and adoption checkpoints, and remove temporary device
+  and host resources before Review or publication while preserving evidence.
 
 ## [2.0.22] - 2026-10-06
 
