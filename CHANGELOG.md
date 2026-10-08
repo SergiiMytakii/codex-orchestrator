@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.24] - 2026-10-08
+
 ### Added
 - Publicly export the existing `parseIssueCheckInvocation` parser.
 
