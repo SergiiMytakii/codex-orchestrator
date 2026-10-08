@@ -5,6 +5,9 @@ const ISSUE_CHECK_ID_PREFIX = 'issue-verification-';
 
 export class InvalidIssueCheckPolicyError extends Error {}
 
+/** Host Flutter prerequisites failed; implementation retries cannot repair them. */
+export class FlutterCheckEnvironmentError extends Error {}
+
 export class CheckProcessQuiescenceError extends Error {
   constructor(readonly processGroupId: number) {
     super(`Check process group ${processGroupId} remained alive after termination.`);
@@ -25,15 +28,10 @@ export function resolveIssueCheckPolicy(
   issueBody: string,
   configuredFallback: Record<string, string>,
 ): ResolvedIssueCheckPolicy {
-  let section: string[] | undefined;
-  try { section = findVerificationSection(issueBody); }
-  catch (error) {
-    if (error instanceof InvalidIssueCheckPolicyError) return { source: 'configured', checks: configuredFallback };
-    throw error;
-  }
+  const section = findVerificationSection(issueBody);
   if (!section) return { source: 'configured', checks: configuredFallback };
   const commands = parseVerificationCommands(section);
-  if (commands.length === 0) return { source: 'configured', checks: configuredFallback };
+  if (commands.length === 0) invalid('has no executable commands; put each supported command on its own bullet without commentary');
   return {
     source: 'issue',
     checks: Object.fromEntries(commands.map((command, index) => [
@@ -73,7 +71,11 @@ export function resolveIssueCheckInvocation(command: string, configured: Record<
   const args = parseFlutterCheck(command);
   const sdk = Object.values(configured).map(value => value.match(/^(\/[^\s]+\/flutter) pub get$/u)?.[1]).filter(Boolean);
   if (sdk.length !== 1) invalid('requires one configured absolute Flutter pub-get command');
-  return { file: sdk[0]!, args };
+  const file = sdk[0]!;
+  if (args[0] === 'analyze' && !args.includes('--no-fatal-infos')
+    && Object.values(configured).some(command => command.startsWith(`${file} analyze `)
+      && command.split(/\s+/u).includes('--no-fatal-infos'))) args.push('--no-fatal-infos');
+  return { file, args };
 }
 
 /** Recognize only analysis and focused test files, never device or publication commands. */
@@ -82,7 +84,9 @@ function parseFlutterCheck(command: string): string[] {
   if (tokens[0] !== 'flutter') invalid('must invoke Flutter');
   const operation = tokens[1];
   const args = tokens.slice(2).filter(token => token !== '--no-pub');
-  if (operation === 'analyze' && args.length === 0) return ['analyze', '--no-pub'];
+  if (operation === 'analyze' && args.every(arg => arg === '--no-fatal-infos') && args.length <= 1) {
+    return ['analyze', '--no-pub', ...args];
+  }
   if (operation === 'test' && args.length > 0 && args.length <= 32 && args.every(value =>
     /^test\/[A-Za-z0-9_./-]+\.dart$/u.test(value) && value === posix.normalize(value) && !value.split('/').includes('..'))) {
     return ['test', '--no-pub', ...args];
@@ -138,12 +142,12 @@ function parseVerificationCommands(lines: string[]): string[] {
       if (command.startsWith('flutter ')) parseFlutterCheck(command);
       else parseIssueCheckInvocation(command);
     } catch (error) {
-      if (error instanceof InvalidIssueCheckPolicyError) continue;
+      if (error instanceof InvalidIssueCheckPolicyError) invalid(`contains an invalid command bullet: ${error.message}`);
       throw error;
     }
     if (commands.includes(command)) continue;
     commands.push(command);
-    if (commands.length === MAX_ISSUE_CHECKS) break;
+    if (commands.length > MAX_ISSUE_CHECKS) invalid('contains too many commands');
   }
   return commands;
 }

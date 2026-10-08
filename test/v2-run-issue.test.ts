@@ -15,7 +15,7 @@ import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence
 import { validateCompletedReport } from '../src/v2/contained-report-operation.js';
 import type { DeliveryAuthority } from '../src/v2/delivery-authority.js';
 import { CandidateProofInspectionError, type ProveChangeResult } from '../src/v2/acceptance-proof.js';
-import { CheckProcessQuiescenceError } from '../src/v2/issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError } from '../src/v2/issue-check-policy.js';
 import {
   RunIssue,
   OwnerLockContentionError,
@@ -771,11 +771,11 @@ test('direct run executes issue-scoped verification checks instead of repository
   ]);
 });
 
-test('invalid issue Verification cannot block the run and configured checks execute instead', async () => {
+test('invalid issue Verification blocks without selecting configured checks', async () => {
   const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready');
-  assert.equal(fixture.events.some((event) => event === 'check:typecheck'), true);
+  assert.equal(result.status, 'blocked');
+  assert.equal(fixture.events.some((event) => event === 'check:typecheck'), false);
   assert.equal(fixture.events.some((event) => event.startsWith('check:changed:issue-verification-')), false);
 });
 
@@ -3783,6 +3783,7 @@ interface FixtureOptions {
   checkSafeHaltOnce?: boolean;
   proofSafeHaltOnce?: boolean;
   checkPreLaunchRejectOnce?: boolean;
+  checkEnvironmentUnavailable?: boolean;
   proofPreLaunchRejectOnce?: boolean;
 }
 
@@ -4178,6 +4179,9 @@ async function runFixture(options: FixtureOptions = {}) {
     checks: {
       supportsLaunchOwnership: true,
       run: async ({ id, onLaunched }) => {
+        if (options.checkEnvironmentUnavailable) {
+          throw new FlutterCheckEnvironmentError('Flutter verification environment: executable denied');
+        }
         if (options.checkPreLaunchRejectOnce) {
           options.checkPreLaunchRejectOnce = false;
           events.push('check:pre-launch-failed');
@@ -4619,3 +4623,31 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
   throw new Error('condition was not reached');
 }
+
+/** A malformed issue stops before implementation or publication. */
+test('invalid declared verification blocks once with an actionable reason', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- flutter analyze --no-pub — baseline info' });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  if (result.status === 'blocked') {
+    assert.equal(result.resumable, false);
+    assert.match(result.blocker?.summary ?? '', /Issue Verification/u);
+  }
+  assert.equal(fixture.events.includes('agent:implementation'), false);
+});
+
+/** Environment recovery resumes checks without retriggering implementation. */
+test('host Flutter environment recovery does not repeat implementation', async () => {
+  const options: FixtureOptions = { checkEnvironmentUnavailable: true };
+  const fixture = await runFixture(options);
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const count = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.equal(count, 1);
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, count);
+  assert.equal(fixture.events.includes('git:push'), false);
+  options.checkEnvironmentUnavailable = false;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, count);
+});

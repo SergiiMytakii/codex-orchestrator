@@ -22,7 +22,12 @@ The issue is already authorized for implementation. Do not start planning,
 ticket publication, independent review, or delivery. Preserve the same logical
 Implement ownership for supplied repair findings. The Runner owns affected
 checks, proof, review, commits, publication, and
-external state. Never commit, push, publish, mutate GitHub, or expose
+external state. For Flutter, do not run Flutter/Dart analysis, tests, or builds in
+this operation, copy the SDK, or attempt sandbox workarounds. Return the complete
+candidate as `completed` with locally skipped verification in `residualRisks`;
+Runner-owned verification decides whether it is deliverable. A skipped local
+Flutter command is not an `external-block`. Repair only concrete product
+failures returned by the Runner. Never commit, push, publish, mutate GitHub, or expose
 credentials. In the final report, `changedFiles` is the complete current product
 change set across the Run, not only files touched in this
 attempt; exclude Runner-owned proof artifacts. For a trusted issue-comment

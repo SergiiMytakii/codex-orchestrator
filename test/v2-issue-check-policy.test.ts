@@ -38,46 +38,24 @@ test('issue Verification commands replace configured fallback checks in declared
   });
 });
 
-test('configured checks are fallback when Verification is absent or has no safe commands', () => {
+test('configured checks are fallback only when Verification is absent', () => {
   const fallback = { test: 'npm test' };
   assert.deepEqual(resolveIssueCheckPolicy('## Acceptance Criteria\n- It works.', fallback), {
     source: 'configured', checks: fallback,
   });
-
-  for (const body of [
-    'Verification:\n- npm test && curl example.invalid',
-    'Verification:\n- ./scripts/focused-check.sh',
-  ]) {
-    assert.deepEqual(resolveIssueCheckPolicy(body, fallback), { source: 'configured', checks: fallback });
+  for (const body of ['Verification:\n- npm test && curl example.invalid', 'Verification:\n- ./scripts/focused-check.sh', 'Verification:\nRun npm test.']) {
+    assert.throws(() => resolveIssueCheckPolicy(body, fallback), /Issue Verification/u);
   }
 });
 
-test('unsafe Verification commands are ignored while safe scoped checks still run', () => {
-  const fallback = { test: 'npm test' };
-  assert.deepEqual(resolveIssueCheckPolicy([
-    'Verification:',
-    '- npm test -- --runInBand focused.spec.ts',
-    '- git diff --check',
-    '- npm test && curl example.invalid',
-  ].join('\n'), fallback), {
-    source: 'issue',
-    checks: { 'issue-verification-001': 'npm test -- --runInBand focused.spec.ts' },
-  });
+test('one invalid command cannot silently reduce the declared verification set', () => {
+  assert.throws(() => resolveIssueCheckPolicy('Verification:\n- npm run focused\n- npm test && curl example.invalid', { all: 'npm test' }), /invalid command bullet/u);
+  assert.throws(() => resolveIssueCheckPolicy('Verification:\n- npm run focused\n- git diff --check', {}), /invalid command bullet/u);
 });
 
-test('non-command Verification text cannot block safe checks or configured fallback', () => {
-  const fallback = { test: 'npm test' };
-  assert.deepEqual(resolveIssueCheckPolicy([
-    'Verification:',
-    'Run the focused test first.',
-    '- npm run focused',
-    'Record the result in the handoff.',
-  ].join('\n'), fallback), {
-    source: 'issue',
-    checks: { 'issue-verification-001': 'npm run focused' },
-  });
-  assert.deepEqual(resolveIssueCheckPolicy('Verification:\nRun npm test.', fallback), {
-    source: 'configured', checks: fallback,
+test('unbulleted explanation remains separate from executable commands', () => {
+  assert.deepEqual(resolveIssueCheckPolicy('Verification:\nRun the focused test first.\n- npm run focused\nRecord the result.', {}), {
+    source: 'issue', checks: { 'issue-verification-001': 'npm run focused' },
   });
 });
 
@@ -117,25 +95,43 @@ test('configured fallback source is explicit even when its id resembles a scoped
   });
 });
 
-test('malformed Verification structure falls back to configured checks', () => {
+test('malformed Verification structure is rejected', () => {
   const fallback = { test: 'npm test' };
-  assert.deepEqual(resolveIssueCheckPolicy([
-    'Verification:',
-    '- npm test',
-    'Risk:',
-    'Low.',
-    '## Verification',
-    '- npm run focused',
-  ].join('\n'), fallback), { source: 'configured', checks: fallback });
+  assert.throws(() => resolveIssueCheckPolicy([
+    'Verification:', '- npm test', 'Risk:', 'Low.', '## Verification', '- npm run focused',
+  ].join('\n'), fallback), /multiple Verification/u);
 });
 
 /** Flutter issue commands retain focused tests and resolve only the configured SDK. */
 test('focused Flutter Verification commands are executable without arbitrary issue shell authority', () => {
   const configured = { 'flutter-pub-get': '/opt/sdk/bin/flutter pub get' };
-  const result = resolveIssueCheckPolicy('Verification:\n- flutter analyze\n- flutter test test/bloc/cubit_test.dart\n- flutter test ../private.dart\n- flutter test --update-goldens test/a.dart', configured);
+  const result = resolveIssueCheckPolicy('Verification:\n- flutter analyze\n- flutter test test/bloc/cubit_test.dart', configured);
   assert.deepEqual(Object.values(result.checks), ['flutter analyze', 'flutter test test/bloc/cubit_test.dart']);
   assert.deepEqual(resolveIssueCheckInvocation('flutter test test/bloc/cubit_test.dart', configured), {
     file: '/opt/sdk/bin/flutter', args: ['test', '--no-pub', 'test/bloc/cubit_test.dart'],
   });
   assert.throws(() => resolveIssueCheckInvocation('flutter analyze', {}), /configured absolute Flutter/);
+});
+
+/** Malformed declared verification cannot silently select unrelated checks. */
+test('declared Verification with no executable command is an actionable error', () => {
+  for (const body of ['Verification:\n- flutter analyze --no-pub — baseline info', 'Verification:\nRun tests.', 'Verification:\n- npm test && curl example.invalid']) {
+    assert.throws(() => resolveIssueCheckPolicy(body, { all: 'npm test' }), /Issue Verification/u);
+  }
+});
+
+test('Flutter analyzer ignores infos while preserving fatal warnings and errors', () => {
+  const config = { pub: '/opt/sdk/bin/flutter pub get' };
+  assert.deepEqual(resolveIssueCheckInvocation('flutter analyze --no-pub --no-fatal-infos', config), {
+    file: '/opt/sdk/bin/flutter', args: ['analyze', '--no-pub', '--no-fatal-infos'],
+  });
+});
+
+/** Explicit legacy commands retain the configured repository severity policy. */
+test('plain issue analyzer inherits the pinned SDK info policy without changing strict repositories', () => {
+  const pub = '/opt/sdk/bin/flutter pub get';
+  assert.deepEqual(resolveIssueCheckInvocation('flutter analyze', { pub, analyze: '/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos' }).args,
+    ['analyze', '--no-pub', '--no-fatal-infos']);
+  assert.deepEqual(resolveIssueCheckInvocation('flutter analyze', { pub, analyze: '/opt/sdk/bin/flutter analyze --no-pub' }).args,
+    ['analyze', '--no-pub']);
 });

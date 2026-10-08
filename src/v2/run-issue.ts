@@ -29,7 +29,7 @@ import {
 } from './direct-delivery.js';
 import { MAX_REVIEW_PATCH_BYTES, type ImplementationReviewerInput, type ImplementationReviewerResult } from './implementation-reviewer.js';
 import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
-import { CheckProcessQuiescenceError, resolveIssueCheckPolicy } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, InvalidIssueCheckPolicyError, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
@@ -1510,6 +1510,7 @@ export class RunIssue {
         }
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
+      resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks);
       let progression = nextValidationTransition(active.record, active.record.deliveryAuthority!);
       const resumeAtChecks = progression.phase === 'checks' || progression.phase === 'acceptance-proof';
       if (progression.phase === 'review') {
@@ -2012,6 +2013,11 @@ export class RunIssue {
         ? await this.updateExistingPullRequest(active, config, input.issueNumber)
         : await this.publish(active, config, issueSnapshot, input.issueNumber);
     } catch (error) {
+      if (active && error instanceof InvalidIssueCheckPolicyError) {
+        return await this.terminal(active, { status: 'blocked', kind: 'authority-boundary', resumable: false, blocker: {
+          kind: 'authority-boundary', summary: error.message, attempted: ['Resolve the declared Verification commands.'], resumable: false,
+        } }, 'invalid-issue-verification');
+      }
       if (!active && error instanceof TransportReadError) {
         return await this.preClaimTransport(input.issueNumber);
       }
@@ -2755,6 +2761,9 @@ export class RunIssue {
         const settled = await this.settleCandidateMaterialization(active, active.config, true);
         if ('status' in settled) return settled;
         active = settled.active;
+      }
+      if (error instanceof FlutterCheckEnvironmentError) {
+        return this.invokedFailure(active, 'flutter-check-environment-unavailable', error.message);
       }
       if (error instanceof CheckProcessQuiescenceError) {
         active = await this.persist(active, { lifecycle: 'safe-halt' });

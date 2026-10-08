@@ -2,6 +2,7 @@ import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
@@ -24,7 +25,7 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { CheckProcessQuiescenceError, resolveIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, resolveIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -1675,8 +1676,10 @@ export async function runShellCheck(
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<CheckExecutionResult> {
-  const flutter = command.match(/^(\/[^\s]+\/flutter) (analyze|test)(?: --no-pub)?$/u);
-  if (flutter) return runProcessCheck({ file: flutter[1]!, args: [flutter[2]!, '--no-pub'] }, cwd, signal, timeoutMs, onLaunched);
+  const pub = command.match(/^(\/[^\s]+\/flutter) pub get$/u);
+  if (pub) return runProcessCheck({ file: pub[1]!, args: ['pub', 'get'] }, cwd, signal, timeoutMs, onLaunched);
+  const flutter = command.match(/^(\/[^\s]+\/flutter) (analyze|test)((?: --no-pub| --no-fatal-infos| test\/[A-Za-z0-9_./-]+\.dart)*)$/u);
+  if (flutter) return runProcessCheck({ file: flutter[1]!, args: [flutter[2]!, '--no-pub', ...flutter[3]!.split(' ').filter(arg => arg && arg !== '--no-pub')] }, cwd, signal, timeoutMs, onLaunched);
   return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
 }
 
@@ -1687,6 +1690,18 @@ async function runProcessCheck(
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
 ): Promise<CheckExecutionResult> {
+  if (invocation.file.endsWith('/flutter')) {
+    try {
+      await access(invocation.file, constants.X_OK);
+      await new Promise<void>((resolveReady, rejectReady) => {
+        const server = createServer();
+        server.once('error', rejectReady);
+        server.listen(0, '127.0.0.1', () => server.close(error => error ? rejectReady(error) : resolveReady()));
+      });
+    } catch (error) {
+      throw new FlutterCheckEnvironmentError(`Flutter verification environment is unavailable: ${error instanceof Error ? error.message : 'SDK executable or loopback socket denied'}`);
+    }
+  }
   if (invocation.file.endsWith('/flutter') && ['analyze', 'test'].includes(invocation.args[0] ?? '')) {
     // Each immutable materialization needs its own package resolution before --no-pub.
     return runSpawnCheck('/bin/sh', ['-c', '"$1" pub get && exec "$@"', 'flutter-check', invocation.file, ...invocation.args], cwd, signal, timeoutMs, onLaunched);

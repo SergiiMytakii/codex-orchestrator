@@ -226,8 +226,9 @@ Delivery guarantees depend on repository policy and issue format. Frozen
 criteria recognize a Markdown `Acceptance Criteria` heading and `-`/`*` bullets
 (including checkboxes); without those bullets, one criterion covers the entire
 title and body. Safe issue `Verification:` commands replace configured checks,
-rather than supplementing them. Unsupported entries are ignored, and no safe
-commands means configured fallback; that fallback can itself be empty. Android
+rather than supplementing them. A declared section must contain supported standalone command bullets; malformed
+commands block the run with an actionable reason. Configured fallback is used
+only when the section is absent; that fallback can itself be empty. Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
 and static workflow evals do not establish live browser or agent behavior.
 
@@ -252,9 +253,9 @@ Starting a new journal requires preserving the old file and checking ownership/r
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite fallback commands used when an issue has no safe npm command
-  bullets in its `Verification:` section. Unsupported or malformed entries are
-  ignored. Checks run before Review against the immutable candidate.
+- `checks`: finite fallback commands used when an issue has no `Verification:`
+  section. A declared section with unsupported or malformed command bullets
+  blocks before implementation. Checks run before Review against the immutable candidate.
   A failed check becomes a bounded finding for the next implementation cycle;
   there is no qualification operation or separate retry coordinator. Final
   checks must all pass; failures are never accepted by comparing output hashes.
@@ -290,7 +291,7 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Safe `Verification:` commands can include `flutter analyze` and focused `flutter test test/..._test.dart` paths. The SDK is resolved from the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout.
+Safe `Verification:` commands can include `flutter analyze --no-fatal-infos` and focused `flutter test test/..._test.dart` paths. The SDK is resolved from the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout. Flutter execution belongs to the host Runner; the implementation Agent returns its candidate with local checks skipped. Before launching Flutter, the Runner checks executable access and loopback socket availability. An unavailable environment defers checks with the candidate retained; recovery resumes checks without repeating implementation. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in the check output.
 
 Delivery remains checks → Acceptance Proof → Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 

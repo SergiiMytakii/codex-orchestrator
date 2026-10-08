@@ -12,6 +12,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 - Publicly export the existing `parseIssueCheckInvocation` parser.
 
 ### Fixed
+- Reject malformed declared verification instead of silently replacing it with
+  repository-wide checks.
+- Keep Flutter verification with the host Runner, preserve configured analyzer
+  severity, and defer unavailable SDK or loopback environments without
+  repeating implementation, resuming checks after recovery.
+- Allow process startup under CI load in the descendant termination test.
 - Stop repeated check repairs when the same check ID and command fail on the
   same candidate Git tree after a repair attempt, retaining candidate and
   evidence. Compare code content rather than log text or stderr hashes; changed

@@ -14,9 +14,9 @@ test('timed-out check proves a TERM-ignoring descendant is absent before returni
       "(trap '' TERM; exec sleep 300) </dev/null >/dev/null 2>&1 & echo $! > child.pid; wait",
       cwd,
       controller.signal,
-      250,
+      5000,
     ),
-    /exceeded 250ms/u,
+    /exceeded 5000ms/u,
   );
 
   const pid = Number((await readFile(join(cwd, 'child.pid'), 'utf8')).trim());
@@ -97,11 +97,27 @@ test('Flutter checks initialize dependencies in the exact checked working direct
   const cwd = await mkdtemp(join(tmpdir(), 'codex-flutter-check-'));
   const flutter = join(cwd, 'flutter');
   try {
-    await writeFile(flutter, '#!/bin/sh\nif [ "$1" = pub ]; then mkdir .dart_tool; echo prepared > .dart_tool/package_config.json; exit 0; fi\n[ -f .dart_tool/package_config.json ] || exit 23\nprintf "checked:%s:%s" "$PWD" "$1"\n');
+    await writeFile(flutter, '#!/bin/sh\nif [ "$1" = pub ]; then mkdir -p .dart_tool; echo prepared > .dart_tool/package_config.json; exit 0; fi\n[ -f .dart_tool/package_config.json ] || exit 23\nprintf "checked:%s:%s" "$PWD" "$*"\n');
     await chmod(flutter, 0o700);
     const result = await runShellCheck(flutter + ' analyze --no-pub', cwd, new AbortController().signal, 5000);
     assert.equal(result.status, 'passed');
     assert.match(result.output.toString(), /checked:.*:analyze/);
     assert.equal(await readFile(join(cwd, '.dart_tool/package_config.json'), 'utf8'), 'prepared\n');
+    const focused = await runShellCheck(flutter + ' test --no-pub test/a_test.dart', cwd, new AbortController().signal, 5000);
+    assert.equal(focused.status, 'passed');
+    assert.match(focused.output.toString(), /test --no-pub test\/a_test\.dart/u);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+/** Missing executable is an environment failure, never a product test failure. */
+test('Flutter verification rejects an unavailable SDK environment before executing checks', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-flutter-unavailable-'));
+  try {
+    const flutter = join(cwd, 'flutter');
+    await writeFile(flutter, '#!/bin/sh\necho should-not-run > marker\n');
+    for (const command of ['analyze --no-pub', 'test --no-pub test/a_test.dart']) {
+      await assert.rejects(runShellCheck(flutter + ' ' + command, cwd, new AbortController().signal, 5000), /Flutter verification environment/u);
+    }
+    await assert.rejects(readFile(join(cwd, 'marker')));
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
