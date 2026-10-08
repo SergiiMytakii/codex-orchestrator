@@ -157,6 +157,7 @@ function run(lifecycle: RunRecord['lifecycle'], authority: DeliveryAuthority): R
     deliveryAuthority: structuredClone(authority),
     pendingEffect: undefined,
     activeAttempt: undefined,
+    checks: [],
   } as unknown as RunRecord;
 }
 

@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Added
+- Publicly export the existing `parseIssueCheckInvocation` parser.
+
+### Fixed
+- Stop repeated check repairs when the same check ID and command fail on the
+  same candidate Git tree after a repair attempt, retaining candidate and
+  evidence. Compare code content rather than log text or stderr hashes; changed
+  code permits repair, and success, target acceptance, or new feedback clears
+  the previous failure marker.
+
 ## [2.0.23] - 2026-10-07
 
 ### Added

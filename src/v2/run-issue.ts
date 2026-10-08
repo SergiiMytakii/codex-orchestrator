@@ -1726,6 +1726,11 @@ export class RunIssue {
         && check.candidateTreeSha === finalBinding.candidateTreeSha
         && check.checkPolicySha256 === finalCheckPolicySha256
         && configuredChecks.some(([id, command]) => check.id === id && check.command === command));
+      const previousFailure = active.record.failedCheckRepair;
+      if (previousFailure && reusableChecks.some((check) =>
+        check.id === previousFailure.id && check.command === previousFailure.command)) {
+        active = await this.persist(active, { failedCheckRepair: undefined });
+      }
       if (reusableChecks.length !== active.record.checks.length) {
         active = await this.persist(active, {
           checks: reusableChecks,
@@ -1770,12 +1775,25 @@ export class RunIssue {
           candidateTreeSha: finalBinding.candidateTreeSha,
           checkPolicySha256: finalCheckPolicySha256,
         } as const;
-        active = await this.adoptAttempt(active, check.attemptResultSha256, { checks: [...active.record.checks, row] });
+        const previous = active.record.failedCheckRepair;
+        active = await this.adoptAttempt(active, check.attemptResultSha256, {
+          checks: [...active.record.checks, row],
+          ...(check.status === 'passed' && previous?.id === id && previous.command === command
+            ? { failedCheckRepair: undefined } : {}),
+        });
         const settledExecution = await this.settleCandidateMaterialization(active, config);
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
         if (check.status === 'failed') {
           const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
+          if (previous?.id === id && previous.command === command
+            && previous.candidateTreeSha === finalBinding.candidateTreeSha) {
+            return this.terminal(active, { status: 'blocked', kind: 'external', resumable: false, blocker: {
+              kind: 'external', resumable: false,
+              summary: `Check ${id} failed again on unchanged candidate content after a repair attempt. Candidate and evidence are retained.`,
+              attempted: ['Ran the check, attempted implementation repair, and reran the same command against the same candidate tree.'],
+            } }, 'configured-check-repair-no-progress');
+          }
           const reopened = await this.startNextCycleFromCandidate(active, [summary], [{
             provenance: 'check', sourceId: `check:${id}:${row.outputSha256}`, summary,
             affectedContracts: ['configured-checks'],
@@ -2253,7 +2271,7 @@ export class RunIssue {
     if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
     if (Object.hasOwn(changes, 'terminalOutcome') && changes.terminalOutcome === undefined
       && !Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications'] as const) {
+    for (const key of ['checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications', 'failedCheckRepair'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
@@ -3796,6 +3814,7 @@ export class RunIssue {
     const notifications = terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments);
     const changes: Partial<RunRecord> & { pendingEffect?: PendingEffect | undefined } = {
       ...additionalChanges,
+      ...(outcome.status === 'review-ready' ? { failedCheckRepair: undefined } : {}),
       lifecycle: outcome.status,
       terminalOutcome,
       outcomeEvidenceId: evidence.id,

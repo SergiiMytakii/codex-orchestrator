@@ -1705,6 +1705,8 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
       implementationRound += 1;
+      assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false,
+        'new feedback clears the previous failure before implementation');
       const baseline = await fixture.dependencies.git.snapshot(worktreePath);
       await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:00:00.000Z', baseline });
       await onLaunched?.({ attemptId, pid: 7000 + implementationRound, processGroupId: 7000 + implementationRound, launchedAt: '2026-07-16T12:00:01.000Z' });
@@ -1718,7 +1720,14 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
 
   const reviewerSessions = new Set<string>();
   for (let round = 1; round <= 4; round += 1) {
-    const before = (await fixture.store.read()).runs[0]!;
+    const state = await fixture.store.read();
+    const before = state.runs[0]!;
+    await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: [{
+      ...before, failedCheckRepair: {
+        id: 'typecheck', command: 'npm run typecheck',
+        candidateTreeSha: await fixture.dependencies.git.getTreeSha(fixture.worktreePath),
+      },
+    }] });
     const oldHead = before.reviewFeedback!.previousPublishedHeadSha!;
     const batch = createFrozenReviewFeedbackBatch({
       runId, canonicalRepository: before.canonicalRepository,
@@ -2245,6 +2254,145 @@ test('failed checks and proof findings rework the same worktree until review-rea
   assert.equal(proofFixture.events.filter((event) => event === 'review:code-review').length, 1);
   assert.equal(proofFixture.events.filter((event) => event === 'proof').length, 2);
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
+});
+
+test('repeated failed check on unchanged candidate stops durably after a repair attempt', async () => {
+  let checkCalls = 0;
+  const fixture = await runFixture({
+    fileBackedStore: true,
+    check: async () => ({ status: 'failed', output: Buffer.from(`failure observation ${++checkCalls}`) }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+  const candidateContent = await readFile(join(fixture.worktreePath, 'feature.txt'));
+  fixture.options.agentWrites = false;
+  const restart = () => new RunIssue({
+    ...fixture.dependencies,
+    runRecords: new FileRunRecordWriter(fixture.statePath),
+  });
+  const blocked = await restart().runIssue(input);
+  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), {
+    status: 'blocked', kind: 'external', resumable: false,
+  });
+  const retained = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
+  assert.equal(retained.cycle, 2);
+  assert.equal(retained.checks[0]?.status, 'failed');
+  assert.ok(retained.candidateBinding, 'blocked run retains the immutable candidate');
+  assert.equal(retained.candidateBinding.candidateTreeSha, retained.failedCheckRepair?.candidateTreeSha);
+  if (blocked.status !== 'blocked') throw new Error('Expected a blocked result');
+  const terminalEvidence = JSON.parse(await readFile(resolve(fixture.targetRoot, blocked.evidencePath), 'utf8'));
+  assert.equal(terminalEvidence.code, 'configured-check-repair-no-progress');
+  const pin = await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-parse', retained.candidateBinding.candidateRef]);
+  assert.equal(pin.stdout.trim(), retained.candidateBinding.candidateCommitSha);
+  assert.deepEqual(await readFile(join(fixture.worktreePath, 'feature.txt')), candidateContent);
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal(checkCalls, 2);
+  assert.equal(fixture.events.includes('proof'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal(fixture.events.includes('review:code-review'), false);
+  assert.deepEqual(await restart().runIssue(input), blocked);
+  assert.equal(checkCalls, 2, 'ordinary reentry replays the terminal outcome');
+  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+});
+
+test('successful check clears its failure marker before a later unchanged-code repair', async () => {
+  let checkCalls = 0;
+  const fixture = await runFixture({
+    fileBackedStore: true,
+    check: async () => ({
+      status: ++checkCalls === 2 ? 'passed' : 'failed', output: Buffer.from('check observation'),
+    }),
+    proof: async () => ({ status: 'needs-rework', findings: ['repair acceptance behavior'], receipt: receipt() }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+  fixture.options.agentWrites = false;
+  const restart = () => new RunIssue({
+    ...fixture.dependencies, runRecords: new FileRunRecordWriter(fixture.statePath),
+  });
+  const proofRepair = await restart().runIssue(input);
+  assert.deepEqual(pick(proofRepair, ['status', 'source']), { status: 'repair-ready', source: 'proof' });
+  assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false);
+  const freshCheckFailure = await restart().runIssue(input);
+  assert.deepEqual(pick(freshCheckFailure, ['status', 'source']), { status: 'repair-ready', source: 'check' });
+  assert.equal((await restart().runIssue(input)).status, 'blocked');
+  assert.equal(checkCalls, 4);
+});
+
+test('retained successful check clears a stale failure marker on reentry', async () => {
+  let checkCalls = 0;
+  let proofCalls = 0;
+  const fixture = await runFixture({
+    fileBackedStore: true,
+    check: async () => ({ status: ++checkCalls === 1 ? 'passed' : 'failed', output: Buffer.from('observation') }),
+    proof: async () => (++proofCalls === 1
+      ? { status: 'transport-failed', resumable: true, receipt: receipt() }
+      : { status: 'needs-rework', findings: ['repair acceptance behavior'], receipt: receipt() }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const state = await fixture.store.read();
+  const before = state.runs[0]!;
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: [{
+    ...before, failedCheckRepair: {
+      id: 'typecheck', command: 'npm run typecheck', candidateTreeSha: before.candidateBinding!.candidateTreeSha,
+    },
+  }] });
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+  assert.equal(checkCalls, 1, 'retained passed receipt is reused');
+  assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false);
+  fixture.options.agentWrites = false;
+  const nextFailure = await new RunIssue(fixture.dependencies).runIssue(input);
+  assert.deepEqual(pick(nextFailure, ['status', 'source']), { status: 'repair-ready', source: 'check' });
+});
+
+test('accepted target clears a prior failure for a removed check', async () => {
+  let checkCalls = 0;
+  const fixture = await runFixture({
+    check: async () => ({ status: ++checkCalls === 1 ? 'failed' : 'passed', output: Buffer.from('observation') }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+  fixture.options.agentWrites = false;
+  const loaded = await fixture.dependencies.readConfig(fixture.targetRoot);
+  loaded.config.checks = { lint: 'npm run lint' };
+  fixture.dependencies.readConfig = async () => ({ config: loaded.config, bytes: Buffer.from(`${canonicalJson(loaded.config)}\n`) });
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+  assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false);
+});
+
+test('same failed check permits another repair when candidate code changes', async () => {
+  let checkCalls = 0;
+  const fixture = await runFixture({
+    check: async () => (++checkCalls <= 2
+      ? { status: 'failed', output: Buffer.from('same failure') }
+      : { status: 'passed', output: Buffer.from('fixed') }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+  const before = await readFile(join(fixture.worktreePath, 'feature.txt'));
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+  assert.notDeepEqual(await readFile(join(fixture.worktreePath, 'feature.txt')), before);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+  assert.equal(checkCalls, 3);
+});
+
+test('a different check identity or command permits repair on unchanged code', async () => {
+  const policies: Record<string, string>[] = [{ lint: 'npm run typecheck' }, { typecheck: 'npm run lint' }];
+  for (const checks of policies) {
+    const fixture = await runFixture({
+      check: async () => ({ status: 'failed', output: Buffer.from('same failure') }),
+    });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
+    fixture.options.agentWrites = false;
+    const loaded = await fixture.dependencies.readConfig(fixture.targetRoot);
+    loaded.config.checks = checks;
+    fixture.dependencies.readConfig = async () => ({
+      config: loaded.config, bytes: Buffer.from(`${canonicalJson(loaded.config)}\n`),
+    });
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+  }
 });
 
 test('sixth in-scope repair continues the same Run without semantic exhaustion', async () => {

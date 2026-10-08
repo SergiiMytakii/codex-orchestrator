@@ -26,6 +26,7 @@ export { parseAgentAutoConfig } from './v2/config.js';
 export type { AgentAutoConfig } from './v2/config.js';
 export { validateImplementationReport } from './v2/implementation-report.js';
 export type { ImplementationReportV1 } from './v2/implementation-report.js';
+export { parseIssueCheckInvocation } from './v2/issue-check-policy.js';
 export { validateProofReport } from './v2/proof-report.js';
 export type { ProofReceipt, ProofReportV1 } from './v2/proof-report.js';
 export { RunIssue } from './v2/run-issue.js';

@@ -137,6 +137,12 @@ Repeated invalid reports stop with the candidate, checks, proof and report
 retained. Ordinary calls replay that terminal outcome without launching more
 reviewers; they do not automatically reopen it.
 
+If the same check ID and command fail again after a repair attempt on the same
+candidate Git tree, the Run stops as non-resumable `blocked` with its candidate
+and evidence retained. This compares code snapshots, not log text or stderr
+hashes. Changed candidate content permits another repair. A matching successful
+check, an accepted target, or new feedback clears the previous failure marker.
+
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
 ### `daemon`

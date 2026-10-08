@@ -158,6 +158,7 @@ export interface RunRecord {
     | { id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }
     | CandidateCheckReceiptV2
   >;
+  failedCheckRepair?: { id: string; command: string; candidateTreeSha: string };
   checkedChangeSha256?: string;
   proofId?: string;
   proofExecution?: {
@@ -320,6 +321,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'changeBindingVersion',
     'candidateBinding',
     'candidateMaterialization',
+    'failedCheckRepair',
   ].filter((key) => hasOwn(value, key));
   assertExactObject(value, [
     'runId', 'issueNumber', 'canonicalRepository', 'baseSha', 'branchName', 'worktreePath', 'lifecycle', 'cycle',
@@ -367,6 +369,13 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   }
   validateStringShaRecord(value.skillHashes, `${field}.skillHashes`);
   validateChecks(value.checks, `${field}.checks`);
+  if (hasOwn(value, 'failedCheckRepair')) {
+    const repair = value.failedCheckRepair;
+    assertExactObject(repair, ['id', 'command', 'candidateTreeSha'], `${field}.failedCheckRepair`);
+    assertNonEmptyString(repair.id, `${field}.failedCheckRepair.id`);
+    assertNonEmptyString(repair.command, `${field}.failedCheckRepair.command`);
+    assertGitSha(repair.candidateTreeSha, `${field}.failedCheckRepair.candidateTreeSha`);
+  }
   if (hasOwn(value, 'activeAttempt')) {
     const attempt = validateActiveAttempt(value.activeAttempt);
     if (attempt.runId !== value.runId) throw new Error(`${field}.activeAttempt run identity is invalid`);

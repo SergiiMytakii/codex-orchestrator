@@ -52,6 +52,7 @@ export type ValidationProgressionChanges = Partial<Pick<RunRecord,
   | 'reviewFeedback'
   | 'reworkFindings'
   | 'checks'
+  | 'failedCheckRepair'
   | 'checkedChangeSha256'
   | 'proofId'
   | 'proofExecution'
@@ -157,6 +158,7 @@ export function projectValidationRepair(
       status: 'open' as const,
     })), run.candidateBinding?.candidateTreeSha)
     : run.directReview;
+  const failedCheck = run.checks.find((check) => check.status === 'failed' && 'candidateTreeSha' in check);
   return casTransition(run, 'semantic-repair', {
     lifecycle: 'implementing',
     changeBindingVersion: undefined,
@@ -166,6 +168,9 @@ export function projectValidationRepair(
     reworkFindings: [...findings],
     ...(directReview ? { directReview } : {}),
     checks: [],
+    ...(failedCheck && 'candidateTreeSha' in failedCheck ? { failedCheckRepair: {
+      id: failedCheck.id, command: failedCheck.command, candidateTreeSha: failedCheck.candidateTreeSha,
+    } } : {}),
     checkedChangeSha256: undefined,
     proofId: undefined,
     proofExecution: undefined,
@@ -226,6 +231,7 @@ export function projectValidationReviewApproved(
   if (!run.candidateBinding) throw new Error('validation review result requires candidate identity');
   return casTransition(run, 'review-approved', {
     lifecycle: 'publishing',
+    failedCheckRepair: undefined,
     directReview: acceptApprovedDirectReview(run.directReview, report, artifactSha256, run.candidateBinding.candidateTreeSha, mode),
   });
 }
@@ -333,6 +339,7 @@ export function projectValidationFeedbackActivation(
   const repairReview = beginDirectReviewRepair(run.directReview, input.repairFindings, input.candidateTreeSha);
   return casTransition(run, 'feedback-activation', {
     lifecycle: 'implementing',
+    failedCheckRepair: undefined,
     reviewFeedback: activateReviewFeedback(run.reviewFeedback, input.batch),
     directReview: {
       ...repairReview,

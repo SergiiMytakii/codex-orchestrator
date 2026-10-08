@@ -191,6 +191,30 @@ test('run state accepts unbounded semantic revisions and resumable infrastructur
   }
 });
 
+test('failed check repair identity is optional, durable, and strictly validated', async () => {
+  const path = join(await temporaryRoot(), 'run-state.json');
+  const writer = new FileRunRecordWriter(path, deterministicAtomicOptions());
+  const original = record();
+  await writer.compareAndSwap(0, body([original]));
+  assert.deepEqual((await writer.read()).runs[0], original);
+  const identity = { id: 'typecheck', command: 'npm run typecheck', candidateTreeSha: 'a'.repeat(40) };
+  await writer.compareAndSwap(1, body([{ ...original, failedCheckRepair: identity }]));
+  assert.deepEqual((await new FileRunRecordWriter(path).read()).runs[0]?.failedCheckRepair, identity);
+  for (const malformed of [
+    null,
+    { ...identity, id: '' },
+    { ...identity, command: '' },
+    { ...identity, candidateTreeSha: 'not-a-tree' },
+    { id: identity.id, command: identity.command },
+    { ...identity, stderrHash: 'b'.repeat(64) },
+  ]) {
+    await assert.rejects(writer.compareAndSwap(2, body([
+      { ...original, failedCheckRepair: malformed } as unknown as RunRecord,
+    ])), /failedCheckRepair/u);
+  }
+  assert.equal((await writer.read()).generation, 2);
+});
+
 test('run state rejects retired legacy blocked terminal effects', async () => {
   for (const pendingEffect of [
     { kind: 'blocked-comment', issueNumber: 42, marker: '<!-- blocked -->', bodySha256: 'a'.repeat(64), blockKind: 'external', resumable: true, evidenceCode: 'proof-external-block' },
