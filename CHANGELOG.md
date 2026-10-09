@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.25] - 2026-10-09
+
 ### Fixed
 - Keep Flutter/Dart checks host-owned during Acceptance Proof, including
   tests-only proof; contained agents inspect the exact candidate and passed
