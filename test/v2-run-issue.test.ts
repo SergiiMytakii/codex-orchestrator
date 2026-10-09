@@ -3184,6 +3184,29 @@ test('six malformed implementation reports retry full implementation for one pro
   assert.equal((await fixture.store.read()).runs[0]?.cycle, 1);
 });
 
+test('proof timeout evidence preserves its cause and retries only proof on the same checked candidate', async () => {
+  const failure = { kind: 'idle-timeout' as const, exitCode: null, signal: 'SIGTERM', reportStatus: 'missing' as const, detail: 'No process diagnostic was captured.' };
+  let attempts = 0;
+  const fixture = await runFixture({ proof: async () => (++attempts === 1
+    ? { status: 'transport-failed', resumable: true, failure }
+    : passedProof()) });
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'transport-failed');
+  const evidence = fixture.evidence.at(-1);
+  assert.deepEqual(evidence, {
+    runId: (await fixture.store.read()).runs[0]!.runId,
+    code: 'acceptance-proof-transport-retryable',
+    summary: 'Acceptance Proof process ended with idle-timeout; exit=null, signal=SIGTERM, report=missing. A later bounded invocation may retry.',
+    failure,
+  });
+  const checked = fixture.checkedChangePayloads[0];
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'check:typecheck').length, 1);
+  assert.equal(attempts, 2);
+  assert.deepEqual(fixture.checkedChangePayloads[1], checked);
+});
+
 test('settled implementation, proof, and review infrastructure failures resume on the next bounded run', async () => {
   let proofCalls = 0;
   const cases: Array<{ name: string; options: FixtureOptions; expectedImplementationCalls: number }> = [

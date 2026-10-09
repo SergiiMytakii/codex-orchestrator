@@ -313,11 +313,12 @@ test('contained implementation and proof map a settled launch-gate failure to re
     packageRoot, runtimeRoot: orchestratorHome, packageVersion: '2.0.1', bootId: 'boot-a',
   });
   let implementationPrompt = '';
+  let processResult = { kind: 'launch-gate-failed', exitCode: null as number | null, signal: null as string | null, stderr: Buffer.alloc(0), report: { kind: 'missing' } };
   const process = {
     run: async (invocation: { prompt?: string; onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
       implementationPrompt = invocation.prompt ?? '';
       await invocation.onSpawned?.({ pid: 4242, processGroupId: 4242 });
-      return { kind: 'launch-gate-failed' as const };
+      return processResult;
     },
   };
   const freshness = {
@@ -370,7 +371,42 @@ test('contained implementation and proof map a settled launch-gate failure to re
     runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
     repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
   });
-  assert.deepEqual(proofResult, { kind: 'transport-failed', resumable: true });
+  assert.deepEqual(proofResult, { kind: 'transport-failed', resumable: true, failure: {
+    kind: 'launch-gate-failed', exitCode: null, signal: null, reportStatus: 'missing', detail: 'No process diagnostic was captured.',
+  } });
+  for (const kind of ['idle-timeout', 'timeout', 'transport-failed', 'spawn-failed']) {
+    processResult = { kind, exitCode: 1, signal: 'SIGTERM', stderr: Buffer.from('stream disconnected before completion'), report: { kind: 'missing' } };
+    const result = await proof.run({
+      attemptId: `proof-${kind}`, proofId: 'proof-42', runId: 'run-42',
+      issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+      frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
+      checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
+      runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
+      repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
+    });
+    assert.deepEqual(result, { kind: 'transport-failed', resumable: true, failure: {
+      kind, exitCode: 1, signal: 'SIGTERM', reportStatus: 'missing', detail: 'Proof process: stream disconnected before completion',
+    } });
+  }
+  for (const diagnostic of ['x'.repeat(2000) + ' token=credential-material-12345', 'ENOENT /Users/example/private/auth.json', 'plain\n' + 'x'.repeat(2000)]) {
+    processResult = { kind: 'transport-failed', exitCode: 1, signal: null, stderr: Buffer.from(diagnostic), report: { kind: 'missing' } };
+    const result = await proof.run({
+      attemptId: `proof-diagnostic-${diagnostic.length}`, proofId: 'proof-42', runId: 'run-42',
+      issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+      frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
+      checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
+      runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
+      repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
+    });
+    assert.equal(result.kind, 'transport-failed');
+    if (result.kind !== 'transport-failed') assert.fail('must preserve a resumable process failure');
+    assert.ok(result.failure!.detail.length <= 1024);
+    assert.equal(result.failure!.detail.includes('credential-material'), false);
+    assert.equal(result.failure!.detail.includes('/Users/'), false);
+    assert.equal(result.failure!.detail.includes('\n'), false);
+    if (diagnostic.includes('token=') || diagnostic.includes('/Users/')) assert.match(result.failure!.detail, /\[redacted\]/u);
+  }
+
 });
 
 test('operation snapshot fails closed on tamper, path escape, and undeclared operation', async () => {

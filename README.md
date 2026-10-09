@@ -212,6 +212,12 @@ Important command results:
 
 All outcomes include structured evidence or a path to local evidence. Quiet terminal output is not the source of truth—the JSON result and persisted state are.
 
+Resumable Acceptance Proof process failures retain `failure.kind`, exit code,
+signal, report availability, and a bounded sanitized diagnostic in local
+evidence. An idle timeout is reported as `idle-timeout`, without claiming a
+service outage. A later ordinary invocation resumes proof for the same checked
+candidate without repeating successful checks or implementation.
+
 On an internal Acceptance Proof failure, the Runner also attempts to retain an
 `acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.
 It contains a bounded, filtered cause, candidate commit, package version, and

@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Keep Flutter/Dart checks host-owned during Acceptance Proof, including
+  tests-only proof; contained agents inspect the exact candidate and passed
+  check receipts instead of rerunning SDK commands in the sandbox.
+- Retain the original Acceptance Proof process failure kind, exit code, signal,
+  report availability, and bounded sanitized diagnostics in local evidence;
+  distinguish idle timeout from transport failure without claiming an outage.
+
 ## [2.0.24] - 2026-10-08
 
 ### Added

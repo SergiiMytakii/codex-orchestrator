@@ -28,7 +28,7 @@ import {
   projectTerminalDirectReview,
 } from './direct-delivery.js';
 import { MAX_REVIEW_PATCH_BYTES, type ImplementationReviewerInput, type ImplementationReviewerResult } from './implementation-reviewer.js';
-import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult } from './acceptance-proof.js';
+import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult, type ProofProcessFailure } from './acceptance-proof.js';
 import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, InvalidIssueCheckPolicyError, resolveIssueCheckPolicy } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
@@ -276,7 +276,7 @@ export interface RunIssueDependencies {
   };
   checkedChangeMint: CheckedChangeMintCapability;
   runRecords: RunRecordWriter;
-  writeEvidence(input: { runId: string; code: string; summary: string }): Promise<{ id: string; path: string }>;
+  writeEvidence(input: { runId: string; code: string; summary: string; failure?: ProofProcessFailure }): Promise<{ id: string; path: string }>;
   outcomeEvidencePath(runId: string, code: string, summarySha256: string): string;
   inspectOutcomeEvidence(path: string): Promise<{ sha256: string } | undefined>;
   writeOutcomeEvidence(input: { path: string; bytes: Buffer; sha256: string }): Promise<void>;
@@ -1977,7 +1977,10 @@ export class RunIssue {
           transportRetryCount: proofExecutionState.transportRetryCount + 1,
         } });
         return this.invokedFailure(active, 'acceptance-proof-transport-retryable',
-          'Acceptance Proof infrastructure is temporarily unavailable; a later bounded invocation may retry.');
+          proof.failure
+            ? `Acceptance Proof process ended with ${proof.failure.kind}; exit=${proof.failure.exitCode}, signal=${proof.failure.signal}, report=${proof.failure.reportStatus}. A later bounded invocation may retry.`
+            : 'Acceptance Proof process did not complete; a later bounded invocation may retry.',
+          proof.failure);
       }
       if (proof.status === 'needs-rework') {
         const reopened = await this.startNextCycleFromCandidate(active, proof.findings, proof.findings.map((summary) => ({
@@ -3457,8 +3460,9 @@ export class RunIssue {
     active: ActiveRun,
     code: string,
     summary = 'Publication delivery requires reconciliation.',
+    failure?: ProofProcessFailure,
   ): Promise<RunIssueResult> {
-    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary });
+    const evidence = await this.dependencies.writeEvidence({ runId: active.record.runId, code, summary, ...(failure ? { failure } : {}) });
     return { status: 'transport-failed', resumable: true, evidencePath: evidence.path };
   }
 

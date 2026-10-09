@@ -302,6 +302,12 @@ test('report repair and transport retry remain resumable without semantic exhaus
   assert.deepEqual(continued, { status: 'transport-failed', resumable: true });
 });
 
+test('resumable proof retains the exact process cause alongside the checked candidate', async () => {
+  const failure = { kind: 'idle-timeout' as const, exitCode: null, signal: 'SIGTERM', reportStatus: 'missing' as const, detail: 'No process diagnostic was captured.' };
+  const fixture = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true, failure } });
+  assert.deepEqual(await fixture.proof.proveChange(fixture.input()), { status: 'transport-failed', resumable: true, failure });
+});
+
 test('passed proof returns only a sanitized receipt and has no hidden lifecycle dependency', async () => {
   const fixture = proofFixture();
   const result = await fixture.proof.proveChange(fixture.input());

@@ -14,7 +14,7 @@ import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackObserver } from './review-feedback-coordinator.js';
 import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProofAgent } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, proofFailureSummary, type FrozenCriterion, type IssueSnapshot, type ProofAgent, type ProofProcessFailure } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import type { DeliveryAuthority } from './delivery-authority.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
@@ -1004,7 +1004,14 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
-        return { kind: 'transport-failed', resumable: true };
+        const diagnostic = [result.error, result.stderr?.toString('utf8')].filter(Boolean).join('\n');
+        return { kind: 'transport-failed', resumable: true, failure: {
+          kind: result.kind as ProofProcessFailure['kind'],
+          exitCode: result.exitCode ?? null,
+          signal: result.signal ?? null,
+          reportStatus: result.report?.kind ?? 'missing',
+          detail: diagnostic ? proofFailureSummary('Proof process', new Error(diagnostic)) : 'No process diagnostic was captured.',
+        } };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
       const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
@@ -1502,10 +1509,10 @@ export function createV2Runtime(input: {
     proof,
     checkedChangeMint: capabilities,
     runRecords: records,
-    writeEvidence: async ({ runId, code, summary }) => {
+    writeEvidence: async ({ runId, code, summary, failure }) => {
       const config = requireConfig(currentConfig);
       const relativePath = `${config.runner.stateDir}/v2/evidence/${runId}.json`;
-      await writeDurableAtomicFile(resolve(targetRoot, relativePath), `${canonicalJson({ version: 1, runId, code, summary, recordedAt: now() })}\n`);
+      await writeDurableAtomicFile(resolve(targetRoot, relativePath), `${canonicalJson({ version: 1, runId, code, summary, ...(failure ? { failure } : {}), recordedAt: now() })}\n`);
       return { id: `evidence:${runId}:${code}`, path: relativePath };
     },
     outcomeEvidencePath: (runId, code, summarySha256) => `${requireConfig(currentConfig).runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`,

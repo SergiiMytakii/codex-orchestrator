@@ -44,10 +44,19 @@ export interface ExternalBlocker {
   resumable: boolean;
 }
 
+/** Retains the bounded, sanitized process cause without storing raw agent output. */
+export interface ProofProcessFailure {
+  kind: 'spawn-failed' | 'transport-failed' | 'timeout' | 'idle-timeout' | 'launch-gate-failed';
+  exitCode: number | null;
+  signal: string | null;
+  reportStatus: 'available' | 'missing' | 'invalid';
+  detail: string;
+}
+
 export type ProofAgentResult =
   | { kind: 'report'; report: unknown; proofPhaseChangedFiles: string[] }
   | { kind: 'safe-halt' }
-  | { kind: 'transport-failed'; resumable: boolean }
+  | { kind: 'transport-failed'; resumable: boolean; failure?: ProofProcessFailure }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' };
 
@@ -95,7 +104,7 @@ export type SettledProveChangeResult =
 export type ProveChangeResult =
   | SettledProveChangeResult
   | { status: 'safe-halt' }
-  | { status: 'transport-failed'; resumable: true }
+  | { status: 'transport-failed'; resumable: true; failure?: ProofProcessFailure }
   | { status: 'report-repair'; reportRepairCount: number; findings: string[] }
   | {
       status: 'cleanup-pending';
@@ -278,7 +287,8 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     if (agentResult.kind === 'safe-halt') return { status: 'safe-halt' };
     if (agentResult.kind === 'transport-failed') {
       if (agentResult.resumable && await this.isFresh(input.payload, input.materialization)) {
-        return { status: 'transport-failed', resumable: true };
+        return { status: 'transport-failed', resumable: true,
+          ...(agentResult.failure ? { failure: agentResult.failure } : {}) };
       }
       return this.settle(input.proofId, {
         status: 'transport-failed',
@@ -663,7 +673,8 @@ function validateProofReceipt(value: unknown): asserts value is ProofReceipt {
   }
 }
 
-function proofFailureSummary(prefix: string, error: unknown): string {
+/** Removes sensitive evidence before bounding a proof failure diagnostic. */
+export function proofFailureSummary(prefix: string, error: unknown): string {
   const detail = error instanceof Error ? error.message : 'Unknown failure';
   if (containsCredentialEvidence(detail) || containsHostIdentityEvidence(detail)
     || /["']?token["']?\s*[:=]\s*["']?[^\s"']{8,}/iu.test(detail)) return `${prefix}: [redacted].`;
