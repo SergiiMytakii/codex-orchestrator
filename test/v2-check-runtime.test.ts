@@ -121,3 +121,22 @@ test('Flutter verification rejects an unavailable SDK environment before executi
     await assert.rejects(readFile(join(cwd, 'marker')));
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+
+test('host checks distinguish unavailable executables from ordinary check failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'configured-check-env-'));
+  try {
+    const tool = join(root, 'not-executable');
+    await writeFile(tool, '#!/bin/sh\nexit 0\n');
+    await chmod(tool, 0o600);
+    for (const [command, expected] of [
+      [join(root, 'missing-tool'), 'unavailable'],
+      [tool, 'unavailable'],
+      ['exit 1', 'failed'],
+      ['exit 0', 'passed'],
+    ] as const) {
+      const result = await runShellCheck(command, root, new AbortController().signal, 5_000);
+      assert.equal(result.status, expected, command);
+      assert.equal(result.observation.group, 'absent');
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -25,7 +25,7 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, resolveIssueCheckInvocation, resolveIssueCheckPolicy } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -1054,19 +1054,22 @@ export interface V2Runtime {
   dispose(): void;
 }
 
-export function selectedConfiguredCheckPolicySha256(
-  selectedChecks: Array<{ id: string; command: string }>,
+export function configuredCheckPolicySha256(
+  passedChecks: Array<{ id: string; command: string }>,
   configuredAuthority: Record<string, string>,
 ): string {
-  const selected: Record<string, string> = {};
-  for (const check of selectedChecks) {
-    if (Object.prototype.hasOwnProperty.call(selected, check.id)
+  const passed = new Set<string>();
+  for (const check of passedChecks) {
+    if (passed.has(check.id) || !Object.prototype.hasOwnProperty.call(configuredAuthority, check.id)
       || configuredAuthority[check.id] !== check.command) {
-      throw new CandidateProofInspectionError('selected check no longer matches current configured authority');
+      throw new CandidateProofInspectionError('check no longer matches current configured authority');
     }
-    selected[check.id] = check.command;
+    passed.add(check.id);
   }
-  return sha256(canonicalJson(selected));
+  if (passed.size !== Object.keys(configuredAuthority).length) {
+    throw new CandidateProofInspectionError('not every mandatory configured check has a receipt');
+  }
+  return sha256(canonicalJson(configuredAuthority));
 }
 
 export async function resolveCodexExecutable(command: string, safePath: string): Promise<string> {
@@ -1330,9 +1333,9 @@ export function createV2Runtime(input: {
         checkedChangeReader: capabilities,
         proofAgent,
         inspectFreshness: async (payload, materialization) => {
-          const checkPolicySha256 = selectedConfiguredCheckPolicySha256(
+          const checkPolicySha256 = configuredCheckPolicySha256(
             payload.checks,
-            resolveIssueCheckPolicy(proofInput.issue.body, config.checks).checks,
+            config.checks,
           );
           if (payload.version === 1) return {
             ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
@@ -1499,11 +1502,9 @@ export function createV2Runtime(input: {
     implementationReviewer,
     checks: {
       supportsLaunchOwnership: true,
-      run: async ({ source, command, cwd, signal, onLaunched }) => {
+      run: async ({ command, cwd, signal, onLaunched }) => {
         const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
-        return source === 'issue'
-          ? runProcessCheck(resolveIssueCheckInvocation(command, requireConfig(currentConfig).checks), cwd, signal, timeoutMs, onLaunched)
-          : runShellCheck(command, cwd, signal, timeoutMs, onLaunched);
+        return runShellCheck(command, cwd, signal, timeoutMs, onLaunched);
       },
     },
     proof,
@@ -1670,7 +1671,7 @@ async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }>
 }
 
 export interface CheckExecutionResult {
-  status: 'passed' | 'failed';
+  status: 'passed' | 'failed' | 'unavailable';
   output: Buffer;
   outputSha256: string;
   observation: { leader: 'absent'; group: ProcessGroupObservation };
@@ -1797,7 +1798,9 @@ async function runSpawnCheck(
         }
         await launchOwnership;
         resolveCheck({
-          status: code === 0 ? 'passed' : 'failed',
+          // POSIX reserves 126/127 for a command that cannot be invoked/found.
+          // This is environment recovery, never a request to edit the candidate.
+          status: code === 0 ? 'passed' : code === 126 || code === 127 ? 'unavailable' : 'failed',
           output: Buffer.concat(chunks),
           outputSha256: outputHash.digest('hex'),
           observation: {

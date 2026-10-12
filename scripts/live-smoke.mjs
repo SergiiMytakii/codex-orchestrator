@@ -628,13 +628,14 @@ async function runReviewFeedbackNegativeScenario(context, scenario) {
 
 async function runIssueVerificationScenario(context, scenario) {
   await configureTarget(context);
-  const verification = 'npm --prefix test/live-smoke test';
+  const verification = 'npm exec -- sh -c issue-text-must-not-execute';
   const issue = await createIssue(context, scenario, true, [], true, verification);
   const result = await continueRepairReady(() => runIssue(context, issue.number));
   assertResult(result, { status: 'review-ready' }, scenario);
   const record = await readRunRecord(context, issue.number);
-  if (record.checks.length !== 1 || record.checks[0].command !== verification || record.checks[0].status !== 'passed') {
-    throw new Error(`${scenario}: issue-scoped Verification did not own the check receipt`);
+  if (record.checks.length !== 1 || record.checks[0].id !== 'smoke'
+    || record.checks[0].command !== `${process.execPath} --version` || record.checks[0].status !== 'passed') {
+    throw new Error(`${scenario}: Issue text replaced the mandatory configured check receipt`);
   }
   const publication = await recordPublication(context, issue.number);
   await assertValidationBindings(context, record, publication.headSha, scenario);

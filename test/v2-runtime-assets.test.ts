@@ -11,7 +11,7 @@ import {
   ContainedImplementationAgent,
   ContainedProofAgent,
   materializeReportReadView,
-  selectedConfiguredCheckPolicySha256,
+  configuredCheckPolicySha256,
 } from '../src/v2/runtime.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { sha256 } from '../src/v2/containment.js';
@@ -32,17 +32,17 @@ test('implementer profile treats listed files as starting points for the authori
   assert.match(profile, /directly affected callers, tests, fixtures, and wiring/u);
 });
 
-test('production proof freshness binds one selected affected check to current two-check authority', () => {
+test('production proof freshness requires the entire current configured check authority', () => {
   const authority = { typecheck: 'npm run typecheck', lint: 'npm run lint' };
-  const selected = [{ id: 'typecheck', command: 'npm run typecheck' }];
-  assert.equal(
-    selectedConfiguredCheckPolicySha256(selected, authority),
-    sha256('{"typecheck":"npm run typecheck"}'),
-  );
-  assert.throws(
-    () => selectedConfiguredCheckPolicySha256(selected, { ...authority, typecheck: 'npm run typecheck -- --changed' }),
-    /current configured authority/u,
-  );
+  const passed = [
+    { id: 'typecheck', command: 'npm run typecheck' },
+    { id: 'lint', command: 'npm run lint' },
+  ];
+  assert.equal(configuredCheckPolicySha256(passed, authority), sha256('{"lint":"npm run lint","typecheck":"npm run typecheck"}'));
+  assert.throws(() => configuredCheckPolicySha256(passed.slice(0, 1), authority), /every mandatory/u);
+  assert.throws(() => configuredCheckPolicySha256(passed, { ...authority, build: 'npm run build' }), /every mandatory/u);
+  assert.throws(() => configuredCheckPolicySha256(passed, { ...authority, typecheck: 'npm run typecheck -- --changed' }), /current configured authority/u);
+  assert.throws(() => configuredCheckPolicySha256([...passed, passed[0]!], authority), /current configured authority/u);
 });
 
 test('report read view excludes env, denied paths, and symlinks before contained report launch', async () => {

@@ -357,8 +357,9 @@ test('new regression scenarios exercise distinct owner boundaries', async () => 
   assert.match(feedback, /listConversationComments/u);
 
   const verification = text.slice(text.indexOf('async function runIssueVerificationScenario'), text.indexOf('async function runAcceptanceProofNegativeScenario'));
-  assert.match(verification, /npm --prefix test\/live-smoke test/u);
-  assert.match(verification, /record\.checks\[0\]\.command !== verification/u);
+  assert.match(verification, /issue-text-must-not-execute/u);
+  assert.match(verification, /record\.checks\[0\]\.id !== 'smoke'/u);
+  assert.match(verification, /process\.execPath.*--version/u);
 
   const reviewFault = text.slice(text.indexOf('function normalizeCodeReview'), text.indexOf('function normalizeReviewFeedbackImplementation'));
   assert.match(reviewFault, /initial-review-rework/u);

@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Use repository configuration as the sole authority for mandatory checks.
+  Issue Verification stays descriptive: its Markdown, prose, and command examples
+  cannot replace configured checks or cause command-parser failures.
+- Require the complete configured check set on the final candidate, including
+  Review repairs, and bind Acceptance Proof freshness to the full current policy.
+  Preserve existing candidate retention and environment-recovery continuation.
+- Retain command-not-found/non-executable check outcomes as recoverable environment
+  failures, including their durable attempt result, instead of requesting a code repair.
+- Reject resumed Review or publication with stale or incomplete configured-check
+  receipts while retaining the candidate, proof, and exact pending effect.
+
 ## [2.0.25] - 2026-10-09
 
 ### Fixed

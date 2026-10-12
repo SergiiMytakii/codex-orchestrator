@@ -31,7 +31,7 @@ import {
   type RunRecordWriter,
   type RunStateInspection,
 } from '../src/v2/run-store.js';
-import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
+import { LocalGitRunIssueAdapter, runShellCheck } from '../src/v2/runtime.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackRunData, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
 import { mkdtemp } from './mission-test-temp.js';
@@ -759,24 +759,37 @@ test('terminal cutoff includes comments added after claim and survives cutoff ob
   assert.deepEqual((await replayFixture.store.read()).runs[0]!.terminalNotifications?.commentCutoff, cutoff);
 });
 
-test('direct run executes issue-scoped verification checks instead of repository-wide configured checks', async () => {
-  const scopedCommand = 'npm --prefix src/service test -- --runInBand scoped.spec.ts';
-  const fixture = await runFixture({ issueBody: `Verification:\n- ${scopedCommand}\n\nRisk:\nLow.` });
+test('Issue Verification cannot replace mandatory configured checks on the final candidate', async () => {
+  const body = [
+    'Verification:',
+    '- npm test -- --runInBand --runTestsByPath src/match-predictions/utils/prediction-evaluation-settlement.util.spec.ts src/match-predictions/utils/recent-prediction-performance.spec.ts',
+    '- Extend public-function tests with a mixed cohort covering half outcomes, pushes, invalid settlements and missing reference odds; verify consistent denominators and unchanged precision.',
+    '- Verify that missing reference odds remain excluded from Recent Performance while administrative aggregation retains its existing fallback.',
+    '- npm run typecheck',
+  ].join('\n');
+  const configuredChecks = { typecheck: 'npm run typecheck', build: 'npm run build' };
+  const fixture = await runFixture({ issueBody: body, configuredChecks });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
-  assert.equal(fixture.events.includes('check:changed:issue-verification-001'), true);
-  assert.equal(fixture.events.some((event) => event.endsWith(':typecheck')), false);
   const record = (await fixture.store.read()).runs[0]!;
   assert.deepEqual(record.checks.map(({ id, command }) => ({ id, command })), [
-    { id: 'issue-verification-001', command: scopedCommand },
+    { id: 'typecheck', command: 'npm run typecheck' },
+    { id: 'build', command: 'npm run build' },
   ]);
+  assert.equal(record.issueSnapshot.body, body);
+  assert.equal(fixture.events.some(event => event.includes('issue-verification-')), false);
+  assert.equal(fixture.events.filter(event => event === 'proof').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'review:code-review').length, 1);
 });
 
-test('invalid issue Verification blocks without selecting configured checks', async () => {
-  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned' });
+test('Issue Verification shell text cannot execute or block configured checks', async () => {
+  const fixture = await runFixture({ issueBody: 'Verification:\n- npm exec -- sh -c owned\n## Verification\n- `broken Markdown' });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'blocked');
-  assert.equal(fixture.events.some((event) => event === 'check:typecheck'), false);
-  assert.equal(fixture.events.some((event) => event.startsWith('check:changed:issue-verification-')), false);
+  assert.equal(result.status, 'review-ready');
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.deepEqual(record.checks.map(({ id, command }) => ({ id, command })), [
+    { id: 'typecheck', command: 'npm run typecheck' },
+  ]);
+  assert.equal(fixture.events.some(event => event.includes('issue-verification-')), false);
 });
 
 test('rejected initial Review preserves exact decision evidence across restart', async () => {
@@ -2442,7 +2455,7 @@ test('review blockers form one targeted repair batch bound to fresh affected pro
   assert.match(repair.repairPatch, /implemented repair/u);
   assert.equal(repair.previousTarget?.targetRevision, 1);
   assert.deepEqual(repair.repairFindings, []);
-  assert.deepEqual(repair.checks.map((check: { id: string }) => check.id), ['typecheck']);
+  assert.deepEqual(repair.checks.map((check: { id: string }) => check.id), ['typecheck', 'lint']);
   assert.equal(repair.checkedChangeSha256.length, 64);
   assert.equal(repair.proofReceipt.proofId, 'proof-1');
   assert.equal(repair.currentTreeSha.length, 40);
@@ -2566,12 +2579,12 @@ test('targeted out-of-cone finding reruns full proof and complete Review for the
   assert.equal(complete.targetFingerprint, targeted.targetFingerprint);
   assert.deepEqual(complete.previousTarget, targeted.previousTarget);
   assert.notEqual(complete.reviewerSessionId, targeted.reviewerSessionId);
-  assert.deepEqual(targeted.checks.map((check: { id: string }) => check.id), ['typecheck']);
+  assert.deepEqual(targeted.checks.map((check: { id: string }) => check.id).sort(), ['lint', 'typecheck']);
   assert.deepEqual(complete.checks.map((check: { id: string }) => check.id).sort(), ['lint', 'typecheck']);
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2, JSON.stringify(fixture.events));
   assert.equal(fixture.events.filter((event) => event === 'proof').length, 3, JSON.stringify(fixture.events));
   assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 3, JSON.stringify(fixture.events));
-  assert.equal(fixture.events.filter((event) => event === 'check:changed:lint').length, 2, JSON.stringify(fixture.events));
+  assert.equal(fixture.events.filter((event) => event === 'check:changed:lint').length, 3, JSON.stringify(fixture.events));
 });
 
 test('one in-cone target cannot hide another out-of-cone target from complete fallback', async () => {
@@ -3261,6 +3274,51 @@ test('resumable implementation transport retries once when the interrupted attem
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
   assert.deepEqual(pick((await fixture.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 1 },
     JSON.stringify({ state: await fixture.store.read(), events: fixture.events, evidence: fixture.evidence }));
+});
+
+for (const phase of ['review', 'publishing'] as const) {
+  test(`restart cannot continue ${phase} with a retained subset of mandatory checks`, async () => {
+    const fixture = await runFixture({ fileBackedStore: true,
+      configuredChecks: { typecheck: 'npm run typecheck', build: 'npm run build' },
+      ...(phase === 'review' ? { reviewTransportOnce: true } : { rejectEffect: 'push' as const }),
+    });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+    const state = await fixture.store.read();
+    const record = state.runs[0]!;
+    assert.equal(record.checks.length, 2);
+    record.checks = record.checks.slice(0, 1);
+    await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+    const before = structuredClone(record);
+    const effects = fixture.events.filter(event => /^(agent:|review:|effect:|git:push)/.test(event));
+    const resumed = await new RunIssue({ ...fixture.dependencies,
+      runRecords: new FileRunRecordWriter(fixture.statePath),
+    }).runIssue(input);
+    assert.deepEqual(pick(resumed, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    const after = (await fixture.store.read()).runs[0]!;
+    assert.deepEqual(after.checks, before.checks);
+    assert.deepEqual(after.candidateBinding, before.candidateBinding);
+    assert.deepEqual(after.proofReceipt, before.proofReceipt);
+    assert.deepEqual(after.pendingEffect, before.pendingEffect);
+    assert.deepEqual(fixture.events.filter(event => /^(agent:|review:|effect:|git:push)/.test(event)), effects);
+  });
+}
+
+test('publication tree observation failure preserves the exact intent and resumes without implementation', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, rejectEffect: 'push' });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.candidateBinding, undefined);
+  assert.equal(retained.pendingEffect?.kind, 'initial-push');
+  const inspect = fixture.dependencies.git.inspectHead;
+  fixture.dependencies.git.inspectHead = async () => { throw new Error('temporary Git observation failure'); };
+  assert.deepEqual(pick(await new RunIssue(fixture.dependencies).runIssue(input), ['status', 'resumable']),
+    { status: 'transport-failed', resumable: true });
+  assert.deepEqual((await fixture.store.read()).runs[0], retained);
+  fixture.dependencies.git.inspectHead = inspect;
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
 });
 
 test('invoked publication rejection is resumable, retains pendingEffect, and starts no later effect', async () => {
@@ -4651,16 +4709,21 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error('condition was not reached');
 }
 
-/** A malformed issue stops before implementation or publication. */
-test('invalid declared verification blocks once with an actionable reason', async () => {
-  const fixture = await runFixture({ issueBody: 'Verification:\n- flutter analyze --no-pub — baseline info' });
+/** A failed mandatory check cannot be replaced by an Issue suggestion. */
+test('failed configured check retains the candidate and prevents proof, Review and publication', async () => {
+  const fixture = await runFixture({
+    issueBody: 'Verification:\n- npm run passing-suggestion',
+    check: async () => ({ status: 'failed', output: Buffer.from('mandatory typecheck failed') }),
+  });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'blocked');
-  if (result.status === 'blocked') {
-    assert.equal(result.resumable, false);
-    assert.match(result.blocker?.summary ?? '', /Issue Verification/u);
-  }
-  assert.equal(fixture.events.includes('agent:implementation'), false);
+  assert.deepEqual(pick(result, ['status', 'source']), { status: 'repair-ready', source: 'check' });
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.ok(record.failedCheckRepair?.candidateTreeSha);
+  assert.ok((await readFile(join(fixture.worktreePath, 'feature.txt'))).length > 0);
+  assert.equal(record.failedCheckRepair?.command, 'npm run typecheck');
+  assert.equal(fixture.events.includes('proof'), false);
+  assert.equal(fixture.events.includes('review:code-review'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
 });
 
 /** Environment recovery resumes checks without retriggering implementation. */
@@ -4678,3 +4741,96 @@ test('host Flutter environment recovery does not repeat implementation', async (
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, count);
 });
+
+
+test('restart after the second mandatory check becomes unavailable reuses the first receipt without repeating implementation', async () => {
+  const fixture = await runFixture({
+    fileBackedStore: true,
+    issueBody: 'Verification:\n- npm run unrelated-suggestion',
+    configuredChecks: { typecheck: 'npm run typecheck', build: 'npm run build' },
+  });
+  let unavailable = true;
+  const original = fixture.dependencies.checks.run;
+  fixture.dependencies.checks.run = async input => {
+    if (input.id === 'build' && unavailable) throw new Error('configured build tooling unavailable before launch');
+    return original(input);
+  };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.deepEqual(pick(await fixture.runner.runIssue(input), ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  const retained = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
+  assert.ok(retained.candidateBinding);
+  assert.deepEqual(retained.checks.map(check => check.id), ['typecheck']);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.includes('proof'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
+  unavailable = false;
+  const resumed = await new RunIssue({ ...fixture.dependencies, runRecords: new FileRunRecordWriter(fixture.statePath) }).runIssue(input);
+  assert.equal(resumed.status, 'review-ready');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'check:typecheck').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'check:changed:build').length, 1);
+  const completed = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
+  assert.deepEqual(completed.checks.map(check => check.id), ['typecheck', 'build']);
+  const firstReceipt = completed.checks[0]!;
+  assert.ok('candidateTreeSha' in firstReceipt);
+  assert.equal(firstReceipt.candidateTreeSha, retained.candidateBinding?.candidateTreeSha);
+});
+
+
+for (const interrupted of [false, true]) {
+  test(`a genuinely missing configured executable resumes on the same candidate after restoration (interrupted result adoption: ${interrupted})`, async () => {
+    const toolRoot = await mkdtemp(join(tmpdir(), 'configured-check-tool-'));
+    const tool = join(toolRoot, 'restored-check-tool');
+    const fixture = await runFixture({
+      fileBackedStore: true,
+      configuredChecks: { typecheck: 'npm run typecheck', tool },
+    });
+    let toolCalls = 0;
+    const original = fixture.dependencies.checks.run;
+    fixture.dependencies.checks.run = async input => {
+      if (input.id !== 'tool') return original(input);
+      toolCalls += 1;
+      return runShellCheck(input.command, input.cwd, input.signal, 5_000, input.onLaunched);
+    };
+    let resultAdoptionInterrupted = false;
+    if (interrupted) {
+      const writer = fixture.dependencies.runRecords;
+      fixture.dependencies.runRecords = {
+        inspect: () => writer.inspect(),
+        read: () => writer.read(),
+        compareAndSwap: async (generation, next) => {
+          const record = next.runs[0]!;
+          if (!resultAdoptionInterrupted && record.activeAttempt?.operationId === 'configured-check'
+            && record.activeAttempt.stage === 'observed' && record.checks.some(check => check.id === 'typecheck')) {
+            resultAdoptionInterrupted = true;
+            throw new Error('interrupted after unavailable result persistence');
+          }
+          return writer.compareAndSwap(generation, next);
+        },
+      };
+    }
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    const restart = () => new RunIssue({ ...fixture.dependencies, runRecords: new FileRunRecordWriter(fixture.statePath) });
+    assert.deepEqual(pick(await fixture.runner.runIssue(input), ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+    if (interrupted) {
+      assert.equal(resultAdoptionInterrupted, true);
+      // Recover the immutable unavailable result without running the missing tool again.
+      assert.deepEqual(pick(await restart().runIssue(input), ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+      assert.equal(toolCalls, 1);
+    }
+    const retained = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
+    assert.ok(retained.candidateBinding);
+    assert.equal(retained.activeAttempt, undefined);
+    assert.deepEqual(retained.checks.map(check => check.id), ['typecheck']);
+    assert.equal(fixture.events.includes('proof'), false);
+    assert.equal(fixture.events.includes('git:push'), false);
+    await writeFile(tool, '#!/bin/sh\nexit 0\n');
+    await chmod(tool, 0o755);
+    assert.equal((await restart().runIssue(input)).status, 'review-ready');
+    assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
+    assert.equal(fixture.events.filter(event => event === 'check:typecheck').length, 1);
+    assert.equal(toolCalls, 2);
+    const completed = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
+    assert.deepEqual(completed.checks.map(check => check.id), ['typecheck', 'tool']);
+  });
+}

@@ -29,7 +29,7 @@ import {
 } from './direct-delivery.js';
 import { MAX_REVIEW_PATCH_BYTES, type ImplementationReviewerInput, type ImplementationReviewerResult } from './implementation-reviewer.js';
 import { CandidateProofInspectionError, ProofLaunchAuthorizationError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult, type ProofProcessFailure } from './acceptance-proof.js';
-import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, InvalidIssueCheckPolicyError, resolveIssueCheckPolicy } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError } from './issue-check-policy.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import {
@@ -166,7 +166,6 @@ interface ReviewValidationScope {
   repairPatch: string | null;
   targetPatch: string;
   changedFiles: string[];
-  checks: Record<string, string>;
   criteria: FrozenCriterion[];
   impactTargets: string[];
 }
@@ -247,10 +246,10 @@ export interface RunIssueDependencies {
   checks: {
     supportsLaunchOwnership?: true;
     run(input: {
-      id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'changed'; signal: AbortSignal;
+      id: string; command: string; cwd: string; phase: 'changed'; signal: AbortSignal;
       onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>;
     }): Promise<{
-      status: 'passed' | 'failed'; output: Buffer; outputSha256: string;
+      status: 'passed' | 'failed' | 'unavailable'; output: Buffer; outputSha256: string;
       observation: { leader: 'absent'; group: 'live' | 'absent' | 'unknown' };
     }>;
   };
@@ -305,7 +304,7 @@ interface ActiveRun {
 }
 
 interface DurableConfiguredCheckResult {
-  status: 'passed' | 'failed';
+  status: 'passed' | 'failed' | 'unavailable';
   output: Buffer;
   outputSha256: string;
   observation: { leader: 'absent'; group: 'live' | 'absent' | 'unknown' };
@@ -417,6 +416,8 @@ export class RunIssue {
     issue: IssueSnapshot,
     issueNumber: number,
   ): Promise<RunIssueResult> {
+    const admission = await this.admitConfiguredCheckReceipts(starting, config, true);
+    if (admission) return admission;
     let active = starting;
     const { runId, branchName, worktreePath, baseSha } = active.record;
     const message = `feat: implement #${issueNumber}`;
@@ -639,6 +640,8 @@ export class RunIssue {
     config: AgentAutoConfig,
     issueNumber: number,
   ): Promise<RunIssueResult> {
+    const admission = await this.admitConfiguredCheckReceipts(starting, config, true);
+    if (admission) return admission;
     let active = starting;
     const feedback = active.record.reviewFeedback;
     const batch = feedback?.activeBatch;
@@ -1510,7 +1513,6 @@ export class RunIssue {
         }
         if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
 
-      resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks);
       let progression = nextValidationTransition(active.record, active.record.deliveryAuthority!);
       const resumeAtChecks = progression.phase === 'checks' || progression.phase === 'acceptance-proof';
       if (progression.phase === 'review') {
@@ -1704,12 +1706,11 @@ export class RunIssue {
       if (progression.phase !== 'checks' && progression.phase !== 'acceptance-proof') {
         return await this.terminal(active, { status: 'internal-error', code: 'validation-progression-checks-invalid' });
       }
-      const checkPolicy = resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks);
       const finalBinding = active.record.candidateBinding;
       if (!finalBinding) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
       let reviewScope: ReviewValidationScope;
       try {
-        reviewScope = await this.reviewValidationScope(active, frozenCriteria, checkPolicy.checks, config.deny.readPaths);
+        reviewScope = await this.reviewValidationScope(active, frozenCriteria, config.deny.readPaths);
       } catch (error) {
         if (error instanceof ReviewTargetCredentialError) {
           return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false, blocker: {
@@ -1718,8 +1719,8 @@ export class RunIssue {
         }
         return this.invokedFailure(active, 'review-target-unavailable', error instanceof Error ? error.message : undefined);
       }
-      const configuredChecks = Object.entries(reviewScope.checks);
-      const finalCheckPolicySha256 = sha256(canonicalJson(reviewScope.checks));
+      const configuredChecks = Object.entries(config.checks);
+      const finalCheckPolicySha256 = sha256(canonicalJson(config.checks));
       const reusableChecks = active.record.checks.filter((check) =>
         check.status === 'passed'
         && 'bindingId' in check
@@ -1757,7 +1758,7 @@ export class RunIssue {
         active = execution.active;
         const materialization = execution.materialization;
         const checked = await this.executeOrRecoverConfiguredCheck(active, {
-          id, command, source: checkPolicy.source, cwd: materialization.path, phase: 'changed',
+          id, command, cwd: materialization.path, phase: 'changed',
         });
         if ('status' in checked) return checked;
         active = checked.active;
@@ -1770,21 +1771,30 @@ export class RunIssue {
             'The configured check leader exited but its process group is still live or cannot be proven absent.',
           );
         }
-        const row = {
-          id, command, status: check.status, outputSha256: check.outputSha256,
-          bindingId: finalBinding.bindingId,
-          candidateTreeSha: finalBinding.candidateTreeSha,
-          checkPolicySha256: finalCheckPolicySha256,
-        } as const;
         const previous = active.record.failedCheckRepair;
-        active = await this.adoptAttempt(active, check.attemptResultSha256, {
-          checks: [...active.record.checks, row],
+        const receiptChanges: Omit<Partial<RunRecord>, 'activeAttempt' | 'pendingEffect'> = check.status === 'unavailable' ? {} : {
+          checks: [...active.record.checks, {
+            id, command, status: check.status, outputSha256: check.outputSha256,
+            bindingId: finalBinding.bindingId,
+            candidateTreeSha: finalBinding.candidateTreeSha,
+            checkPolicySha256: finalCheckPolicySha256,
+          }],
           ...(check.status === 'passed' && previous?.id === id && previous.command === command
             ? { failedCheckRepair: undefined } : {}),
-        });
+        };
+        try {
+          active = await this.adoptAttempt(active, check.attemptResultSha256, receiptChanges);
+        } catch {
+          return this.invokedFailure(active, 'configured-check-result-adoption-pending',
+            'The configured-check result is retained; resume the same Run to reconcile its receipt.');
+        }
         const settledExecution = await this.settleCandidateMaterialization(active, config);
         if ('status' in settledExecution) return settledExecution;
         active = settledExecution.active;
+        if (check.status === 'unavailable') {
+          return this.invokedFailure(active, 'configured-check-environment-unavailable',
+            `Mandatory check ${id} cannot run in the current environment:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`);
+        }
         if (check.status === 'failed') {
           const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
           if (previous?.id === id && previous.command === command
@@ -1796,16 +1806,16 @@ export class RunIssue {
             } }, 'configured-check-repair-no-progress');
           }
           const reopened = await this.startNextCycleFromCandidate(active, [summary], [{
-            provenance: 'check', sourceId: `check:${id}:${row.outputSha256}`, summary,
+            provenance: 'check', sourceId: `check:${id}:${check.outputSha256}`, summary,
             affectedContracts: ['configured-checks'],
           }]);
           if ('status' in reopened) return reopened;
-          return this.semanticContinuation(reopened, 'check', [`check:${id}:${row.outputSha256}`],
+          return this.semanticContinuation(reopened, 'check', [`check:${id}:${check.outputSha256}`],
             'The consolidated affected-check repair batch is ready for the next bounded invocation.');
         }
       }
 
-      if (!sameCheckPolicy(active.record.checks, reviewScope.checks)) {
+      if (!sameCheckPolicy(active.record.checks, config.checks)) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'configured-check-policy-drift');
       }
       const proofBinding = active.record.candidateBinding;
@@ -2016,11 +2026,6 @@ export class RunIssue {
         ? await this.updateExistingPullRequest(active, config, input.issueNumber)
         : await this.publish(active, config, issueSnapshot, input.issueNumber);
     } catch (error) {
-      if (active && error instanceof InvalidIssueCheckPolicyError) {
-        return await this.terminal(active, { status: 'blocked', kind: 'authority-boundary', resumable: false, blocker: {
-          kind: 'authority-boundary', summary: error.message, attempted: ['Resolve the declared Verification commands.'], resumable: false,
-        } }, 'invalid-issue-verification');
-      }
       if (!active && error instanceof TransportReadError) {
         return await this.preClaimTransport(input.issueNumber);
       }
@@ -2735,7 +2740,7 @@ export class RunIssue {
 
   private async executeOrRecoverConfiguredCheck(
     active: ActiveRun,
-    input: { id: string; command: string; source: 'issue' | 'configured'; cwd: string; phase: 'changed' },
+    input: { id: string; command: string; cwd: string; phase: 'changed' },
   ): Promise<{ active: ActiveRun; check: DurableConfiguredCheckResult } | RunIssueResult> {
     const attempt = active.record.activeAttempt;
     if (attempt?.stage === 'observed' && attempt.result) {
@@ -2971,7 +2976,6 @@ export class RunIssue {
   private async reviewValidationScope(
     active: ActiveRun,
     frozenCriteria: FrozenCriterion[],
-    configuredChecks: Record<string, string>,
     deniedPaths: string[],
   ): Promise<ReviewValidationScope> {
     const binding = active.record.candidateBinding;
@@ -2991,7 +2995,7 @@ export class RunIssue {
     if (!review?.previousTarget) return {
       mode: 'complete', repairPatch: null, targetPatch: completeDiff.patch,
       changedFiles: completeDiff.changedFiles,
-      checks: structuredClone(configuredChecks), criteria: structuredClone(frozenCriteria), impactTargets: [],
+      criteria: structuredClone(frozenCriteria), impactTargets: [],
     };
 
     let treeDiff: Awaited<ReturnType<RunIssueGit['diffTrees']>>;
@@ -3004,7 +3008,7 @@ export class RunIssue {
     } catch {
       return {
         mode: 'complete', repairPatch: null, targetPatch: completeDiff.patch, changedFiles: completeDiff.changedFiles,
-        checks: structuredClone(configuredChecks), criteria: structuredClone(frozenCriteria),
+        criteria: structuredClone(frozenCriteria),
         impactTargets: [],
       };
     }
@@ -3019,10 +3023,7 @@ export class RunIssue {
       ...repairDefects.flatMap((defect) => defect.affectedTargets),
       ...repairFindings.flatMap((finding) => finding.affectedContracts),
     ])].sort();
-    const checkEntries = Object.entries(configuredChecks);
-    const exactChecks = new Set(contracts.filter((target) => target.startsWith('check:')).map((target) => target.slice('check:'.length)));
     const exactCriteria = new Set(contracts.filter((target) => target.startsWith('criterion:')).map((target) => target.slice('criterion:'.length)));
-    const affectedChecks = checkEntries.filter(([id]) => exactChecks.has(id));
     const affectedCriteria = frozenCriteria.filter((criterion) => exactCriteria.has(criterion.id));
     const directImpact = new Set([
       ...treeDiff.changedFiles,
@@ -3048,9 +3049,6 @@ export class RunIssue {
       repairPatch: isolated ? treeDiff.patch : null,
       targetPatch: isolated ? treeDiff.patch : completeDiff.patch,
       changedFiles: isolated ? treeDiff.changedFiles : [...binding.canonicalChangedFiles],
-      checks: isolated && affectedChecks.length > 0
-        ? Object.fromEntries(affectedChecks)
-        : structuredClone(configuredChecks),
       criteria: isolated && affectedCriteria.length > 0
         ? structuredClone(affectedCriteria)
         : structuredClone(frozenCriteria),
@@ -3062,6 +3060,27 @@ export class RunIssue {
     };
   }
 
+  private async admitConfiguredCheckReceipts(
+    active: ActiveRun,
+    config: AgentAutoConfig,
+    publication: boolean,
+  ): Promise<RunIssueResult | undefined> {
+    let publishedTreeSha: string | undefined;
+    if (publication && !active.record.candidateBinding) {
+      try {
+        publishedTreeSha = (await this.dependencies.git.inspectHead(active.record.worktreePath)).treeSha;
+      } catch {
+        return this.invokedFailure(active, 'configured-check-tree-observation-unavailable',
+          'The committed candidate tree could not be inspected. Work and pending publication intent are preserved for retry.');
+      }
+    }
+    if (!hasCurrentConfiguredCheckReceipts(active.record, config.checks, publishedTreeSha)) {
+      return this.invokedFailure(active, 'configured-check-policy-drift',
+        'Retained validation does not confirm every current configured check on this candidate. Work, proof, and pending publication intent are preserved.');
+    }
+    return undefined;
+  }
+
   private async runFullReview(
     starting: ActiveRun,
     issue: IssueSnapshot,
@@ -3070,13 +3089,14 @@ export class RunIssue {
     config: AgentAutoConfig,
     suppliedScope?: ReviewValidationScope,
   ): Promise<ActiveRun | RunIssueResult> {
+    const admission = await this.admitConfiguredCheckReceipts(starting, config, false);
+    if (admission) return admission;
     let active = starting;
     let reviewScope: ReviewValidationScope;
     try {
       reviewScope = suppliedScope ?? await this.reviewValidationScope(
         active,
         frozenCriteria,
-        resolveIssueCheckPolicy(active.record.issueSnapshot.body, config.checks).checks,
         config.deny.readPaths,
       );
     } catch (error) {
@@ -4056,7 +4076,7 @@ interface ConfiguredCheckAttemptResult {
   schema: 'codex-orchestrator.configured-check-result';
   id: string;
   command: string;
-  status: 'passed' | 'failed';
+  status: 'passed' | 'failed' | 'unavailable';
   outputBase64: string;
   outputSha256: string;
 }
@@ -4064,7 +4084,7 @@ interface ConfiguredCheckAttemptResult {
 function configuredCheckAttemptBytes(input: {
   id: string;
   command: string;
-  status: 'passed' | 'failed';
+  status: 'passed' | 'failed' | 'unavailable';
   output: Buffer;
 }): Buffer {
   return Buffer.from(`${canonicalJson({
@@ -4143,7 +4163,7 @@ function validateConfiguredCheckAttemptBytes(
   }
   if (record.schema !== 'codex-orchestrator.configured-check-result'
     || record.id !== expected.id || record.command !== expected.command
-    || (record.status !== 'passed' && record.status !== 'failed')
+    || (record.status !== 'passed' && record.status !== 'failed' && record.status !== 'unavailable')
     || typeof record.outputBase64 !== 'string' || typeof record.outputSha256 !== 'string') {
     throw new Error('configured check result identity is invalid');
   }
@@ -4158,6 +4178,20 @@ function validateConfiguredCheckAttemptBytes(
     output,
   }))) throw new Error('configured check result bytes are not canonical');
   return { ...(record as unknown as ConfiguredCheckAttemptResult), output };
+}
+
+function hasCurrentConfiguredCheckReceipts(record: RunRecord, policy: Record<string, string>, publishedTreeSha?: string): boolean {
+  const binding = record.candidateBinding;
+  // Publication releases the pin after committing the checked tree. Subsequent
+  // effect reconciliation must validate the retained receipts against that tree.
+  const treeSha = binding?.candidateTreeSha ?? publishedTreeSha;
+  const firstCheck = record.checks[0];
+  const bindingId = binding?.bindingId ?? (firstCheck && 'bindingId' in firstCheck ? firstCheck.bindingId : undefined);
+  const policySha256 = sha256(canonicalJson(policy));
+  return !!treeSha && !!record.checkedChangeSha256 && !!record.proofReceipt && sameCheckPolicy(record.checks, policy)
+    && record.checks.every(check => check.status === 'passed' && 'bindingId' in check
+      && check.bindingId === bindingId && check.candidateTreeSha === treeSha
+      && check.checkPolicySha256 === policySha256);
 }
 
 function sameCheckPolicy(checks: RunRecord['checks'], policy: Record<string, string>): boolean {

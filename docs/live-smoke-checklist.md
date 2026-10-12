@@ -62,8 +62,8 @@ Its scenarios are intentionally bound to these current owner behaviors:
   boundary and the next invocation stops without publication.
 - `review-feedback-negative`: a resolved inline review thread remains
   effect-free on daemon replay.
-- `issue-verification`: an issue-scoped `Verification:` command replaces the
-  configured fallback and its passing receipt is bound to the candidate.
+- `issue-verification`: Issue command examples stay descriptive; the mandatory
+  configured check executes and its passing receipt is bound to the candidate.
 
 One additional focused scenario is intentionally available only by explicit
 `--scenario` selection or through `--profile full`:

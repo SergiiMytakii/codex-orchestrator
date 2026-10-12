@@ -231,10 +231,14 @@ installed compiled files when investigating a source/install discrepancy.
 Delivery guarantees depend on repository policy and issue format. Frozen
 criteria recognize a Markdown `Acceptance Criteria` heading and `-`/`*` bullets
 (including checkboxes); without those bullets, one criterion covers the entire
-title and body. Safe issue `Verification:` commands replace configured checks,
-rather than supplementing them. A declared section must contain supported standalone command bullets; malformed
-commands block the run with an actionable reason. Configured fallback is used
-only when the section is absent; that fallback can itself be empty. Android
+title and body. The repository configuration is the only source of mandatory
+executable checks. An Issue's `Verification` text describes expectations for
+implementation and Acceptance Proof; Markdown, wording, and command examples
+never select, replace, or add executable checks. Every configured check must pass
+on the final candidate before Acceptance Proof, Review, and publication. A failed
+check requires repair; an unavailable check retains the work and resumes through
+the existing lifecycle after environment recovery without repeating implementation.
+Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
 and static workflow evals do not establish live browser or agent behavior.
 
@@ -259,9 +263,9 @@ Starting a new journal requires preserving the old file and checking ownership/r
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: finite fallback commands used when an issue has no `Verification:`
-  section. A declared section with unsupported or malformed command bullets
-  blocks before implementation. Checks run before Review against the immutable candidate.
+- `checks`: mandatory commands executed on the final candidate. Issue descriptions
+  cannot change this set. Checks run before Acceptance Proof and Review against
+  the immutable candidate, including after Review repairs.
   A failed check becomes a bounded finding for the next implementation cycle;
   there is no qualification operation or separate retry coordinator. Final
   checks must all pass; failures are never accepted by comparing output hashes.
@@ -293,11 +297,11 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 {"version":1,"level":"tests-only","reason":"Focused tests establish the async completion contract.","authentication":"none","steps":[]}
 ```
 
-`tests-only` runs the selected checks and non-visual Acceptance Proof without starting Android. `android-live` requires a Runner-owned emulator and fresh Android visual evidence; its `steps` are bounded `tap`/`expect` actions with exact UI text, `back`, or `swipe` (`up`/`down`). The final step must be an `expect`. `authentication: "dev-account"` additionally requires a configured `proof.android.login` command and args; the trusted helper receives the exact debug APK build arguments, digest, live emulator lease and serial on stdin, then must return `authenticated_identity_verified` with the same app PID and canonical user ID. These inputs and credential handling remain with the host Runner. Missing tools, login or required evidence blocks publication rather than becoming a warning. Issues without this block retain their existing proof policy.
+`tests-only` runs the configured checks and non-visual Acceptance Proof without starting Android. `android-live` requires a Runner-owned emulator and fresh Android visual evidence; its `steps` are bounded `tap`/`expect` actions with exact UI text, `back`, or `swipe` (`up`/`down`). The final step must be an `expect`. `authentication: "dev-account"` additionally requires a configured `proof.android.login` command and args; the trusted helper receives the exact debug APK build arguments, digest, live emulator lease and serial on stdin, then must return `authenticated_identity_verified` with the same app PID and canonical user ID. These inputs and credential handling remain with the host Runner. Missing tools, login or required evidence blocks publication rather than becoming a warning. Issues without this block retain their existing proof policy.
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Safe `Verification:` commands can include `flutter analyze --no-fatal-infos` and focused `flutter test test/..._test.dart` paths. The SDK is resolved from the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout. Flutter execution belongs to the host Runner; the implementation Agent returns its candidate with local checks skipped. Before launching Flutter, the Runner checks executable access and loopback socket availability. An unavailable environment defers checks with the candidate retained; recovery resumes checks without repeating implementation. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in the check output.
+Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`, alongside the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout. Flutter execution belongs to the host Runner; the implementation Agent returns its candidate with local checks skipped. Before launching Flutter, the Runner checks executable access and loopback socket availability. An unavailable environment defers checks with the candidate retained; recovery resumes checks without repeating implementation. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in the check output.
 
 Delivery remains checks → Acceptance Proof → Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 
