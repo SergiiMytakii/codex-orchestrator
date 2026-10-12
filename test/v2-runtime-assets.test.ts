@@ -388,7 +388,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
       kind, exitCode: 1, signal: 'SIGTERM', reportStatus: 'missing', detail: 'Proof process: stream disconnected before completion',
     } });
   }
-  for (const diagnostic of ['x'.repeat(2000) + ' token=credential-material-12345', 'ENOENT /Users/example/private/auth.json', 'plain\n' + 'x'.repeat(2000)]) {
+  for (const diagnostic of ['Selected model is at capacity. Please try a different model.', 'x'.repeat(2000) + ' token=credential-material-12345', 'ENOENT /Users/example/private/auth.json', 'plain\n' + 'x'.repeat(2000)]) {
     processResult = { kind: 'transport-failed', exitCode: 1, signal: null, stderr: Buffer.from(diagnostic), report: { kind: 'missing' } };
     const result = await proof.run({
       attemptId: `proof-diagnostic-${diagnostic.length}`, proofId: 'proof-42', runId: 'run-42',
@@ -404,6 +404,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
     assert.equal(result.failure!.detail.includes('credential-material'), false);
     assert.equal(result.failure!.detail.includes('/Users/'), false);
     assert.equal(result.failure!.detail.includes('\n'), false);
+    if (diagnostic.startsWith('Selected model')) assert.equal(result.failure!.detail, `Proof process: ${diagnostic}`);
     if (diagnostic.includes('token=') || diagnostic.includes('/Users/')) assert.match(result.failure!.detail, /\[redacted\]/u);
   }
 

@@ -255,6 +255,25 @@ test('classifies confirmed Codex stream disconnect without a report as transport
   });
 });
 
+test('classifies model capacity refusal without a report as resumable transport failure', async () => {
+  await withRunFixture(async (fixture) => {
+    const result = await new CodexProcess(async () => new FakeChild({
+      reportPath: fixture.reportPath,
+      exit: { exitCode: 1, signal: null },
+      writeReport: false,
+      streams: {
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from('ERROR: Selected model is at capacity. Please try a different model.'),
+        truncated: false,
+      },
+    })).run(fixture.input(), new AbortController().signal);
+
+    assert.equal(result.kind, 'transport-failed');
+    assert.equal(result.report.kind, 'missing');
+    assert.match(result.stderr.toString('utf8'), /Selected model is at capacity/u);
+  });
+});
+
 test('classifies successful Codex exit without its output report as resumable transport failure', async () => {
   await withRunFixture(async (fixture) => {
     const result = await new CodexProcess(async () => new FakeChild({
@@ -266,6 +285,23 @@ test('classifies successful Codex exit without its output report as resumable tr
     assert.equal(result.kind, 'transport-failed');
     assert.equal(result.report.kind, 'missing');
   });
+});
+
+test('capacity diagnostics do not mask an available report or an unrelated process failure', async () => {
+  for (const entry of [
+    { writeReport: true, diagnostic: 'Selected model is at capacity. Please try a different model.', expected: 'exit-failed' },
+    { writeReport: false, diagnostic: 'ERROR: invalid model configuration', expected: 'report-failed' },
+  ]) {
+    await withRunFixture(async (fixture) => {
+      const result = await new CodexProcess(async () => new FakeChild({
+        reportPath: fixture.reportPath,
+        exit: { exitCode: 1, signal: null },
+        writeReport: entry.writeReport,
+        streams: { stdout: Buffer.alloc(0), stderr: Buffer.from(entry.diagnostic), truncated: false },
+      })).run(fixture.input(), new AbortController().signal);
+      assert.equal(result.kind, entry.expected);
+    });
+  }
 });
 
 test('wall timeout terminates the group and escalates to SIGKILL before returning', async () => {

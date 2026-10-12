@@ -208,7 +208,9 @@ export class CodexProcess {
 }
 
 function isConfirmedTransportFailure(stderr: Buffer): boolean {
-  return stderr.toString('utf8').includes('stream disconnected before completion');
+  const diagnostic = stderr.toString('utf8');
+  return diagnostic.includes('stream disconnected before completion')
+    || diagnostic.includes('Selected model is at capacity. Please try a different model.');
 }
 
 type TerminalObservation =
