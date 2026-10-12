@@ -709,3 +709,63 @@ function androidConfigFixture(): AgentAutoConfig {
     deny: { readPaths: ['.env'], commands: ['/usr/bin/env'] },
   };
 }
+
+
+test('implementation and proof format correction use exact bytes/schema in read-only view without semantic instructions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-report-correction-'));
+  const orchestratorHome = join(root, 'orchestrator');
+  const targetRoot = join(root, 'target');
+  const worktree = join(targetRoot, '.worktrees', 'issue-42');
+  await mkdir(worktree, { recursive: true });
+  await execFileAsync('git', ['init', worktree]);
+  await writeFile(join(worktree, 'feature.txt'), 'checked candidate');
+  const workflowGeneration = await materializeWorkflowGeneration({ packageRoot, runtimeRoot: orchestratorHome, packageVersion: '2.0.1', bootId: 'boot-a' });
+  const bytes = Buffer.from('{"broken":');
+  const reportCorrection = { bytes, sha256: sha256(bytes), diagnostic: 'Unexpected end of JSON input' };
+  let calls = 0;
+  let transientFailure = false;
+  const process = { run: async (invocation: any) => {
+    calls++;
+    if (transientFailure) throw Object.assign(new Error('EIO: temporary filesystem error'), { code: 'EIO' });
+    assert.notEqual(invocation.cwd, worktree);
+    assert.equal(invocation.operationPolicy.sandboxMode, 'read-only');
+    assert.equal(invocation.operationPolicy.runnerPostcondition, 'report-only');
+    assert.deepEqual(invocation.operationPolicy.writableRootClasses, []);
+    assert.match(invocation.prompt, /Correct only the structured report/u);
+    assert.doesNotMatch(invocation.prompt, /Independently prove|Implement issue|When a frozen criterion/u);
+    const facts = JSON.parse(await readFile(join(invocation.cwd, `review-facts/correction-${reportCorrection.sha256}.json`), 'utf8'));
+    assert.equal(facts.originalReport, bytes.toString());
+    assert.equal(facts.originalReportSha256, reportCorrection.sha256);
+    assert.equal(facts.diagnostic, reportCorrection.diagnostic);
+    assert.ok(facts.schema.properties);
+    assert.equal(await readFile(join(invocation.cwd, 'feature.txt'), 'utf8'), 'checked candidate');
+    return { kind: 'cancelled' };
+  } };
+  const issue = { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN' as const, labels: [] };
+  const frozenCriteria = [{ id: 'ac-1', order: 1, source: 'explicit' as const, text: 'Works.' }];
+  const signal = new AbortController().signal;
+  const implementation = new ContainedImplementationAgent({ config: androidConfigFixture, orchestratorHome,
+    parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', bootId: 'boot-a',
+    git: { snapshot: async () => ({ headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64), untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'fixture' }) } as never,
+    process: process as never });
+  const runImplementation = () => implementation.run({ operation: 'implementation', attemptId: 'format-implementation', runId: 'run-42', worktreePath: worktree,
+    issue, frozenCriteria, deliveryAuthority: { version: 2, kind: 'issue', issueNumber: 42, issueUrl: issue.url, issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64) },
+    cycle: 1, reworkFindings: [], workflowGeneration, reportCorrection, signal });
+  assert.deepEqual(await runImplementation(), { kind: 'cancelled' });
+  const proof = new ContainedProofAgent({ config: androidConfigFixture, orchestratorHome,
+    parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', targetRoot, bootId: 'boot-a',
+    androidAdbPath: '/android/adb', iosXcrunPath: '/usr/bin/xcrun', processExecutor: async () => { assert.fail('Correction cannot discover iOS or launch tooling'); }, process: process as never });
+  const runProof = () => proof.run({ attemptId: 'format-proof', proofId: 'proof-42', runId: 'run-42', issue, frozenCriteria,
+    checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
+    runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
+    repairOnly: true, repairFindings: [reportCorrection.diagnostic], reportCorrection, workflowGeneration, signal });
+  assert.deepEqual(await runProof(), { kind: 'cancelled' });
+  assert.equal(calls, 2);
+  transientFailure = true;
+  await assert.rejects(runImplementation(), /EIO/u);
+  await assert.rejects(runProof(), /EIO/u);
+  transientFailure = false;
+  assert.deepEqual(await runImplementation(), { kind: 'cancelled' });
+  assert.deepEqual(await runProof(), { kind: 'cancelled' });
+  assert.equal(await readFile(join(worktree, 'feature.txt'), 'utf8'), 'checked candidate');
+});

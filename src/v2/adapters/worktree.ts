@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 import { normalizePath, uniqueSortedPaths } from './path-policy.js';
-import type { ProcessExecutor } from './command.js';
+import type { ProcessExecutor, ProcessCommandOptions } from './command.js';
 import { defaultProcessExecutor } from './command.js';
 
 export interface BranchTemplateValues {
@@ -80,7 +80,11 @@ export class GitMergeConflictError extends Error {
 }
 
 export class GitWorktreeManager {
-  public constructor(private readonly executor: ProcessExecutor = defaultProcessExecutor) {}
+  public constructor(private readonly executor: ProcessExecutor = defaultProcessExecutor, private readonly options: ProcessCommandOptions = {}) {}
+
+  private execute(file: string, args: string[]) {
+    return this.executor(file, args, { ...this.options, timeoutMs: this.options.timeoutMs ?? 60_000, processGroup: true });
+  }
 
   public async getHead(worktreePath: string): Promise<string> {
     const result = await this.git(['-C', worktreePath, 'rev-parse', 'HEAD']);
@@ -90,16 +94,11 @@ export class GitWorktreeManager {
   public async createIssueWorktree(input: CreateIssueWorktreeInput): Promise<void> {
     await mkdir(dirname(input.workspacePath), { recursive: true });
     const args = this.newIssueWorktreeArgs(input);
-    const result = await this.executor('git', args);
+    const result = await this.execute('git', args);
     if (result.exitCode === 0) {
       return;
     }
-    if (!/a branch named .+ already exists/i.test(result.stderr)) {
-      throw new Error(`git command failed: git ${args.join(' ')}\n${result.stderr}`);
-    }
-
-    await this.removeMergedStaleBranchWorktree(input);
-    await this.git(args);
+    throw new Error(`git command failed: git ${args.join(' ')}\n${result.stderr}; existing branches and materializations require confirmed ownership before cleanup`);
   }
 
   public async ensureIssueWorktree(input: EnsureIssueWorktreeInput): Promise<void> {
@@ -204,7 +203,7 @@ export class GitWorktreeManager {
   }
 
   public async mergeBranch(input: MergeBranchInput): Promise<void> {
-    const result = await this.executor('git', [
+    const result = await this.execute('git', [
       '-C',
       input.worktreePath,
       '-c',
@@ -241,7 +240,7 @@ export class GitWorktreeManager {
   }
 
   public async branchExists(targetRoot: string, branchName: string): Promise<boolean> {
-    const result = await this.executor('git', [
+    const result = await this.execute('git', [
       '-C',
       targetRoot,
       'show-ref',
@@ -259,7 +258,7 @@ export class GitWorktreeManager {
   }
 
   public async branchContainsCommit(targetRoot: string, branchName: string, commitSha: string): Promise<boolean> {
-    const result = await this.executor('git', [
+    const result = await this.execute('git', [
       '-C',
       targetRoot,
       'merge-base',
@@ -277,7 +276,7 @@ export class GitWorktreeManager {
   }
 
   public async isBranchAncestorOf(targetRoot: string, ancestorBranch: string, descendantBranch: string): Promise<boolean> {
-    const result = await this.executor('git', [
+    const result = await this.execute('git', [
       '-C',
       targetRoot,
       'merge-base',
@@ -300,7 +299,7 @@ export class GitWorktreeManager {
   }
 
   private async git(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    const result = await this.executor('git', args);
+    const result = await this.execute('git', args);
     if (result.exitCode !== 0) {
       throw new Error(`git command failed: git ${args.join(' ')}\n${result.stderr}`);
     }
@@ -321,41 +320,11 @@ export class GitWorktreeManager {
     ];
   }
 
-  private async removeMergedStaleBranchWorktree(input: CreateIssueWorktreeInput): Promise<void> {
-    const ancestor = await this.executor('git', [
-      '-C',
-      input.targetRoot,
-      'merge-base',
-      '--is-ancestor',
-      input.branchName,
-      input.requiredBaseSha ?? input.baseBranch,
-    ]);
-    if (ancestor.exitCode !== 0) {
-      throw new Error(
-        `Existing branch ${input.branchName} is not merged into the required base; refusing to remove it automatically.`,
-      );
-    }
-
-    const worktrees = parseWorktreeList((await this.git(['-C', input.targetRoot, 'worktree', 'list', '--porcelain'])).stdout);
-    const staleWorktree = worktrees.find((worktree) => worktree.branch === `refs/heads/${input.branchName}`);
-    if (staleWorktree) {
-      const status = await this.git(['-C', staleWorktree.path, 'status', '--porcelain=v1']);
-      if (status.stdout.trim().length > 0) {
-        throw new Error(
-          `Existing worktree for ${input.branchName} has uncommitted changes at ${staleWorktree.path}; refusing to remove it automatically.`,
-        );
-      }
-      await this.removeWorktree({ targetRoot: input.targetRoot, worktreePath: staleWorktree.path });
-    }
-
-    await this.git(['-C', input.targetRoot, 'branch', '-d', input.branchName]);
-  }
-
   private async assertBranchContainsRequiredBase(input: EnsureIssueWorktreeInput): Promise<void> {
     if (!input.requiredBaseSha) {
       return;
     }
-    const ancestor = await this.executor('git', [
+    const ancestor = await this.execute('git', [
       '-C',
       input.targetRoot,
       'merge-base',

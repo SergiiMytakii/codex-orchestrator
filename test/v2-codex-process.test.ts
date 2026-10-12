@@ -233,7 +233,8 @@ test('classifies nonzero exit, spawn failure, and bounded-output overflow separa
       reportPath: fixture.reportPath,
       streams: { stdout: Buffer.from('partial'), stderr: Buffer.alloc(0), truncated: true },
     })).run(fixture.input(), new AbortController().signal);
-    assert.equal(truncated.kind, 'output-truncated');
+    assert.equal(truncated.kind, 'completed');
+
   });
 });
 
@@ -585,3 +586,77 @@ async function withRunFixture(
 
 const _spawnTypeProof: SpawnSupervisedProcess | undefined = undefined;
 void _spawnTypeProof;
+
+ test('wall deadline includes durable onSpawned persistence and never releases a hung gate', { timeout: 2_000 }, async () => {
+  await withRunFixture(async (fixture) => {
+    const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
+    const result = await new CodexProcess(async () => child).run(fixture.input({ timeoutMs: 30,
+      onSpawned: () => new Promise(() => undefined),
+    }), new AbortController().signal);
+    assert.equal(result.kind, 'timeout');
+    assert.equal(child.events.includes('stdin'), false);
+    assert.deepEqual(child.terminations, ['SIGTERM']);
+  });
+});
+
+test('real supervised worker hung on stdin returns timeout or preserves unconfirmed group ownership', { timeout: 20_000 }, async () => {
+  await withRunFixture(async (fixture) => {
+    let child: SupervisedChild | undefined;
+    const runner = new CodexProcess(async (spec) => {
+      child = await spawnNodeSupervisedProcess({
+        ...spec, file: process.execPath,
+        args: ['-e', 'process.stdin.pause(); setInterval(() => {}, 1000)'],
+      });
+      return child;
+    });
+    try {
+      const result = await runner.run({ ...fixture.input({ timeoutMs: 100, idleTimeoutMs: 1_000 }),
+        prompt: 'x'.repeat(4 * 1024 * 1024),
+      }, new AbortController().signal);
+      assert.equal(result.kind, 'timeout');
+      assert.equal(result.report.kind, 'missing');
+      assert.throws(() => process.kill(-result.processGroupId!, 0), { code: 'ESRCH' });
+    } catch (error) {
+      assert.ok(error instanceof ProcessQuiescenceError);
+      assert.equal((error.cause as NodeJS.ErrnoException).code, 'EPERM');
+      assert.equal(error.pid, child?.pid);
+      assert.equal(error.processGroupId, child?.processGroupId);
+    }
+    const ownedChild = child;
+    assert.ok(ownedChild);
+    // Both accepted outcomes require the actual owned leader to have exited.
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([ownedChild.waitForExit(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('owned leader did not exit')), 2_000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+    assert.throws(() => process.kill(ownedChild.pid, 0), { code: 'ESRCH' });
+  });
+});
+
+// A permission failure must not clear process ownership without positive absence.
+test('group signal permission error keeps typed ownership when reobservation stays live', async () => {
+  await withRunFixture(async (fixture) => {
+    const child = new FakeChild({ reportPath: fixture.reportPath, groupFailures: Number.POSITIVE_INFINITY });
+    child.terminateGroup = async () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); };
+    await assert.rejects(new CodexProcess(async () => child).run(fixture.input(), new AbortController().signal),
+      (error: unknown) => error instanceof ProcessQuiescenceError
+        && (error.cause as NodeJS.ErrnoException).code === 'EPERM'
+        && error.pid === child.pid && error.processGroupId === child.processGroupId);
+  });
+});
+
+test('real oversized service output preserves the atomic report and bounded diagnostic bytes', { timeout: 5_000 }, async () => {
+  await withRunFixture(async (fixture) => {
+    const runner = new CodexProcess((spec) => spawnNodeSupervisedProcess({
+      ...spec, file: process.execPath,
+      args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '{"status":"fixture"}'); process.stdout.write(Buffer.alloc(1024 * 1024 + 1, 120));`],
+    }));
+    const result = await runner.run(fixture.input(), new AbortController().signal);
+    assert.equal(result.kind, 'completed');
+    assert.equal(result.outputTruncated, true);
+    assert.equal(result.stdout.length, 1024 * 1024);
+    assert.equal(result.report.kind, 'available');
+  });
+});

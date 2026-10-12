@@ -5,7 +5,7 @@ type CommitEffect = Extract<PendingEffect, { kind: 'initial-commit' | 'review-up
 type PushEffect = Extract<PendingEffect, { kind: 'initial-push' | 'review-update-push' }>;
 type DraftPullRequestEffect = Extract<PendingEffect, { kind: 'draft-pr' }>;
 type CommentEffect = Extract<PendingEffect, {
-  kind: 'claim-comment' | 'terminal-comment' | 'review-summary';
+  kind: 'claim-comment' | 'terminal-comment' | 'review-summary' | 'issue-feedback-comment';
 }>;
 type LabelsEffect = Extract<PendingEffect, {
   kind: 'claim-labels' | 'terminal-labels' | 'review-activation-labels'
@@ -47,7 +47,7 @@ export function settleDraftPullRequestEffect(
 }
 
 export function settleCommentEffect(effect: CommentEffect, adapter: FiniteEffectAdapter): Promise<EffectSettlement> {
-  assertEffect(effect, ['claim-comment', 'terminal-comment', 'review-summary'], 'comment');
+  assertEffect(effect, ['claim-comment', 'terminal-comment', 'review-summary', 'issue-feedback-comment'], 'comment');
   return settle(adapter);
 }
 

@@ -5,11 +5,11 @@ import { GhCliPullRequestAdapter } from '../src/v2/adapters/gh-pull-request-adap
 import type { CommandExecutor } from '../src/v2/adapters/gh-cli.js';
 
 test('reads the authoritative head SHA from the REST pull-request snapshot', async () => {
-  const executor: CommandExecutor = async () => jsonResult([[{
+  const executor: CommandExecutor = async () => jsonResult([{
     number: 17, node_id: 'PR_rest', html_url: 'https://github.com/owner/repo/pull/17',
     state: 'open', merged_at: null, draft: true, title: 'Change', body: '<!-- marker -->',
     author_association: 'MEMBER', head: { ref: 'codex/issue-42', sha: 'b'.repeat(40) }, base: { ref: 'main' },
-  }]]);
+  }]);
 
   const pulls = await new GhCliPullRequestAdapter('owner', 'repo', executor).listAllByHeadBranch('codex/issue-42');
 
@@ -242,3 +242,16 @@ function restConversationComment(): Record<string, unknown> {
     user: { id: '90071992547409930004', login: 'writer', type: 'User' },
   };
 }
+
+test('reads more than twenty pages and two thousand submitted reviews completely', async () => {
+  let pages = 0;
+  const executor: CommandExecutor = async (_file, args) => {
+    pages += 1;
+    const page = Number(args.find((arg) => arg.startsWith('page='))?.slice(5));
+    return { stdout: page <= 21 ? Array.from({ length: 100 }, (_, i) => JSON.stringify({ ...restReview(), id: String((page - 1) * 100 + i + 1) })).join('\n') : '', stderr: '' };
+  };
+  const reviews = await new GhCliPullRequestAdapter('owner', 'repo', executor).listSubmittedReviews(17);
+  assert.equal(reviews.length, 2100);
+  assert.equal(reviews.at(-1)!.databaseId, '2100');
+  assert.equal(pages, 22);
+});

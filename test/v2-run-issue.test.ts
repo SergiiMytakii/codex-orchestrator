@@ -8,7 +8,7 @@ import { test } from 'node:test';
 
 import { promisify } from 'node:util';
 
-import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1 } from '../src/v2/checked-change.js';
+import type { CheckedChange, CheckedChangePayload, CheckedChangePayloadV1, CheckedChangePayloadV2 } from '../src/v2/checked-change.js';
 import { createCheckedChangeCapabilities } from '../src/v2/checked-change.js';
 import type { AgentAutoConfig } from '../src/v2/config.js';
 import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from '../src/v2/containment.js';
@@ -365,29 +365,29 @@ test('candidate V2 ignores shared-index authority, pins the stable tree across p
     activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: 'f'.repeat(40) }],
   });
   assert.equal(divergedActive.kind, 'failed');
-  assert.deepEqual(await restartedAdapter.candidateV2.reconcileOrphans!({
+  assert.equal((await restartedAdapter.candidateV2.reconcileOrphans!({
     repositoryRoot: root,
     workspaceRoot: join(root, '.worktrees'),
     activeCandidateRefs: [binding.candidateRef],
     pendingCandidates: [],
     activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: binding.candidateCommitSha }],
-  }), { kind: 'ok', value: undefined });
+  })).kind, 'failed');
   assert.equal((await execFileAsync('git', ['-C', prepared.value.materialization.path, 'rev-parse', 'HEAD'])).stdout.trim(), binding.candidateCommitSha);
-  await assert.rejects(readFile(join(unrecordedSiblingPath, 'tracked.txt')));
+  assert.equal(await readFile(join(unrecordedSiblingPath, 'tracked.txt'), 'utf8'), 'authoritative worktree bytes\n');
   const orphanRef = `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000099/${'9'.repeat(64)}`;
   const orphanPath = join(root, '.worktrees', '.candidate-materializations', 'orphan');
   await execFileAsync('git', ['-C', root, 'update-ref', orphanRef, binding.candidateCommitSha]);
   await mkdir(join(root, '.worktrees', '.candidate-materializations'), { recursive: true });
   await execFileAsync('git', ['-C', root, 'worktree', 'add', '--detach', orphanPath, binding.candidateCommitSha]);
-  assert.deepEqual(await restartedAdapter.candidateV2.reconcileOrphans!({
+  assert.equal((await restartedAdapter.candidateV2.reconcileOrphans!({
     repositoryRoot: root,
     workspaceRoot: join(root, '.worktrees'),
     activeCandidateRefs: [binding.candidateRef],
     pendingCandidates: [],
     activeMaterializations: [{ path: prepared.value.materialization.path, candidateCommitSha: binding.candidateCommitSha }],
-  }), { kind: 'ok', value: undefined });
-  await assert.rejects(execFileAsync('git', ['-C', root, 'rev-parse', '--verify', orphanRef]));
-  await assert.rejects(readFile(join(orphanPath, 'tracked.txt')));
+  })).kind, 'failed');
+  assert.equal((await execFileAsync('git', ['-C', root, 'rev-parse', '--verify', orphanRef])).stdout.trim(), binding.candidateCommitSha);
+  assert.equal(await readFile(join(orphanPath, 'tracked.txt'), 'utf8'), 'authoritative worktree bytes\n');
   assert.equal((await execFileAsync('git', ['-C', prepared.value.materialization.path, 'rev-parse', 'HEAD^{tree}'])).stdout.trim(), binding.candidateTreeSha);
   const artifactPath = '.codex-orchestrator/proofs/proof-2/evidence.txt';
   const artifactBytes = Buffer.from('candidate evidence\n');
@@ -559,11 +559,11 @@ test('review-ready persists before independent bounded terminal notifications', 
   const exhausted = (await fixture.store.read()).runs[0]!;
   assert.equal(exhausted.terminalOutcome?.status, 'review-ready');
   assert.deepEqual(exhausted.terminalNotifications?.comment, {
-    status: 'exhausted', attempts: 3, diagnostic: 'terminal-comment-delivery-unknown',
+    status: 'pending', attempts: 3, diagnostic: 'terminal-comment-delivery-unknown',
   });
   const attempts = fixture.events.filter((event) => event === 'effect:handoff-comment').length;
   await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(fixture.events.filter((event) => event === 'effect:handoff-comment').length, attempts);
+  assert.equal(fixture.events.filter((event) => event === 'effect:handoff-comment').length, attempts + 1);
 });
 
 test('terminal comment succeeds when managed-label reconciliation permanently fails', async () => {
@@ -588,11 +588,11 @@ test('terminal comment succeeds when managed-label reconciliation permanently fa
   await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.deepEqual((await fixture.store.read()).runs[0]?.terminalNotifications?.labels, {
-    status: 'exhausted', attempts: 3, diagnostic: 'terminal-labels-delivery-unknown',
+    status: 'pending', attempts: 3, diagnostic: 'terminal-labels-delivery-unknown',
   });
   const attempts = fixture.events.filter((event) => event === 'effect:terminal-labels').length;
   await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, attempts);
+  assert.equal(fixture.events.filter((event) => event === 'effect:terminal-labels').length, attempts + 1);
 });
 
 test('all terminal outcomes persist before permanent managed-label failure', async () => {
@@ -897,21 +897,20 @@ test('missing retained reviewer authority stops as a Runner error without reques
   assert.equal(fixture.events.includes('push'), false);
 });
 
-test('repeated malformed review stops after one correction and preserves the candidate across restart', async () => {
+test('repeated malformed review retains report correction across ordinary Runner restarts', async () => {
   const fixture = await runFixture({ reviewMalformedCount: 6, fileBackedStore: true });
-  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
-  const result = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'blocked');
-  if (result.status === 'blocked') assert.match(result.blocker?.summary ?? '', /report.*correction|correction.*report/iu);
-  const record = (await fixture.store.read()).runs[0]!;
-  assert.equal(record.directReview?.review.reportRepairs, 2);
-  assert.ok(record.candidateBinding);
-  assert.equal(record.cycle, 1);
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
-  assert.equal(fixture.events.includes('push'), false);
-  assert.equal(await readFile(join(record.worktreePath, 'feature.txt'), 'utf8'), 'implemented\n');
-  assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
-  assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 2);
+  for (let tick = 0; tick < 6; tick += 1) {
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  }
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.directReview?.review.reportRepairs, 6);
+  assert.ok(retained.candidateBinding);
+  assert.equal(retained.cycle, 1);
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
+  assert.deepEqual(fixture.reviewReportRepairInputs.map((entry) => entry.repairOnly), [false, true, true, true, true, true, true]);
+  assert.equal((await fixture.store.read()).runs[0]!.runId, retained.runId);
 });
 
 test('incoherent needs-work is repaired report-only instead of reaching terminal state', async () => {
@@ -1043,7 +1042,7 @@ test('trusted issue question answers on the same Run and PR without code, checks
   assert.equal(responseReceipt?.kind, 'responded');
   if (responseReceipt?.kind === 'responded') assert.equal(responseReceipt.publication, 'failed');
   assert.equal(after.reviewFeedback?.activeBatch, null);
-  assert.equal(after.pendingEffect, undefined);
+  assert.equal(after.pendingEffect?.kind, 'issue-feedback-comment');
   assert.equal((await fixture.dependencies.issues.read(42))?.labels.includes('manual:keep'), true);
   assert.deepEqual(after.terminalOutcome, before.terminalOutcome);
   assert.equal(after.outcomeEvidenceId, before.outcomeEvidenceId);
@@ -1154,6 +1153,52 @@ test('trusted issue question answers on the same Run and PR without code, checks
   assert.deepEqual((await fixture.store.read()).runs[0]!.proofReceipt, before.proofReceipt);
   assert.equal(proofInputs.length, 2);
 });
+
+for (const fault of ['before-send', 'after-send', 'revoked-auto'] as const) {
+  test(`issue feedback response keeps its durable intent through ${fault} delivery failure`, async () => {
+    const fixture = await runFixture({ fileBackedStore: true });
+    await prepareActiveIssueFeedback(fixture);
+    const before = (await fixture.store.read()).runs[0]!;
+    let answers = 0;
+    fixture.dependencies.implementationAgent.run = async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
+      answers += 1;
+      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onLaunched?.({ attemptId, pid: 9191, processGroupId: 9191, launchedAt: '2026-07-16T12:10:03.000Z' });
+      return { kind: 'completed', attemptId, report: { version: 1, status: 'answer-only', summary: 'Answer ready.', changedFiles: [], residualRisks: [], response: 'The exact answer.' } };
+    };
+    const post = fixture.dependencies.issues.postComment;
+    let failures = fault === 'after-send' ? 1 : 4;
+    fixture.dependencies.issues.postComment = async (issueNumber, body) => {
+      if (body.includes(':issue-feedback:') && failures > 0) {
+        failures -= 1;
+        if (fault === 'after-send') await post(issueNumber, body);
+        throw new Error('temporary response transport failure');
+      }
+      return post(issueNumber, body);
+    };
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+    const pending = (await fixture.store.read()).runs[0]!.pendingEffect;
+    assert.equal(pending?.kind, 'issue-feedback-comment');
+    if (fault === 'revoked-auto') {
+      const read = fixture.dependencies.issues.read;
+      fixture.dependencies.issues.read = async (number) => {
+        const issue = await read(number);
+        return issue ? { ...issue, labels: issue.labels.filter((label) => label !== 'agent:auto') } : issue;
+      };
+    }
+    for (let tick = 0; tick < 5; tick += 1) assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+    const completed = (await fixture.store.read()).runs[0]!;
+    assert.equal(completed.runId, before.runId);
+    assert.equal(completed.pendingEffect, undefined);
+    assert.equal(completed.reviewFeedback?.history.at(-1)?.kind, 'responded');
+    const receipt = completed.reviewFeedback?.history.at(-1);
+    if (receipt?.kind === 'responded') assert.equal(receipt.publication, fault === 'revoked-auto' ? 'suppressed' : 'delivered');
+    assert.equal(fixture.comments.filter((comment) => comment.body.includes(':issue-feedback:')).length, fault === 'revoked-auto' ? 0 : 1);
+    assert.equal(answers, 1);
+    assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
+  });
+}
 
 test('answer-only fails closed when the discovered open PR no longer matches the frozen batch identity', async () => {
   const fixture = await runFixture();
@@ -1591,10 +1636,12 @@ test('trusted issue-comment repair runs checks, proof, review, and updates the s
   assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:blocked', 'extra', 'manual:keep']);
   assert.equal(
     (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
-    1,
+    0,
+    'revoked claim must suppress new notification publication',
   );
   const blockedRecord = (await fixture.store.read()).runs[0]!;
   assert.equal(blockedRecord.pendingEffect, undefined);
+  assert.equal(blockedRecord.terminalNotifications?.comment.diagnostic, 'terminal-comment-observation-diverged');
   assert.deepEqual(pick(blockedRecord.terminalOutcome!, ['status', 'kind', 'resumable']), {
     status: 'blocked', kind: 'safety', resumable: false,
   });
@@ -1932,13 +1979,13 @@ test('not eligible and revoked authorization start no implementation or publicat
   assert.equal(revoked.events.includes('agent'), false);
 });
 
-test('malformed config and run state return typed internal error before claim effects', async () => {
+test('malformed config stops while state I/O remains resumable before claim effects', async () => {
   const invalidConfig = await runFixture({ invalidConfig: true });
   assert.equal((await invalidConfig.runner.runIssue({ targetRoot: invalidConfig.targetRoot, issueNumber: 42 })).status, 'internal-error');
   assert.equal(invalidConfig.events.includes('effect:claim-labels'), false);
 
   const invalidState = await runFixture({ storeReadReject: true });
-  assert.equal((await invalidState.runner.runIssue({ targetRoot: invalidState.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  assert.equal((await invalidState.runner.runIssue({ targetRoot: invalidState.targetRoot, issueNumber: 42 })).status, 'transport-failed');
   assert.equal(invalidState.events.includes('effect:claim-labels'), false);
 });
 
@@ -2269,43 +2316,23 @@ test('failed checks and proof findings rework the same worktree until review-rea
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
 });
 
-test('repeated failed check on unchanged candidate stops durably after a repair attempt', async () => {
+test('repeated failed check on unchanged candidate remains a bounded semantic repair', async () => {
   let checkCalls = 0;
-  const fixture = await runFixture({
-    fileBackedStore: true,
+  const fixture = await runFixture({ fileBackedStore: true,
     check: async () => ({ status: 'failed', output: Buffer.from(`failure observation ${++checkCalls}`) }),
   });
   const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
   assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
   const candidateContent = await readFile(join(fixture.worktreePath, 'feature.txt'));
   fixture.options.agentWrites = false;
-  const restart = () => new RunIssue({
-    ...fixture.dependencies,
-    runRecords: new FileRunRecordWriter(fixture.statePath),
-  });
-  const blocked = await restart().runIssue(input);
-  assert.deepEqual(pick(blocked, ['status', 'kind', 'resumable']), {
-    status: 'blocked', kind: 'external', resumable: false,
-  });
-  const retained = (await new FileRunRecordWriter(fixture.statePath).read()).runs[0]!;
-  assert.equal(retained.cycle, 2);
-  assert.equal(retained.checks[0]?.status, 'failed');
-  assert.ok(retained.candidateBinding, 'blocked run retains the immutable candidate');
-  assert.equal(retained.candidateBinding.candidateTreeSha, retained.failedCheckRepair?.candidateTreeSha);
-  if (blocked.status !== 'blocked') throw new Error('Expected a blocked result');
-  const terminalEvidence = JSON.parse(await readFile(resolve(fixture.targetRoot, blocked.evidencePath), 'utf8'));
-  assert.equal(terminalEvidence.code, 'configured-check-repair-no-progress');
-  const pin = await execFileAsync('git', ['-C', fixture.worktreePath, 'rev-parse', retained.candidateBinding.candidateRef]);
-  assert.equal(pin.stdout.trim(), retained.candidateBinding.candidateCommitSha);
+  for (let tick = 0; tick < 4; tick += 1) {
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+  }
   assert.deepEqual(await readFile(join(fixture.worktreePath, 'feature.txt')), candidateContent);
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
-  assert.equal(checkCalls, 2);
+  assert.equal(checkCalls, 5);
   assert.equal(fixture.events.includes('proof'), false);
   assert.equal(fixture.events.includes('git:push'), false);
-  assert.equal(fixture.events.includes('review:code-review'), false);
-  assert.deepEqual(await restart().runIssue(input), blocked);
-  assert.equal(checkCalls, 2, 'ordinary reentry replays the terminal outcome');
-  assert.equal(fixture.events.filter((event) => event === 'agent').length, 2);
+  assert.equal((await fixture.store.read()).runs[0]!.terminalOutcome, undefined);
 });
 
 test('successful check clears its failure marker before a later unchanged-code repair', async () => {
@@ -2328,7 +2355,7 @@ test('successful check clears its failure marker before a later unchanged-code r
   assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false);
   const freshCheckFailure = await restart().runIssue(input);
   assert.deepEqual(pick(freshCheckFailure, ['status', 'source']), { status: 'repair-ready', source: 'check' });
-  assert.equal((await restart().runIssue(input)).status, 'blocked');
+  assert.equal((await restart().runIssue(input)).status, 'repair-ready');
   assert.equal(checkCalls, 4);
 });
 
@@ -2404,7 +2431,8 @@ test('a different check identity or command permits repair on unchanged code', a
     fixture.dependencies.readConfig = async () => ({
       config: loaded.config, bytes: Buffer.from(`${canonicalJson(loaded.config)}\n`),
     });
-    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+    const resumed = await new RunIssue(fixture.dependencies).runIssue(input);
+    assert.equal(resumed.status, 'repair-ready', JSON.stringify({ resumed, checks, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   }
 });
 
@@ -2660,27 +2688,19 @@ test('credential-bearing Review target blocks durably instead of retrying transp
   assert.equal(fixture.events.slice(before).some((event) => event === 'agent:implementation' || event === 'proof' || event.startsWith('review:')), false);
 });
 
-test('Review waits when every available target patch is oversized or denied', async () => {
-  const cases = [
-    {
-      name: 'oversized patch',
-      diffTreeOverride: { changedFiles: ['feature.txt'], patch: `diff --git a/feature.txt b/feature.txt\n+${'x'.repeat(1024 * 1024)}` },
-    },
-    {
-      name: 'denied path', denyReadPaths: ['secrets/**'],
-      diffTreeOverride: { changedFiles: ['secrets/value.txt'], patch: 'diff --git a/secrets/value.txt b/secrets/value.txt\n-old\n+new\n' },
-    },
-  ];
-  for (const entry of cases) {
-    const fixture = await runFixture({
-      reviewNeedsWorkOnce: true, diffTreeOverride: entry.diffTreeOverride, denyReadPaths: entry.denyReadPaths,
-      configuredChecks: { lint: 'npm run lint', typecheck: 'npm run typecheck' },
-    });
-    assert.deepEqual(pick(await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 }), ['status', 'resumable']), {
-      status: 'transport-failed', resumable: true,
-    }, entry.name);
-    assert.equal(fixture.reviewInputs.length, 0, entry.name);
-  }
+test('Review admits a large exact target and waits for denied paths', async () => {
+  const patch = `diff --git a/feature.txt b/feature.txt\n+${'x'.repeat(1024 * 1024)}`;
+  const large = await runFixture({ diffTreeOverride: { changedFiles: ['feature.txt'], patch },
+    configuredChecks: { lint: 'npm run lint', typecheck: 'npm run typecheck' } });
+  assert.equal((await large.runner.runIssue({ targetRoot: large.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.equal(large.reviewInputs[0]?.targetPatch, patch);
+  const denied = await runFixture({ reviewNeedsWorkOnce: true, denyReadPaths: ['secrets/**'],
+    diffTreeOverride: { changedFiles: ['secrets/value.txt'], patch: 'diff --git a/secrets/value.txt b/secrets/value.txt\n-old\n+new\n' },
+    configuredChecks: { lint: 'npm run lint', typecheck: 'npm run typecheck' } });
+  assert.deepEqual(pick(await denied.runner.runIssue({ targetRoot: denied.targetRoot, issueNumber: 42 }), ['status', 'resumable']), {
+    status: 'transport-failed', resumable: true,
+  });
+  assert.equal(denied.reviewInputs.length, 0);
 });
 
 test('ordinary external and safety terminals publish the blocked issue status', async () => {
@@ -3012,7 +3032,7 @@ test('blocked comment settlement never posts after the issue closes', async () =
   }
   assert.equal(fixture.events.filter((event) => event === 'effect:blocked-comment').length, postAttempts);
   assert.deepEqual((await fixture.store.read()).runs[0]?.terminalNotifications?.comment, {
-    status: 'exhausted', attempts: 3, diagnostic: 'terminal-comment-observation-diverged',
+    status: 'exhausted', attempts: 2, diagnostic: 'terminal-comment-observation-diverged',
   });
   assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
 });
@@ -3061,6 +3081,26 @@ test('blocked comment survives a crash after remote publication without duplicat
     (await fixture.dependencies.issues.read(42))?.comments.filter((comment) => comment.body.includes(':blocked -->')).length,
     1,
   );
+});
+
+test('closed issue confirms a previously posted terminal comment without another publication', async () => {
+  const fixture = await runFixture({ fileBackedStore: true,
+    rejectStoreTransition: { from: 'terminal-comment', to: 'none' },
+    proof: async () => ({ status: 'external-block', blocker: {
+      kind: 'service', summary: 'down', attempted: ['retry'], resumable: false,
+    }, receipt: receipt() }),
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  assert.equal((await fixture.store.read()).runs[0]!.pendingEffect?.kind, 'terminal-comment');
+  const posts = fixture.events.filter((event) => event === 'effect:blocked-comment').length;
+  assert.equal(fixture.comments.filter((comment) => comment.body.includes(':blocked -->')).length, 1);
+  fixture.setIssueState('CLOSED');
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'blocked');
+  assert.equal((await fixture.store.read()).runs[0]!.terminalNotifications?.comment.status, 'delivered');
+  assert.equal(fixture.events.filter((event) => event === 'effect:blocked-comment').length, posts);
+  assert.equal(fixture.comments.filter((comment) => comment.body.includes(':blocked -->')).length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
 });
 
 test('blocked label delivery survives a crash after the remote effect without duplicating work or labels', async () => {
@@ -3223,6 +3263,103 @@ for (const failure of [
     assert.deepEqual(fixture.checkedChangePayloads[1], checked);
   });
 }
+
+for (const fault of ['correction-write', 'after-correction-persist'] as const) {
+  test(`proof report correction preserves its exact result and artifacts through ${fault}`, async () => {
+    const bytes = Buffer.from('{"version":1}');
+    const malformed: ProveChangeResult = { status: 'report-repair', reportRepairCount: 1, findings: ['missing proof fields'],
+      reportCorrection: { bytes, sha256: sha256(bytes), diagnostic: 'missing proof fields' } };
+    let scenarios = 0;
+    const fixture = await runFixture({ fileBackedStore: true, proof: async () => ++scenarios === 1 ? malformed : passedProof() });
+    const prove = fixture.dependencies.proof.proveChange;
+    const inputs: ProofInput[] = [];
+    fixture.dependencies.proof.proveChange = async (input) => {
+      inputs.push(input);
+      if (input.recoverOnly && !input.reportCorrection) return malformed;
+      return prove(input);
+    };
+    let injected = false;
+    if (fault === 'correction-write') {
+      const write = fixture.dependencies.writeAttemptResult;
+      fixture.dependencies.writeAttemptResult = async (input) => {
+        if (!injected && input.path.includes('.report-correction-')) {
+          injected = true;
+          throw new Error('temporary correction artifact write failure');
+        }
+        return write(input);
+      };
+    } else {
+      const writer = fixture.dependencies.runRecords;
+      fixture.dependencies.runRecords = {
+        inspect: () => writer.inspect(), read: () => writer.read(),
+        compareAndSwap: async (generation, next) => {
+          const record = next.runs[0];
+          const saved = await writer.compareAndSwap(generation, next);
+          if (!injected && record?.proofExecution?.reportCorrection && record.activeAttempt?.stage === 'adopted') {
+            injected = true;
+            throw new Error('interrupted after durable proof correction publication');
+          }
+          return saved;
+        },
+      };
+    }
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+    const retained = (await fixture.store.read()).runs[0]!;
+    assert.equal(retained.activeAttempt?.stage, 'adopted');
+    assert.ok(retained.candidateMaterialization);
+    if (fault === 'correction-write') assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'transport-failed');
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+    const repair = inputs.find((entry) => entry.reportCorrection);
+    assert.ok(repair);
+    assert.deepEqual(repair.reportCorrection?.bytes, bytes);
+    assert.equal(repair.reportCorrection?.sha256, sha256(bytes));
+    assert.equal(repair.reportCorrection?.diagnostic, 'missing proof fields');
+    assert.equal(repair.materialization?.path, retained.candidateMaterialization?.path);
+    assert.equal(scenarios, 2, 'one original scenario and one report correction invocation');
+    assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+    assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 1);
+  });
+}
+
+test('ordinary proof terminal retry requires proven technical evidence and preserves successful checks', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({ status: 'internal-error',
+    receipt: { ...passedProof().receipt, summary: 'Proof agent failed: EIO.' } }) });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'internal-error');
+  const before = (await fixture.store.read()).runs[0]!;
+  fixture.dependencies.hasTechnicalTerminalProofFailure = async () => false;
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'internal-error');
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
+  fixture.dependencies.hasTechnicalTerminalProofFailure = async () => true;
+  fixture.options.proof = async () => passedProof();
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.runId, before.runId);
+  assert.deepEqual((fixture.checkedChangePayloads.at(-1)! as CheckedChangePayloadV2).binding, before.candidateBinding);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'proof').length, 2);
+});
+
+test('legacy explicit technical terminal resumes the same checked candidate without reimplementation', async () => {
+  let proofCalls = 0;
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ++proofCalls === 1
+    ? { status: 'transport-failed', resumable: true } : passedProof() });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const state = await fixture.store.read();
+  const record = state.runs[0]!;
+  const candidate = structuredClone(record.candidateBinding);
+  record.lifecycle = 'transport-failed';
+  record.terminalOutcome = { status: 'transport-failed', resumable: true, evidencePath: 'legacy-technical-transport.json' };
+  await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+  assert.equal((await fixture.store.read()).runs[0]!.runId, record.runId);
+  assert.deepEqual((fixture.checkedChangePayloads.at(-1)! as CheckedChangePayloadV2).binding, candidate);
+  assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, 1);
+  assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 1);
+  assert.equal(proofCalls, 2);
+});
 
 test('settled implementation, proof, and review infrastructure failures resume on the next bounded run', async () => {
   let proofCalls = 0;
@@ -3504,7 +3641,8 @@ test('post-proof drift persists the next cycle before fallible pin cleanup', asy
   const transitioned = (await fixture.store.read()).runs[0]!;
   assert.equal(transitioned.lifecycle, 'implementing');
   assert.equal(transitioned.cycle, 2);
-  assert.equal(transitioned.candidateBinding, undefined);
+  assert.ok(transitioned.candidateBinding, 'old candidate ownership survives the cleanup failure');
+  assert.equal(transitioned.pendingEffect?.kind, 'candidate-pin-release');
   const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(replay.status, 'review-ready', JSON.stringify({ replay, state: await fixture.store.read(), events: fixture.events }));
 });

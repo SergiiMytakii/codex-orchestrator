@@ -1,5 +1,5 @@
-import type { CommandExecutionError, CommandExecutor } from './gh-cli.js';
-import { defaultGhExecutor } from './gh-cli.js';
+import type { CommandExecutionError, CommandExecutor, GitHubExecutionOptions } from './gh-cli.js';
+import { defaultGhExecutor, githubCollectionExecutor, githubExecutor, githubRestCollection } from './gh-cli.js';
 import type {
   CloseIssueEvidenceInput,
   CreateIssueInput,
@@ -27,9 +27,10 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
     repo: string,
     executor: CommandExecutor = defaultGhExecutor,
     private readonly now: () => string = () => new Date().toISOString(),
+    private readonly executionOptions: GitHubExecutionOptions = {},
   ) {
     this.repo = `${owner}/${repo}`;
-    this.executor = executor;
+    this.executor = githubExecutor(executor, executionOptions);
   }
 
   public async listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]> {
@@ -42,22 +43,14 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
 
   private async listIssuesWithAnyLabel(labels: string[], state: 'open' | 'closed'): Promise<GitHubIssue[]> {
     const wanted = new Set(labels);
-    const result = await this.executor('gh', [
-      'issue',
-      'list',
-      '--repo',
-      this.repo,
-      '--state',
-      state,
-      '--limit',
-      '1000',
-      '--json',
-      issueJsonFields,
-    ]);
-    const parsed = JSON.parse(result.stdout) as unknown[];
+    const parsed = await githubRestCollection(githubCollectionExecutor(this.executor, this.executionOptions), `repos/${this.repo}/issues`, ['-f', `state=${state}`]);
 
     return parsed
-      .map(normalizeIssue)
+      .filter((item) => !(typeof item === 'object' && item !== null && 'pull_request' in item))
+      .map((item) => {
+        const record = item as Record<string, unknown>;
+        return normalizeIssue({ ...record, url: record.html_url ?? record.url, body: record.body ?? '', state: String(record.state).toUpperCase(), comments: [], closedByPullRequestsReferences: [] });
+      })
       .filter((issue) => issue.labels.some((label) => wanted.has(label.name)))
       .sort((left, right) => left.number - right.number);
   }
@@ -87,16 +80,8 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
   }
 
   public async listAllComments(issueNumber: number): Promise<GitHubIssueComment[]> {
-    const result = await this.executor('gh', [
-      'api', '--paginate', '--method', 'GET',
-      `repos/${this.repo}/issues/${issueNumber}/comments`,
-      '-f', 'per_page=100',
-      '--jq', '.[] | .id = (.id | tostring) | .user.id = (.user.id | tostring)',
-    ]);
-    return result.stdout
-      .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .map((line) => normalizeRestComment(JSON.parse(line) as unknown));
+    const comments = await githubRestCollection(githubCollectionExecutor(this.executor, this.executionOptions), `repos/${this.repo}/issues/${issueNumber}/comments`, [], '.[] | .id = (.id | tostring) | .user.id = (.user.id | tostring)');
+    return comments.map(normalizeRestComment);
   }
 
   public async getRepositoryPermission(login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation> {

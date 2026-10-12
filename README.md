@@ -117,31 +117,30 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
 
-A terminal Acceptance Proof internal failure is replayed by ordinary calls. To explicitly retry its checks and proof, supply the exact run ID from durable state:
+Technical Acceptance Proof failures resume on the next ordinary call for the same candidate. Ambiguous legacy internal failures remain stopped. To explicitly retry an eligible legacy proof failure, supply its exact durable run ID:
 
 ```sh
 npx codex-orchestrator run --target "$PWD" --issue 123 --retry-proof <run-id>
 ```
 
-This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context and check receipts, then runs checks, fresh Acceptance Proof, and Review before publication. Other terminal outcomes cannot be reopened. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
+This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context, preserves valid check receipts, and requires fresh Acceptance Proof and Review before publication. Other terminal outcomes cannot be reopened. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
 
 Review persists its exact validation context before launch, including reviewer
 roles, required coverage, finding IDs and target identity. Recovery checks a
 retained report against that same context. Missing context is a Runner error,
 not a request for the agent to invent reviewer authority.
 
-A malformed Review report receives at most one report-only correction per
-candidate revision. Coverage uses the schema's exact category IDs; coverage-only
-corrections retain independent reviewer identities, verdicts and findings.
-Repeated invalid reports stop with the candidate, checks, proof and report
-retained. Ordinary calls replay that terminal outcome without launching more
-reviewers; they do not automatically reopen it.
+Malformed implementation, proof and Review reports retain exact report bytes,
+validation diagnostics and the unchanged candidate. Each ordinary call makes one
+bounded report-only correction in a read-only view. Format correction does not
+repeat implementation or an app scenario. Coverage corrections retain the
+independent reviewer identities, verdicts and findings. Repeated malformed reports
+never authorize publication and do not exhaust a lifetime attempt budget.
 
-If the same check ID and command fail again after a repair attempt on the same
-candidate Git tree, the Run stops as non-resumable `blocked` with its candidate
-and evidence retained. This compares code snapshots, not log text or stderr
-hashes. Changed candidate content permits another repair. A matching successful
-check, an accepted target, or new feedback clears the previous failure marker.
+Repeated failed checks on the same tree do not establish a permanent external
+blocker. Unavailable tooling resumes checks after recovery; behavioral failures
+continue through the existing semantic repair path. Every final check still has
+to pass on the exact candidate.
 
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
@@ -242,10 +241,31 @@ Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
 and static workflow evals do not establish live browser or agent behavior.
 
-Review receives the exact patch without truncation, bounded to 1 MiB of UTF-8
-bytes. Its encoded JSON capsule has a separate 1 MiB limit, so metadata,
-duplicated repair patches, and JSON escaping can cause a smaller patch to be
-rejected. Other text fields keep their existing limits.
+Review receives the complete exact patch. Capsules larger than 1 MiB use a
+Runner-owned file in the existing read-only view, bound by SHA-256 and byte length.
+Credential checks, report limits and required Review coverage still apply.
+
+Run state is stored under `<runner.stateDir>/v2/runs/<repository-sha256>/<issue>.json`.
+Each file has its own CAS generation and size limit. Large immutable history is
+stored as hash-verified evidence chunks; all consumed feedback remains available.
+On the first owned write, a valid legacy `run-state.json` migrates under the
+repository owner lock, with exact destination verification and its original bytes
+preserved as `run-state.json.backup`. Run only one Runner version over this stateDir
+during migration. Interrupted migration resumes by verifying existing files;
+divergence or missing migrated records blocks execution. Unknown candidate refs
+and materializations are preserved, including when another stateDir may own them.
+
+The daemon combines complete GitHub discovery with local runs requiring
+reconciliation, cleanup or notification delivery. Every tick binds discovery and
+execution to one current config snapshot. Technical terminal comment/label failures
+retry once per tick without an exhaustion budget. Marker/body divergence remains a
+safety stop; a delivery error does not change the proven outcome.
+
+Short Runner commands share cancellation with the current tick. The repository
+owner lock records command launches before execution and clears them only after
+confirmed settlement. An unresolved process group, stream, or interrupted launch
+keeps ownership blocked; restarting the Runner cannot admit another command by
+assuming the previous process disappeared.
 
 An owner-lock refusal does not prove a stale lock. Foreign host/boot ownership
 stays blocked even if the recorded PID is absent; a live Darwin worker cannot

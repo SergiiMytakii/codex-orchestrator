@@ -1,14 +1,12 @@
-import { execFile } from 'node:child_process';
+import { defaultProcessExecutor } from './adapters/command.js';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { promisify } from 'node:util';
 
 import { acquireOwnerControlLock, inspectOwnerControlLock } from './owner-control-lock.js';
 import { Setup, type SetupDependencies } from './setup.js';
 
-const execFileAsync = promisify(execFile);
 
 export function createProductionSetup(input: { orchestratorHome: string; bootId: string }): Setup {
   const dependencies: SetupDependencies = {
@@ -81,13 +79,9 @@ function parseLabel(value: unknown): { name: string } {
 }
 
 async function command(file: string, args: string[]): Promise<string> {
-  try { return (await execFileAsync(file, args, { maxBuffer: 8 * 1024 * 1024 })).stdout; }
-  catch (error) {
-    const stderr = typeof error === 'object' && error !== null && typeof (error as { stderr?: unknown }).stderr === 'string'
-      ? (error as { stderr: string }).stderr.trim()
-      : '';
-    throw new Error(`${file} command failed${stderr ? `: ${stderr}` : ''}`);
-  }
+  const result = await defaultProcessExecutor(file, args, { timeoutMs: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
+  if (result.exitCode !== 0) throw new Error(`${file} command failed: ${result.stderr.trim()}`);
+  return result.stdout;
 }
 
 function processAlive(pid: number): boolean {

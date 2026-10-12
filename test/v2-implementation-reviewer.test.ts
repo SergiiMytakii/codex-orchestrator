@@ -37,25 +37,21 @@ test('complete and targeted Review launch with the exact 19207-character candida
   assert.equal(JSON.parse(capsules[1]!).target.repairPatch, patch);
 });
 
-test('Review bounds UTF-8 patch bytes and the encoded capsule while preserving other field limits', async () => {
-  let calls = 0;
-  const reviewer = new ContainedImplementationReviewer({
-    operation: { run: async () => { calls += 1; return { status: 'cancelled' }; } },
-  });
-  const admitted = 'я'.repeat(500_000);
-  assert.equal(Buffer.byteLength(admitted, 'utf8'), 1_000_000);
-  assert.deepEqual(await reviewer.run(input({ targetPatch: admitted })), { kind: 'cancelled' });
+test('Review passes large exact capsules through Runner-owned files without truncating patches', async () => {
+  const calls: Parameters<ContainedReportOperation['run']>[0][] = [];
+  const reviewer = new ContainedImplementationReviewer({ operation: { run: async (call) => { calls.push(call); return { status: 'cancelled' }; } } });
+  const patch = 'я'.repeat(600_000);
+  assert.deepEqual(await reviewer.run(input({ targetPatch: patch })), { kind: 'cancelled' });
+  const fact = calls[0]!.runnerFacts?.[0];
+  assert.ok(fact);
+  assert.equal(JSON.parse(fact.bytes.toString('utf8')).target.patch, patch);
+  assert.equal(createHash('sha256').update(fact.bytes).digest('hex'), fact.sha256);
+  assert.equal(JSON.parse(calls[0]!.promptFacts[0]!).exactReviewCapsule.path, fact.path);
   for (const overrides of [
-    { targetPatch: 'я'.repeat(524_289) }, // Under 1 MiB characters, over 1 MiB UTF-8 bytes.
-    { targetPatch: 'x'.repeat(1_048_576) }, // Exact patch limit still requires capsule overhead.
-    { targetPatch: '\n'.repeat(600_000) + '+' }, // JSON escaping also counts towards the capsule.
-    { targetPatch: ' ' },
-    { reviewerSessionId: 'x'.repeat(16_385) },
-    { repairFindings: [{ id: 'finding', sourceId: 'check', summary: 'x'.repeat(16_385), affectedContracts: [] }], previousTarget: { targetRevision: 1, targetFingerprint: '4'.repeat(64), candidateTreeSha: '5'.repeat(40) } },
-  ]) {
-    assert.equal((await reviewer.run(input(overrides))).kind, 'internal-error');
-  }
-  assert.equal(calls, 1, 'invalid inputs cannot launch a reviewer');
+    { targetPatch: ' ' }, { reviewerSessionId: 'x'.repeat(16_385) },
+    { targetPatch: 'API_KEY=unsafecredential123456789abcdef' },
+  ]) assert.equal((await reviewer.run(input(overrides))).kind, 'internal-error');
+  assert.equal(calls.length, 1);
 });
 
 test('thin reviewer facade binds an independent attempt and delegates durable launch hooks', async () => {
@@ -194,7 +190,7 @@ test('malformed Review admission has one exact encoded capsule boundary and ever
     if ((await resultForSize(middle)).result.kind === 'report-invalid') low = middle;
     else high = middle - 1;
   }
-  assert.ok(low < 2 * 1024 * 1024, 'repair admission must reserve capsule metadata overhead');
+  assert.equal(low, 1024 * 1024, 'unsafe report size remains bounded independently from valid exact patch input');
   const admitted = await resultForSize(low);
   assert.equal(admitted.result.kind, 'report-invalid');
   assert.notEqual((await resultForSize(low + 1)).result.kind, 'report-invalid');
@@ -265,7 +261,7 @@ test('reviewer facade projects settled launch-gate failure as resumable infrastr
   assert.deepEqual(await reviewer.run(input()), { kind: 'transport-failed', resumable: true });
 });
 
-test('actual contained Review operation maps temporary prepare, launch, and report availability failures as resumable', async () => {
+test('actual contained Review operation maps temporary snapshots, preparation, launch, and report availability as resumable', async () => {
   const snapshot = {
     headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
     untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'review-worktree',
@@ -281,6 +277,10 @@ test('actual contained Review operation maps temporary prepare, launch, and repo
     },
   };
   const cases = [
+    new InjectedContainedReportOperation({
+      snapshot: async () => { throw Object.assign(new Error('temporary snapshot I/O'), { code: 'EIO' }); },
+      prepare: async () => prepared, launch: async () => ({ status: 'cancelled' }),
+    }),
     new InjectedContainedReportOperation({
       snapshot: async () => snapshot,
       prepare: async () => { throw new Error('service unavailable'); },
@@ -300,6 +300,15 @@ test('actual contained Review operation maps temporary prepare, launch, and repo
     const reviewer = new ContainedImplementationReviewer({ operation });
     assert.deepEqual(await reviewer.run(input()), { kind: 'transport-failed', resumable: true });
   }
+});
+
+test('reviewer facade retains unsafe snapshot failures as integrity errors', async () => {
+  const reviewer = new ContainedImplementationReviewer({ operation: new InjectedContainedReportOperation({
+    snapshot: async () => ({ headSha: 'only one fingerprint' }),
+    prepare: async () => { throw new Error('must not prepare'); },
+    launch: async () => { throw new Error('must not launch'); },
+  }) });
+  assert.deepEqual(await reviewer.run(input()), { kind: 'internal-error', code: 'report-operation-snapshot-failed' });
 });
 
 function input(overrides: Partial<ImplementationReviewerInput> = {}): ImplementationReviewerInput {

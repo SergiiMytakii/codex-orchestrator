@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -109,4 +111,84 @@ test('foreign host or boot ownership stays fail closed even when the recorded PI
       inspectProcessIdentity: async () => ({ status: 'absent' as const }),
     }), OwnerControlLockBlockedError);
   }
+});
+
+test('durable unresolved command fence survives a dead owner and preserves repository ownership', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-command-fence-'));
+  const first = await acquireOwnerControlLock(input(root, 501, new Set([501])));
+  await first.fenceCommand({ pid: 2_147_483_647, processGroupId: 2_147_483_647, streamsUnconfirmed: true });
+  await assert.rejects(first.release(), /owner lock retained/u);
+  await assert.rejects(acquireOwnerControlLock({ ...input(root, 502, new Set([502])),
+    inspectProcessIdentity: async () => ({ status: 'absent' as const }),
+  }), /owned command group cleanup is unconfirmed/u);
+});
+
+test('command fence permits reclaim only after positive leader and group absence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-command-absence-'));
+  const first = await acquireOwnerControlLock(input(root, 601, new Set([601])));
+  await first.fenceCommand({ pid: 2_147_483_647, processGroupId: 2_147_483_647, streamsUnconfirmed: false });
+  await assert.rejects(acquireOwnerControlLock({ ...input(root, 602, new Set([602])),
+    inspectProcessIdentity: async (pid) => pid === 2_147_483_647
+      ? { status: 'unknown' as const } : { status: 'absent' as const },
+  }), /owned command group cleanup is unconfirmed/u);
+  const second = await acquireOwnerControlLock({ ...input(root, 603, new Set([603])),
+    inspectProcessIdentity: async () => ({ status: 'absent' as const }),
+  });
+  await second.release();
+});
+
+test('failed fence persistence does not authorize release of the existing owner lock', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-command-invalid-'));
+  const first = await acquireOwnerControlLock(input(root, 701, new Set([701])));
+  await assert.rejects(first.fenceCommand({ pid: -1, processGroupId: 0, streamsUnconfirmed: true }), /identity is invalid/u);
+  await assert.rejects(first.release(), /owner lock retained/u);
+  await assert.rejects(acquireOwnerControlLock(input(root, 702, new Set([701]), { waitMs: 5 })), /timed out/u);
+});
+
+
+test('concurrent command receipts cannot release ownership before every command settles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-concurrent-command-'));
+  const first = await acquireOwnerControlLock(input(root, 801, new Set([801])));
+  await Promise.all([first.beginCommand(), first.beginCommand()]);
+  await first.completeCommand();
+  await assert.rejects(first.release(), /owner lock retained/u);
+  await first.completeCommand();
+  await first.release();
+});
+
+test('real runner crash with a durable prelaunch receipt fences a fresh runner', { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'owner-control-prelaunch-restart-'));
+  const moduleUrl = new URL('../src/v2/owner-control-lock.js', import.meta.url).href;
+  const base = `import { acquireOwnerControlLock } from ${JSON.stringify(moduleUrl)};
+    import { hostname } from 'node:os';
+    const input = { orchestratorHome: ${JSON.stringify(root)}, canonicalRepository: 'owner/repo',
+      bootId: 'same-boot', host: hostname(), pid: process.pid,
+      now: () => new Date().toISOString(), createToken: () => String(process.pid),
+      processAlive: () => false, waitMs: 0 };
+  `;
+  const owner = spawn(process.execPath, ['--input-type=module', '-e', `${base}
+    const lock = await acquireOwnerControlLock(input);
+    await lock.beginCommand(); process.stdout.write('checkpoint'); setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const ownerExit = once(owner, 'exit');
+  try {
+    let timer: NodeJS.Timeout | undefined;
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('owner did not checkpoint')), 5_000);
+      owner.stdout.on('data', (bytes) => { if (bytes.toString().includes('checkpoint')) { clearTimeout(timer); resolve(); } });
+      owner.once('error', reject);
+    });
+    owner.kill('SIGKILL');
+    await ownerExit;
+    const fresh = spawn(process.execPath, ['--input-type=module', '-e', `${base}
+      try { await acquireOwnerControlLock(input); process.stdout.write('unexpected-acquisition'); }
+      catch (error) { process.stdout.write(error.message); }
+    `], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    fresh.stdout.on('data', (bytes) => { output += bytes.toString(); });
+    const [code] = await once(fresh, 'exit');
+    assert.equal(code, 0);
+    assert.match(output, /owned command group cleanup is unconfirmed/u);
+    assert.doesNotMatch(output, /unexpected-acquisition/u);
+  } finally { if (owner.exitCode === null && owner.signalCode === null) owner.kill('SIGKILL'); }
 });

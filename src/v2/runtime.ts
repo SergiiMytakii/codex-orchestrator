@@ -12,13 +12,13 @@ import { GitWorktreeManager } from './adapters/worktree.js';
 import type { GitHubIssueAdapter } from './adapters/issues.js';
 import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackObserver } from './review-feedback-coordinator.js';
-import { defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
+import { CommandProcessQuiescenceError, defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
 import { AcceptanceProof, CandidateProofInspectionError, proofFailureSummary, type FrozenCriterion, type IssueSnapshot, type ProofAgent, type ProofProcessFailure } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import type { DeliveryAuthority } from './delivery-authority.js';
 import { InjectedContainedReportOperation } from './contained-report-operation.js';
-import { ContainedImplementationReviewer, MAX_REVIEW_PATCH_BYTES } from './implementation-reviewer.js';
+import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import {
   canonicalJson,
@@ -26,16 +26,16 @@ import {
   sha256,
 } from './containment.js';
 import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError } from './issue-check-policy.js';
-import { acquireOwnerControlLock, OwnerControlLockBlockedError } from './owner-control-lock.js';
+import { acquireOwnerControlLock, OwnerControlLockBlockedError, inspectProcessIdentity, readProcessStartIdentity, type OwnerControlLockHandle } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
 import { FileAndroidLeaseVerifier, FileIosLeaseVerifier, type IosLeaseRecordV1 } from './mobile-lease.js';
 import { publishRuntimeAssetSnapshot } from './runtime-assets.js';
 import {
-  OwnerLockContentionError, OwnerLockSafetyError, RunIssue,
-  type AttemptCleanupIdentity, type ImplementationAgentResult, type RunIssueGit,
+  OwnerLockContentionError, OwnerLockSafetyError, RunIssue, RunConfigurationError,
+  type AttemptCleanupIdentity, type ImplementationAgentResult, type RunIssueGit, type RunIssueSnapshot,
 } from './run-issue.js';
-import { FileRunRecordWriter, type RunRecordWriter } from './run-store.js';
+import { FileRunRecordWriter, type RunRecordWriter, type RunRecord } from './run-store.js';
 import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity, type ProcessGroupObservation } from './process-identity.js';
 import {
   parseWorkflowExecutionProfile,
@@ -67,6 +67,7 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     this.candidateV2 = {
       reconcileOrphans: (input) => this.reconcileCandidateOrphans(input),
       captureAndPin: (input) => this.captureAndPinCandidate(input),
+      inspectSource: (input) => this.inspectCandidateSource(input),
       inspectPin: (binding) => this.inspectCandidatePin(binding),
       normalizeSharedIndex: (input) => this.candidateOperation('candidate-io-failed', async () => {
         if (await this.getHead(input.worktreePath) !== input.expectedHeadSha) throw new Error('candidate expected HEAD diverged');
@@ -109,8 +110,8 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
         const ref = row.slice(0, separator);
         const sha = row.slice(separator + 1);
         if (!activeRefs.has(ref) && !adoptableRefs.has(ref)) {
-          const deleted = await this.executor('git', ['-C', root, 'update-ref', '-d', ref, sha]);
-          if (deleted.exitCode !== 0) throw new Error('orphan candidate ref cleanup failed');
+          // Absence from this stateDir cannot prove that another journal does not own the ref.
+          throw new Error('candidate ref ownership is unknown; preserve it for inspection');
         }
       }
       const materializationRoot = canonicalFilesystemPath(resolve(input.workspaceRoot, '.candidate-materializations'));
@@ -128,10 +129,24 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
             }
           } else {
             if (worktree.branch !== undefined) throw new Error('orphan candidate materialization unexpectedly owns a branch');
-            await this.git(['-C', root, 'worktree', 'remove', '--force', path]);
+            throw new Error('candidate materialization ownership is unknown; preserve it for inspection');
           }
         }
       }
+    });
+  }
+
+  private async inspectCandidateSource(input: Parameters<CandidateGitV2['inspectSource']>[0]): Promise<CandidateResult<'matching' | 'changed'>> {
+    return this.candidateOperation('candidate-io-failed', async () => {
+      const first = await this.captureCandidateTree(input.worktreePath, input.binding.expectedHeadSha, input.artifactDir);
+      const second = await this.captureCandidateTree(input.worktreePath, input.binding.expectedHeadSha, input.artifactDir);
+      if (canonicalJson(first) !== canonicalJson(second)) throw new Error('candidate source is unstable');
+      const bindingId = candidateBindingId({
+        bindingSeed: candidateBindingSeed(input.runId, input.boundary), expectedHeadSha: input.binding.expectedHeadSha,
+        candidateTreeSha: first.treeSha, canonicalChangedFiles: first.changedFiles, sourceWorktreeIdentity: first.worktreeIdentity,
+      });
+      return bindingId === input.binding.bindingId && first.treeSha === input.binding.candidateTreeSha
+        && canonicalJson(first.changedFiles) === canonicalJson(input.binding.canonicalChangedFiles) ? 'matching' : 'changed';
     });
   }
 
@@ -530,7 +545,7 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
   async diffTrees(worktreePath: string, previousTreeSha: string, candidateTreeSha: string): Promise<{ changedFiles: string[]; patch: string }> {
     const [names, patch] = await Promise.all([
       this.git(['-C', worktreePath, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', previousTreeSha, candidateTreeSha], { maxOutputBytes: 1024 * 1024 }),
-      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--'], { maxOutputBytes: MAX_REVIEW_PATCH_BYTES }),
+      this.git(['-C', worktreePath, 'diff', '--binary', '--full-index', '--no-ext-diff', previousTreeSha, candidateTreeSha, '--']),
     ]);
     return { changedFiles: names.split('\0').filter(Boolean).sort(), patch };
   }
@@ -804,6 +819,7 @@ export class ContainedImplementationAgent {
     deliveryAuthority: DeliveryAuthority;
     cycle: number;
     reworkFindings: string[];
+    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
     workflowGeneration: WorkflowGenerationReceipt;
     reviewFeedbackRound?: number;
     reviewFeedback?: Array<{ id: string; sourceUrl: string; path: string | null; line: number | null; body: string }>;
@@ -834,16 +850,25 @@ export class ContainedImplementationAgent {
       preparedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
       baseline,
     });
+    let correctionView: string | undefined;
+    let unresolvedProcess = false;
     try {
       try {
         const recovered = await readRegularFile(attempt.reportPath);
-        return { kind: 'completed', attemptId, report: decodeAgentReportForValidation(recovered) };
+        return { kind: 'completed', attemptId, report: decodeAgentReportForValidation(recovered), reportBytes: recovered };
       } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) return { kind: 'internal-error' };
+        if (!isErrorCode(error, 'ENOENT')) {
+          if (isTechnicalRuntimeError(error)) throw error;
+          return { kind: 'internal-error' };
+        }
       }
+      if (input.reportCorrection) correctionView = await prepareReportCorrectionView({
+        worktreePath: input.worktreePath, destination: join(dirname(attempt.tmpDir), 'read-view'),
+        deniedPaths: config.deny.readPaths, correction: input.reportCorrection, schemaPath: attempt.schemaPath, signal: input.signal,
+      });
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
-        cwd: input.worktreePath,
+        cwd: correctionView ?? input.worktreePath,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
         toolHome: attempt.toolHome,
@@ -851,11 +876,15 @@ export class ContainedImplementationAgent {
         safePath: this.dependencies.safePath,
         parentCodexHome: this.dependencies.parentCodexHome,
         parentEnv: process.env,
-        prompt: [
+        prompt: input.reportCorrection ? [
+          reportCorrectionPrompt(input.reportCorrection),
+          `Use the exact structured output schema at ${attempt.schemaPath}.`,
+          `Retain the existing operation ${attempt.operationPath}; correct its report only.`,
+        ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Implement issue #${input.issue.number}: ${input.issue.title}`,
+          ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
           `Implementation cycle: ${input.cycle}.`,
           ...(input.reviewFeedbackRound ? [`Trusted feedback follow-up round: ${input.reviewFeedbackRound}.`] : []),
           ...(input.reviewFeedbackPullRequest ? [`Current same-branch draft pull request: ${canonicalJson(input.reviewFeedbackPullRequest)}`] : []),
@@ -871,13 +900,17 @@ export class ContainedImplementationAgent {
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
         idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
+        operationPolicy: input.reportCorrection ? reportOnlyPolicy(attempt.policy) : attempt.policy,
         executionProfile: attempt.profile,
         onSpawned: async ({ pid, processGroupId }) => input.onLaunched?.({
           attemptId, pid, processGroupId, launchedAt: (this.dependencies.now ?? (() => new Date().toISOString()))(),
         }),
       }, input.signal);
+      if (input.reportCorrection && canonicalJson(await this.dependencies.git.snapshot(input.worktreePath)) !== canonicalJson(baseline)) return { kind: 'internal-error' };
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
+      if (result.kind === 'transport-failed' && result.report.kind === 'missing' && result.exitCode === 0 && result.signal === null) {
+        return { kind: 'completed', attemptId, report: '', reportBytes: Buffer.alloc(0) };
+      }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
         return { kind: 'transport-failed', resumable: true };
       }
@@ -885,11 +918,17 @@ export class ContainedImplementationAgent {
       return {
         kind: 'completed',
         attemptId,
-        report: decodeAgentReportForValidation(result.report.bytes),
+        report: decodeAgentReportForValidation(result.report.bytes), reportBytes: result.report.bytes,
       };
     } catch (error) {
-      if (!(error instanceof ProcessQuiescenceError)) return { kind: 'internal-error' };
+      if (!(error instanceof ProcessQuiescenceError)) {
+        if (isTechnicalRuntimeError(error)) throw error;
+        return { kind: 'internal-error' };
+      }
+      unresolvedProcess = true;
       return { kind: 'safe-halt' };
+    } finally {
+      if (correctionView && !unresolvedProcess) await rm(correctionView, { recursive: true, force: true });
     }
   }
 
@@ -934,8 +973,10 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
       'leases',
     );
     const iosLeaseArtifact = join(artifactRoot, input.proofId, 'ios-lease.json');
-    const iosTooling = await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
+    const iosTooling = input.reportCorrection ? undefined : await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
     const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
+    let correctionView: string | undefined;
+    let unresolvedProcess = false;
     try {
       try {
         const recoveredReport = await readRegularFile(attempt.reportPath);
@@ -943,16 +984,20 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
         return {
           kind: 'report',
-          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']),
+          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']), reportBytes: recoveredReport,
           proofPhaseChangedFiles: [...recoveredInventory.keys()].filter((path) => !runnerPrepared.has(path)).sort(),
         };
       } catch (error) {
         if (!isErrorCode(error, 'ENOENT')) throw error;
       }
       if (input.recoverOnly) return { kind: 'internal-error' };
+      if (input.reportCorrection) correctionView = await prepareReportCorrectionView({
+        worktreePath, destination: join(dirname(attempt.tmpDir), 'read-view'), deniedPaths: config.deny.readPaths,
+        correction: input.reportCorrection, schemaPath: attempt.schemaPath, signal: input.signal,
+      });
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
-        cwd: worktreePath,
+        cwd: correctionView ?? worktreePath,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
         toolHome: attempt.toolHome,
@@ -960,11 +1005,15 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         safePath: this.dependencies.safePath,
         parentCodexHome: this.dependencies.parentCodexHome,
         parentEnv: process.env,
-        prompt: [
+        prompt: input.reportCorrection ? [
+          reportCorrectionPrompt(input.reportCorrection),
+          `Use the exact structured output schema at ${attempt.schemaPath}.`,
+          `Retain the existing operation ${attempt.operationPath}; correct its report only.`,
+        ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
           `Follow the exact operation at ${attempt.operationPath}.`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Independently prove issue #${input.issue.number}.`,
+          ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Independently prove issue #${input.issue.number}.`]),
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           `Checked change digest: ${input.checkedChangeSha256}.`,
           `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
@@ -996,13 +1045,17 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
         idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
+        operationPolicy: input.reportCorrection ? reportOnlyPolicy(attempt.policy) : attempt.policy,
         executionProfile: attempt.profile,
         onSpawned: async ({ pid, processGroupId }) => input.onLaunched?.({
           pid, processGroupId, launchedAt: new Date().toISOString(),
         }),
       }, input.signal);
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
+      if (result.kind === 'transport-failed' && result.report.kind === 'missing' && result.exitCode === 0 && result.signal === null) {
+        const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
+        return { kind: 'report', report: '', reportBytes: Buffer.alloc(0), proofPhaseChangedFiles: changedArtifactPaths(before, after) };
+      }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
         const diagnostic = [result.error, result.stderr?.toString('utf8')].filter(Boolean).join('\n');
         return { kind: 'transport-failed', resumable: true, failure: {
@@ -1017,11 +1070,15 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
       const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
       return {
         kind: 'report',
-        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']),
+        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']), reportBytes: result.report.bytes,
         proofPhaseChangedFiles: changedArtifactPaths(before, after),
       };
     } catch (error) {
-      return error instanceof ProcessQuiescenceError ? { kind: 'safe-halt' } : { kind: 'internal-error' };
+      unresolvedProcess = error instanceof ProcessQuiescenceError;
+      if (!unresolvedProcess && isTechnicalRuntimeError(error)) throw error;
+      return unresolvedProcess ? { kind: 'safe-halt' } : { kind: 'internal-error' };
+    } finally {
+      if (correctionView && !unresolvedProcess) await rm(correctionView, { recursive: true, force: true });
     }
   }
 }
@@ -1098,8 +1155,12 @@ export function createV2Runtime(input: {
   bootId: string;
   packageVersion: string;
   createWorkflowGeneration: () => Promise<{ receipt: WorkflowGenerationReceipt; skillHashes: Record<string, string> }>;
-  issues: GitHubIssueAdapter;
-  pullRequests: GitHubPullRequestAdapter;
+  issues?: GitHubIssueAdapter;
+  pullRequests?: GitHubPullRequestAdapter;
+  createGitHubAdapters?: (signal: AbortSignal, executor: ProcessExecutor) => {
+    issues: GitHubIssueAdapter;
+    pullRequests: GitHubPullRequestAdapter;
+  };
   implementationAgent?: {
     run(input: Parameters<NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent']['run']>[0]): Promise<ImplementationAgentResult>;
   };
@@ -1109,6 +1170,8 @@ export function createV2Runtime(input: {
   codexProcess?: CodexProcess;
   git?: RunIssueGit;
   processExecutor?: ProcessExecutor;
+  expectedConfigBytes?: Buffer;
+  abortController?: AbortController;
   createRunId?: () => string;
   createProofId?: () => string;
   createAttemptId?: () => string;
@@ -1120,7 +1183,17 @@ export function createV2Runtime(input: {
   const targetRoot = resolve(input.targetRoot);
   const orchestratorHome = resolve(input.orchestratorHome);
   const now = input.now ?? (() => new Date().toISOString());
-  const commandExecutor = input.processExecutor ?? defaultProcessExecutor;
+  const controller = input.abortController ?? new AbortController();
+  const underlyingExecutor = input.processExecutor ?? defaultProcessExecutor;
+  let ownerCommandHandle: OwnerControlLockHandle | undefined;
+  const commandExecutor: ProcessExecutor = (file, args, options) => executeOwnedCommand({
+    executor: underlyingExecutor, owner: ownerCommandHandle, file, args,
+    options: { timeoutMs: 30_000, processGroup: true, ...options, signal: options?.signal ?? controller.signal },
+  });
+  const githubAdapters = input.createGitHubAdapters?.(controller.signal, commandExecutor);
+  const issues = githubAdapters?.issues ?? input.issues;
+  const pullRequests = githubAdapters?.pullRequests ?? input.pullRequests;
+  if (!issues || !pullRequests) throw new Error('GitHub adapters are required');
   const runtimeSafePath = requireRuntimeString(input.safePath, 'safePath');
   let codexExecutable: { command: string; path: string } | undefined;
   const resolveRuntimeCodex = async (command: string) => {
@@ -1136,9 +1209,12 @@ export function createV2Runtime(input: {
       ignoredRoot: string,
     ) => Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>>;
   };
-  const controller = new AbortController();
   let currentConfig: AgentAutoConfig | undefined;
   let runRecords: RunRecordWriter | undefined;
+  let repositoryRecords: FileRunRecordWriter | undefined;
+  let selectedIssueNumber: number | undefined;
+  let ownsRepository = false;
+  let selectedStoreKey: string | undefined;
   const containedProcess = input.codexProcess ?? new CodexProcess();
   const configuredAndroidAdbPath = input.androidAdbPath
     ?? process.env.ANDROID_ADB
@@ -1190,7 +1266,7 @@ export function createV2Runtime(input: {
       }),
     }),
     snapshot: (worktreePath) => git.snapshot(worktreePath),
-    launch: async ({ attempt, worktreePath, promptFacts, signal, onLaunched }) => {
+    launch: async ({ attempt, worktreePath, promptFacts, runnerFacts, signal, onLaunched }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
         || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
@@ -1208,8 +1284,9 @@ export function createV2Runtime(input: {
         readView = await materializeReportReadView({
           worktreePath,
           destination: join(dirname(attempt.tmpDir), 'read-view'),
-          deniedPaths: config.deny.readPaths,
+          deniedPaths: config.deny.readPaths, signal,
         });
+        if (runnerFacts) await materializeRunnerFacts(readView, runnerFacts);
       } catch {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
       }
@@ -1275,13 +1352,33 @@ export function createV2Runtime(input: {
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
     const bytes = await readRegularFile(join(targetRoot, '.codex-orchestrator', 'config.json'));
-    const parsed = parseAgentAutoConfig(parseJsonWithoutDuplicateKeys(bytes.toString('utf8')));
+    if (input.expectedConfigBytes && !bytes.equals(input.expectedConfigBytes)) throw new Error('config-snapshot-changed');
+    let parsed: AgentAutoConfig;
+    try { parsed = parseAgentAutoConfig(parseJsonWithoutDuplicateKeys(bytes.toString('utf8'))); }
+    catch (error) { throw new RunConfigurationError(error instanceof Error ? error.message : 'Malformed config'); }
     const config: AgentAutoConfig = {
       ...parsed,
       codex: { ...parsed.codex, command: await resolveRuntimeCodex(parsed.codex.command) },
     };
     const path = join(targetRoot, config.runner.stateDir, 'v2', 'run-state.json');
-    if (!runRecords) runRecords = new FileRunRecordWriter(path);
+    const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
+    const storeKey = `${path}:${canonicalRepository}:${ownsRepository}`;
+    if (selectedStoreKey !== storeKey) {
+      const processStartIdentity = await readProcessStartIdentity(process.pid);
+      if (!processStartIdentity) throw new Error('writer process start identity is unavailable');
+      repositoryRecords = FileRunRecordWriter.forRepository(path, canonicalRepository, {
+        host: hostname(), bootId: input.bootId, pid: process.pid, processStartIdentity,
+        exclusiveRepositoryOwnership: ownsRepository,
+        inspectProcessIdentity: async (pid) => {
+          const observed = await inspectProcessIdentity(pid);
+          return observed.status === 'present' ? { processStartIdentity: observed.processStartIdentity } : observed.status;
+        },
+      });
+      if (ownsRepository) await repositoryRecords.migrateLegacy();
+      runRecords = ownsRepository && selectedIssueNumber !== undefined
+        ? repositoryRecords.forIssue(selectedIssueNumber) : repositoryRecords;
+      selectedStoreKey = storeKey;
+    }
     currentConfig = config;
     return { bytes, config };
   };
@@ -1388,6 +1485,7 @@ export function createV2Runtime(input: {
             checks: checked.payload.checks,
             checkedChangeSha256: checked.checkedChangeSha256,
             proofAgentBudgetMs: config.codex.timeoutMs * 3,
+            observeOnly: !!proofInput.reportCorrection,
             signal: controller.signal,
           });
           if (prepared.status === 'prepared') {
@@ -1418,66 +1516,46 @@ export function createV2Runtime(input: {
   const runner = new RunIssue({
     readConfig,
     ownerLock: {
-      acquire: async ({ canonicalRepository }) => acquireOwnerLock({
-        orchestratorHome,
-        canonicalRepository,
-        bootId: input.bootId,
-        now,
-        processAlive: input.processAlive ?? processIsAlive,
-      }),
+      acquire: async ({ canonicalRepository }) => {
+        const lock = await acquireOwnerLock({
+          orchestratorHome, canonicalRepository, bootId: input.bootId, now,
+          processAlive: input.processAlive ?? processIsAlive,
+        });
+        ownsRepository = true;
+        ownerCommandHandle = lock;
+        return { release: async () => {
+          try { await lock.release(); } finally { ownsRepository = false; ownerCommandHandle = undefined; selectedStoreKey = undefined; }
+        } };
+      },
     },
     issues: {
-      read: async (issueNumber) => {
-        const issue = await input.issues.getIssue(issueNumber);
-        if (!issue || issue.state !== 'OPEN') return issue ? {
-          number: issue.number, title: issue.title, body: issue.body, url: issue.url, state: 'CLOSED',
-          labels: issue.labels.map((label) => label.name).sort(), comments: [],
-        } : undefined;
-        const comments = await input.issues.listAllComments(issueNumber);
-        return {
-          number: issue.number,
-          title: issue.title,
-          body: issue.body,
-          url: issue.url,
-          state: 'OPEN',
-          labels: issue.labels.map((label) => label.name).sort(),
-          comments: comments.map((comment) => ({
-            id: comment.id,
-            body: comment.body,
-            authorAssociation: comment.authorAssociation,
-            author: comment.author.login,
-            authorId: comment.author.id,
-            createdAt: comment.createdAt,
-            updatedAt: comment.updatedAt,
-          })),
-        };
-      },
+      read: (issueNumber) => readRuntimeIssue(issues, issueNumber),
       setLabels: async (issueNumber, labels) => {
-        const current = await input.issues.getLabels(issueNumber);
+        const current = await issues.getLabels(issueNumber);
         const policy = requireConfig(currentConfig).github.labels;
-        await input.issues.updateIssue(issueNumber, managedLabelUpdate(current, labels, policy));
+        await issues.updateIssue(issueNumber, managedLabelUpdate(current, labels, policy));
       },
-      getRepositoryPermission: (login, expectedUserId) => input.issues.getRepositoryPermission(login, expectedUserId),
+      getRepositoryPermission: (login, expectedUserId) => issues.getRepositoryPermission(login, expectedUserId),
       reconcileTerminalLabels: async (issueNumber, labels) => {
-        const current = await input.issues.getLabels(issueNumber);
+        const current = await issues.getLabels(issueNumber);
         const policy = requireConfig(currentConfig).github.labels;
-        await input.issues.updateIssue(issueNumber, managedLabelUpdate(
+        await issues.updateIssue(issueNumber, managedLabelUpdate(
           current,
           current.filter((label) => !labels.remove.includes(label)).concat(labels.add),
           policy,
           true,
         ));
       },
-      postComment: async (issueNumber, body) => { await input.issues.postComment(issueNumber, body); },
+      postComment: async (issueNumber, body) => { await issues.postComment(issueNumber, body); },
     },
     pullRequests: {
       findOpen: async ({ headBranch, baseBranch }) => {
-        const matches = (await input.pullRequests.listAllByHeadBranch(headBranch))
+        const matches = (await pullRequests.listAllByHeadBranch(headBranch))
           .filter((pullRequest) => pullRequest.state === 'OPEN' && pullRequest.baseRefName === baseBranch);
         if (matches.length > 1) throw new Error('multiple open pull requests match publication pendingEffect');
         const match = matches[0];
         if (!match) return undefined;
-        const reviewTarget = await input.pullRequests.getReviewTarget(match.number);
+        const reviewTarget = await pullRequests.getReviewTarget(match.number);
         return {
           url: match.url,
           body: match.body,
@@ -1488,15 +1566,15 @@ export function createV2Runtime(input: {
           ...(reviewTarget ? { headSha: reviewTarget.headRefOid } : {}),
         };
       },
-      createDraft: async ({ title, body, headBranch, baseBranch }) => input.pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
-      listConversationComments: async (number) => (await input.pullRequests.listConversationComments(number))
+      createDraft: async ({ title, body, headBranch, baseBranch }) => pullRequests.createDraftPullRequest({ title, body, headBranch, baseBranch }),
+      listConversationComments: async (number) => (await pullRequests.listConversationComments(number))
         .map((comment) => ({ id: comment.id, body: comment.body })),
       postConversationComment: async (number, body) => {
-        const comment = await input.pullRequests.postConversationComment(number, body);
+        const comment = await pullRequests.postConversationComment(number, body);
         return { id: comment.id, body: comment.body };
       },
     },
-    reviewFeedback: new ReviewFeedbackObserver({ pullRequests: input.pullRequests, issues: input.issues, now }),
+    reviewFeedback: new ReviewFeedbackObserver({ pullRequests: pullRequests, issues: issues, now }),
     git,
     implementationAgent,
     implementationReviewer,
@@ -1510,6 +1588,11 @@ export function createV2Runtime(input: {
     proof,
     checkedChangeMint: capabilities,
     runRecords: records,
+    hasTechnicalTerminalProofFailure: (record) => hasTechnicalLegacyProofFailure({ targetRoot, config: requireConfig(currentConfig), record }),
+    inventoryRuns: async () => {
+      if (!repositoryRecords) throw new Error('inventory used before config');
+      return (await repositoryRecords.inventory()).runs;
+    },
     writeEvidence: async ({ runId, code, summary, failure }) => {
       const config = requireConfig(currentConfig);
       const relativePath = `${config.runner.stateDir}/v2/evidence/${runId}.json`;
@@ -1580,12 +1663,65 @@ export function createV2Runtime(input: {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
   return {
-    runIssue: (runInput) => runner.runIssue(runInput),
+    runIssue: (runInput) => {
+      selectedIssueNumber = runInput.issueNumber;
+      selectedStoreKey = undefined;
+      return runner.runIssue(runInput);
+    },
     abort: () => controller.abort(),
     dispose: () => {
       process.off('SIGINT', onSignal);
       process.off('SIGTERM', onSignal);
     },
+  };
+}
+
+export async function executeOwnedCommand(input: {
+  executor: ProcessExecutor;
+  owner?: OwnerControlLockHandle;
+  file: string;
+  args: string[];
+  options?: Parameters<ProcessExecutor>[2];
+}): ReturnType<ProcessExecutor> {
+  await input.owner?.beginCommand();
+  let unresolved = false;
+  try {
+    return await input.executor(input.file, input.args, input.options);
+  } catch (error) {
+    if (error instanceof CommandProcessQuiescenceError) {
+      unresolved = true;
+      await input.owner?.fenceCommand({ pid: error.pid, processGroupId: error.processGroupId,
+        streamsUnconfirmed: error.streamsUnconfirmed });
+    }
+    throw error;
+  } finally {
+    if (!unresolved) await input.owner?.completeCommand();
+  }
+}
+
+export async function readRuntimeIssue(
+  issues: Pick<GitHubIssueAdapter, 'getIssue' | 'listAllComments'>,
+  issueNumber: number,
+): Promise<RunIssueSnapshot | undefined> {
+  const issue = await issues.getIssue(issueNumber);
+  if (!issue) return undefined;
+  const comments = await issues.listAllComments(issueNumber);
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
+    url: issue.url,
+    state: issue.state,
+    labels: issue.labels.map((label) => label.name).sort(),
+    comments: comments.map((comment) => ({
+      id: comment.id,
+      body: comment.body,
+      authorAssociation: comment.authorAssociation,
+      author: comment.author.login,
+      authorId: comment.author.id,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+    })),
   };
 }
 
@@ -1611,7 +1747,7 @@ async function acquireOwnerLock(input: {
   bootId: string;
   now: () => string;
   processAlive: (pid: number) => boolean;
-}): Promise<{ release(): Promise<void> }> {
+}): Promise<OwnerControlLockHandle> {
   try {
     return await acquireOwnerControlLock({
       orchestratorHome: input.orchestratorHome,
@@ -1734,18 +1870,20 @@ async function runSpawnCheck(
       : Promise.resolve();
     const chunks: Buffer[] = [];
     let retained = 0;
-    const outputHash = createHash('sha256');
+    let outputTruncated = false;
     let settled = false;
     let timedOut = false;
     let terminationRequested = false;
+    let launchFailure: unknown;
     let killTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
     const timeout = setTimeout(() => {
       timedOut = true;
       terminate();
     }, timeoutMs);
     timeout.unref();
     const collect = (chunk: Buffer) => {
-      outputHash.update(chunk);
+      if (retained + chunk.length > 1024 * 1024) outputTruncated = true;
       if (retained >= 1024 * 1024) return;
       const kept = chunk.subarray(0, 1024 * 1024 - retained);
       chunks.push(kept);
@@ -1757,13 +1895,24 @@ async function runSpawnCheck(
       terminationRequested = true;
       if (!child.pid) return;
       try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already absent */ }
+      if (killTimer) return;
       killTimer = setTimeout(() => {
         if (settled || !child.pid) return;
         try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already absent */ }
-      }, 5_000);
+      }, 500);
       killTimer.unref();
+      drainTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+        signal.removeEventListener('abort', terminate);
+        clearTimeout(timeout);
+        rejectCheck(new CheckProcessQuiescenceError(child.pid!));
+      }, 2_000);
+      drainTimer.unref();
     };
-    void launchOwnership.then(() => child.stdin.end('\n')).catch(() => terminate());
+    child.stdin.on('error', () => terminate());
+    void launchOwnership.then(() => { if (!terminationRequested) child.stdin.end('\n'); }).catch((error) => { launchFailure = error; terminate(); });
     signal.addEventListener('abort', terminate, { once: true });
     if (signal.aborted) terminate();
     child.once('error', (error) => {
@@ -1771,11 +1920,13 @@ async function runSpawnCheck(
       signal.removeEventListener('abort', terminate);
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
+      if (drainTimer) clearTimeout(drainTimer);
       rejectCheck(error);
     });
     child.once('close', (code) => {
       if (settled) return;
       settled = true;
+      if (drainTimer) clearTimeout(drainTimer);
       signal.removeEventListener('abort', terminate);
       clearTimeout(timeout);
       void (async () => {
@@ -1796,13 +1947,16 @@ async function runSpawnCheck(
           rejectCheck(new Error(`Check exceeded ${timeoutMs}ms and was terminated.`));
           return;
         }
-        await launchOwnership;
+        if (launchFailure) throw launchFailure;
+        if (!terminationRequested) await launchOwnership;
+        const output = Buffer.concat([...chunks, ...(outputTruncated
+          ? [Buffer.from('\n[diagnostic output truncated]\n')] : [])]);
         resolveCheck({
           // POSIX reserves 126/127 for a command that cannot be invoked/found.
           // This is environment recovery, never a request to edit the candidate.
           status: code === 0 ? 'passed' : code === 126 || code === 127 ? 'unavailable' : 'failed',
-          output: Buffer.concat(chunks),
-          outputSha256: outputHash.digest('hex'),
+          output,
+          outputSha256: sha256(output),
           observation: {
             leader: 'absent',
             group: child.pid ? observeProcessGroup(child.pid) : 'unknown',
@@ -2051,14 +2205,85 @@ export async function materializeReportReadView(input: {
   worktreePath: string;
   destination: string;
   deniedPaths: string[];
+  signal?: AbortSignal;
 }): Promise<string> {
   await assertDisjointReadViewPaths(input.worktreePath, input.destination);
   const deniedPaths = normalizeReadViewDeniedPaths(input.deniedPaths);
   await rm(input.destination, { recursive: true, force: true });
   await mkdir(input.destination, { recursive: true, mode: 0o700 });
-  await materializeCurrentReadView(input.worktreePath, input.destination, deniedPaths);
+  await materializeCurrentReadView(input.worktreePath, input.destination, deniedPaths, input.signal);
   await scrubReportReadView(input.destination);
   return input.destination;
+}
+
+
+function isTechnicalRuntimeError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof code === 'string' && ['EIO', 'ENOENT', 'EAGAIN', 'EINTR', 'ENOSPC', 'EMFILE', 'ENFILE', 'EBUSY', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
+  return error instanceof Error && /^(?:git failed:|report read-view inventory failed:)/u.test(error.message);
+}
+
+/** Old generic proof terminals are reopened only from bound host-written technical evidence. */
+export async function hasTechnicalLegacyProofFailure(input: { targetRoot: string; config: AgentAutoConfig; record: RunRecord }): Promise<boolean> {
+  const { record } = input;
+  if (record.terminalOutcome?.status !== 'internal-error' || record.terminalOutcome.code !== 'acceptance-proof-internal-failure'
+    || !record.candidateBinding || !/^[a-f0-9-]{36}$/u.test(record.runId)) return false;
+  let bytes: Buffer;
+  try { bytes = await readRegularFile(resolve(input.targetRoot, input.config.runner.stateDir, 'v2/evidence', `${record.runId}.json`)); }
+  catch (error) { if (isErrorCode(error, 'ENOENT')) return false; throw error; }
+  let evidence: any;
+  let diagnostic: any;
+  try { evidence = parseJsonWithoutDuplicateKeys(bytes.toString('utf8')); diagnostic = parseJsonWithoutDuplicateKeys(evidence.summary); }
+  catch { return false; }
+  if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
+  return evidence.version === 1 && evidence.runId === record.runId && evidence.code === 'acceptance-proof-diagnostic'
+    && diagnostic.packageVersion === record.packageVersion
+    && diagnostic.workflowGenerationHash === record.workflowGeneration.generationHash
+    && diagnostic.workflowManifestSha256 === record.workflowGeneration.manifestSha256
+    && diagnostic.candidateCommitSha === record.candidateBinding.candidateCommitSha
+    && typeof diagnostic.summary === 'string'
+    && /^Proof agent failed: (?:EIO|EAGAIN|EINTR|ENOSPC|EMFILE|ENFILE|EBUSY|ETIMEDOUT|ECONNRESET|ENETUNREACH|ECONNREFUSED|EPIPE)\b/u.test(diagnostic.summary);
+}
+
+function reportOnlyPolicy(policy: WorkflowOperationPolicy): WorkflowOperationPolicy {
+  return { ...policy, sandboxMode: 'read-only', worktreeAccess: 'read-only', writableRootClasses: [], runnerPostcondition: 'report-only' };
+}
+
+function reportCorrectionPrompt(correction: { sha256: string; diagnostic: string }): string {
+  return `Correct only the structured report using review-facts/correction-${correction.sha256}.json and the exact output schema. Do not implement, rerun checks, launch an app scenario, modify product/evidence files, or make semantic repairs. Preserve all existing facts; if evidence cannot establish a result, report that accurately. Diagnostic: ${correction.diagnostic}`;
+}
+
+async function prepareReportCorrectionView(input: {
+  worktreePath: string; destination: string; deniedPaths: string[]; schemaPath: string; signal: AbortSignal;
+  correction: { bytes: Buffer; sha256: string; diagnostic: string };
+}): Promise<string> {
+  if (sha256(input.correction.bytes) !== input.correction.sha256
+    || !Buffer.from(input.correction.bytes.toString('utf8')).equals(input.correction.bytes)) throw new Error('report correction binding is invalid');
+  const view = await materializeReportReadView(input);
+  const bytes = Buffer.from(canonicalJson({
+    originalReport: input.correction.bytes.toString('utf8'), originalReportSha256: input.correction.sha256,
+    diagnostic: input.correction.diagnostic, schema: JSON.parse((await readRegularFile(input.schemaPath)).toString('utf8')),
+  }));
+  await materializeRunnerFacts(view, [{ path: `review-facts/correction-${input.correction.sha256}.json`, bytes, sha256: sha256(bytes) }]);
+  return view;
+}
+
+/** Create-only facts live beside the scrubbed view, never in the product tree. */
+export async function materializeRunnerFacts(readView: string, facts: Array<{ path: string; bytes: Buffer; sha256: string }>): Promise<void> {
+  const canonicalView = await realpath(readView);
+  const seen = new Set<string>();
+  for (const fact of facts) {
+    if (!/^review-facts\/[a-zA-Z0-9._-]+\.json$/u.test(fact.path) || seen.has(fact.path)
+      || sha256(fact.bytes) !== fact.sha256) throw new Error('review facts binding is invalid');
+    seen.add(fact.path);
+    const destination = resolve(canonicalView, fact.path);
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    const directory = await realpath(dirname(destination));
+    if (directory !== resolve(canonicalView, 'review-facts')) throw new Error('review facts directory is unsafe');
+    const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o400);
+    try { await handle.writeFile(fact.bytes); await handle.sync(); } finally { await handle.close(); }
+    if (sha256(await readFile(destination)) !== fact.sha256) throw new Error('review facts materialization diverged');
+  }
 }
 
 async function assertDisjointReadViewPaths(worktreePath: string, destination: string): Promise<void> {
@@ -2101,9 +2326,10 @@ function normalizeReadViewDeniedPaths(paths: string[]): string[] {
   });
 }
 
-async function materializeCurrentReadView(worktreePath: string, destination: string, deniedPaths: string[]): Promise<void> {
-  const paths = new Set(await readGitPathList(worktreePath, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']));
+async function materializeCurrentReadView(worktreePath: string, destination: string, deniedPaths: string[], signal?: AbortSignal): Promise<void> {
+  const paths = new Set(await readGitPathList(worktreePath, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], signal));
   for (const path of [...paths].sort()) {
+    signal?.throwIfAborted();
     if (isExcludedReadViewPath(path, deniedPaths)) continue;
     const target = resolve(destination, path);
     const contained = relative(destination, target);
@@ -2132,22 +2358,12 @@ function isExcludedReadViewPath(path: string, deniedPaths: string[]): boolean {
   return deniedPaths.some((deniedPath) => path === deniedPath || path.startsWith(`${deniedPath}/`));
 }
 
-async function readGitPathList(worktreePath: string, args: string[]): Promise<string[]> {
-  return new Promise((resolvePaths, reject) => {
-    const child = spawn('git', ['-C', worktreePath, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.once('error', reject);
-    child.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr.push(chunk); });
-    child.once('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`report read-view inventory failed: ${Buffer.concat(stderr).toString('utf8').slice(0, 8 * 1024)}`));
-        return;
-      }
-      resolvePaths(Buffer.concat(stdout).toString('utf8').split('\0').filter((path) => path.length > 0));
-    });
+async function readGitPathList(worktreePath: string, args: string[], signal?: AbortSignal): Promise<string[]> {
+  const result = await defaultProcessExecutor('git', ['-C', worktreePath, ...args], {
+    timeoutMs: 30_000, signal, processGroup: true,
   });
+  if (result.exitCode !== 0) throw new Error(`report read-view inventory failed: ${result.stderr.slice(0, 8 * 1024)}`);
+  return result.stdout.split('\0').filter(Boolean);
 }
 
 async function copyRegularFileNoFollow(sourcePath: string, targetPath: string, mode: number): Promise<void> {

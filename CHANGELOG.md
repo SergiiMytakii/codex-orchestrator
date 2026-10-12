@@ -7,6 +7,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Fixed
+- Resume technical failures with the same candidate and retained valid receipts;
+  reconcile durable external effects and marker-bound feedback answers after restart.
+- Store runs in repository-scoped per-issue CAS files, migrate valid legacy journals
+  under ownership, and retain long history as verified immutable evidence chunks.
+- Bound owned commands and process-group cleanup; preserve valid reports when
+  diagnostic stdout is truncated and hash the exact retained check output.
+- Page complete GitHub collections, bind each daemon tick to current config, and
+  include local reconciliation and notification work without lifetime retry budgets.
+- Correct malformed reports in read-only views without repeating semantic work;
+  deliver large exact Review capsules through bound Runner-owned files.
 - Use repository configuration as the sole authority for mandatory checks.
   Issue Verification stays descriptive: its Markdown, prose, and command examples
   cannot replace configured checks or cause command-parser failures.

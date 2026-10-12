@@ -1,5 +1,5 @@
 import type { IssueProofRequirements } from './issue-proof-policy.js';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, lstat, mkdir, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
@@ -123,6 +123,7 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
     checks: CheckedChangePayloadV1['checks'];
     checkedChangeSha256: string;
     proofAgentBudgetMs: number;
+    observeOnly?: boolean;
     signal: AbortSignal;
   }): Promise<RunnerAndroidProofResult> {
     if (input.requirements?.authentication === 'dev-account' && (!input.config.login || !input.config.buildArgs.includes('--debug'))) {
@@ -183,6 +184,7 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
         : existingLease.proofId === input.proofId
           ? 'Existing durable Android lease requires terminal recovery before preparation.'
           : 'Existing durable Android lease belongs to another proof.';
+      if (input.observeOnly) return { status: 'blocked', summary, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {} };
       await ensureManagedProofRoot(worktreePath, proofRoot);
       await writeDurableAtomicFile(receiptPath, `${canonicalJson({
         schema: 'codex-orchestrator.runner-android-proof', version: 1, status: 'blocked', proofId: input.proofId,
@@ -194,6 +196,7 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
         runnerPreparedArtifactSha256: { [receiptRelativePath]: sha256(await readFile(receiptPath)) },
       };
     }
+    if (input.observeOnly) return { status: 'blocked', summary: 'Retained Android proof is unavailable for report correction.', runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {} };
     let serial: string | undefined;
     let dataDir: string | undefined;
     let emulatorStarted = false;
@@ -781,55 +784,30 @@ function safeCommandDiagnostic(value: string): string {
     .slice(0, 2_048);
 }
 
-function executeBinary(
+async function executeBinary(
   file: string,
   args: string[],
-  options?: {
-    cwd?: string;
-    timeoutMs?: number;
-    signal?: AbortSignal;
-    maxStdoutBytes?: number;
-    maxStderrBytes?: number;
-  },
+  options?: { cwd?: string; timeoutMs?: number; signal?: AbortSignal; maxStdoutBytes?: number; maxStderrBytes?: number },
 ): Promise<Buffer> {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(file, args, { cwd: options?.cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let settled = false;
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let overflow: 'stdout' | 'stderr' | undefined;
-    const terminate = () => {
-      child.kill('SIGTERM');
-      setTimeout(() => { if (!settled) child.kill('SIGKILL'); }, 2_000).unref();
-    };
-    const timeout = options?.timeoutMs ? setTimeout(terminate, options.timeoutMs) : undefined;
-    timeout?.unref();
-    options?.signal?.addEventListener('abort', terminate, { once: true });
-    child.stdout.on('data', (chunk: Buffer) => {
+  const stdout: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  const result = await defaultProcessExecutor(file, args, {
+    cwd: options?.cwd, timeoutMs: options?.timeoutMs ?? CAPTURE_TIMEOUT_MS, signal: options?.signal,
+    processGroup: true,
+    maxOutputBytes: (options?.maxStdoutBytes ?? 32 * 1024 * 1024) + (options?.maxStderrBytes ?? 1024 * 1024),
+    onStdoutBytes: (chunk) => {
       stdoutBytes += chunk.length;
-      if (options?.maxStdoutBytes && stdoutBytes > options.maxStdoutBytes) {
-        overflow = 'stdout'; terminate(); return;
-      }
+      if (stdoutBytes > (options?.maxStdoutBytes ?? 32 * 1024 * 1024)) throw new Error('Android binary command stdout exceeded its byte limit.');
       stdout.push(chunk);
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
+    },
+    onStderrBytes: (chunk) => {
       stderrBytes += chunk.length;
-      if (options?.maxStderrBytes && stderrBytes > options.maxStderrBytes) {
-        overflow = 'stderr'; terminate(); return;
-      }
-      stderr.push(chunk);
-    });
-    child.once('error', (error) => { settled = true; if (timeout) clearTimeout(timeout); rejectRun(error); });
-    child.once('close', (code) => {
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      if (overflow) rejectRun(new Error(`Android binary command ${overflow} exceeded its byte limit.`));
-      else if (code === 0) resolveRun(Buffer.concat(stdout));
-      else rejectRun(new Error(`Android binary command failed: ${safeCommandDiagnostic(Buffer.concat(stderr).toString('utf8'))}`));
-    });
+      if (stderrBytes > (options?.maxStderrBytes ?? 1024 * 1024)) throw new Error('Android binary command stderr exceeded its byte limit.');
+    },
   });
+  if (result.exitCode !== 0) throw new Error(`Android binary command failed: ${safeCommandDiagnostic(result.stderr)}`);
+  return Buffer.concat(stdout);
 }
 
 function startEmulator(file: string, args: string[], options?: { cwd?: string }): Promise<{ pid: number }> {
@@ -885,19 +863,12 @@ async function inspectProcessStartIdentity(pid: number): Promise<ProcessIdentity
       return fields[19] ? { status: 'present', identity: `linux:${fields[19]}` } : { status: 'error' };
     } catch (error) { return isMissing(error) ? { status: 'absent' } : { status: 'error' }; }
   }
-  return await new Promise((resolveIdentity) => {
-    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
-      if (error) {
-        const code = (error as unknown as { code?: unknown }).code;
-        resolveIdentity(code === 1 || code === '1'
-          ? { status: 'absent' }
-          : { status: 'error' });
-        return;
-      }
-      const value = stdout.trim().replace(/\s+/gu, ' ');
-      resolveIdentity(value ? { status: 'present', identity: `${platform()}:${value}` } : { status: 'error' });
-    });
-  });
+  try {
+    const result = await defaultProcessExecutor('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5_000 });
+    if (result.exitCode !== 0) return { status: result.exitCode === 1 ? 'absent' : 'error' };
+    const value = result.stdout.trim().replace(/\s+/gu, ' ');
+    return value ? { status: 'present', identity: `${platform()}:${value}` } : { status: 'error' };
+  } catch { return { status: 'error' }; }
 }
 
 async function snapshotFreshRegularFile(path: string, snapshotPath: string): Promise<string> {

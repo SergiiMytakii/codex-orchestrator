@@ -108,6 +108,7 @@ const reread: CheckedChangePayloadV1 = capabilities.verifyAndRead(legacy).payloa
 const optionalAdapter: { candidateV2?: CandidateGitV2 } = {};
 const exactApprovedCandidateAdapter: CandidateGitV2 = {
   captureAndPin: async () => { throw new Error('fixture'); },
+  inspectSource: async () => { throw new Error('fixture'); },
   inspectPin: async () => { throw new Error('fixture'); },
   normalizeSharedIndex: async () => { throw new Error('fixture'); },
   prepareMaterialization: async () => { throw new Error('fixture'); },

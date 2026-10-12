@@ -27,6 +27,7 @@ export interface ContainedReportOperationInput {
   worktreePath: string;
   workflowGeneration: WorkflowGenerationReceipt;
   promptFacts: string[];
+  runnerFacts?: Array<{ path: string; bytes: Buffer; sha256: string }>;
   signal: AbortSignal;
   reviewContext?: CodeReviewValidationContext;
   onPrepared?: (context: CodeReviewValidationContext) => Promise<void>;
@@ -98,8 +99,8 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     let before: ReportOnlyWorktreeSnapshot;
     try {
       before = requireReportSnapshot(await this.dependencies.snapshot(input.worktreePath));
-    } catch {
-      return { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' };
+    } catch (error) {
+      return snapshotFailure(error);
     }
 
     let attempt: PreparedContainedReportAttempt;
@@ -141,10 +142,10 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
         }
         try {
           await input.onPrepared(input.reviewContext);
-        } catch {
-          return this.finishWithSnapshot(input.worktreePath, before, {
-            status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed',
-          });
+        } catch (error) {
+          return this.finishWithSnapshot(input.worktreePath, before, isTechnicalReportFailure(error)
+            ? { status: 'retryable', code: 'review-operation-prepare-persistence-retryable' }
+            : { status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed' });
         }
       }
       try {
@@ -177,8 +178,8 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
     let after: ReportOnlyWorktreeSnapshot;
     try {
       after = requireReportSnapshot(await this.dependencies.snapshot(worktreePath));
-    } catch {
-      return { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' };
+    } catch (error) {
+      return snapshotFailure(error);
     }
     if (!sameSnapshot(before, after)) {
       return { status: 'blocked', kind: 'safety', code: 'report-operation-worktree-mutated' };
@@ -190,6 +191,20 @@ export class InjectedContainedReportOperation implements ContainedReportOperatio
       ...input.reviewContext!,
     });
   }
+}
+
+function isTechnicalReportFailure(error: unknown): boolean {
+  const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  const technical = typeof code === 'string' && [
+    'EIO', 'ENOENT', 'EAGAIN', 'EINTR', 'ENOSPC', 'EMFILE', 'ENFILE', 'EBUSY',
+    'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE',
+  ].includes(code);
+  return technical || (error instanceof Error && /^(?:git failed:|report read-view inventory failed:)/u.test(error.message));
+}
+
+function snapshotFailure(error: unknown): ContainedReportOperationResult {
+  if (isTechnicalReportFailure(error)) return { status: 'retryable', code: 'report-operation-snapshot-retryable' };
+  return { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' };
 }
 
 function hasExactReadOnlyAuthority(

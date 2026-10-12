@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -139,4 +140,33 @@ test('host checks distinguish unavailable executables from ordinary check failur
       assert.equal(result.observation.group, 'absent');
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('large passed and failed check logs hash the exact retained bytes with explicit truncation', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-check-large-output-'));
+  try {
+    for (const size of [1_048_575, 1_048_576, 1_048_577]) {
+      for (const exitCode of [0, 1]) {
+        const result = await runShellCheck(
+          `${JSON.stringify(process.execPath)} -e 'process.stdout.write(Buffer.alloc(${size}, 120)); process.exitCode=${exitCode}'`,
+          cwd, new AbortController().signal, 5000,
+        );
+        assert.equal(result.status, exitCode === 0 ? 'passed' : 'failed');
+        assert.equal(result.outputSha256, createHash('sha256').update(result.output).digest('hex'));
+        assert.equal(result.output.toString().includes('[diagnostic output truncated]'), size > 1_048_576);
+      }
+    }
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test('check launch persistence that never settles returns within its command deadline', { timeout: 3000 }, async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-check-hung-launch-'));
+  const started = Date.now();
+  try {
+    await assert.rejects(runShellCheck('echo unsafe > marker', cwd, new AbortController().signal, 100,
+      async () => new Promise<void>(() => {})), /exceeded 100ms/u);
+    assert.ok(Date.now() - started < 3000);
+    await assert.rejects(readFile(join(cwd, 'marker')));
+  } finally { await rm(cwd, { recursive: true, force: true }); }
 });

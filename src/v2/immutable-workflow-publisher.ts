@@ -1,6 +1,5 @@
-import { execFile } from 'node:child_process';
-import { link, lstat, mkdir, open, readFile, readdir, rm, writeFile, chmod } from 'node:fs/promises';
-import { platform } from 'node:os';
+import { inspectProcessIdentity, readProcessStartIdentity } from './owner-control-lock.js';
+import { link, lstat, mkdir, open, readdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const WAIT_MS = 60_000;
@@ -208,25 +207,9 @@ async function syncDirectory(path: string): Promise<void> {
 const activeOwnerTokens = new Set<string>();
 
 async function processIdentityMatches(pid: number, expected: string): Promise<boolean> {
-  return await readProcessStartIdentity(pid) === expected;
-}
-
-async function readProcessStartIdentity(pid: number): Promise<string | undefined> {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-  if (platform() === 'linux') {
-    try {
-      const text = await readFile(`/proc/${pid}/stat`, 'utf8');
-      const close = text.lastIndexOf(') ');
-      const fields = close < 0 ? [] : text.slice(close + 2).trim().split(/\s+/u);
-      return fields[19] ? `linux:${fields[19]}` : undefined;
-    } catch { return undefined; }
-  }
-  return await new Promise((resolveIdentity) => {
-    execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
-      const value = error ? '' : stdout.trim().replace(/\s+/gu, ' ');
-      resolveIdentity(value ? `${platform()}:${value}` : undefined);
-    });
-  });
+  const observed = await inspectProcessIdentity(pid);
+  if (observed.status === 'unknown') throw new Error('publisher process identity is unavailable');
+  return observed.status === 'present' && observed.processStartIdentity === expected;
 }
 
 async function removeOwnedContent(root: string): Promise<void> {

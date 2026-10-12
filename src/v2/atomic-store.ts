@@ -124,6 +124,12 @@ export class AtomicStateFile<T extends { generation: number }> {
     };
   }
 
+  async withExclusiveLock<Result>(operation: () => Promise<Result>): Promise<Result> {
+    await ensureDirectDirectoryPath(dirname(this.path));
+    const release = await acquireAdjacentLock(`${this.path}.lock`, this.options);
+    try { return await operation(); } finally { await release(); }
+  }
+
   async read(): Promise<T | undefined> {
     const bytes = await readOptionalRegularFile(this.path, this.options.maxBytes);
     return bytes === undefined ? undefined : parseBytes(bytes, this.parse);
@@ -263,8 +269,9 @@ async function acquireAdjacentLock(
     let current: LockRecordV1;
     try {
       current = await readLockRecord(path);
-    } catch {
-      return;
+    } catch (error) {
+      if (isErrorCode(error, 'ENOENT')) return;
+      throw new Error('state lock release could not verify its token; lock preserved', { cause: error });
     }
     if (current.token !== token) return;
     await unlink(path).catch((error: unknown) => {

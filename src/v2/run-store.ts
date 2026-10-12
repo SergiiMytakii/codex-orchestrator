@@ -5,13 +5,16 @@ import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js'
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 import { validateDeliveryAuthority, type DeliveryAuthority } from './delivery-authority.js';
 import { constants } from 'node:fs';
-import { posix } from 'node:path';
-import { open, type FileHandle } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { dirname, join, posix } from 'node:path';
+import { link, lstat, mkdir, open, readdir, rename, unlink, type FileHandle } from 'node:fs/promises';
 import { AtomicStateFile, type AtomicStateFileOptions } from './atomic-store.js';
 import { canonicalJson, sha256 } from './containment.js';
 import { validateCandidateBinding, validateCandidateMaterialization, type CandidateBindingV2, type CandidateMaterializationV2 } from './candidate.js';
 import {
   validateReviewFeedbackRunData,
+  validateFrozenReviewFeedbackBatch,
+  type FrozenReviewFeedbackBatchV1,
   type ReviewFeedbackRunDataV1,
 } from './review-feedback.js';
 
@@ -52,6 +55,7 @@ export type PendingEffect = EffectIdentity & (
   | { kind: 'review-activation-labels'; issueNumber: number; batchId: string; expected: string[] }
   | { kind: 'review-update-commit'; batchId: string; parentSha: string; treeSha: string; message: string; candidateRef?: string }
   | { kind: 'review-update-push'; batchId: string; branch: string; priorRemoteSha: string; sha: string; treeSha: string }
+  | { kind: 'issue-feedback-comment'; issueNumber: number; batchId: string; batch: FrozenReviewFeedbackBatchV1; marker: string; body: string; bodySha256: string }
   | { kind: 'review-summary'; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; marker: string; bodySha256: string; epochHeadSha: string }
   | { kind: 'review-final-labels'; issueNumber: number; batchId: string; pullRequestNumber: number; pullRequestNodeId: string; epochHeadSha: string; expected: string[] }
   | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
@@ -167,9 +171,11 @@ export interface RunRecord {
     reportRepairCount: number;
     reportRepairFindings: string[];
     cleanupOutcome?: SettledProveChangeResult;
+    reportCorrection?: { path: string; sha256: string; diagnostic: string };
   };
   proofReceipt?: ProofReceipt;
   implementationResult?: { summary: string; residualRisks: string[] };
+  implementationReportCorrection?: { path: string; sha256: string; diagnostic: string };
   terminalNotifications?: TerminalNotificationStateV1;
   pendingEffect?: PendingEffect;
   outcomeEvidenceId?: string;
@@ -212,21 +218,137 @@ export class IssueInitializationUnrecoverableError extends Error {
 }
 
 export class FileRunRecordWriter implements RunRecordWriter {
-  private readonly file: AtomicStateFile<RunStateFile>;
+  private readonly file: AtomicStateFile<StoredRunState>;
   private readonly maxBytes: number;
+  private repository?: { legacyPath: string; canonicalRepository: string; directory: string };
+  private issueNumber?: number;
+  private readonly options: AtomicStateFileOptions;
 
   constructor(path: string, options: AtomicStateFileOptions = {}) {
-    this.file = new AtomicStateFile(path, validateRunStateFile, options);
+    this.file = new AtomicStateFile(path, validateStoredRunState, options);
     this.maxBytes = options.maxBytes ?? 1024 * 1024;
+    this.options = options;
+  }
+
+  /** Repository mode never persists aggregate inventory: CAS belongs to forIssue(). */
+  static forRepository(legacyPath: string, canonicalRepository: string, options: AtomicStateFileOptions = {}): FileRunRecordWriter {
+    if (!/^[a-z0-9._-]+\/[a-z0-9._-]+$/u.test(canonicalRepository)) throw new Error('canonical repository is invalid');
+    const writer = new FileRunRecordWriter(legacyPath, options);
+    writer.repository = { legacyPath, canonicalRepository, directory: join(dirname(legacyPath), 'runs', sha256(canonicalRepository)) };
+    return writer;
+  }
+
+  forIssue(issueNumber: number): FileRunRecordWriter {
+    if (!this.repository) throw new Error('per-issue storage requires repository mode');
+    assertPositiveInteger(issueNumber, 'issueNumber');
+    const writer = new FileRunRecordWriter(join(this.repository.directory, `${issueNumber}.json`), this.options);
+    writer.repository = this.repository;
+    writer.issueNumber = issueNumber;
+    return writer;
+  }
+
+  /** Called only while the current Runner owns the repository owner-control lock. */
+  async migrateLegacy(): Promise<void> {
+    if (!this.repository || this.issueNumber !== undefined) throw new Error('migration requires repository inventory writer');
+    if (!this.options.exclusiveRepositoryOwnership) throw new Error('migration requires exclusive repository ownership');
+    await this.file.withExclusiveLock(async () => {
+      const bytes = await readOptionalStateFile(this.repository!.legacyPath);
+      if (!bytes) return;
+      // Validate every record, including records belonging to another repository, before any write.
+      const state = await hydrateStoredRunState(validateStoredRunState(JSON.parse(bytes.toString('utf8'))), dirname(this.repository!.legacyPath));
+      if (state.runs.some((run) => run.canonicalRepository !== this.repository!.canonicalRepository)) throw new Error('legacy migration contains a foreign repository; original journal preserved');
+      const grouped = new Map<string, { repository: string; issueNumber: number; runs: RunRecord[] }>();
+      for (const run of state.runs) {
+        const key = `${run.canonicalRepository}:${run.issueNumber}`;
+        const group = grouped.get(key) ?? { repository: run.canonicalRepository, issueNumber: run.issueNumber, runs: [] };
+        group.runs.push(run);
+        grouped.set(key, group);
+      }
+      for (const group of grouped.values()) {
+        const writer = FileRunRecordWriter.forRepository(this.repository!.legacyPath, group.repository, this.options).forIssue(group.issueNumber);
+        const expected = { schema: state.schema, generation: 1, runs: group.runs };
+        const inspection = await writer.inspect();
+        if (inspection.status === 'absent') await writer.compareAndSwap(0, { schema: state.schema, runs: group.runs });
+        else if (inspection.status !== 'supported' || canonicalJson(inspection.state) !== canonicalJson(expected)
+          || inspection.rawSha256 !== sha256(`${canonicalJson(await archiveRunHistory(expected, dirname(writer.file.path), this.maxBytes))}\n`)) {
+          throw new Error('legacy migration destination diverged; original journal preserved');
+        }
+        if (canonicalJson(await writer.read()) !== canonicalJson(expected)) throw new Error('legacy migration verification failed');
+      }
+      const observed = await readOptionalStateFile(this.repository!.legacyPath);
+      if (!observed?.equals(bytes)) throw new Error('legacy migration source diverged');
+      const backupPath = `${this.repository!.legacyPath}.backup`;
+      const backup = await readOptionalStateFile(backupPath);
+      if (backup && !backup.equals(bytes)) throw new Error('legacy migration backup diverged');
+      if (backup) throw new Error('legacy migration source unexpectedly reappeared beside backup');
+      await rename(this.repository!.legacyPath, backupPath);
+      const parent = await open(dirname(backupPath), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { await parent.sync(); } finally { await parent.close(); }
+    });
+  }
+
+  async inventory(): Promise<RunStateFile> {
+    if (!this.repository) return this.read();
+    // Legacy bytes stay authoritative until migration has completed.
+    const legacy = await readOptionalStateFile(this.repository.legacyPath);
+    if (legacy) return { schema: 'codex-orchestrator.run-state', generation: 0,
+      runs: (await hydrateStoredRunState(validateStoredRunState(JSON.parse(legacy.toString('utf8'))), dirname(this.repository.legacyPath))).runs.filter((run) => run.canonicalRepository === this.repository!.canonicalRepository) };
+    let entries;
+    try {
+      const stat = await lstat(this.repository.directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('run inventory directory is unsafe');
+      entries = await readdir(this.repository.directory, { withFileTypes: true });
+    } catch (error) {
+      if (isErrorCode(error, 'ENOENT')) {
+        const backup = await readOptionalStateFile(`${this.repository.legacyPath}.backup`);
+        if (backup && (await hydrateStoredRunState(validateStoredRunState(JSON.parse(backup.toString('utf8'))), dirname(this.repository.legacyPath))).runs.some((run) => run.canonicalRepository === this.repository!.canonicalRepository)) throw new Error('migrated run inventory directory is missing');
+        return emptyRunState();
+      }
+      throw error;
+    }
+    const runs: RunRecord[] = [];
+    for (const entry of entries) {
+      if (entry.name === 'evidence' && entry.isDirectory()) continue;
+      if (entry.name.endsWith('.lock') || entry.name.endsWith('.tmp')) continue;
+      if (!entry.isFile() || !/^[1-9][0-9]*\.json$/u.test(entry.name)) throw new Error('run inventory contains unsupported entry');
+      const issue = Number(entry.name.slice(0, -5));
+      const inspection = await this.forIssue(issue).inspect();
+      if (inspection.status !== 'supported') throw new Error('run inventory is incomplete or unsupported');
+      runs.push(...inspection.state.runs);
+    }
+    validateRuns(runs);
+    const backup = await readOptionalStateFile(`${this.repository.legacyPath}.backup`);
+    if (backup) {
+      for (const previous of (await hydrateStoredRunState(validateStoredRunState(JSON.parse(backup.toString('utf8'))), dirname(this.repository.legacyPath))).runs.filter((run) => run.canonicalRepository === this.repository!.canonicalRepository)) {
+        if (!runs.some((run) => run.runId === previous.runId && run.issueNumber === previous.issueNumber)) throw new Error('migrated run inventory is incomplete');
+      }
+    }
+    return { schema: 'codex-orchestrator.run-state', generation: 0, runs };
   }
 
   async inspect(): Promise<RunStateInspection> {
+    if (this.repository && this.issueNumber === undefined) {
+      try {
+        const state = await this.inventory();
+        return state.runs.length ? { status: 'supported', rawSha256: sha256(canonicalJson(state)), state } : { status: 'absent', rawSha256: null };
+      } catch (error) { return { status: 'unsupported', rawSha256: sha256(String(error)), reason: String(error) }; }
+    }
     const bytes = await readOptionalStateFile(this.file.path);
-    if (!bytes) return { status: 'absent', rawSha256: null };
+    if (!bytes) {
+      if (this.repository && this.issueNumber !== undefined) {
+        const backup = await readOptionalStateFile(`${this.repository.legacyPath}.backup`);
+        if (backup && (await hydrateStoredRunState(validateStoredRunState(JSON.parse(backup.toString('utf8'))), dirname(this.repository.legacyPath))).runs.some((run) => run.canonicalRepository === this.repository!.canonicalRepository && run.issueNumber === this.issueNumber)) {
+          return { status: 'unsupported', rawSha256: sha256(backup), reason: 'Migrated issue journal is missing; refusing to create a replacement Run.' };
+        }
+      }
+      return { status: 'absent', rawSha256: null };
+    }
     const rawSha256 = sha256(bytes);
     if (bytes.length > this.maxBytes) return { status: 'unsupported', rawSha256, reason: 'Run state exceeds the supported size limit; inspect and archive it before starting a new journal.' };
     try {
-      return { status: 'supported', rawSha256, state: parseRawState(bytes) };
+      const state = await hydrateStoredRunState(validateStoredRunState(JSON.parse(bytes.toString('utf8'))), dirname(this.file.path));
+      this.assertIssueIdentity(state.runs);
+      return { status: 'supported', rawSha256, state };
     } catch {
       return { status: 'unsupported', rawSha256, reason: unsupportedStateReason(bytes) };
     }
@@ -240,9 +362,21 @@ export class FileRunRecordWriter implements RunRecordWriter {
   }
 
   async compareAndSwap(expectedGeneration: number, next: RunStateBody): Promise<RunStateFile> {
+    if (this.repository && this.issueNumber === undefined) throw new Error('aggregate inventory cannot be persisted');
     validateRunStateBody(next);
+    this.assertIssueIdentity(next.runs);
+    const inspection = await this.inspect();
+    if (inspection.status === 'unsupported') throw new Error('existing run state evidence is unsupported');
+    if ((inspection.status === 'supported' ? inspection.state.generation : 0) !== expectedGeneration) throw new Error('run state generation conflict');
     const candidate = { ...structuredClone(next), generation: expectedGeneration + 1 };
-    return this.file.compareAndSwap(expectedGeneration, candidate);
+    const stored = await archiveRunHistory(candidate, dirname(this.file.path), this.maxBytes);
+    await this.file.compareAndSwap(expectedGeneration, stored);
+    return candidate;
+  }
+  private assertIssueIdentity(runs: RunRecord[]): void {
+    if (this.repository && this.issueNumber !== undefined && runs.some((run) => run.issueNumber !== this.issueNumber || run.canonicalRepository !== this.repository!.canonicalRepository)) {
+      throw new Error('per-issue run state identity mismatch');
+    }
   }
 }
 
@@ -294,7 +428,7 @@ function validateRunStateBody(value: unknown): asserts value is RunStateBody {
 }
 
 function validateRuns(value: unknown): asserts value is RunRecord[] {
-  if (!Array.isArray(value) || value.length > 256) throw new Error('run state runs are invalid');
+  if (!Array.isArray(value)) throw new Error('run state runs are invalid');
   const ids = new Set<string>();
   for (const [index, run] of value.entries()) {
     validateRunRecord(run, `run state.runs[${index}]`);
@@ -311,6 +445,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'proofExecution',
     'proofReceipt',
     'implementationResult',
+    'implementationReportCorrection',
     'terminalNotifications',
     'pendingEffect',
     'outcomeEvidenceId',
@@ -389,6 +524,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   }
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
   if (hasOwn(value, 'implementationResult')) validateImplementationResult(value.implementationResult, `${field}.implementationResult`);
+  if (hasOwn(value, 'implementationReportCorrection')) validateReportCorrection(value.implementationReportCorrection, `${field}.implementationReportCorrection`);
   if (hasOwn(value, 'terminalNotifications')) validateTerminalNotifications(value.terminalNotifications, `${field}.terminalNotifications`);
   if (hasOwn(value, 'pendingEffect')) validatePendingEffect(value.pendingEffect, `${field}.pendingEffect`);
   if (hasOwn(value, 'outcomeEvidenceId')) assertNonEmptyString(value.outcomeEvidenceId, `${field}.outcomeEvidenceId`);
@@ -456,8 +592,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     if (terminalDeliveryEffect.issueNumber !== value.issueNumber
       || terminalDeliveryEffect.outcome !== notifications.report.outcome
       || delivery.status !== 'pending'
-      || terminalDeliveryEffect.attempt !== delivery.attempts + 1
-      || terminalDeliveryEffect.attempt > 3) {
+      || terminalDeliveryEffect.attempt !== delivery.attempts + 1) {
       throw new Error(`${field} terminal delivery effect does not match pending notification state`);
     }
   }
@@ -472,7 +607,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   const reviewReadyEffect = (value.pendingEffect as PendingEffect | undefined)?.kind;
   const reviewReadyEffectAllowed = reviewReadyEffect === undefined
     || ['review-activation-labels', 'continuation-worktree-create', 'outcome-evidence',
-      'terminal-comment', 'terminal-labels'].includes(reviewReadyEffect);
+      'terminal-comment', 'terminal-labels', 'issue-feedback-comment'].includes(reviewReadyEffect);
   if (value.lifecycle === 'review-ready' && (!hasOwn(value, 'proofReceipt') || !reviewReadyEffectAllowed)) {
     throw new Error(`${field} review-ready requires proofReceipt and only a review continuation or terminal effect`);
   }
@@ -515,7 +650,7 @@ function validateWorkflowGeneration(value: unknown, field: string): asserts valu
 }
 
 function validateChecks(value: unknown, field: string): asserts value is RunRecord['checks'] {
-  if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${field} is invalid`);
   const ids = new Set<string>();
   for (const [index, check] of value.entries()) {
     const candidate = hasOwn(check, 'bindingId') || hasOwn(check, 'candidateTreeSha') || hasOwn(check, 'checkPolicySha256');
@@ -547,7 +682,7 @@ function validateIssueSnapshot(value: unknown, field: string): asserts value is 
   if (value.state !== 'OPEN') throw new Error(`${field}.state is invalid`);
   validateStringArray(value.labels, `${field}.labels`);
   if (hasOwn(value, 'comments')) {
-    if (!Array.isArray(value.comments) || value.comments.length > 256) throw new Error(`${field}.comments is invalid`);
+    if (!Array.isArray(value.comments)) throw new Error(`${field}.comments is invalid`);
     for (const [index, comment] of value.comments.entries()) {
       const optionalCommentFields = [
         ...(hasOwn(comment, 'id') ? ['id'] : []),
@@ -565,7 +700,7 @@ function validateIssueSnapshot(value: unknown, field: string): asserts value is 
 }
 
 function validateFrozenCriteria(value: unknown, field: string): asserts value is PersistedFrozenCriterionV1[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 256) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${field} is invalid`);
   const ids = new Set<string>();
   for (const [index, criterion] of value.entries()) {
     assertExactObject(criterion, ['id', 'order', 'text', 'source'], `${field}[${index}]`);
@@ -579,7 +714,7 @@ function validateFrozenCriteria(value: unknown, field: string): asserts value is
 }
 
 function validateStringList(value: unknown, field: string): asserts value is string[] {
-  if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${field} is invalid`);
   for (const item of value) assertNonEmptyString(item, field);
 }
 
@@ -610,6 +745,16 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
     assertNonEmptyString(value.marker, `${field}.marker`);
     assertSha256(value.bodySha256, `${field}.bodySha256`);
+  } else if (kind === 'issue-feedback-comment') {
+    assertExactObject(value, [...identity, 'issueNumber', 'batchId', 'batch', 'marker', 'body', 'bodySha256'], field);
+    assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
+    assertSha256(value.batchId, `${field}.batchId`);
+    validateFrozenReviewFeedbackBatch(value.batch);
+    assertNonEmptyString(value.marker, `${field}.marker`);
+    assertNonEmptyString(value.body, `${field}.body`);
+    assertSha256(value.bodySha256, `${field}.bodySha256`);
+    if (value.batch.batchId !== value.batchId || !value.body.startsWith(`${value.marker}\n`)
+      || sha256(value.body) !== value.bodySha256) throw new Error(`${field} feedback comment binding is invalid`);
   } else if (kind === 'terminal-comment') {
     assertExactObject(value, [...identity, 'issueNumber', 'marker', 'bodySha256', 'outcome', 'attempt'], field);
     assertPositiveInteger(value.issueNumber, `${field}.issueNumber`);
@@ -735,7 +880,7 @@ function validateTerminalDelivery(value: unknown, field: string): void {
   const diagnostic = hasOwn(value, 'diagnostic') ? ['diagnostic'] : [];
   assertExactObject(value, ['status', 'attempts', ...diagnostic], field);
   if (!['pending', 'delivered', 'exhausted'].includes(value.status as string)) throw new Error(`${field}.status is invalid`);
-  if (!Number.isSafeInteger(value.attempts) || (value.attempts as number) < 0 || (value.attempts as number) > 3) {
+  if (!Number.isSafeInteger(value.attempts) || (value.attempts as number) < 0) {
     throw new Error(`${field}.attempts is invalid`);
   }
   if (hasOwn(value, 'diagnostic')) assertNonEmptyString(value.diagnostic, `${field}.diagnostic`);
@@ -778,7 +923,7 @@ function validateBlockerDetail(value: unknown, field: string): void {
   assertExactObject(value, ['kind', 'summary', 'attempted', 'resumable', ...(hasOwn(value, 'reviewerRejectionDetail') ? ['reviewerRejectionDetail'] : [])], field);
   assertNonEmptyString(value.kind, `${field}.kind`);
   assertNonEmptyString(value.summary, `${field}.summary`);
-  if (!Array.isArray(value.attempted) || value.attempted.length > 256) throw new Error(`${field}.attempted is invalid`);
+  if (!Array.isArray(value.attempted)) throw new Error(`${field}.attempted is invalid`);
   for (const attempted of value.attempted) assertNonEmptyString(attempted, `${field}.attempted`);
   if (typeof value.resumable !== 'boolean') throw new Error(`${field}.resumable is invalid`);
   if (hasOwn(value, 'reviewerRejectionDetail')) assertNonEmptyString(value.reviewerRejectionDetail, `${field}.reviewerRejectionDetail`);
@@ -790,7 +935,7 @@ function validateReceipt(value: unknown, field: string): void {
   assertSha256(value.bindingSha256, `${field}.bindingSha256`);
   assertNonEmptyString(value.summary, `${field}.summary`);
   assertNonEmptyString(value.localEvidenceId, `${field}.localEvidenceId`);
-  if (!Array.isArray(value.publishableEvidence) || value.publishableEvidence.length > 256) throw new Error(`${field}.publishableEvidence is invalid`);
+  if (!Array.isArray(value.publishableEvidence)) throw new Error(`${field}.publishableEvidence is invalid`);
   for (const evidence of value.publishableEvidence) {
     assertExactObject(evidence, ['ref', 'kind', 'sha256', 'description'], `${field}.publishableEvidence`);
     assertNonEmptyString(evidence.ref, `${field}.publishableEvidence.ref`);
@@ -801,7 +946,7 @@ function validateReceipt(value: unknown, field: string): void {
 }
 
 function validateProofExecution(value: unknown, field: string): void {
-  assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings', ...(hasOwn(value, 'cleanupOutcome') ? ['cleanupOutcome'] : [])], field);
+  assertExactObject(value, ['startedAt', 'transportRetryCount', 'reportRepairCount', 'reportRepairFindings', ...(hasOwn(value, 'cleanupOutcome') ? ['cleanupOutcome'] : []), ...(hasOwn(value, 'reportCorrection') ? ['reportCorrection'] : [])], field);
   assertTimestamp(value.startedAt, `${field}.startedAt`);
   if (!Number.isSafeInteger(value.transportRetryCount) || (value.transportRetryCount as number) < 0) throw new Error(`${field}.transportRetryCount is invalid`);
   if (!Number.isSafeInteger(value.reportRepairCount) || (value.reportRepairCount as number) < 0) throw new Error(`${field}.reportRepairCount is invalid`);
@@ -809,6 +954,7 @@ function validateProofExecution(value: unknown, field: string): void {
   if ((value.reportRepairCount === 0) !== (value.reportRepairFindings.length === 0)) {
     throw new Error(`${field} report repair state is invalid`);
   }
+  if (hasOwn(value, 'reportCorrection')) validateReportCorrection(value.reportCorrection, `${field}.reportCorrection`);
   if (hasOwn(value, 'cleanupOutcome')) {
     const outcome = value.cleanupOutcome;
     if (typeof outcome !== 'object' || outcome === null || Array.isArray(outcome)) throw new Error(`${field}.cleanupOutcome is invalid`);
@@ -835,7 +981,7 @@ function validateStringShaRecord(value: unknown, field: string): void {
 }
 
 function validateStringArray(value: unknown, field: string): void {
-  if (!Array.isArray(value) || value.length > 256) throw new Error(`${field} is invalid`);
+  if (!Array.isArray(value)) throw new Error(`${field} is invalid`);
   for (const item of value) assertNonEmptyString(item, field);
   const sorted = [...value].sort();
   if (new Set(value).size !== value.length || value.some((item, index) => item !== sorted[index])) throw new Error(`${field} must be sorted and unique`);
@@ -855,14 +1001,7 @@ function unsupportedStateReason(bytes: Buffer): string {
   return 'Run state has an unknown format or invalid records. Inspect the journal; required lifecycle, authority, process, and publication fields cannot be ignored. Repair it or archive it before starting a new one.';
 }
 
-function parseRawState(bytes: Buffer): RunStateFile {
-  let value: unknown;
-  try { value = JSON.parse(bytes.toString('utf8')); }
-  catch { throw new Error('run state JSON is malformed'); }
-  return validateRunStateFile(value);
-}
-
-async function readOptionalStateFile(path: string): Promise<Buffer | undefined> {
+async function readOptionalStateFile(path: string, maxBytes?: number): Promise<Buffer | undefined> {
   let handle: FileHandle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -873,6 +1012,7 @@ async function readOptionalStateFile(path: string): Promise<Buffer | undefined> 
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error(`${path} is not a regular file`);
+    if (maxBytes !== undefined && stat.size > maxBytes) throw new Error(`${path} exceeds maximum size`);
     return await handle.readFile();
   } finally {
     await handle.close();
@@ -962,4 +1102,161 @@ function assertCandidateRef(value: unknown, field: string): asserts value is str
 
 function assertTimestamp(value: unknown, field: string): asserts value is string {
   if (typeof value !== 'string' || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) throw new Error(`${field} is invalid`);
+}
+
+
+interface RunHistoryRef { sha256: string; bytes: number; chunks: string[] }
+interface ArchivedRunState {
+  schema: 'codex-orchestrator.run-state-evidence';
+  generation: number;
+  runs: Array<{ current: Record<string, unknown>; history: Record<string, RunHistoryRef> }>;
+}
+type StoredRunState = RunStateFile | ArchivedRunState;
+const HISTORY_CHUNK_BYTES = 128 * 1024;
+
+function validateStoredRunState(value: unknown): StoredRunState {
+  if (!hasOwn(value, 'schema') || (value as Record<string, unknown>).schema !== 'codex-orchestrator.run-state-evidence') return validateRunStateFile(value);
+  assertExactObject(value, ['schema', 'generation', 'runs'], 'archived run state');
+  assertPositiveInteger(value.generation, 'archived run generation');
+  if (!Array.isArray(value.runs)) throw new Error('archived runs are invalid');
+  for (const run of value.runs) {
+    assertExactObject(run, ['current', 'history'], 'archived run');
+    if (typeof run.current !== 'object' || run.current === null || Array.isArray(run.current)
+      || typeof run.history !== 'object' || run.history === null || Array.isArray(run.history)) throw new Error('archived run fields are invalid');
+    for (const [path, ref] of Object.entries(run.history)) {
+      if (!path || path.split('.').some((part) => !/^[a-zA-Z][a-zA-Z0-9]*$/u.test(part))) throw new Error('run evidence field path is invalid');
+      assertExactObject(ref, ['sha256', 'bytes', 'chunks'], 'run evidence reference');
+      assertSha256(ref.sha256, 'run evidence hash');
+      assertPositiveInteger(ref.bytes, 'run evidence byte count');
+      if (!Array.isArray(ref.chunks) || ref.chunks.length === 0) throw new Error('run evidence chunks are invalid');
+      ref.chunks.forEach((hash) => assertSha256(hash, 'run evidence chunk hash'));
+      if (ref.chunks.length !== Math.ceil((ref.bytes as number) / HISTORY_CHUNK_BYTES)) throw new Error('run evidence chunk count is invalid');
+    }
+  }
+  return value as unknown as ArchivedRunState;
+}
+
+async function hydrateStoredRunState(state: StoredRunState, directory: string): Promise<RunStateFile> {
+  if (state.schema === 'codex-orchestrator.run-state') return state;
+  const runs: unknown[] = [];
+  for (const archived of state.runs) {
+    const current = structuredClone(archived.current);
+    for (const [path, ref] of Object.entries(archived.history)) {
+      const parts: Buffer[] = [];
+      for (const hash of ref.chunks) {
+        const bytes = await readOptionalStateFile(join(directory, 'evidence', `${hash}.json`), HISTORY_CHUNK_BYTES);
+        if (!bytes || sha256(bytes) !== hash) throw new Error('run evidence chunk missing or hash mismatch');
+        parts.push(bytes);
+      }
+      const bytes = Buffer.concat(parts);
+      if (bytes.length !== ref.bytes || sha256(bytes) !== ref.sha256) throw new Error('run evidence content hash mismatch');
+      let parent = current;
+      const segments = path.split('.');
+      const last = segments.pop()!;
+      for (const segment of segments) {
+        const child = parent[segment];
+        if (typeof child !== 'object' || child === null || Array.isArray(child)) throw new Error('run evidence parent is invalid');
+        parent = child as Record<string, unknown>;
+      }
+      if (hasOwn(parent, last)) throw new Error('run evidence overlaps inline field');
+      parent[last] = JSON.parse(bytes.toString('utf8'));
+    }
+    runs.push(current);
+  }
+  return validateRunStateFile({ schema: 'codex-orchestrator.run-state', generation: state.generation, runs });
+}
+
+async function archiveRunHistory(state: RunStateFile, directory: string, maxBytes: number): Promise<StoredRunState> {
+  if (Buffer.byteLength(canonicalJson(state)) + 1 <= maxBytes) return state;
+  const result: ArchivedRunState = { schema: 'codex-orchestrator.run-state-evidence', generation: state.generation, runs: [] };
+  for (const run of state.runs) {
+    const current = structuredClone(run) as unknown as Record<string, unknown>;
+    const history: Record<string, RunHistoryRef> = {};
+    async function visit(object: Record<string, unknown>, prefix: string): Promise<void> {
+      for (const [key, value] of Object.entries(object)) {
+        const path = prefix ? `${prefix}.${key}` : key;
+        // Immutable snapshots and histories can be rehydrated exactly. Execution and
+        // authority receipts remain in the state file so recovery stays inspectable.
+        if ((Array.isArray(value) || typeof value === 'string') && Buffer.byteLength(canonicalJson(value)) > 64 * 1024) {
+          const bytes = Buffer.from(canonicalJson(value));
+          const chunks: string[] = [];
+          for (let offset = 0; offset < bytes.length; offset += HISTORY_CHUNK_BYTES) {
+            const part = bytes.subarray(offset, offset + HISTORY_CHUNK_BYTES);
+            const hash = sha256(part);
+            await writeImmutableRunEvidence(directory, hash, part);
+            chunks.push(hash);
+          }
+          history[path] = { sha256: sha256(bytes), bytes: bytes.length, chunks };
+          delete object[key];
+        } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+          await visit(value as Record<string, unknown>, path);
+        }
+      }
+    }
+    await visit(current, '');
+    result.runs.push({ current, history });
+  }
+  validateStoredRunState(result);
+  if (Buffer.byteLength(canonicalJson(result)) + 1 > maxBytes) throw new Error('current run receipts exceed maximum state size');
+  return result;
+}
+
+async function writeImmutableRunEvidence(directory: string, hash: string, bytes: Buffer): Promise<void> {
+  // AtomicStateFile already rejects symlinked ancestors; apply the same rule
+  // before writing evidence, which is published before its reference.
+  let parent = dirname(join(directory, 'evidence'));
+  const missing: string[] = [];
+  while (true) {
+    try {
+      const stat = await lstat(parent);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('run evidence directory is unsafe');
+      break;
+    } catch (error) {
+      if (!isErrorCode(error, 'ENOENT')) throw error;
+      missing.push(parent);
+      parent = dirname(parent);
+    }
+  }
+  for (const path of missing.reverse()) await mkdir(path, { mode: 0o700 });
+  const evidenceDirectory = join(directory, 'evidence');
+  await mkdir(evidenceDirectory, { mode: 0o700 }).catch((error: unknown) => { if (!isErrorCode(error, 'EEXIST')) throw error; });
+  const stat = await lstat(evidenceDirectory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('run evidence directory is unsafe');
+  const path = join(evidenceDirectory, `${hash}.json`);
+  const existing = await readOptionalStateFile(path, HISTORY_CHUNK_BYTES);
+  if (existing) {
+    if (!existing.equals(bytes)) throw new Error('run evidence immutable content diverged');
+    return;
+  }
+  const temporary = join(evidenceDirectory, `${hash}.${process.pid}.${randomUUID()}.tmp`);
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    // Publish immutable bytes without overwriting a concurrent writer. A crash
+    // before this link leaves only an unreferenced temporary file.
+    try { await link(temporary, path); }
+    catch (error) {
+      if (!isErrorCode(error, 'EEXIST')) throw error;
+      const observed = await readOptionalStateFile(path, HISTORY_CHUNK_BYTES);
+      if (!observed?.equals(bytes)) throw new Error('run evidence immutable content diverged');
+    }
+    const folder = await open(evidenceDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await folder.sync(); } finally { await folder.close(); }
+  } finally {
+    await handle?.close();
+    await unlink(temporary).catch((error: unknown) => { if (!isErrorCode(error, 'ENOENT')) throw error; });
+  }
+}
+
+
+function validateReportCorrection(value: unknown, field: string): void {
+  assertExactObject(value, ['path', 'sha256', 'diagnostic'], field);
+  assertNonEmptyString(value.path, `${field}.path`);
+  if (!posix.isAbsolute(value.path) || posix.normalize(value.path) !== value.path) throw new Error(`${field}.path is invalid`);
+  assertSha256(value.sha256, `${field}.sha256`);
+  assertNonEmptyString(value.diagnostic, `${field}.diagnostic`);
 }

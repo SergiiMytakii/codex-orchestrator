@@ -27,7 +27,7 @@ test('GhCliIssueAdapter preserves decimal REST comment and author IDs above MAX_
   assert.equal(comments[0]!.id, restComment.id);
   assert.equal(comments[0]!.author.id, restComment.user.id);
   assert.equal(comments[0]!.updatedAt, restComment.updated_at);
-  assert.equal(observedArgs.includes('--paginate'), true);
+  assert.equal(observedArgs.includes('--paginate'), false);
   assert.equal(observedArgs.includes('--slurp'), false);
   assert.deepEqual(observedArgs.slice(-2), [
     '--jq',
@@ -146,4 +146,50 @@ test('GhCliIssueAdapter preserves oversized Unicode comments across the GitHub a
   assert.doesNotMatch(outboundBody, /😀/u);
   assert.equal(observed.body.length, outboundBody.length);
   assert.doesNotMatch(observed.body, /\uFFFD/u);
+});
+
+test('discovers eligible issues beyond the first thousand through bounded pages', async () => {
+  const pages: number[] = [];
+  const executor: CommandExecutor = async (_file, args) => {
+    const page = Number(args.find((arg) => arg.startsWith('page='))?.slice(5) ?? 1);
+    pages.push(page);
+    const records = page <= 10 ? Array.from({ length: 100 }, (_, i) => ({
+      number: (page - 1) * 100 + i + 1, title: 'Issue', body: '',
+      url: 'https://github.com/owner/repo/issues/1', html_url: 'https://github.com/owner/repo/issues/1', state: 'OPEN', labels: [],
+    })) : [{ number: 1001, title: 'Eligible', body: '', url: 'https://github.com/owner/repo/issues/1001', html_url: 'https://github.com/owner/repo/issues/1001', state: 'OPEN', labels: [{ name: 'auto' }] }];
+    return { stdout: JSON.stringify(records), stderr: '' };
+  };
+  assert.deepEqual((await new GhCliIssueAdapter('owner', 'repo', executor).listOpenIssuesWithAnyLabel(['auto'])).map((issue) => issue.number), [1001]);
+  assert.equal(pages.length, 11);
+});
+
+
+test('Runner cancellation aborts an active issue collection and never returns its first page as authority', { timeout: 3000 }, async () => {
+  const controller = new AbortController();
+  let started!: () => void;
+  const secondPage = new Promise<void>((resolve) => { started = resolve; });
+  let pages = 0;
+  const executor: CommandExecutor = async (_file, _args, options) => {
+    pages += 1;
+    if (pages === 1) return { stdout: Array.from({ length: 100 }, (_, i) => JSON.stringify({ ...restComment, id: String(i + 1) })).join('\n'), stderr: '' };
+    started();
+    return new Promise((_resolve, reject) => options!.signal!.addEventListener('abort', () => reject(new Error('request cancelled')), { once: true }));
+  };
+  const read = new GhCliIssueAdapter('owner', 'repo', executor, undefined, { signal: controller.signal }).listAllComments(12);
+  await secondPage;
+  controller.abort();
+  await assert.rejects(read, /cancelled|cancellation/);
+  assert.equal(pages, 2);
+});
+
+
+test('Runner cancellation prevents a new individual issue read or write', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  const executor: CommandExecutor = async () => { calls += 1; return { stdout: '', stderr: '' }; };
+  const adapter = new GhCliIssueAdapter('owner', 'repo', executor, undefined, { signal: controller.signal });
+  await assert.rejects(adapter.getIssue(12), /cancellation/);
+  await assert.rejects(adapter.addLabels(12, ['agent:running']), /cancellation/);
+  assert.equal(calls, 0);
 });

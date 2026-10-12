@@ -9,7 +9,6 @@ import type { DeliveryAuthority } from './delivery-authority.js';
 import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 const SHA256 = /^[0-9a-f]{64}$/u;
-export const MAX_REVIEW_PATCH_BYTES = 1024 * 1024;
 const MAX_CAPSULE_BYTES = 1024 * 1024;
 
 export interface ImplementationReviewInvocation {
@@ -71,6 +70,7 @@ export class ContainedImplementationReviewer {
   async run(input: ImplementationReviewerInput): Promise<ImplementationReviewerResult> {
     let attemptId: string;
     let promptFacts: string[];
+    let runnerFacts: Array<{ path: string; bytes: Buffer; sha256: string }> | undefined;
     try {
       attemptId = input.attemptId;
       assertText(attemptId, 'review attempt ID');
@@ -95,7 +95,15 @@ export class ContainedImplementationReviewer {
         assertPatch(input.repairPatch, 'repair patch');
       }
       assertSha256(input.checkedChangeSha256, 'review checked change');
-      promptFacts = [buildCapsule({ ...input, changedFiles })];
+      const capsule = buildCapsule({ ...input, changedFiles });
+      if (Buffer.byteLength(capsule, 'utf8') > MAX_CAPSULE_BYTES) {
+        const bytes = Buffer.from(capsule);
+        const path = `review-facts/${createHash('sha256').update(attemptId).digest('hex')}.json`;
+        const hash = createHash('sha256').update(bytes).digest('hex');
+        runnerFacts = [{ path, bytes, sha256: hash }];
+        promptFacts = [canonicalJson({ version: 1, exactReviewCapsule: { path, sha256: hash, bytes: bytes.length },
+          instruction: 'Read the complete exact Review capsule file before reviewing. It contains the exact patch, criteria, evidence and required coverage; do not truncate or omit its contents.' })];
+      } else promptFacts = [capsule];
     } catch (error) {
       return {
         kind: 'internal-error',
@@ -116,6 +124,7 @@ export class ContainedImplementationReviewer {
         worktreePath: input.worktreePath,
         workflowGeneration: structuredClone(input.workflowGeneration),
         promptFacts,
+        ...(runnerFacts ? { runnerFacts } : {}),
         signal: input.signal,
         reviewContext: {
           operation: input.operation, targetRevision: input.targetRevision,
@@ -130,7 +139,7 @@ export class ContainedImplementationReviewer {
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
       });
     } catch {
-      return { kind: 'internal-error', code: 'review-operation-threw' };
+      return { kind: 'transport-failed', resumable: true };
     }
     return mapResult(result, input);
   }
@@ -178,14 +187,14 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     reviewFocus: sortedUnique(input.reviewFocus, 'review focus'),
     repairOnly: input.repairOnly, repair: repair ? { ...repair, retainReview: retainedReview(input) !== undefined } : null,
   });
-  if (Buffer.byteLength(text, 'utf8') > MAX_CAPSULE_BYTES || containsCredentialEvidence(text)) {
+  if (containsCredentialEvidence(text)) {
     throw new Error('review capsule is unsafe or oversized');
   }
   return text;
 }
 
 function validateRepairInput(hash: string | null, diagnostic: string | null, bytes: Buffer | null) {
-  if (hash === null || diagnostic === null || bytes === null) throw new Error('report repair input is incomplete');
+  if (hash === null || diagnostic === null || bytes === null || bytes.length > MAX_CAPSULE_BYTES) throw new Error('report repair input is incomplete');
   assertSha256(hash, 'original report hash');
   assertText(diagnostic, 'validation diagnostic');
   if (createHash('sha256').update(bytes).digest('hex') !== hash) {
@@ -280,7 +289,7 @@ function assertText(value: unknown, field: string): asserts value is string {
 }
 
 function assertPatch(value: unknown, field: string): asserts value is string {
-  if (typeof value !== 'string' || value.trim().length === 0 || Buffer.byteLength(value, 'utf8') > MAX_REVIEW_PATCH_BYTES) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`${field} is invalid`);
   }
 }

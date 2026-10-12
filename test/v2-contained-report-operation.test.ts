@@ -68,6 +68,32 @@ test('implementation reviewer persists prepared and launched identity before acc
   ]);
 });
 
+test('Review preparation persistence I/O retries the same candidate before launching any worker', async () => {
+  for (const code of ['EIO', 'ENOSPC']) {
+    const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
+      snapshots: [stableSnapshot(), stableSnapshot(), stableSnapshot(), stableSnapshot()],
+    });
+    let preparations = 0;
+    const input = { ...reviewInput(), onPrepared: async () => {
+      if (++preparations === 1) throw Object.assign(new Error('temporary prepared state persistence failure'), { code });
+    } };
+    assert.deepEqual(await fixture.operation.run(input), { status: 'retryable', code: 'review-operation-prepare-persistence-retryable' });
+    assert.equal(fixture.events.filter((event) => event === 'launch:code-review').length, 0);
+    assert.equal((await fixture.operation.run(input)).status, 'completed');
+    assert.equal(fixture.events.filter((event) => event === 'launch:code-review').length, 1);
+    assert.equal(preparations, 2);
+  }
+});
+
+test('Review preparation correlation or unexplained persistence failure preserves its safety stop', async () => {
+  const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
+  const input = { ...reviewInput(), onPrepared: async () => { throw new Error('review validation correlation drift'); } };
+  assert.deepEqual(await fixture.operation.run(input), {
+    status: 'blocked', kind: 'safety', code: 'review-operation-prepare-persistence-failed',
+  });
+  assert.equal(fixture.events.filter((event) => event === 'launch:code-review').length, 0);
+});
+
 test('implementation reviewer rejects missing launch persistence and stale correlation', async () => {
   const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })));
   const missingGate = await fixture.operation.run(runInput('code-review'));
@@ -150,6 +176,27 @@ test('launcher blocks authority or generation drift before starting the process'
   assert.deepEqual(fixture.events, ['snapshot', 'prepare:code-review', 'snapshot']);
 });
 
+for (const phase of ['before-launch', 'after-launch'] as const) {
+  test(`temporary snapshot I/O during ${phase} remains retryable without admitting a report`, async () => {
+    for (const error of [Object.assign(new Error('temporary snapshot I/O'), { code: 'EIO' }),
+      Object.assign(new Error('temporary command timeout'), { code: 'ETIMEDOUT' }), new Error('git failed: temporary Git observation')]) {
+      const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
+        snapshots: phase === 'before-launch' ? [error] : [stableSnapshot(), error],
+      });
+      assert.deepEqual(await fixture.operation.run(reviewInput()), { status: 'retryable', code: 'report-operation-snapshot-retryable' });
+      assert.equal(fixture.events.filter((event) => event === 'launch:code-review').length, phase === 'before-launch' ? 0 : 1);
+    }
+  });
+  test(`invalid or unexplained snapshot failure during ${phase} keeps its safety stop`, async () => {
+    for (const snapshot of [{ headSha: 'invalid-only' }, new Error('unknown snapshot validation failure')]) {
+      const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
+        snapshots: phase === 'before-launch' ? [snapshot] : [stableSnapshot(), snapshot],
+      });
+      assert.deepEqual(await fixture.operation.run(reviewInput()), { status: 'blocked', kind: 'safety', code: 'report-operation-snapshot-failed' });
+    }
+  });
+}
+
 test('launcher blocks a completed report when any before/after worktree fingerprint differs', async () => {
   const fixture = operationFixture('code-review', Buffer.from(JSON.stringify({ report: codeReviewArtifact })), {
     snapshots: [
@@ -206,7 +253,9 @@ function operationFixture(
   const dependencies: ContainedReportOperationDependencies = {
     snapshot: async () => {
       events.push('snapshot');
-      return structuredClone(snapshots[snapshotIndex++]);
+      const snapshot = snapshots[snapshotIndex++];
+      if (snapshot instanceof Error) throw snapshot;
+      return structuredClone(snapshot);
     },
     prepare: async (input) => {
       events.push(`prepare:${input.operation}`);

@@ -54,7 +54,7 @@ export interface ProofProcessFailure {
 }
 
 export type ProofAgentResult =
-  | { kind: 'report'; report: unknown; proofPhaseChangedFiles: string[] }
+  | { kind: 'report'; report: unknown; reportBytes?: Buffer; proofPhaseChangedFiles: string[] }
   | { kind: 'safe-halt' }
   | { kind: 'transport-failed'; resumable: boolean; failure?: ProofProcessFailure }
   | { kind: 'cancelled' }
@@ -78,6 +78,7 @@ export interface ProofAgent<TPayload extends CheckedChangePayload = CheckedChang
     runnerPreparationWarnings: string[];
     repairOnly: boolean;
     repairFindings: string[];
+    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
     workflowGeneration?: WorkflowGenerationReceipt;
     signal: AbortSignal;
   }): Promise<ProofAgentResult>;
@@ -105,7 +106,7 @@ export type ProveChangeResult =
   | SettledProveChangeResult
   | { status: 'safe-halt' }
   | { status: 'transport-failed'; resumable: true; failure?: ProofProcessFailure }
-  | { status: 'report-repair'; reportRepairCount: number; findings: string[] }
+  | { status: 'report-repair'; reportRepairCount: number; findings: string[]; reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string } }
   | {
       status: 'cleanup-pending';
       outcome: SettledProveChangeResult;
@@ -140,6 +141,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     transportRetryCount: number;
     reportRepairCount: number;
     reportRepairFindings: string[];
+    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
     passedReceipt?: ProofReceipt;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
@@ -209,6 +211,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     transportRetryCount: number;
     reportRepairCount: number;
     reportRepairFindings: string[];
+    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     checkedChange: CheckedChange<TPayload>;
@@ -267,15 +270,16 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         runnerPreparationWarnings: [...(input.runnerPreparationWarnings ?? [])],
         repairOnly: input.reportRepairCount > 0,
         repairFindings: [...input.reportRepairFindings],
+        ...(input.reportCorrection ? { reportCorrection: input.reportCorrection } : {}),
         workflowGeneration: input.workflowGeneration ? structuredClone(input.workflowGeneration) : undefined,
         signal: this.dependencies.signal ?? new AbortController().signal,
       });
     } catch (error) {
       if (error instanceof CandidateProofInspectionError || error instanceof ProofLaunchAuthorizationError) throw error;
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof agent failed', error)),
-      });
+      return { status: 'transport-failed', resumable: true, failure: {
+        kind: 'launch-gate-failed', exitCode: null, signal: null, reportStatus: 'missing',
+        detail: proofFailureSummary('Proof agent failed', error),
+      } };
     }
 
     if (this.dependencies.signal?.aborted) {
@@ -302,12 +306,9 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof was cancelled.'),
       });
     }
-    if (agentResult.kind === 'internal-error') {
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof agent failed internally.'),
-      });
-    }
+    if (agentResult.kind === 'internal-error') return this.settle(input.proofId, {
+      status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof agent failed internally.'),
+    });
 
     try {
       report = validateProofReport(agentResult.report, input.payload.checks.map((check) => check.id));
@@ -325,7 +326,15 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       }
     } catch (error) {
       if (await this.isFresh(input.payload, input.materialization)) {
-        return { status: 'report-repair', reportRepairCount: input.reportRepairCount + 1, findings: [proofReportRepairDiagnostic(error)] };
+        const diagnostic = proofReportRepairDiagnostic(error);
+        const bytes = agentResult.reportBytes ?? Buffer.from(canonicalJson(agentResult.report));
+        if (bytes.length > 1024 * 1024 || !Buffer.from(bytes.toString('utf8')).equals(bytes)
+          || containsCredentialEvidence(bytes.toString('utf8'))) return this.settle(input.proofId, {
+            status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof report correction bytes are unsafe.'),
+          });
+        return { status: 'report-repair', reportRepairCount: input.reportRepairCount + 1, findings: [diagnostic],
+          reportCorrection: { bytes, sha256: sha256(bytes), diagnostic } };
+
       }
       return this.settle(input.proofId, {
         status: 'internal-error',

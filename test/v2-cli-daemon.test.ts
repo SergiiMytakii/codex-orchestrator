@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import type { RunRecord } from '../src/v2/run-store.js';
 import { test } from 'node:test';
 
-import { executeDaemonTick } from '../src/v2/cli.js';
+import { executeDaemonTick, executeDaemonLoop, discoverConfiguredDaemonTick } from '../src/v2/cli.js';
 import type { GitHubIssue } from '../src/v2/adapters/issues.js';
 import type { RunIssueResult } from '../src/v2/run-issue.js';
 
@@ -105,4 +107,85 @@ test('an unresolved attempt releases the issue loop so later candidates run and 
   assert.equal(await executeDaemonTick(input), 0);
   assert.deepEqual(executed, [1, 2, 2, 3]);
   assert.equal(discoveries, 2);
+});
+
+test('daemon refreshes the complete execution snapshot each tick after temporary config I/O', async () => {
+  const stop = new Error('stop test');
+  const executions: string[] = [];
+  let ticks = 0;
+  let delays = 0;
+  const result = { status: 'transport-failed', kind: 'transport', resumable: true, summary: 'retry' } as unknown as RunIssueResult;
+  await assert.rejects(executeDaemonLoop({ targetRoot: '/tmp/repo', once: false }, () => {}, {
+    discover: async () => { throw new Error('unbound discovery must never run'); },
+    executeRun: async () => { throw new Error('unbound executor must never run'); },
+    readTick: async () => {
+      ticks += 1;
+      if (ticks === 1) throw Object.assign(new Error('temporary config read failure'), { code: 'EIO' });
+      const repository = ticks === 2 ? 'A' : 'B';
+      return { candidates: [issue(42)], pollIntervalMilliseconds: 10,
+        executeRun: async () => { executions.push(repository); return result; } };
+    },
+    pollIntervalMilliseconds: 1,
+    delay: async () => { if (++delays === 3) throw stop; },
+  }), (error: unknown) => error === stop);
+  assert.deepEqual(executions, ['A', 'B']);
+});
+
+
+test('a repository config change after discovery cancels the frozen execution before effects', async () => {
+  let bytes = await readFile('.codex-orchestrator/config.json');
+  let executed = 0;
+  const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
+    readConfigBytes: async () => bytes,
+    discover: async (config) => { assert.equal(config.github.repo, 'codex-orchestrator'); return [issue(12)]; },
+    inventory: async () => [],
+    executeRun: async () => { executed += 1; return { status: 'state-schema-unsupported' }; },
+  });
+  const changed = JSON.parse(bytes.toString());
+  changed.github.repo = 'other';
+  bytes = Buffer.from(JSON.stringify(changed));
+  await assert.rejects(snapshot.executeRun({ targetRoot: '/tmp/target', issueNumber: 12 }), /config-snapshot-changed/);
+  assert.equal(executed, 0);
+});
+
+test('discovery picks interrupted local runs without auto and omits final safety stops', async () => {
+  const bytes = await readFile('.codex-orchestrator/config.json');
+  const fixture = (number: number, extra: Partial<RunRecord>): RunRecord => ({ issueNumber: number, createdAt: '2026-10-12T00:00:00Z', issueSnapshot: { ...issue(number), labels: ['agent:running'] }, ...extra } as unknown as RunRecord);
+  const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
+    readConfigBytes: async () => bytes,
+    discover: async () => [issue(2)],
+    inventory: async () => [fixture(1, {}), fixture(2, { terminalOutcome: { status: 'blocked', kind: 'safety', resumable: false, evidencePath: 'evidence.json' } })],
+    executeRun: async () => ({ status: 'state-schema-unsupported' }),
+  });
+  assert.deepEqual(snapshot.candidates.map((candidate) => candidate.number), [1]);
+});
+
+
+test('daemon resumes only legacy proof terminals with proven technical evidence', async () => {
+  const bytes = await readFile('.codex-orchestrator/config.json');
+  const stopped = (number: number): RunRecord => ({ issueNumber: number, createdAt: '2026-10-12T00:00:00Z',
+    issueSnapshot: { ...issue(number), labels: ['agent:blocked'] },
+    terminalOutcome: { status: 'internal-error', code: 'acceptance-proof-internal-failure', evidencePath: 'proof.json' } } as unknown as RunRecord);
+  const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
+    readConfigBytes: async () => bytes, discover: async () => [issue(1), issue(2)],
+    inventory: async () => [stopped(1), stopped(2)],
+    hasTechnicalTerminalProofFailure: async (run) => run.issueNumber === 2,
+    executeRun: async () => ({ status: 'state-schema-unsupported' }),
+  });
+  assert.deepEqual([...new Set(snapshot.candidates.map((candidate) => candidate.number))], [2]);
+});
+
+
+test('daemon cancellation ends the serial pass and skips later issue invocations', async () => {
+  const controller = new AbortController();
+  const executed: number[] = [];
+  const result = await executeDaemonLoop({ targetRoot: '/tmp/target', once: true }, () => {}, {
+    signal: controller.signal,
+    discover: async () => [issue(1), issue(2)],
+    executeRun: async ({ issueNumber }) => { executed.push(issueNumber); controller.abort(); return { status: 'cancelled', evidencePath: 'cancelled.json' }; },
+    delay: async () => { throw new Error('cancelled daemon must not delay'); },
+    pollIntervalMilliseconds: 1,
+  });
+  assert.equal(result, 130);
+  assert.deepEqual(executed, [1]);
 });

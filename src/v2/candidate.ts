@@ -52,6 +52,13 @@ export interface CandidateGitV2 {
     }>;
     activeMaterializations: Array<{ path: string; candidateCommitSha: string }>;
   }): Promise<CandidateResult<void>>;
+  inspectSource(input: {
+    binding: CandidateBindingV2;
+    worktreePath: string;
+    runId: string;
+    boundary: CandidateBoundaryV2;
+    artifactDir: string;
+  }): Promise<CandidateResult<'matching' | 'changed'>>;
   captureAndPin(input: {
     worktreePath: string;
     expectedHeadSha: string;

@@ -10,6 +10,8 @@ export interface ProcessCommandOptions {
   signal?: AbortSignal;
   processGroup?: boolean;
   maxOutputBytes?: number;
+  onStdoutBytes?: (chunk: Buffer) => void;
+  onStderrBytes?: (chunk: Buffer) => void;
   onStdoutChunk?: (chunk: string) => void | Promise<void>;
   onStderrChunk?: (chunk: string) => void | Promise<void>;
 }
@@ -26,6 +28,23 @@ export class ProcessOutputLimitError extends Error {
   constructor(readonly maxOutputBytes: number) {
     super(`Command output exceeded ${maxOutputBytes} bytes.`);
     this.name = 'ProcessOutputLimitError';
+  }
+}
+
+export interface UnresolvedCommandIdentity {
+  pid: number;
+  processGroupId: number;
+  processStartIdentity?: string;
+  streamsUnconfirmed: boolean;
+}
+
+export class CommandProcessQuiescenceError extends Error implements UnresolvedCommandIdentity {
+  readonly code = 'command-process-quiescence-unconfirmed';
+  readonly processStartIdentity?: string;
+  constructor(message: string, readonly pid: number, readonly processGroupId: number,
+    readonly streamsUnconfirmed: boolean, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'CommandProcessQuiescenceError';
   }
 }
 
@@ -48,169 +67,118 @@ function runSpawn(
   args: string[],
   options: ProcessCommandOptions & { shell: boolean },
 ): Promise<ProcessCommandResult> {
+  if (options.maxOutputBytes !== undefined && (!Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 1)) {
+    return Promise.reject(new Error('maxOutputBytes must be a positive safe integer'));
+  }
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('timeoutMs must be finite and positive'));
+  const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
-    let settled = false;
-    let timedOut = false;
-    let idleTimedOut = false;
-    let aborted = false;
-    let outputLimitExceeded = false;
-    let outputBytes = 0;
-    const callbackTasks: Array<Promise<void>> = [];
-    const ownsProcessGroup = options.processGroup === true && process.platform !== 'win32';
+    const ownsGroup = options.processGroup !== false && process.platform !== 'win32';
     const child = spawn(file, args, {
       cwd: options.cwd,
       env: options.env ? { ...options.env } : options.envOverlay ? { ...process.env, ...options.envOverlay } : process.env,
-      shell: options.shell,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: ownsProcessGroup,
+      shell: options.shell, stdio: ['pipe', 'pipe', 'pipe'], detached: ownsGroup,
     });
-    let stdout = '';
-    let stderr = '';
-
-    if (options.maxOutputBytes !== undefined
-      && (!Number.isSafeInteger(options.maxOutputBytes) || options.maxOutputBytes < 1)) {
-      child.kill();
-      reject(new Error('maxOutputBytes must be a positive safe integer'));
-      return;
-    }
-
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    const scheduleCallback = (callback: ((chunk: string) => void | Promise<void>) | undefined, chunk: string) => {
-      if (callback) {
-        callbackTasks.push(Promise.resolve(callback(chunk)));
-      }
-    };
-    let idleTimeout: NodeJS.Timeout | undefined;
-    const resetIdleTimeout = () => {
-      if (!options.idleTimeoutMs || options.idleTimeoutMs <= 0) {
-        return;
-      }
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
-      idleTimeout = setTimeout(() => {
-        idleTimedOut = true;
-        signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
-        setTimeout(() => {
-          if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
-        }, 2_000).unref();
-      }, options.idleTimeoutMs);
-      idleTimeout.unref();
-    };
-    resetIdleTimeout();
-
-    const capture = (chunk: string, stream: 'stdout' | 'stderr') => {
-      const bytes = Buffer.byteLength(chunk, 'utf8');
-      if (options.maxOutputBytes !== undefined && outputBytes + bytes > options.maxOutputBytes) {
-        outputLimitExceeded = true;
-        signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
-        setTimeout(() => {
-          if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
-        }, 2_000).unref();
-        return false;
-      }
-      outputBytes += bytes;
-      if (stream === 'stdout') stdout += chunk;
-      else stderr += chunk;
-      return true;
-    };
-    child.stdout.on('data', (chunk: string) => {
-      if (!capture(chunk, 'stdout')) return;
-      scheduleCallback(options.onStdoutChunk, chunk);
-      resetIdleTimeout();
-    });
-    child.stderr.on('data', (chunk: string) => {
-      if (!capture(chunk, 'stderr')) return;
-      scheduleCallback(options.onStderrChunk, chunk);
-      resetIdleTimeout();
-    });
-    const timeout =
-      options.timeoutMs && options.timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
-            setTimeout(() => {
-              if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
-            }, 2_000).unref();
-          }, options.timeoutMs)
-        : undefined;
-    timeout?.unref();
-    const abort = () => {
-      aborted = true;
-      signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGTERM');
-      setTimeout(() => {
-        if (ownsProcessGroup || !settled) signalOwnedProcess(child.pid, ownsProcessGroup, 'SIGKILL');
-      }, 2_000).unref();
-    };
-    if (options.signal?.aborted) abort();
-    else options.signal?.addEventListener('abort', abort, { once: true });
-    child.on('error', (error) => {
-      if (settled) {
-        return;
-      }
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const callbacks: Promise<void>[] = [];
+    let bytes = 0;
+    let settled = false;
+    let stopping = false;
+    let captureError: unknown;
+    let streamsClosed = false;
+    let reason: 'timeout' | 'idle' | 'cancelled' | 'output' | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let barrierTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: unknown, exitCode = 1) => {
+      if (settled) return;
       settled = true;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
+      clearTimeout(timer); if (idleTimer) clearTimeout(idleTimer);
+      if (killTimer) clearTimeout(killTimer); if (barrierTimer) clearTimeout(barrierTimer);
       options.signal?.removeEventListener('abort', abort);
-      reject(error);
-    });
-    child.on('close', (exitCode) => {
-      if (settled) {
+      if (error || captureError) {
+        const failure = error && captureError ? new Error(`${String(captureError)}; command cleanup failed: ${String(error)}`) : error ?? captureError;
+        let absent = !child.pid;
+        try { absent = !child.pid || (ownsGroup ? !groupPresent(child.pid) : false); } catch { absent = false; }
+        reject(child.pid && (!absent || !streamsClosed)
+          ? new CommandProcessQuiescenceError(String(failure), child.pid, ownsGroup ? child.pid : 0, !streamsClosed, { cause: failure })
+          : failure);
         return;
       }
-      settled = true;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
-      options.signal?.removeEventListener('abort', abort);
-      const finish = async () => {
-        await Promise.all(callbackTasks);
-        if ((aborted || timedOut || idleTimedOut) && ownsProcessGroup && child.pid) {
-          await waitForProcessGroupAbsence(child.pid);
+      if (reason === 'output') { reject(new ProcessOutputLimitError(options.maxOutputBytes!)); return; }
+      const diagnostic = reason === 'cancelled' ? 'Command cancelled.' : reason === 'idle'
+        ? `Command idle timed out after ${options.idleTimeoutMs}ms.` : reason === 'timeout'
+          ? `Command timed out after ${timeoutMs}ms.` : '';
+      const capturedStderr = Buffer.concat(stderr).toString('utf8');
+      resolve({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: diagnostic
+        ? `${capturedStderr}${capturedStderr ? '\n' : ''}${diagnostic}` : capturedStderr,
+        exitCode: reason === 'cancelled' ? 130 : reason ? 124 : exitCode });
+    };
+    const stop = (nextReason?: typeof reason) => {
+      if (nextReason && !reason) reason = nextReason;
+      if (stopping || settled) return;
+      stopping = true;
+      try { signalOwnedProcess(child.pid, ownsGroup, 'SIGTERM'); } catch (error) { finish(error); return; }
+      killTimer = setTimeout(() => {
+        try { signalOwnedProcess(child.pid, ownsGroup, 'SIGKILL'); } catch (error) { finish(error); }
+      }, 2_000);
+      barrierTimer = setTimeout(() => {
+        child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+        finish(new Error('Command process group or streams could not be confirmed absent after SIGKILL.'));
+      }, 7_000);
+    };
+    const abort = () => stop('cancelled');
+    const timer = setTimeout(() => stop('timeout'), timeoutMs);
+    const activity = () => {
+      if (!options.idleTimeoutMs || stopping) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => stop('idle'), options.idleTimeoutMs);
+    };
+    const capture = (chunk: Buffer, stream: 'stdout' | 'stderr') => {
+      if (options.maxOutputBytes !== undefined && bytes + chunk.length > options.maxOutputBytes) { stop('output'); return; }
+      bytes += chunk.length;
+      (stream === 'stdout' ? stdout : stderr).push(chunk);
+      try {
+        (stream === 'stdout' ? options.onStdoutBytes : options.onStderrBytes)?.(chunk);
+        const callback = stream === 'stdout' ? options.onStdoutChunk : options.onStderrChunk;
+        if (callback) {
+          const task = Promise.resolve(callback(chunk.toString('utf8')));
+          void task.catch(() => undefined); callbacks.push(task);
         }
-        if (outputLimitExceeded) {
-          reject(new ProcessOutputLimitError(options.maxOutputBytes!));
-          return;
-        }
-        if (aborted) {
-          resolve({ stdout, stderr: stderr ? `${stderr}\nCommand cancelled.` : 'Command cancelled.', exitCode: 130 });
-          return;
-        }
-        if (idleTimedOut) {
-          const timeoutMessage = `Command idle timed out after ${options.idleTimeoutMs}ms.`;
-          resolve({
-            stdout,
-            stderr: stderr ? `${stderr}\n${timeoutMessage}` : timeoutMessage,
-            exitCode: 124,
-          });
-          return;
-        }
-        if (timedOut) {
-          const timeoutMessage = `Command timed out after ${options.timeoutMs}ms.`;
-          resolve({
-            stdout,
-            stderr: stderr ? `${stderr}\n${timeoutMessage}` : timeoutMessage,
-            exitCode: 124,
-          });
-          return;
-        }
-        resolve({ stdout, stderr, exitCode: exitCode ?? 1 });
-      };
-      void finish().catch(reject);
+      } catch (error) { captureError = error; stop(); }
+      activity();
+    };
+    child.stdout.on('data', (chunk: Buffer) => capture(chunk, 'stdout'));
+    child.stderr.on('data', (chunk: Buffer) => capture(chunk, 'stderr'));
+    child.stdin.on('error', () => undefined);
+    child.once('error', (error) => finish(error));
+    child.once('exit', () => {
+      // Parent exit is insufficient: descendants may still own the inherited pipes.
+      try { if (ownsGroup && child.pid && groupPresent(child.pid)) stop(); }
+      catch (error) { finish(error); }
     });
-    if (options.stdin !== undefined) {
-      child.stdin.end(options.stdin);
-    } else {
-      child.stdin.end();
-    }
+    child.once('close', (code) => {
+      streamsClosed = true;
+      void (async () => {
+        if (ownsGroup && child.pid) {
+          if (groupPresent(child.pid)) stop();
+          while (groupPresent(child.pid) && !settled) await new Promise((r) => setTimeout(r, 25));
+        }
+        // Keep the wall deadline alive for asynchronous output consumers too.
+        let callbackTimer: NodeJS.Timeout | undefined;
+        try {
+          if (!reason) await Promise.race([Promise.all(callbacks), new Promise<void>((r) => {
+            callbackTimer = setTimeout(() => { if (!reason) reason = 'timeout'; r(); }, Math.max(0, deadline - Date.now()));
+          })]);
+        } finally { if (callbackTimer) clearTimeout(callbackTimer); }
+        if (!settled) finish(undefined, code ?? 1);
+      })().catch((error) => finish(error));
+    });
+    if (options.signal?.aborted) abort(); else options.signal?.addEventListener('abort', abort, { once: true });
+    activity();
+    child.stdin.end(options.stdin);
   });
 }
 
@@ -219,18 +187,9 @@ function signalOwnedProcess(pid: number | undefined, processGroup: boolean, sign
   try { process.kill(processGroup ? -pid : pid, signal); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
 }
-
-async function waitForProcessGroupAbsence(processGroupId: number): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try { process.kill(-processGroupId, 0); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error; }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  signalOwnedProcess(processGroupId, true, 'SIGKILL');
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    try { process.kill(-processGroupId, 0); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error; }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  throw new Error('Command process group remained active after SIGKILL.');
+function groupPresent(pid: number): boolean {
+  try { process.kill(-pid, 0); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
+    throw error; }
 }

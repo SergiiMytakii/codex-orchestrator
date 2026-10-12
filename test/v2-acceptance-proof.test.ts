@@ -36,8 +36,8 @@ test('proof failure receipts retain the bounded cause for input, inspection, age
 
   const agent = proofFixture();
   const launch = await agent.proof.proveChange(agent.input({ beforeAgentLaunch: async () => { throw new Error('agent unavailable'); } }));
-  assert.equal(launch.status, 'internal-error');
-  if (launch.status === 'internal-error') assert.match(launch.receipt.summary, /agent unavailable/u);
+  assert.equal(launch.status, 'transport-failed');
+  if (launch.status === 'transport-failed' && launch.resumable) assert.match(launch.failure?.detail ?? '', /agent unavailable/u);
 
   const artifact = proofFixture({ artifactContent: Buffer.from('changed bytes') });
   const mismatch = await artifact.proof.proveChange(artifact.input());

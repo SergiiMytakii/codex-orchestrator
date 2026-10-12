@@ -159,7 +159,7 @@ test('one incomplete GraphQL page defers without an internal retry and succeeds 
   assert.equal(reads, 2);
 });
 
-for (const paginationFailure of ['omitted-end-cursor', 'page-bound'] as const) {
+for (const paginationFailure of ['omitted-end-cursor', 'repeated-end-cursor'] as const) {
   test(`real GraphQL ${paginationFailure} pagination uncertainty remains retryable`, async () => {
     let threadPages = 0;
     const executor: CommandExecutor = async (_file, args) => {
@@ -169,7 +169,7 @@ for (const paginationFailure of ['omitted-end-cursor', 'page-bound'] as const) {
         return jsonResult({ data: { repository: { pullRequest: { reviewThreads: {
           nodes: [], pageInfo: {
             hasNextPage: true,
-            endCursor: paginationFailure === 'omitted-end-cursor' ? null : `cursor-${threadPages}`,
+            endCursor: paginationFailure === 'omitted-end-cursor' ? null : 'cursor-1',
           },
         } } } } });
       }
@@ -185,7 +185,7 @@ for (const paginationFailure of ['omitted-end-cursor', 'page-bound'] as const) {
 
     assert.equal(result.status, 'retryable');
     if (result.status === 'retryable') assert.match(result.reason, /pagination/u);
-    assert.equal(threadPages, paginationFailure === 'omitted-end-cursor' ? 1 : 20);
+    assert.equal(threadPages, paginationFailure === 'omitted-end-cursor' ? 1 : 2);
   });
 }
 
@@ -367,7 +367,7 @@ function reviewTargetGraphQl(headSha = 'a'.repeat(40)) {
 function productionObservationExecutor(restHead: string, graphQlHead: string): CommandExecutor {
   return async (_file, args) => {
     const query = args.find((argument) => argument.startsWith('query=')) ?? '';
-    if (args.includes('--paginate')) return jsonResult([[restPullRequestPayload(restHead)]]);
+    if (args.includes('repos/owner/repo/pulls')) return jsonResult([restPullRequestPayload(restHead)]);
     if (query.includes('ReviewThreads')) return jsonResult({ data: { repository: { pullRequest: { reviewThreads: {
       nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
     } } } } });

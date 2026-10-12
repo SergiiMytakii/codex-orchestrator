@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -256,7 +258,7 @@ test('run state round-trips bounded terminal notification diagnostics and cutoff
   assert.deepEqual((await new FileRunRecordWriter(path, deterministicAtomicOptions()).read()).runs[0], active);
 
   const invalid = structuredClone(active);
-  invalid.terminalNotifications!.comment.attempts = 4;
+  invalid.terminalNotifications!.comment.attempts = -1;
   await assert.rejects(
     new FileRunRecordWriter(join(await temporaryRoot(), 'run-state.json'), deterministicAtomicOptions())
       .compareAndSwap(0, body([invalid])),
@@ -371,7 +373,7 @@ test('lock release is token-safe', async () => {
       acquiredAt: timestamp(),
     })}\n`),
   }));
-  await assert.rejects(writer.compareAndSwap(0, body([record()])), /before-rename/u);
+  await assert.rejects(writer.compareAndSwap(0, body([record()])), /release could not verify/u);
   assert.equal(JSON.parse(await readFile(`${path}.lock`, 'utf8')).token, 'replacement');
 });
 
@@ -483,3 +485,124 @@ function timestamp(): string {
 function uuid(value: number): string {
   return `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 }
+
+
+test('per-issue journals preserve more than 256 issues without cumulative file limits', async () => {
+  const root = await temporaryRoot();
+  const repository = FileRunRecordWriter.forRepository(join(root, 'run-state.json'), 'owner/repo', {
+    ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true,
+  });
+  for (let issue = 1; issue <= 257; issue++) {
+    const next = { ...record(), runId: uuid(issue), issueNumber: issue,
+      issueSnapshot: { ...record().issueSnapshot, number: issue }, reworkFindings: ['x'.repeat(8000)] };
+    await repository.forIssue(issue).compareAndSwap(0, body([next]));
+  }
+  assert.equal((await repository.inventory()).runs.length, 257);
+  assert.equal((await repository.forIssue(257).read()).generation, 1);
+  assert.equal((await repository.forIssue(1).read()).runs[0]?.issueNumber, 1);
+});
+
+
+test('large run histories are lossless hashed evidence and stay bounded per state file', async () => {
+  const root = await temporaryRoot();
+  const writer = FileRunRecordWriter.forRepository(join(root, 'run-state.json'), 'owner/repo', deterministicAtomicOptions()).forIssue(42);
+  const original = { ...record(), reworkFindings: Array.from({ length: 1500 }, (_, i) => `${i}:` + 'я'.repeat(500)) };
+  await writer.compareAndSwap(0, body([original]));
+  const fresh = FileRunRecordWriter.forRepository(join(root, 'run-state.json'), 'owner/repo').forIssue(42);
+  assert.deepEqual((await fresh.read()).runs, [original]);
+  const directory = join(root, 'runs', sha256('owner/repo'));
+  assert.ok((await readFile(join(directory, '42.json'))).length < 1024 * 1024);
+  const evidence = join(directory, 'evidence');
+  const chunks = await readdir(evidence);
+  assert.ok(chunks.length > 1);
+  await writeFile(join(evidence, chunks[0]!), 'corrupt');
+  assert.equal((await fresh.inspect()).status, 'unsupported');
+  await assert.rejects(fresh.compareAndSwap(1, body([record()])), /evidence|unsupported/u);
+});
+
+
+test('migration resumes after a killed writer and preserves the original journal', async () => {
+  for (const crashPoint of ['before-file-fsync', 'before-rename', 'after-rename', 'before-parent-fsync']) {
+  const root = await temporaryRoot();
+  const legacyPath = join(root, 'run-state.json');
+  const old = { schema: 'codex-orchestrator.run-state', generation: 9, runs: [record(),
+    { ...record(), runId: uuid(2), issueNumber: 43, issueSnapshot: { ...record().issueSnapshot, number: 43 } }] };
+  const bytes = `${canonicalJson(old)}\n`;
+  await writeFile(legacyPath, bytes);
+  const moduleUrl = new URL('../src/v2/run-store.js', import.meta.url).href;
+  const optionsCode = `({ host:'same-host', bootId:'same-boot', pid:process.pid, processStartIdentity:'pid:'+process.pid,
+    exclusiveRepositoryOwnership:true, inspectProcessIdentity:async (pid)=>{
+      try {process.kill(pid,0);return 'unknown'} catch(error){return error.code==='ESRCH'?'absent':'unknown'}
+    } })`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import {FileRunRecordWriter} from ${JSON.stringify(moduleUrl)};
+    const options=${optionsCode};
+    options.fault=async(point)=>{if(point===${JSON.stringify(crashPoint)}){process.send('persisted');await new Promise(()=>{});}};
+    setInterval(()=>{},1000);
+    await FileRunRecordWriter.forRepository(${JSON.stringify(legacyPath)},'owner/repo',options).migrateLegacy();
+  `], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  try {
+    await once(child, 'message');
+    const closed = once(child, 'close');
+    child.kill('SIGKILL');
+    await closed;
+    assert.equal(await readFile(legacyPath, 'utf8'), bytes);
+    const fresh = spawn(process.execPath, ['--input-type=module', '-e', `
+      import {FileRunRecordWriter} from ${JSON.stringify(moduleUrl)};
+      const writer=FileRunRecordWriter.forRepository(${JSON.stringify(legacyPath)},'owner/repo',${optionsCode});
+      await writer.migrateLegacy();
+      const inventory=await writer.inventory();
+      if(inventory.runs.length!==2)throw Error('lost run');
+    `], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let error = '';
+    fresh.stderr.on('data', (chunk) => { error += chunk.toString(); });
+    const [code] = await once(fresh, 'close');
+    assert.equal(code, 0, error);
+    assert.equal(await readFile(`${legacyPath}.backup`, 'utf8'), bytes);
+    const writer = FileRunRecordWriter.forRepository(legacyPath, 'owner/repo', { ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true });
+    assert.deepEqual((await writer.inventory()).runs.map((run) => run.runId).sort(), old.runs.map((run) => run.runId).sort());
+  } finally { child.kill('SIGKILL'); }
+  }
+});
+
+test('migration divergence preserves both destination and original bytes', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const original = `${canonicalJson({ schema: 'codex-orchestrator.run-state', generation: 4, runs: [record()] })}\n`;
+  await writeFile(path, original);
+  const repository = FileRunRecordWriter.forRepository(path, 'owner/repo', { ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true });
+  await repository.forIssue(42).compareAndSwap(0, body([{ ...record(), cycle: 2 }]));
+  await assert.rejects(repository.migrateLegacy(), /diverged/u);
+  assert.equal(await readFile(path, 'utf8'), original);
+  assert.equal((await repository.forIssue(42).read()).runs[0]?.cycle, 2);
+});
+
+test('large legacy migration archives each Run and missing migrated state blocks replacement', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const large = { ...record(), reworkFindings: Array.from({ length: 8000 }, (_, i) => `${i}:` + 'x'.repeat(200)) };
+  const original = `${canonicalJson({ schema: 'codex-orchestrator.run-state', generation: 3, runs: [large] })}\n`;
+  assert.ok(Buffer.byteLength(original) > 1024 * 1024);
+  await writeFile(path, original);
+  const writer = FileRunRecordWriter.forRepository(path, 'owner/repo', { ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true });
+  await writer.migrateLegacy();
+  assert.deepEqual((await writer.forIssue(42).read()).runs, [large]);
+  assert.equal(await readFile(`${path}.backup`, 'utf8'), original);
+  const { unlink } = await import('node:fs/promises');
+  await unlink(join(root, 'runs', sha256('owner/repo'), '42.json'));
+  assert.equal((await writer.forIssue(42).inspect()).status, 'unsupported');
+  await assert.rejects(writer.inventory(), /incomplete/u);
+  await assert.rejects(writer.forIssue(42).compareAndSwap(0, body([record()])), /unsupported/u);
+});
+
+test('foreign-repository legacy migration is blocked before any destination mutation', async () => {
+  const root = await temporaryRoot();
+  const path = join(root, 'run-state.json');
+  const foreign = { ...record(), runId: uuid(2), canonicalRepository: 'another/repo' };
+  const original = `${canonicalJson({ schema: 'codex-orchestrator.run-state', generation: 3, runs: [record(), foreign] })}\n`;
+  await writeFile(path, original);
+  const writer = FileRunRecordWriter.forRepository(path, 'owner/repo', { ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true });
+  await assert.rejects(writer.migrateLegacy(), /foreign repository/u);
+  assert.equal(await readFile(path, 'utf8'), original);
+  assert.deepEqual(await readdir(root), ['run-state.json']);
+});

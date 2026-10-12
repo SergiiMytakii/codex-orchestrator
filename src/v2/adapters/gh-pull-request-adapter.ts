@@ -1,5 +1,5 @@
-import type { CommandExecutor } from './gh-cli.js';
-import { defaultGhExecutor } from './gh-cli.js';
+import type { CommandExecutor, GitHubExecutionOptions } from './gh-cli.js';
+import { defaultGhExecutor, githubCollectionExecutor, githubExecutor, githubRestCollection } from './gh-cli.js';
 import type {
   CreateDraftPullRequestInput,
   GitHubPullRequest,
@@ -13,8 +13,6 @@ import type {
   GitHubSubmittedPullRequestReview,
 } from './pull-requests.js';
 
-const MAX_PAGES = 20;
-const MAX_ITEMS = 2_000;
 const MAX_TEXT_LENGTH = 131_072;
 
 export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
@@ -22,25 +20,14 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
   private readonly repo: string;
   private readonly executor: CommandExecutor;
 
-  public constructor(owner: string, repo: string, executor: CommandExecutor = defaultGhExecutor) {
+  public constructor(owner: string, repo: string, executor: CommandExecutor = defaultGhExecutor, private readonly executionOptions: GitHubExecutionOptions = {}) {
     this.owner = owner;
     this.repo = `${owner}/${repo}`;
-    this.executor = executor;
+    this.executor = githubExecutor(executor, executionOptions);
   }
 
   public async listAllByHeadBranch(headBranch: string): Promise<GitHubPullRequestDetails[]> {
-    const result = await this.executor('gh', [
-      'api', '--paginate', '--slurp', '--method', 'GET',
-      `repos/${this.repo}/pulls`,
-      '-f', 'state=all',
-      '-f', `head=${this.owner}:${headBranch}`,
-      '-f', 'per_page=100',
-    ]);
-    const pages = JSON.parse(result.stdout) as unknown;
-    if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
-      throw new Error('GitHub pull request pagination payload must be an array of pages');
-    }
-    return pages.flatMap((page) => (page as unknown[]).map(normalizeDetailedPullRequest));
+    return (await githubRestCollection(githubCollectionExecutor(this.executor, this.executionOptions), `repos/${this.repo}/pulls`, ['-f', 'state=all', '-f', `head=${this.owner}:${headBranch}`])).map(normalizeDetailedPullRequest);
   }
 
   public async createDraftPullRequest(input: CreateDraftPullRequestInput): Promise<GitHubPullRequest> {
@@ -184,16 +171,18 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
   }
 
   public async listReviewThreads(number: number): Promise<GitHubPullRequestReviewThread[]> {
+    const executor = githubCollectionExecutor(this.executor, this.executionOptions);
     const threads: GitHubPullRequestReviewThread[] = [];
+    const seenCursors = new Set<string>();
     let cursor: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const result = await this.executor('gh', [
+    for (;;) {
+      const result = await executor('gh', [
         'api', 'graphql',
         '-f', `owner=${this.owner}`,
         '-f', `repo=${this.repo.slice(this.owner.length + 1)}`,
         '-F', `number=${number}`,
         ...(cursor ? ['-f', `cursor=${cursor}`] : []),
-        '-f', 'query=query ReviewThreads($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved isOutdated path line comments(first:100){nodes{id databaseId url body createdAt updatedAt author{__typename ... on User{id databaseId login} ... on Bot{id login}} commit{oid} originalCommit{oid}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}',
+        '-f', 'query=query ReviewThreads($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved isOutdated path line comments(first:1){nodes{id databaseId url body createdAt updatedAt author{__typename ... on User{id databaseId login} ... on Bot{id login}} commit{oid} originalCommit{oid}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}',
       ]);
       const connection = reviewThreadsConnection(result.stdout);
       for (const rawThread of arrayField(connection, 'nodes')) {
@@ -203,41 +192,42 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
         let comments = thread.comments;
         let commentsPageInfo = pageInfo(commentsConnection, 'review thread comments');
         let commentsCursor = commentsPageInfo.endCursor;
-        for (let commentPage = 1; commentsPageInfo.hasNextPage; commentPage += 1) {
-          if (commentPage >= MAX_PAGES || !commentsCursor) {
-            throw new Error('GitHub review thread comments pagination exceeded its bound or omitted endCursor');
+        const seenCommentsCursors = new Set<string>();
+        while (commentsPageInfo.hasNextPage) {
+          if (!commentsCursor || seenCommentsCursors.has(commentsCursor)) {
+            throw new Error('GitHub review thread comments pagination repeated or omitted endCursor');
           }
-          const commentsResult = await this.executor('gh', [
+          seenCommentsCursors.add(commentsCursor);
+          const commentsResult = await executor('gh', [
             'api', 'graphql', '-f', `threadId=${thread.nodeId}`, '-f', `cursor=${commentsCursor}`,
             '-f', 'query=query ReviewThreadComments($threadId:ID!,$cursor:String!){node(id:$threadId){... on PullRequestReviewThread{comments(first:100,after:$cursor){nodes{id databaseId url body createdAt updatedAt author{__typename ... on User{id databaseId login} ... on Bot{id login}} commit{oid} originalCommit{oid}} pageInfo{hasNextPage endCursor}}}}}',
           ]);
           const commentsRoot = objectField(graphqlData(commentsResult.stdout), 'node');
           const nextConnection = objectField(commentsRoot, 'comments');
           comments = comments.concat(arrayField(nextConnection, 'nodes').map(normalizeReviewComment));
-          requireItemBound(comments.length, 'review thread comments');
           commentsPageInfo = pageInfo(nextConnection, 'review thread comments');
           commentsCursor = commentsPageInfo.endCursor;
         }
         threads.push({ ...thread, comments });
-        requireItemBound(threads.length, 'review threads');
       }
       const info = pageInfo(connection, 'review threads');
       if (!info.hasNextPage) return threads;
       if (!info.endCursor) throw new Error('GitHub review threads pagination omitted endCursor');
+      if (seenCursors.has(info.endCursor)) throw new Error('GitHub review threads pagination repeated endCursor');
+      seenCursors.add(info.endCursor);
       cursor = info.endCursor;
     }
-    throw new Error('GitHub review threads pagination exceeded its page bound');
   }
 
   public async listSubmittedReviews(number: number): Promise<GitHubSubmittedPullRequestReview[]> {
-    return (await this.listBoundedRestCollection(
+    return (await this.listRestCollection(
       `repos/${this.repo}/pulls/${number}/reviews`,
       'GitHub pull request reviews',
     )).map(normalizeSubmittedReview);
   }
 
   public async listConversationComments(number: number): Promise<GitHubPullRequestConversationComment[]> {
-    return (await this.listBoundedRestCollection(
+    return (await this.listRestCollection(
       `repos/${this.repo}/issues/${number}/comments`,
       'GitHub pull request conversation comments',
     )).map(normalizeConversationComment);
@@ -255,20 +245,9 @@ export class GhCliPullRequestAdapter implements GitHubPullRequestAdapter {
     return matches[0]!;
   }
 
-  private async listBoundedRestCollection(endpoint: string, description: string): Promise<unknown[]> {
-    const items: unknown[] = [];
-    for (let page = 1; page <= MAX_PAGES; page += 1) {
-      const result = await this.executor('gh', [
-        'api', '--method', 'GET', endpoint,
-        '-f', 'per_page=100', '-f', `page=${page}`,
-        '--jq', '.[] | .id = (.id | tostring) | if .user then .user.id = (.user.id | tostring) else . end',
-      ]);
-      const next = parseJsonLines(result.stdout, description);
-      items.push(...next);
-      requireItemBound(items.length, description);
-      if (next.length < 100) return items;
-    }
-    throw new Error(`${description} pagination exceeded its page bound`);
+  private async listRestCollection(endpoint: string, description: string): Promise<unknown[]> {
+    void description;
+    return githubRestCollection(githubCollectionExecutor(this.executor, this.executionOptions), endpoint, [], '.[] | .id = (.id | tostring) | if .user then .user.id = (.user.id | tostring) else . end');
   }
 }
 
@@ -367,17 +346,6 @@ function normalizeRestActor(input: unknown): GitHubReviewActor | null {
   };
 }
 
-function parseJsonLines(stdout: string, description: string): unknown[] {
-  if (!stdout.trim()) return [];
-  return stdout.trim().split(/\r?\n/u).map((line, index) => {
-    try {
-      return JSON.parse(line) as unknown;
-    } catch {
-      throw new Error(`${description} line ${index + 1} is not valid JSON`);
-    }
-  });
-}
-
 function pageInfo(connection: Record<string, unknown>, description: string): { hasNextPage: boolean; endCursor: string | null } {
   const value = objectField(connection, 'pageInfo');
   const hasNextPage = booleanField(value, 'hasNextPage');
@@ -425,10 +393,6 @@ function decimalIdField(record: Record<string, unknown>, field: string): string 
 function boundedText(value: string, description: string): string {
   if (value.length > MAX_TEXT_LENGTH) throw new Error(`${description} exceeds the text bound`);
   return value;
-}
-
-function requireItemBound(length: number, description: string): void {
-  if (length > MAX_ITEMS) throw new Error(`${description} exceeds the item bound`);
 }
 
 function normalizeDetailedPullRequest(input: unknown): GitHubPullRequestDetails {

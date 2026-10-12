@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { defaultProcessExecutor } from './adapters/command.js';
 import { readFile } from 'node:fs/promises';
 
 import type { ProcessStartIdentity } from './active-attempt.js';
@@ -135,23 +135,17 @@ async function readLinuxProcess(pid: number, system: ProcessIdentitySystem): Pro
   return { status: 'present', processGroupId, startTicks };
 }
 
-function readDarwinProcessGroupId(pid: number): Promise<
+async function readDarwinProcessGroupId(pid: number): Promise<
   | { status: 'present'; processGroupId: number }
   | { status: 'absent' | 'unknown' }
 > {
-  return new Promise((resolveObservation) => {
-    execFile('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }, (error, stdout) => {
-      if (error) {
-        const code = (error as unknown as { code?: unknown }).code;
-        resolveObservation(code === 1 || code === '1' ? { status: 'absent' } : { status: 'unknown' });
-        return;
-      }
-      const processGroupId = Number.parseInt(stdout.trim(), 10);
-      resolveObservation(Number.isSafeInteger(processGroupId) && processGroupId > 0
-        ? { status: 'present', processGroupId }
-        : { status: 'unknown' });
-    });
-  });
+  try {
+    const result = await defaultProcessExecutor('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { timeoutMs: 5_000 });
+    if (result.exitCode !== 0) return { status: result.exitCode === 1 ? 'absent' : 'unknown' };
+    const processGroupId = Number.parseInt(result.stdout.trim(), 10);
+    return Number.isSafeInteger(processGroupId) && processGroupId > 0
+      ? { status: 'present', processGroupId } : { status: 'unknown' };
+  } catch { return { status: 'unknown' }; }
 }
 
 function positive(value: number, field: string): void {

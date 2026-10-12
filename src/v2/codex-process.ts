@@ -19,6 +19,8 @@ export interface SpawnSpec {
   cwd: string;
   env: Record<string, string>;
   stdin: string;
+  deadline?: number;
+  signal?: AbortSignal;
 }
 
 export interface SupervisedChild {
@@ -84,6 +86,7 @@ export interface CodexProcessResult {
   stderr: Buffer;
   report: CodexReportRead;
   error?: string;
+  outputTruncated?: boolean;
 }
 
 export class ProcessQuiescenceError extends Error {
@@ -103,6 +106,7 @@ export class CodexProcess {
 
   async run(input: CodexProcessInput, signal: AbortSignal): Promise<CodexProcessResult> {
     validateInput(input);
+    const deadline = Date.now() + input.timeoutMs;
     await clearPriorReport(input.reportPath);
     const liveSmokeModel = input.parentEnv.CODEX_ORCHESTRATOR_LIVE_SMOKE_MODEL;
     if (liveSmokeModel !== undefined && !/^[a-z0-9._-]+$/u.test(liveSmokeModel)) {
@@ -131,13 +135,14 @@ export class CodexProcess {
         safePath: input.safePath,
       }),
       stdin: input.prompt,
+      deadline, signal,
     };
 
     let child: SupervisedChild;
     try {
       child = await this.spawnProcess(spec);
     } catch (error) {
-      return emptyResult('spawn-failed', errorMessage(error));
+      return emptyResult(error instanceof DeadlineError ? error.kind : 'spawn-failed', errorMessage(error));
     }
 
     if (!child.processStartIdentity) {
@@ -145,35 +150,35 @@ export class CodexProcess {
       return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, 'process start identity is unknown');
     }
     try {
-      await input.onSpawned({
+      await withinDeadline(input.onSpawned({
         pid: child.pid,
         processGroupId: child.processGroupId,
         processStartIdentity: structuredClone(child.processStartIdentity),
-      });
+      }), deadline, signal);
     } catch (error) {
       const settled = await terminateAndSettle(child, child.waitForExit());
-      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
+      return finalizeResult(error instanceof DeadlineError ? error.kind : 'launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
     }
     try {
-      await child.releaseStartGate();
+      await withinDeadline(child.releaseStartGate(), deadline, signal);
     } catch (error) {
       const settled = await terminateAndSettle(child, child.waitForExit());
-      return finalizeResult('launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
+      return finalizeResult(error instanceof DeadlineError ? error.kind : 'launch-gate-failed', child, settled, { kind: 'missing' }, errorMessage(error));
     }
 
     let stdinError: unknown;
     try {
-      await child.writeStdinAndClose(spec.stdin);
+      await withinDeadline(child.writeStdinAndClose(spec.stdin), deadline, signal);
     } catch (error) {
       stdinError = error;
     }
     const exitPromise = child.waitForExit();
     if (stdinError) {
       const settled = await terminateAndSettle(child, exitPromise);
-      return finalizeResult('transport-failed', child, settled, await readReportAtomic(input.reportPath), errorMessage(stdinError));
+      return finalizeResult(stdinError instanceof DeadlineError ? stdinError.kind : 'transport-failed', child, settled, await readReportAtomic(input.reportPath), errorMessage(stdinError));
     }
 
-    const terminal = await monitorTerminal(child, exitPromise, signal, input.timeoutMs, input.idleTimeoutMs);
+    const terminal = await monitorTerminal(child, exitPromise, signal, Math.max(1, deadline - Date.now()), input.idleTimeoutMs);
     let settled: SettledChild;
     if (terminal.kind === 'exit') {
       settled = await settleNormalExit(child, terminal.exit);
@@ -188,7 +193,6 @@ export class CodexProcess {
     if (terminal.kind === 'cancelled') return finalizeResult('cancelled', child, settled, report);
     if (terminal.kind === 'timeout') return finalizeResult('timeout', child, settled, report);
     if (terminal.kind === 'idle-timeout') return finalizeResult('idle-timeout', child, settled, report);
-    if (settled.streams.truncated) return finalizeResult('output-truncated', child, settled, report);
     if (
       report.kind !== 'available'
       && settled.exit.exitCode !== 0
@@ -268,13 +272,13 @@ async function settleNormalExit(
   exit: { exitCode: number | null; signal: string | null },
 ): Promise<SettledChild> {
   try {
-    await child.waitForGroupAbsent(0);
+    await withTimeout(child.waitForGroupAbsent(0), MONITOR_POLL_MS, 'group observation did not settle');
   } catch {
-    await child.terminateGroup('SIGTERM');
+    await requireGroupTermination(child, 'SIGTERM');
     try {
-      await child.waitForGroupAbsent(TERMINATE_GRACE_MS);
+      await withTimeout(child.waitForGroupAbsent(TERMINATE_GRACE_MS), TERMINATE_GRACE_MS, 'group observation did not settle');
     } catch {
-      await child.terminateGroup('SIGKILL');
+      await requireGroupTermination(child, 'SIGKILL');
       await requireGroupAbsent(child, QUIESCENCE_TIMEOUT_MS);
     }
   }
@@ -286,11 +290,11 @@ async function terminateAndSettle(
   child: SupervisedChild,
   exitPromise: Promise<{ exitCode: number | null; signal: string | null }>,
 ): Promise<SettledChild> {
-  await child.terminateGroup('SIGTERM');
+  await requireGroupTermination(child, 'SIGTERM');
   try {
-    await child.waitForGroupAbsent(TERMINATE_GRACE_MS);
+    await withTimeout(child.waitForGroupAbsent(TERMINATE_GRACE_MS), TERMINATE_GRACE_MS, 'group observation did not settle');
   } catch {
-    await child.terminateGroup('SIGKILL');
+    await requireGroupTermination(child, 'SIGKILL');
     await requireGroupAbsent(child, QUIESCENCE_TIMEOUT_MS);
   }
   let exit: { exitCode: number | null; signal: string | null };
@@ -303,9 +307,24 @@ async function terminateAndSettle(
   return { exit, streams };
 }
 
+async function requireGroupTermination(child: SupervisedChild, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  try { await withTimeout(child.terminateGroup(signal), QUIESCENCE_TIMEOUT_MS, 'group termination did not settle'); }
+  catch (error) {
+    // A group may disappear between observation and signalling. EPERM alone is
+    // never absence evidence; require a fresh bounded group observation.
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') {
+      try {
+        await withTimeout(child.waitForGroupAbsent(MONITOR_POLL_MS), MONITOR_POLL_MS, 'group reobservation did not settle');
+        return;
+      } catch { /* Retain the original permission diagnostic and owned identity. */ }
+    }
+    throw new ProcessQuiescenceError('process group termination could not be confirmed', child, { cause: error });
+  }
+}
+
 async function requireGroupAbsent(child: SupervisedChild, timeoutMs: number): Promise<void> {
   try {
-    await child.waitForGroupAbsent(timeoutMs);
+    await withTimeout(child.waitForGroupAbsent(timeoutMs), Math.max(1, timeoutMs), 'group observation did not settle');
   } catch (error) {
     throw new ProcessQuiescenceError('process group absence could not be confirmed', child, { cause: error });
   }
@@ -340,11 +359,12 @@ function finalizeResult(
     stdout: settled.streams.stdout,
     stderr: settled.streams.stderr,
     report,
+    ...(settled.streams.truncated ? { outputTruncated: true } : {}),
     ...(error ? { error } : {}),
   };
 }
 
-function emptyResult(kind: 'spawn-failed', error: string): CodexProcessResult {
+function emptyResult(kind: 'spawn-failed' | 'timeout' | 'cancelled', error: string): CodexProcessResult {
   return {
     kind,
     exitCode: null,
@@ -422,11 +442,11 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
   });
   if (!child.pid) throw new Error('spawned Codex process has no pid');
   const pid = child.pid;
-  const capturedStartIdentity = await captureProcessStartIdentity({
+  const capturedStartIdentity = await withinDeadline(captureProcessStartIdentity({
     platform: process.platform,
     pid,
     processGroupId: pid,
-  });
+  }), spec.deadline ?? Date.now() + 5_000, spec.signal).catch(() => ({ status: 'unknown' as const }));
 
   return {
     pid,
@@ -545,4 +565,20 @@ function delay(timeoutMs: number): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+class DeadlineError extends Error {
+  constructor(readonly kind: 'timeout' | 'cancelled') { super(`Codex process ${kind}`); }
+}
+async function withinDeadline<T>(promise: Promise<T>, deadline: number, signal?: AbortSignal): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  let abort: (() => void) | undefined;
+  try {
+    if (signal?.aborted) throw new DeadlineError('cancelled');
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new DeadlineError('timeout')), Math.max(0, deadline - Date.now()));
+      abort = () => reject(new DeadlineError('cancelled'));
+      signal?.addEventListener('abort', abort, { once: true });
+    })]);
+  } finally { if (timer) clearTimeout(timer); if (abort) signal?.removeEventListener('abort', abort); }
 }

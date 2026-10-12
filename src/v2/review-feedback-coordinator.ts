@@ -428,7 +428,7 @@ function normalizePath(path: string): string {
 function classifyReadError(error: unknown): Extract<ReviewFeedbackObservationResult, { status: 'retryable' | 'blocked' }> {
   const message = error instanceof Error ? error.message : 'Unknown GitHub review read failure';
   if (error instanceof GitHubPermissionRetryableError
-    || /failed to run|timed out|temporar|transport|pagination (?:omitted endCursor|exceeded (?:its )?(?:page )?bound(?: or omitted endCursor)?)/iu.test(message)) {
+    || /failed to run|timed out|temporar|transport|pagination (?:omitted endCursor|repeated endCursor)|GitHub collection deadline or cancellation/iu.test(message)) {
     return { status: 'retryable', reason: message };
   }
   return { status: 'blocked', reason: message };

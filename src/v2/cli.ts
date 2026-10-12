@@ -5,15 +5,18 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { defaultGhExecutor, ghExecutorFromProcessExecutor } from './adapters/gh-cli.js';
+import { defaultProcessExecutor } from './adapters/command.js';
 import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
-import { createV2Runtime } from './runtime.js';
+import { createV2Runtime, hasTechnicalLegacyProofFailure } from './runtime.js';
 import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
 import { parseSetupArgs, renderSetupResultJson, setupOutcomeExitCode } from './setup-cli.js';
 import { createProductionSetup } from './setup-runtime.js';
 import type { SetupIntent, SetupOutcome } from './setup.js';
+import { FileRunRecordWriter, type RunRecord } from './run-store.js';
 import type { RunIssueResult } from './run-issue.js';
 import type { GitHubIssue } from './adapters/issues.js';
 
@@ -87,23 +90,89 @@ async function executeProductionDaemon(
   intent: DaemonIntent,
   write: (text: string) => void,
 ): Promise<number> {
-  const config = await readTargetConfig(intent.targetRoot);
-  const issues = new GhCliIssueAdapter(config.github.owner, config.github.repo);
-  return executeDaemonLoop(intent, write, {
-    discover: () => issues.listOpenIssuesWithAnyLabel([
-      config.github.labels.auto.name,
-      config.github.labels.review.name,
-    ]),
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try { return await executeDaemonLoop(intent, write, {
+    signal: controller.signal,
+    discover: async () => [],
     executeRun: executeProductionRun,
-    delay: (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)),
+    readTick: () => discoverConfiguredDaemonTick(intent.targetRoot, {
+      readConfigBytes: () => readConfigBytes(intent.targetRoot),
+      discover: (config) => new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }).listOpenIssuesWithAnyLabel([config.github.labels.auto.name, config.github.labels.review.name]),
+      inventory: async (config) => (await FileRunRecordWriter.forRepository(join(intent.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`).inventory()).runs,
+      hasTechnicalTerminalProofFailure: (run, config) => hasTechnicalLegacyProofFailure({ targetRoot: intent.targetRoot, config, record: run }),
+      executeRun: (runIntent, snapshot) => executeProductionRun(runIntent, snapshot, controller),
+    }),
+    delay: (milliseconds) => new Promise((resolveDelay) => {
+      if (controller.signal.aborted) { resolveDelay(undefined); return; }
+      const finish = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolveDelay(undefined); };
+      const timer = setTimeout(finish, milliseconds);
+      controller.signal.addEventListener('abort', finish, { once: true });
+    }),
+    pollIntervalMilliseconds: 30_000,
+  }); } finally { process.off('SIGINT', onSignal); process.off('SIGTERM', onSignal); }
+}
+
+export async function discoverConfiguredDaemonTick(targetRoot: string, dependencies: {
+  readConfigBytes(): Promise<Buffer>;
+  discover(config: AgentAutoConfig): Promise<GitHubIssue[]>;
+  inventory(config: AgentAutoConfig): Promise<RunRecord[]>;
+  hasTechnicalTerminalProofFailure?(run: RunRecord, config: AgentAutoConfig): Promise<boolean>;
+  executeRun(intent: RunIntent, snapshot: { bytes: Buffer; config: AgentAutoConfig }): Promise<RunIssueResult>;
+}): Promise<DaemonTickSnapshot> {
+  const bytes = await dependencies.readConfigBytes();
+  let config: AgentAutoConfig;
+  try { config = parseTargetConfigForExecution(JSON.parse(bytes.toString('utf8')), targetRoot); }
+  catch (error) { throw new InvalidDaemonConfigError(error instanceof Error ? error.message : String(error)); }
+  const discovered = await dependencies.discover(config);
+  const runs = await dependencies.inventory(config);
+  const latest = new Map<number, RunRecord>();
+  for (const run of runs) {
+    const previous = latest.get(run.issueNumber);
+    if (!previous || previous.createdAt <= run.createdAt) latest.set(run.issueNumber, run);
+  }
+  const needed = new Set<number>();
+  for (const run of latest.values()) {
+    if (runNeedsDaemonTick(run) || await dependencies.hasTechnicalTerminalProofFailure?.(run, config) === true) needed.add(run.issueNumber);
+  }
+  const finalStopped = new Set([...latest.values()].filter((run) => !needed.has(run.issueNumber) && run.terminalOutcome?.status !== 'review-ready').map((run) => run.issueNumber));
+  const candidates = discovered.filter((issue) => !finalStopped.has(issue.number));
+  for (const run of latest.values()) {
+    if (needed.has(run.issueNumber)) candidates.push({ ...run.issueSnapshot, labels: run.issueSnapshot.labels.map((name) => ({ name })), comments: [], closedByPullRequestsReferences: [] });
+  }
+  return {
+    candidates,
     pollIntervalMilliseconds: config.runner.pollIntervalSeconds * 1_000,
-  });
+    executeRun: async (intent) => {
+      if (intent.targetRoot !== targetRoot || !(await dependencies.readConfigBytes()).equals(bytes)) throw new Error('config-snapshot-changed');
+      return dependencies.executeRun(intent, { bytes, config });
+    },
+  };
+}
+
+class InvalidDaemonConfigError extends Error {}
+
+export function runNeedsDaemonTick(run: RunRecord): boolean {
+  return !run.terminalOutcome || Boolean(run.activeAttempt || run.pendingEffect || run.candidateMaterialization)
+    || (run.terminalOutcome.status === 'transport-failed' && run.terminalOutcome.resumable)
+    || Boolean(run.terminalNotifications && [run.terminalNotifications.comment, run.terminalNotifications.labels].some((delivery) =>
+      delivery.status === 'pending' || (delivery.status === 'exhausted' && !delivery.diagnostic?.endsWith('-diverged'))));
+}
+
+export interface DaemonTickSnapshot {
+  candidates: GitHubIssue[];
+  executeRun(input: RunIntent): Promise<RunIssueResult>;
+  pollIntervalMilliseconds: number;
 }
 
 export async function executeDaemonLoop(
   intent: DaemonIntent,
   write: (text: string) => void,
   dependencies: {
+    signal?: AbortSignal;
+    readTick?(): Promise<DaemonTickSnapshot>;
     discover(): Promise<GitHubIssue[]>;
     executeRun(input: RunIntent): Promise<RunIssueResult>;
     delay(milliseconds: number): Promise<void>;
@@ -112,11 +181,19 @@ export async function executeDaemonLoop(
 ): Promise<number> {
   let exitCode = 0;
   const lastResults = new Map<number, string>();
+  let pollInterval = dependencies.pollIntervalMilliseconds;
   do {
+    if (dependencies.signal?.aborted) return Math.max(exitCode, 130);
+    let tick: DaemonTickSnapshot | undefined;
     let discovered: GitHubIssue[] | undefined;
     try {
-      discovered = await dependencies.discover();
+      if (dependencies.readTick) {
+        tick = await dependencies.readTick();
+        pollInterval = tick.pollIntervalMilliseconds;
+        discovered = tick.candidates;
+      } else discovered = await dependencies.discover();
     } catch (error) {
+      if (error instanceof InvalidDaemonConfigError) throw error;
       exitCode = Math.max(exitCode, 70);
       try { write(`daemon discovery failed: ${error instanceof Error ? error.message : String(error)}\n`); }
       catch { /* output failure cannot terminate the daemon */ }
@@ -128,13 +205,15 @@ export async function executeDaemonLoop(
       exitCode = Math.max(exitCode, await executeDaemonCandidates({
         targetRoot: intent.targetRoot,
         candidates,
-        executeRun: dependencies.executeRun,
+        executeRun: tick?.executeRun ?? dependencies.executeRun,
+        signal: dependencies.signal,
         write,
         lastResults,
       }));
     }
+    if (dependencies.signal?.aborted) return Math.max(exitCode, 130);
     if (intent.once) return exitCode;
-    await dependencies.delay(dependencies.pollIntervalMilliseconds);
+    await dependencies.delay(pollInterval);
   } while (true);
 }
 
@@ -160,6 +239,7 @@ export async function executeDaemonTick(input: {
 }
 
 export async function executeDaemonCandidates(input: {
+  signal?: AbortSignal;
   targetRoot: string;
   candidates: GitHubIssue[];
   executeRun(input: RunIntent): Promise<RunIssueResult>;
@@ -170,6 +250,7 @@ export async function executeDaemonCandidates(input: {
   const candidates = [...new Map(input.candidates.map((issue) => [issue.number, issue])).values()]
     .sort((left, right) => left.number - right.number);
   for (const issue of candidates) {
+    if (input.signal?.aborted) return Math.max(exitCode, 130);
     let result: RunIssueResult;
     try {
       result = await input.executeRun({ targetRoot: input.targetRoot, issueNumber: issue.number });
@@ -192,14 +273,17 @@ export async function executeDaemonCandidates(input: {
   return exitCode;
 }
 
-async function executeProductionRun(intent: RunIntent): Promise<RunIssueResult> {
+async function executeProductionRun(intent: RunIntent, snapshot?: { bytes: Buffer; config: AgentAutoConfig }, abortController = new AbortController()): Promise<RunIssueResult> {
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
   const packageVersion = await readPackageVersion();
-  const config = await readTargetConfig(intent.targetRoot);
+  const config = snapshot?.config ?? await readTargetConfig(intent.targetRoot);
+  if (snapshot && !(await readConfigBytes(intent.targetRoot)).equals(snapshot.bytes)) throw new Error('config-snapshot-changed');
   const orchestratorHome = resolve(process.env.CODEX_ORCHESTRATOR_HOME ?? join(homedir(), '.codex-orchestrator'));
   const bootId = await readBootId();
   const runtime = createV2Runtime({
     targetRoot: intent.targetRoot,
+    abortController,
+    ...(snapshot ? { expectedConfigBytes: snapshot.bytes } : {}),
     orchestratorHome,
     bootId,
     packageVersion,
@@ -207,8 +291,11 @@ async function executeProductionRun(intent: RunIntent): Promise<RunIssueResult> 
       const receipt = await materializeWorkflowGeneration({ packageRoot, runtimeRoot: orchestratorHome, packageVersion, bootId });
       return { receipt, skillHashes: await workflowSkillHashes(receipt) };
     },
-    issues: new GhCliIssueAdapter(config.github.owner, config.github.repo),
-    pullRequests: new GhCliPullRequestAdapter(config.github.owner, config.github.repo),
+    createGitHubAdapters: (signal, executor) => {
+      const ghExecutor = ghExecutorFromProcessExecutor(executor);
+      return { issues: new GhCliIssueAdapter(config.github.owner, config.github.repo, ghExecutor, undefined, { signal }),
+        pullRequests: new GhCliPullRequestAdapter(config.github.owner, config.github.repo, ghExecutor, { signal }) };
+    },
     parentCodexHome: resolve(process.env.CODEX_HOME ?? join(homedir(), '.codex')),
     safePath: process.env.CODEX_ORCHESTRATOR_SAFE_PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
   });
@@ -216,8 +303,12 @@ async function executeProductionRun(intent: RunIntent): Promise<RunIssueResult> 
   finally { runtime.dispose(); }
 }
 
+async function readConfigBytes(targetRoot: string): Promise<Buffer> {
+  return readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), { signal: AbortSignal.timeout(5_000) });
+}
+
 async function readTargetConfig(targetRoot: string) {
-  return parseTargetConfigForExecution(JSON.parse(await readFile(join(targetRoot, '.codex-orchestrator', 'config.json'), 'utf8')), targetRoot);
+  return parseTargetConfigForExecution(JSON.parse((await readConfigBytes(targetRoot)).toString('utf8')), targetRoot);
 }
 
 export function parseTargetConfigForExecution(value: unknown, targetRoot: string): AgentAutoConfig {
@@ -255,11 +346,9 @@ function cliHelp(): string {
 async function readBootId(): Promise<string> {
   if (process.platform === 'linux') return (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
   if (process.platform === 'darwin') {
-    const { execFile } = await import('node:child_process');
-    return await new Promise((resolveBoot, rejectBoot) => execFile('/usr/sbin/sysctl', ['-n', 'kern.boottime'], (error, stdout) => {
-      if (error || !stdout.trim()) rejectBoot(error ?? new Error('boot identity is unavailable'));
-      else resolveBoot(stdout.trim());
-    }));
+    const result = await defaultProcessExecutor('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeoutMs: 5_000, processGroup: true, maxOutputBytes: 16_384 });
+    if (result.exitCode !== 0 || !result.stdout.trim()) throw new Error('boot identity is unavailable');
+    return result.stdout.trim();
   }
   throw new Error(`platform ${process.platform} cannot prove boot identity`);
 }
