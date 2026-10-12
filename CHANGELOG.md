@@ -6,7 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.26] - 2026-10-12
+
 ### Fixed
+- Retry confirmed model-capacity refusals through the existing recovery lifecycle.
 - Resume technical failures with the same candidate and retained valid receipts;
   reconcile durable external effects and marker-bound feedback answers after restart.
 - Store runs in repository-scoped per-issue CAS files, migrate valid legacy journals
