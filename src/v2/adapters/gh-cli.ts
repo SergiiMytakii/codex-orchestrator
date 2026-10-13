@@ -1,4 +1,5 @@
-import { defaultProcessExecutor, type ProcessCommandOptions, type ProcessExecutor } from './command.js';
+import { CommandProcessQuiescenceError, defaultProcessExecutor, type ProcessCommandOptions, type ProcessExecutor } from './command.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export interface CommandResult { stdout: string; stderr: string }
 export type CommandExecutor = (file: string, args: string[], options?: ProcessCommandOptions) => Promise<CommandResult>;
@@ -37,10 +38,40 @@ export function githubExecutor(executor: CommandExecutor, options: GitHubExecuti
   const execute: CommandExecutor = async (file, args, commandOptions = {}) => {
     const signal = commandOptions.signal ?? options.signal;
     if (signal?.aborted) throw new Error('GitHub collection deadline or cancellation');
-    return executor(file, args, { ...commandOptions, signal, timeoutMs: commandOptions.timeoutMs ?? options.timeoutMs ?? githubCollectionDeadlineMs });
+    const timeoutMs = commandOptions.timeoutMs ?? options.timeoutMs ?? githubCollectionDeadlineMs;
+    const deadline = Date.now() + timeoutMs;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await executor(file, args, { ...commandOptions, signal, timeoutMs: Math.max(1, deadline - Date.now()) });
+      } catch (error) {
+        const pauseMs = 250 * (attempt + 1);
+        if (attempt >= 2 || signal?.aborted || !isGitHubRead(file, args)
+          || !isTemporaryGitHubError(error) || deadline - Date.now() <= pauseMs) throw error;
+        try { await delay(pauseMs, undefined, { signal }); }
+        catch { throw error; }
+        if (signal?.aborted || Date.now() >= deadline) throw error;
+      }
+    }
   };
   if (ownedExecutors.has(executor)) ownedExecutors.add(execute);
   return execute;
+}
+
+function isGitHubRead(file: string, args: string[]): boolean {
+  if (file !== 'gh') return false;
+  if (['issue', 'pr', 'repo'].includes(args[0] ?? '') && ['view', 'list'].includes(args[1] ?? '')) return true;
+  const methodIndex = args.findIndex((arg) => arg === '--method' || arg === '-X');
+  if (args[0] !== 'api') return false;
+  if (methodIndex >= 0) return args[methodIndex + 1] === 'GET';
+  if (args[1] !== 'graphql') return false;
+  const query = args.find((arg) => arg.startsWith('query='))?.slice('query='.length).trimStart();
+  return query !== undefined && /^query(?:\s|\()/u.test(query);
+}
+
+function isTemporaryGitHubError(error: unknown): boolean {
+  if (!(error instanceof Error) || error instanceof CommandProcessQuiescenceError) return false;
+  const detail = `${error.message} ${(error as CommandExecutionError).stderr ?? ''}`;
+  return /\bHTTP (?:429|5\d\d)\b|\b(?:API rate limit exceeded|secondary rate limit|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|TLS handshake timeout|i\/o timeout|connection reset by peer|temporary failure in name resolution)\b/iu.test(detail);
 }
 
 /** One deadline for the complete collection, with individually bounded pages. */

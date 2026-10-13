@@ -38,6 +38,54 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('issue read failures retain the original transport reason before claim', async () => {
+  const fixture = await runFixture();
+  fixture.dependencies.issues.read = async () => {
+    throw Object.assign(new Error('Failed to run gh: exit 1'), { stderr: 'HTTP 503: Service Unavailable' });
+  };
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'transport-failed');
+  assert.match(fixture.evidence.find(entry => entry.code === 'issue-read-failed')!.summary, /HTTP 503: Service Unavailable/u);
+  assert.equal((await fixture.store.read()).runs.length, 0);
+});
+
+test('issue read diagnostics redact credentials instead of persisting stderr secrets', async () => {
+  const fixture = await runFixture();
+  fixture.dependencies.issues.read = async () => {
+    throw Object.assign(new Error('gh failed'), { stderr: 'token=verysecretcredential123' });
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const summary = fixture.evidence.find(entry => entry.code === 'issue-read-failed')!.summary;
+  assert.match(summary, /redacted/u);
+  assert.equal(summary.includes('verysecretcredential123'), false);
+});
+
+test('terminal cancellation labels do not revoke a fresh grant arriving during comment delivery', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' } });
+  let authorized = false;
+  let authorizationChecks = 0;
+  fixture.dependencies.issues.isReauthorized = async () => {
+    authorizationChecks += 1;
+    return authorized;
+  };
+  const postComment = fixture.dependencies.issues.postComment;
+  fixture.dependencies.issues.postComment = async (issueNumber, body) => {
+    const comment = await postComment(issueNumber, body);
+    if (body.split('\n')[0]?.endsWith(':cancelled -->')) {
+      authorized = true;
+      await fixture.dependencies.issues.setLabels(issueNumber, ['agent:auto']);
+    }
+    return comment;
+  };
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(authorizationChecks, 1);
+  assert.equal((await fixture.dependencies.issues.read(42))?.labels.includes('agent:auto'), true);
+  assert.equal(fixture.events.filter(event => event === 'effect:terminal-labels').length, 1);
+});
+
 test('a fresh GitHub grant resumes a cancelled Run without stale cancellation labels undoing it', async () => {
   const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' } });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
@@ -116,6 +164,32 @@ test('a fresh GitHub grant survives interrupted outcome evidence at both state b
     assert.equal((await fixture.store.read()).runs[0]!.runId, runId);
     assert.equal(fixture.events.filter(event => event === 'git:push').length, 1);
   }
+});
+
+test('a repeated terminal outcome after reauthorization receives a distinct immutable evidence path', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' } });
+  let now = Date.parse('2026-07-16T12:00:00.000Z');
+  fixture.dependencies.now = () => new Date(now).toISOString();
+  let grantId = '10';
+  fixture.dependencies.issues.getAuthorizationGrantId = async () => grantId;
+  fixture.dependencies.issues.isReauthorized = async record =>
+    !!record.terminalOutcome && BigInt(grantId) > BigInt(record.terminalAuthorizationGrantId ?? '0');
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  const first = (await fixture.store.read()).runs[0]!;
+  const priorEvidencePath = first.terminalOutcome!.evidencePath;
+  grantId = '11';
+  now += 1_000;
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+
+  const secondResult = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(secondResult.status, 'cancelled', JSON.stringify({ secondResult, record: (await fixture.store.read()).runs[0] }));
+  const second = (await fixture.store.read()).runs[0]!;
+  assert.notEqual(second.terminalOutcome!.evidencePath, priorEvidencePath);
+  assert.equal(second.pendingEffect, undefined);
+  assert.ok(await readFile(resolve(fixture.targetRoot, priorEvidencePath)));
+  assert.ok(await readFile(resolve(fixture.targetRoot, second.terminalOutcome!.evidencePath)));
 });
 
 test('new run persists GitHub comments through claim without leaking transport metadata', async () => {

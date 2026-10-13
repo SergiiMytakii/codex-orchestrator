@@ -10,6 +10,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 - Honor fresh GitHub execution authorization after a stopped run while preserving
   progress, candidate receipts and history; prevent stale terminal notifications
   from overriding a new grant.
+- Retry transient GitHub read failures within bounded command deadlines and retain
+  sanitized issue-read diagnostics in transport-failure evidence.
+- Recheck fresh execution grants before terminal labels and give repeated terminal
+  outcomes distinct immutable evidence paths.
 
 ## [2.0.26] - 2026-10-12
 

@@ -211,6 +211,13 @@ Important command results:
 
 All outcomes include structured evidence or a path to local evidence. Quiet terminal output is not the source of truth—the JSON result and persisted state are.
 
+GitHub reads retry temporary network failures, HTTP 429/5xx, and explicit rate
+limits up to three attempts, with 250 ms and 500 ms backoff within the original
+command or collection deadline. Cancellation stops further attempts. Writes,
+permission failures, missing resources, and invalid payloads are not retried.
+Issue-read failures retain the bounded, sanitized original error and GitHub
+stderr in local evidence.
+
 Resumable Acceptance Proof process failures retain `failure.kind`, exit code,
 signal, report availability, and a bounded sanitized diagnostic in local
 evidence. An idle timeout is reported as `idle-timeout`, without claiming a

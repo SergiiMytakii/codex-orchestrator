@@ -1251,8 +1251,8 @@ export class RunIssue {
       let issue: RunIssueSnapshot | undefined;
       try {
         issue = await this.dependencies.issues.read(input.issueNumber);
-      } catch {
-        return await this.preClaimTransport(input.issueNumber);
+      } catch (error) {
+        return await this.preClaimTransport(input.issueNumber, 'issue-read-failed', transportReadSummary(error));
       }
       const sourceBaseMarkers = issue?.body.match(/^source-base-sha:.*$/gmu) ?? [];
       const expectedBaseSha = sourceBaseMarkers[0]?.slice('source-base-sha:'.length);
@@ -2101,7 +2101,7 @@ export class RunIssue {
           : this.preClaimInternal('config-invalid', input.issueNumber);
       }
       if (!active && error instanceof TransportReadError) {
-        return await this.preClaimTransport(input.issueNumber);
+        return await this.preClaimTransport(input.issueNumber, 'issue-read-failed', error.message);
       }
       if (!active && error instanceof WorkflowGenerationUnrecoverableError) {
         return await this.preClaimInternal('workflow-generation-unrecoverable', input.issueNumber);
@@ -2110,7 +2110,7 @@ export class RunIssue {
         return await this.invokedFailure(error.active, 'post-effect-state-write-failed');
       }
       if (active && error instanceof TransportReadError) {
-        return await this.invokedFailure(active, 'authorization-read-failed');
+        return await this.invokedFailure(active, 'authorization-read-failed', error.message);
       }
       if (error instanceof LaunchAuthorizationRevokedError) {
         return await this.revoked(error.active);
@@ -2336,8 +2336,8 @@ export class RunIssue {
     const branchName = `codex/issue-${issue.number}`;
     try {
       if (await this.dependencies.pullRequests.findOpen({ headBranch: branchName, baseBranch: config.github.baseBranch })) return 'An open pull request already exists.';
-    } catch {
-      throw new TransportReadError();
+    } catch (error) {
+      throw new TransportReadError(error);
     }
     return undefined;
   }
@@ -2536,7 +2536,7 @@ export class RunIssue {
 
   private async readIssue(issueNumber: number): Promise<RunIssueSnapshot | undefined> {
     try { return await this.dependencies.issues.read(issueNumber); }
-    catch { throw new TransportReadError(); }
+    catch (error) { throw new TransportReadError(error); }
   }
 
   private async revalidateFeedbackWorker(
@@ -3645,7 +3645,16 @@ export class RunIssue {
   ): Promise<{ active: ActiveRun; path: string; id: string }> {
     if (!active.record.pendingEffect) {
       const recordedAt = this.timestamp();
-      const path = this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary));
+      // Include immutable occurrence context so a later terminal outcome for the
+      // same run/code/summary cannot collide with bytes written by an earlier one.
+      const occurrenceSha256 = code === 'review-ready'
+        ? sha256(summary)
+        : sha256(canonicalJson({
+          summarySha256: sha256(summary),
+          recordedAt,
+          authorizationGrantId: authorizationGrantId ?? null,
+        }));
+      const path = this.dependencies.outcomeEvidencePath(active.record.runId, code, occurrenceSha256);
       const bytes = outcomeEvidenceBytes({ runId: active.record.runId, code, summary, recordedAt });
       active = await this.persist(active, { pendingEffect: {
         kind: 'outcome-evidence', path, runId: active.record.runId, code, summary, recordedAt, bytesSha256: sha256(bytes),
@@ -3653,9 +3662,20 @@ export class RunIssue {
       } });
     }
     const effect = active.record.pendingEffect;
+    const legacyPath = this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary));
+    const occurrenceSha256 = effect?.kind === 'outcome-evidence'
+      ? effect.code === 'review-ready'
+        ? sha256(summary)
+        : sha256(canonicalJson({
+          summarySha256: sha256(summary),
+          recordedAt: effect.recordedAt,
+          authorizationGrantId: effect.authorizationGrantId ?? null,
+        }))
+      : '';
+    const occurrencePath = this.dependencies.outcomeEvidencePath(active.record.runId, code, occurrenceSha256);
     if (effect?.kind !== 'outcome-evidence' || effect.runId !== active.record.runId
       || effect.code !== code || effect.summary !== summary
-      || effect.path !== this.dependencies.outcomeEvidencePath(active.record.runId, code, sha256(summary))) {
+      || (effect.path !== occurrencePath && effect.path !== legacyPath)) {
       throw new PostEffectStateError(active);
     }
     const bytes = outcomeEvidenceBytes(effect);
@@ -3942,6 +3962,12 @@ export class RunIssue {
         return effect.add.every((label) => issue.labels.includes(label))
           && effect.remove.every((label) => !issue.labels.includes(label)) ? 'confirmed' : 'absent';
       },
+      authorize: async () => {
+        const autoLabel = active.config.github.labels.auto.name;
+        if (!policy.remove.includes(autoLabel) || !this.dependencies.issues.isReauthorized) return true;
+        const issue = await this.readIssue(effect.issueNumber);
+        return !!issue && await this.dependencies.issues.isReauthorized(active.record, issue) !== true;
+      },
       invoke: async () => {
         if (!this.dependencies.issues.reconcileTerminalLabels) throw new Error('terminal label reconciliation unavailable');
         await this.dependencies.issues.reconcileTerminalLabels(effect.issueNumber, {
@@ -4049,7 +4075,17 @@ export class RunIssue {
   }
 }
 
-class TransportReadError extends Error {}
+class TransportReadError extends Error {
+  constructor(cause?: unknown) {
+    super(transportReadSummary(cause), { cause });
+  }
+}
+
+function transportReadSummary(error: unknown): string {
+  if (!(error instanceof Error)) return 'Issue read failed.';
+  const stderr = 'stderr' in error && typeof error.stderr === 'string' ? error.stderr : '';
+  return publicBlockedText(`Issue read failed: ${error.message}${stderr ? `; ${stderr}` : ''}`, 'Issue read failure detail was redacted.', 1024);
+}
 class LaunchAuthorizationRevokedError extends Error {
   constructor(readonly active: ActiveRun) {
     super('launch authorization revoked');

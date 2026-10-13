@@ -1,4 +1,5 @@
 import { defaultProcessExecutor } from './adapters/command.js';
+import { defaultGhExecutor, githubExecutor } from './adapters/gh-cli.js';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -7,6 +8,7 @@ import { hostname } from 'node:os';
 import { acquireOwnerControlLock, inspectOwnerControlLock } from './owner-control-lock.js';
 import { Setup, type SetupDependencies } from './setup.js';
 
+const githubCommand = githubExecutor(defaultGhExecutor);
 
 export function createProductionSetup(input: { orchestratorHome: string; bootId: string }): Setup {
   const dependencies: SetupDependencies = {
@@ -16,7 +18,7 @@ export function createProductionSetup(input: { orchestratorHome: string; bootId:
     labels: {
       listPage: async ({ owner, repo, cursor }) => {
         if (cursor !== undefined) throw new Error('GitHub label cursor is unsupported by the bounded gh adapter');
-        const stdout = await command('gh', ['api', '--paginate', '--slurp', `repos/${owner}/${repo}/labels?per_page=100`]);
+        const { stdout } = await githubCommand('gh', ['api', '--method', 'GET', '--paginate', '--slurp', `repos/${owner}/${repo}/labels?per_page=100`]);
         const value = JSON.parse(stdout) as unknown;
         if (!Array.isArray(value) || value.some((page) => !Array.isArray(page))) throw new Error('GitHub label list is malformed');
         return { labels: value.flatMap((page) => (page as unknown[]).map(parseLabel)) };

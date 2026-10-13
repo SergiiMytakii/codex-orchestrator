@@ -73,6 +73,28 @@ test('reads an exact repository-bound pull request review target', async () => {
   });
 });
 
+test('retries a transient failure during the GraphQL pull-request read', async () => {
+  let calls = 0;
+  const response = {
+    data: { repository: { id: 'R_repo', name: 'repo', owner: { id: 'O_owner', login: 'owner' }, pullRequest: {
+      id: 'PR_node', databaseId: 17, number: 17, url: 'https://github.com/owner/repo/pull/17',
+      state: 'OPEN', isDraft: true, isCrossRepository: false, headRefName: 'codex/issue-42',
+      headRefOid: 'a'.repeat(40), baseRefName: 'main', title: 'Change', body: '<!-- marker -->',
+      authorAssociation: 'MEMBER',
+    } } },
+  };
+  const executor: CommandExecutor = async () => {
+    calls += 1;
+    if (calls === 1) throw Object.assign(new Error('gh failed'), { stderr: 'HTTP 503: Service Unavailable' });
+    return jsonResult(response);
+  };
+
+  const target = await new GhCliPullRequestAdapter('owner', 'repo', executor).getReviewTarget(17);
+
+  assert.equal(target?.number, 17);
+  assert.equal(calls, 2);
+});
+
 test('paginates review threads and nested comments without exposing a mutation', async () => {
   const calls: string[][] = [];
   const executor: CommandExecutor = async (_file, args) => {
