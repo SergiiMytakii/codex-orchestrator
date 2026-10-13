@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Honor fresh GitHub execution authorization after a stopped run while preserving
+  progress, candidate receipts and history; prevent stale terminal notifications
+  from overriding a new grant.
+
 ## [2.0.26] - 2026-10-12
 
 ### Fixed

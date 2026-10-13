@@ -11,7 +11,7 @@ import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
-import { createV2Runtime, hasTechnicalLegacyProofFailure } from './runtime.js';
+import { createV2Runtime, hasTechnicalLegacyProofFailure, hasGitHubReauthorization } from './runtime.js';
 import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
 import { parseSetupArgs, renderSetupResultJson, setupOutcomeExitCode } from './setup-cli.js';
 import { createProductionSetup } from './setup-runtime.js';
@@ -103,6 +103,7 @@ async function executeProductionDaemon(
       discover: (config) => new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }).listOpenIssuesWithAnyLabel([config.github.labels.auto.name, config.github.labels.review.name]),
       inventory: async (config) => (await FileRunRecordWriter.forRepository(join(intent.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`).inventory()).runs,
       hasTechnicalTerminalProofFailure: (run, config) => hasTechnicalLegacyProofFailure({ targetRoot: intent.targetRoot, config, record: run }),
+      isReauthorized: (record, issue, config) => hasGitHubReauthorization({ targetRoot: intent.targetRoot, config, record, issue: { ...issue, labels: issue.labels.map(label => label.name) }, issues: new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }) }),
       executeRun: (runIntent, snapshot) => executeProductionRun(runIntent, snapshot, controller),
     }),
     delay: (milliseconds) => new Promise((resolveDelay) => {
@@ -120,6 +121,7 @@ export async function discoverConfiguredDaemonTick(targetRoot: string, dependenc
   discover(config: AgentAutoConfig): Promise<GitHubIssue[]>;
   inventory(config: AgentAutoConfig): Promise<RunRecord[]>;
   hasTechnicalTerminalProofFailure?(run: RunRecord, config: AgentAutoConfig): Promise<boolean>;
+  isReauthorized?(run: RunRecord, issue: GitHubIssue, config: AgentAutoConfig): Promise<boolean>;
   executeRun(intent: RunIntent, snapshot: { bytes: Buffer; config: AgentAutoConfig }): Promise<RunIssueResult>;
 }): Promise<DaemonTickSnapshot> {
   const bytes = await dependencies.readConfigBytes();
@@ -138,7 +140,13 @@ export async function discoverConfiguredDaemonTick(targetRoot: string, dependenc
     if (runNeedsDaemonTick(run) || await dependencies.hasTechnicalTerminalProofFailure?.(run, config) === true) needed.add(run.issueNumber);
   }
   const finalStopped = new Set([...latest.values()].filter((run) => !needed.has(run.issueNumber) && run.terminalOutcome?.status !== 'review-ready').map((run) => run.issueNumber));
-  const candidates = discovered.filter((issue) => !finalStopped.has(issue.number));
+  const candidates: GitHubIssue[] = [];
+  for (const issue of discovered) {
+    if (!finalStopped.has(issue.number)) { candidates.push(issue); continue; }
+    try {
+      if (await dependencies.isReauthorized?.(latest.get(issue.number)!, issue, config)) candidates.push(issue);
+    } catch { /* A failed timeline read leaves this issue stopped; other issues remain runnable. */ }
+  }
   for (const run of latest.values()) {
     if (needed.has(run.issueNumber)) candidates.push({ ...run.issueSnapshot, labels: run.issueSnapshot.labels.map((name) => ({ name })), comments: [], closedByPullRequestsReferences: [] });
   }

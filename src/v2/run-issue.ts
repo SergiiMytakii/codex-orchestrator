@@ -191,6 +191,8 @@ export interface RunIssueDependencies {
   };
   issues: {
     read(issueNumber: number): Promise<RunIssueSnapshot | undefined>;
+    isReauthorized?(record: RunRecord, issue: RunIssueSnapshot): Promise<boolean>;
+    getAuthorizationGrantId?(issueNumber: number, label: string): Promise<string | undefined>;
     setLabels(issueNumber: number, labels: string[]): Promise<void>;
     reconcileTerminalLabels?(issueNumber: number, labels: {
       outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled'; add: string[]; remove: string[];
@@ -1301,6 +1303,15 @@ export class RunIssue {
           return await this.preClaimInternal('run-identity-mismatch', input.issueNumber);
         }
         active = { state: persisted, record: existing, config };
+        let reauthorized = !!issue && !!active.record.terminalOutcome && active.record.terminalOutcome.status !== 'review-ready'
+          && await this.dependencies.issues.isReauthorized?.(active.record, issue) === true;
+        let resumedGitHubAuthorization = false;
+        if (!active.record.terminalOutcome && active.record.pendingEffect?.kind === 'claim-labels') {
+          const reclaimed = await this.reconcileClaim(active, config);
+          if ('result' in reclaimed) return reclaimed.result;
+          active = reclaimed.active;
+          resumedGitHubAuthorization = true;
+        }
         if (active.record.lifecycle === 'implementing' && active.record.pendingEffect?.kind === 'candidate-pin-release') {
           const released = await this.finishRepairCandidateRelease(active);
           if ('status' in released) return released;
@@ -1324,13 +1335,22 @@ export class RunIssue {
               active.record.pendingEffect.summary,
             );
             active = await this.confirmEffect(observed.active);
-            active = await this.settleTerminalNotificationsBestEffort(active);
-            return publicOutcome(active.record.terminalOutcome!);
+            if (!reauthorized) {
+              active = await this.settleTerminalNotificationsBestEffort(active);
+              return publicOutcome(active.record.terminalOutcome!);
+            }
+          } else {
+            const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
+            const result = await this.terminal(active, seed, active.record.pendingEffect.code);
+            const recovered = await this.dependencies.runRecords.read();
+            const record = recovered.runs.find(run => run.runId === active!.record.runId);
+            if (!record?.terminalOutcome || record.pendingEffect?.kind === 'outcome-evidence') return result;
+            active = { state: recovered, record, config };
+            reauthorized = !!issue && await this.dependencies.issues.isReauthorized?.(record, issue) === true;
+            if (!reauthorized) return result;
           }
-          const seed = parseTerminalSeedSummary(active.record.pendingEffect.summary);
-          return await this.terminal(active, seed, active.record.pendingEffect.code);
         }
-        if (active.record.terminalOutcome && (active.record.terminalNotifications
+        if (!reauthorized && active.record.terminalOutcome && (active.record.terminalNotifications
           || active.record.pendingEffect?.kind === 'terminal-comment'
           || active.record.pendingEffect?.kind === 'terminal-labels')) {
           active = await this.settleTerminalNotificationsBestEffort(active);
@@ -1358,6 +1378,15 @@ export class RunIssue {
           const reconciled = await this.reconcilePersistedCandidateMaterialization(active, config);
           if ('status' in reconciled) return reconciled;
           active = reconciled.active;
+        }
+        if (reauthorized && active.record.activeAttempt?.stage === 'adopted' && !active.record.candidateMaterialization) {
+          active = await this.clearAttempt(active);
+        }
+        if (reauthorized && active.record.terminalOutcome) {
+          const resumed = await this.resumeGitHubAuthorization(active, config);
+          if ('result' in resumed) return resumed.result;
+          active = resumed.active;
+          resumedGitHubAuthorization = true;
         }
         if (active.record.terminalOutcome?.status === 'transport-failed' && active.record.terminalOutcome.resumable
           && !active.record.pendingEffect && !active.record.activeAttempt && !active.record.candidateMaterialization
@@ -1483,7 +1512,7 @@ export class RunIssue {
             const implementationInfrastructureRecovery = active.record.lifecycle === 'implementing'
               && !active.record.activeAttempt
               && (active.record.transportRetries > 0 || active.record.reportRepairs > 0);
-            if (!resumedSafeHalt && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
+            if (!resumedGitHubAuthorization && !resumedSafeHalt && !preparedImplementationRecovery && !reviewRecovery && !checkRecovery
               && !proofRecovery && !directReviewRepair && !plannedRepairRecovery && !attemptResultRecovery
               && !implementationInfrastructureRecovery) {
               active = await this.startNextCycle(active, [`Recovered interrupted ${active.record.lifecycle} phase.`]);
@@ -2160,6 +2189,41 @@ export class RunIssue {
     }) };
   }
 
+  private async resumeGitHubAuthorization(active: ActiveRun, config: AgentAutoConfig): Promise<{ active: ActiveRun } | { result: RunIssueResult }> {
+    const stopped = active.record.terminalOutcome!;
+    const unchanged = () => ({ result: publicOutcome(stopped) });
+    if (active.record.activeAttempt || active.record.candidateMaterialization
+      || (active.record.pendingEffect && !['terminal-comment', 'terminal-labels'].includes(active.record.pendingEffect.kind))) return unchanged();
+    const issue = await this.readIssue(active.record.issueNumber);
+    if (!issue || await this.dependencies.issues.isReauthorized?.(active.record, issue) !== true) return unchanged();
+    // A new grant does not authorize replacing an existing PR or accepting drifted local work.
+    if (await this.ineligibilityReason(issue, config)) return unchanged();
+    await this.dependencies.verifyWorkflowGeneration(active.record.workflowGeneration);
+    if (await this.dependencies.git.inspectWorktree({ worktreePath: active.record.worktreePath,
+      branchName: active.record.branchName, baseSha: expectedImplementationHead(active.record) }) !== 'matching') return unchanged();
+    if (active.record.candidateBinding) {
+      const pin = await this.dependencies.git.candidateV2?.inspectPin(active.record.candidateBinding);
+      if (pin?.kind !== 'ok' || pin.value !== 'matching') return unchanged();
+    }
+    const refreshed = await this.readIssue(active.record.issueNumber);
+    if (!refreshed || await this.dependencies.issues.isReauthorized?.(active.record, refreshed) !== true) return unchanged();
+    const review = active.record.directReview;
+    const { terminalCode: _code, terminalOutcome: _outcome, ...retainedReview } = review ?? {};
+    const lifecycle = review?.stage === 'review-repair' ? 'implementing' as const
+      : active.record.proofReceipt && review ? 'reviewing' as const
+      : active.record.implementationResult ? 'checking' as const : 'implementing' as const;
+    await this.dependencies.writeEvidence({ runId: active.record.runId, code: 'github-reauthorization',
+      summary: canonicalJson({ previousOutcome: stopped, lifecycle, supersededNotifications: active.record.terminalNotifications ?? null,
+        supersededEffect: active.record.pendingEffect ?? null }) });
+    active = await this.persist(active, { lifecycle, terminalOutcome: undefined, outcomeEvidenceId: undefined,
+      pendingEffect: { kind: 'claim-labels', issueNumber: active.record.issueNumber,
+        expected: sortedUnique([config.github.labels.auto.name, config.github.labels.running.name]) },
+      ...(review?.status === 'terminal' ? { directReview: { ...retainedReview, status: 'active' as const } as DirectReviewV1 } : {}) });
+    const claimed = await this.reconcileClaim(active, config);
+    if ('result' in claimed) return claimed;
+    return { active: claimed.active };
+  }
+
   async initializeClaimedRun(active: ActiveRun, issue?: RunIssueSnapshot): Promise<ActiveRun> {
     if (active.record.lifecycle !== 'claimed'
       || active.record.activeAttempt
@@ -2321,9 +2385,11 @@ export class RunIssue {
     }
     const record = { ...active.record, ...normalized, updatedAt: this.timestamp() } as RunRecord;
     if (Object.hasOwn(changes, 'pendingEffect') && changes.pendingEffect === undefined) delete record.pendingEffect;
-    if (Object.hasOwn(changes, 'terminalOutcome') && changes.terminalOutcome === undefined
-      && !Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
-    for (const key of ['checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications', 'failedCheckRepair', 'implementationReportCorrection'] as const) {
+    if (Object.hasOwn(changes, 'terminalOutcome') && changes.terminalOutcome === undefined) {
+      delete record.terminalAuthorizationGrantId;
+      if (!Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
+    }
+    for (const key of ['terminalAuthorizationGrantId', 'checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications', 'failedCheckRepair', 'implementationReportCorrection'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);
@@ -3575,6 +3641,7 @@ export class RunIssue {
     active: ActiveRun,
     code: string,
     summary: string,
+    authorizationGrantId?: string,
   ): Promise<{ active: ActiveRun; path: string; id: string }> {
     if (!active.record.pendingEffect) {
       const recordedAt = this.timestamp();
@@ -3582,6 +3649,7 @@ export class RunIssue {
       const bytes = outcomeEvidenceBytes({ runId: active.record.runId, code, summary, recordedAt });
       active = await this.persist(active, { pendingEffect: {
         kind: 'outcome-evidence', path, runId: active.record.runId, code, summary, recordedAt, bytesSha256: sha256(bytes),
+        ...(authorizationGrantId ? { authorizationGrantId } : {}),
       } });
     }
     const effect = active.record.pendingEffect;
@@ -3900,10 +3968,19 @@ export class RunIssue {
     evidenceCode: string,
     additionalChanges: Omit<Partial<RunRecord>, 'pendingEffect' | 'terminalOutcome' | 'outcomeEvidenceId' | 'lifecycle'> = {},
   ): Promise<RunIssueResult> {
+    let terminalAuthorizationGrantId: string | undefined;
+    const recoveringOutcomeEvidence = active.record.pendingEffect?.kind === 'outcome-evidence';
+    if (!recoveringOutcomeEvidence) {
+      try { terminalAuthorizationGrantId = await this.dependencies.issues.getAuthorizationGrantId?.(
+        active.record.issueNumber, active.config.github.labels.auto.name); }
+      catch { /* Without a baseline, only a provably later GitHub grant may reopen this outcome. */ }
+    }
     const evidence = await this.observeOutcomeEvidenceEffect(
-      active, evidenceCode, canonicalJson(outcome),
+      active, evidenceCode, canonicalJson(outcome), terminalAuthorizationGrantId,
     );
     active = evidence.active;
+    terminalAuthorizationGrantId = active.record.pendingEffect?.kind === 'outcome-evidence'
+      ? active.record.pendingEffect.authorizationGrantId : undefined;
     const terminalOutcome = { ...outcome, evidencePath: evidence.path } as RunTerminalOutcome;
     let terminalComments = active.record.issueSnapshot.comments ?? [];
     if (outcome.status !== 'transport-failed') {
@@ -3919,6 +3996,7 @@ export class RunIssue {
       ...(outcome.status === 'review-ready' ? { failedCheckRepair: undefined } : {}),
       lifecycle: outcome.status,
       terminalOutcome,
+      terminalAuthorizationGrantId,
       outcomeEvidenceId: evidence.id,
       ...(notifications ? { terminalNotifications: notifications } : {}),
     };
@@ -3929,6 +4007,12 @@ export class RunIssue {
     }
     active = await this.persist(active, changes);
     try { active = await this.confirmEffect(active); } catch { return publicOutcome(terminalOutcome); }
+    if (recoveringOutcomeEvidence) {
+      try {
+        const issue = await this.readIssue(active.record.issueNumber);
+        if (issue && await this.dependencies.issues.isReauthorized?.(active.record, issue) === true) return publicOutcome(terminalOutcome);
+      } catch { return publicOutcome(terminalOutcome); }
+    }
     active = await this.settleTerminalNotificationsBestEffort(active);
     return publicOutcome(terminalOutcome);
   }

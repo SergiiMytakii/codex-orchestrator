@@ -84,6 +84,25 @@ export class GhCliIssueAdapter implements GitHubIssueAdapter {
     return comments.map(normalizeRestComment);
   }
 
+  public async getLatestAuthorizationGrant(issueNumber: number, label: string): Promise<{ id: string; createdAt: string } | undefined> {
+    const events = await githubRestCollection(githubCollectionExecutor(this.executor, this.executionOptions),
+      `repos/${this.repo}/issues/${issueNumber}/timeline`, [], '.[] | .id = (.id | tostring)');
+    let latest: { id: string; createdAt: string; granted: boolean } | undefined;
+    for (const item of events) {
+      if (typeof item !== 'object' || item === null) continue;
+      const event = item as Record<string, unknown>;
+      const eventLabel = typeof event.label === 'object' && event.label !== null
+        ? (event.label as Record<string, unknown>).name : undefined;
+      if ((event.event !== 'labeled' && event.event !== 'unlabeled') || eventLabel !== label) continue;
+      if (typeof event.id !== 'string' || !/^[1-9][0-9]*$/u.test(event.id)
+        || typeof event.created_at !== 'string' || !Number.isFinite(Date.parse(event.created_at))) throw new Error('Invalid GitHub authorization event');
+      if (!latest || BigInt(event.id) > BigInt(latest.id)) latest = {
+        id: event.id, createdAt: new Date(event.created_at).toISOString(), granted: event.event === 'labeled',
+      };
+    }
+    return latest?.granted ? { id: latest.id, createdAt: latest.createdAt } : undefined;
+  }
+
   public async getRepositoryPermission(login: string, expectedUserId: string): Promise<GitHubRepositoryPermissionObservation> {
     let result: Awaited<ReturnType<CommandExecutor>>;
     try {

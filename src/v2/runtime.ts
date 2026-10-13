@@ -1530,6 +1530,8 @@ export function createV2Runtime(input: {
     },
     issues: {
       read: (issueNumber) => readRuntimeIssue(issues, issueNumber),
+      isReauthorized: (record, issue) => hasGitHubReauthorization({ targetRoot, config: requireConfig(currentConfig), record, issue, issues }),
+      getAuthorizationGrantId: async (number, label) => (await issues.getLatestAuthorizationGrant?.(number, label))?.id,
       setLabels: async (issueNumber, labels) => {
         const current = await issues.getLabels(issueNumber);
         const policy = requireConfig(currentConfig).github.labels;
@@ -2425,4 +2427,30 @@ function validateRelativeRoot(value: string): void {
   ) {
     throw new Error('ignored untracked root must be a normalized repository-relative path');
   }
+}
+
+/** GitHub grants execution; the journal supplies only the stopped operation's boundary. */
+export async function hasGitHubReauthorization(input: {
+  targetRoot: string; config: AgentAutoConfig; record: RunRecord;
+  issue: { state: string; labels: string[] }; issues: Pick<GitHubIssueAdapter, 'getLatestAuthorizationGrant'>;
+}): Promise<boolean> {
+  const { record, issue, config } = input;
+  const outcome = record.terminalOutcome;
+  if (!outcome || outcome.status === 'review-ready' || issue.state !== 'OPEN'
+    || !issue.labels.includes(config.github.labels.auto.name)
+    || [config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name]
+      .some(label => issue.labels.includes(label))) return false;
+  const evidenceRoot = resolve(input.targetRoot, config.runner.stateDir, 'v2/evidence');
+  const path = resolve(input.targetRoot, outcome.evidencePath);
+  if (!isPathWithin(evidenceRoot, path)) return false;
+  let evidence;
+  try { evidence = JSON.parse((await readRegularFile(path)).toString('utf8')); }
+  catch (error) { if (isErrorCode(error, 'ENOENT')) return false; throw error; }
+  const { evidencePath: _path, ...seed } = outcome;
+  if (evidence.runId !== record.runId || evidence.summary !== canonicalJson(seed)
+    || typeof evidence.recordedAt !== 'string' || !Number.isFinite(Date.parse(evidence.recordedAt))) return false;
+  const grant = await input.issues.getLatestAuthorizationGrant?.(record.issueNumber, config.github.labels.auto.name);
+  return !!grant && (record.terminalAuthorizationGrantId
+    ? BigInt(grant.id) > BigInt(record.terminalAuthorizationGrantId)
+    : Date.parse(grant.createdAt) > Date.parse(evidence.recordedAt));
 }

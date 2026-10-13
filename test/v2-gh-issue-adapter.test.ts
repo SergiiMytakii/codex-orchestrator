@@ -193,3 +193,23 @@ test('Runner cancellation prevents a new individual issue read or write', async 
   await assert.rejects(adapter.addLabels(12, ['agent:running']), /cancellation/);
   assert.equal(calls, 0);
 });
+
+
+test('GitHub authorization uses the latest auto-label event across the complete timeline', async () => {
+  const executor: CommandExecutor = async () => ({ stdout: [
+    { id: '90071992547409931234', event: 'labeled', label: { name: 'agent:auto' }, created_at: '2026-10-05T12:00:00Z' },
+    { id: '90071992547409931235', event: 'unlabeled', label: { name: 'agent:auto' }, created_at: '2026-10-06T12:00:00Z' },
+    { id: '90071992547409931236', event: 'labeled', label: { name: 'agent:auto' }, created_at: '2026-10-12T13:27:17Z' },
+    { id: '90071992547409931237', event: 'commented', created_at: '2026-10-12T13:30:00Z' },
+  ].map(event => JSON.stringify(event)).join('\n'), stderr: '' });
+  assert.deepEqual(await new GhCliIssueAdapter('owner', 'repo', executor).getLatestAuthorizationGrant(263, 'agent:auto'),
+    { id: '90071992547409931236', createdAt: '2026-10-12T13:27:17.000Z' });
+});
+
+test('an auto-label removal is not an authorization even when an older grant exists', async () => {
+  const executor: CommandExecutor = async () => ({ stdout: [
+    { id: '10', event: 'labeled', label: { name: 'agent:auto' }, created_at: '2026-10-12T12:00:00Z' },
+    { id: '11', event: 'unlabeled', label: { name: 'agent:auto' }, created_at: '2026-10-12T12:00:01Z' },
+  ].map(event => JSON.stringify(event)).join('\n'), stderr: '' });
+  assert.equal(await new GhCliIssueAdapter('owner', 'repo', executor).getLatestAuthorizationGrant(263, 'agent:auto'), undefined);
+});

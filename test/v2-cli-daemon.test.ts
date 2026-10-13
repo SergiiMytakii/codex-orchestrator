@@ -189,3 +189,31 @@ test('daemon cancellation ends the serial pass and skips later issue invocations
   assert.equal(result, 130);
   assert.deepEqual(executed, [1]);
 });
+
+test('a fresh GitHub authorization returns a cancelled issue to the daemon queue', async () => {
+  const bytes = await readFile('.codex-orchestrator/config.json');
+  const cancelled = { issueNumber: 263, createdAt: '2026-10-05T00:00:00Z',
+    terminalOutcome: { status: 'cancelled', evidencePath: 'cancelled.json' } } as RunRecord;
+  const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
+    readConfigBytes: async () => bytes,
+    discover: async () => [issue(263)],
+    inventory: async () => [cancelled],
+    isReauthorized: async () => true,
+    executeRun: async () => ({ status: 'state-schema-unsupported' }),
+  } as Parameters<typeof discoverConfiguredDaemonTick>[1]);
+  assert.deepEqual(snapshot.candidates.map(candidate => candidate.number), [263]);
+});
+
+test('a stopped issue timeline failure does not skip another eligible issue', async () => {
+  const bytes = await readFile('.codex-orchestrator/config.json');
+  const stopped = { issueNumber: 263, createdAt: '2026-10-05T00:00:00Z',
+    terminalOutcome: { status: 'cancelled', evidencePath: 'cancelled.json' } } as RunRecord;
+  const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
+    readConfigBytes: async () => bytes,
+    discover: async () => [issue(263), issue(264)],
+    inventory: async () => [stopped],
+    isReauthorized: async () => { throw new Error('HTTP 503 timeline'); },
+    executeRun: async () => ({ status: 'state-schema-unsupported' }),
+  });
+  assert.deepEqual(snapshot.candidates.map(candidate => candidate.number), [264]);
+});

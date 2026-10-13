@@ -61,7 +61,7 @@ export type PendingEffect = EffectIdentity & (
   | { kind: 'worktree-create'; worktreePath: string; branchName: string; baseBranch: string; baseSha: string }
   | { kind: 'continuation-worktree-create'; worktreePath: string; branchName: string; baseBranch: string; publishedHeadSha: string }
   | { kind: 'candidate-pin-release'; bindingId: string; expectedPinnedCommitSha: string }
-  | { kind: 'outcome-evidence'; path: string; runId: string; code: string; summary: string; recordedAt: string; bytesSha256: string }
+  | { kind: 'outcome-evidence'; path: string; runId: string; code: string; summary: string; recordedAt: string; bytesSha256: string; authorizationGrantId?: string }
 );
 
 export type PendingEffectInput = PendingEffect extends infer T
@@ -180,6 +180,7 @@ export interface RunRecord {
   pendingEffect?: PendingEffect;
   outcomeEvidenceId?: string;
   terminalOutcome?: RunTerminalOutcome;
+  terminalAuthorizationGrantId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -447,6 +448,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'implementationResult',
     'implementationReportCorrection',
     'terminalNotifications',
+    'terminalAuthorizationGrantId',
     'pendingEffect',
     'outcomeEvidenceId',
     'terminalOutcome',
@@ -477,6 +479,8 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
   if (!Number.isSafeInteger(value.cycle) || (value.cycle as number) < 1) throw new Error(`${field}.cycle is invalid`);
   if (!Number.isSafeInteger(value.reportRepairs) || (value.reportRepairs as number) < 0) throw new Error(`${field}.reportRepairs is invalid`);
   if (!Number.isSafeInteger(value.transportRetries) || (value.transportRetries as number) < 0) throw new Error(`${field}.transportRetries is invalid`);
+  if (hasOwn(value, 'terminalAuthorizationGrantId') && (typeof value.terminalAuthorizationGrantId !== 'string'
+    || !/^[1-9][0-9]*$/u.test(value.terminalAuthorizationGrantId))) throw new Error(`${field}.terminalAuthorizationGrantId is invalid`);
   validateIssueSnapshot(value.issueSnapshot, `${field}.issueSnapshot`);
   validateFrozenCriteria(value.frozenCriteria, `${field}.frozenCriteria`);
   validateStringList(value.reworkFindings, `${field}.reworkFindings`);
@@ -821,13 +825,16 @@ function validatePendingEffect(value: unknown, field: string): void {
     assertSha256(value.bindingId, `${field}.bindingId`);
     assertGitSha(value.expectedPinnedCommitSha, `${field}.expectedPinnedCommitSha`);
   } else if (kind === 'outcome-evidence') {
-    assertExactObject(value, [...identity, 'path', 'runId', 'code', 'summary', 'recordedAt', 'bytesSha256'], field);
+    assertExactObject(value, [...identity, 'path', 'runId', 'code', 'summary', 'recordedAt', 'bytesSha256',
+      ...(hasOwn(value, 'authorizationGrantId') ? ['authorizationGrantId'] : [])], field);
     assertNonEmptyString(value.path, `${field}.path`);
     if (typeof value.runId !== 'string' || !UUID_V4_PATTERN.test(value.runId)) throw new Error(`${field}.runId is invalid`);
     assertNonEmptyString(value.code, `${field}.code`);
     assertNonEmptyString(value.summary, `${field}.summary`);
     assertTimestamp(value.recordedAt, `${field}.recordedAt`);
     assertSha256(value.bytesSha256, `${field}.bytesSha256`);
+    if (hasOwn(value, 'authorizationGrantId') && (typeof value.authorizationGrantId !== 'string'
+      || !/^[1-9][0-9]*$/u.test(value.authorizationGrantId))) throw new Error(`${field}.authorizationGrantId is invalid`);
   } else {
     throw new Error(`${field}.kind is invalid`);
   }

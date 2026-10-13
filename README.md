@@ -123,7 +123,7 @@ Technical Acceptance Proof failures resume on the next ordinary call for the sam
 npx codex-orchestrator run --target "$PWD" --issue 123 --retry-proof <run-id>
 ```
 
-This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context, preserves valid check receipts, and requires fresh Acceptance Proof and Review before publication. Other terminal outcomes cannot be reopened. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
+This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context, preserves valid check receipts, and requires fresh Acceptance Proof and Review before publication. This proof-only command does not reopen other terminal outcomes. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
 
 Review persists its exact validation context before launch, including reviewer
 roles, required coverage, finding IDs and target identity. Recovery checks a
@@ -254,6 +254,16 @@ preserved as `run-state.json.backup`. Run only one Runner version over this stat
 during migration. Interrupted migration resumes by verifying existing files;
 divergence or missing migrated records blocks execution. Unknown candidate refs
 and materializations are preserved, including when another stateDir may own them.
+
+GitHub owns execution permission; the local journal retains progress and history.
+To authorize a stopped issue again, remove conflicting running/blocked/review labels
+and remove then re-add the configured `auto` label. The Runner verifies a new
+GitHub label event after the previous stop, using event identity when retained
+and immutable outcome evidence for legacy runs. Deleting comments or rewriting
+journal timestamps does not grant execution. A new grant resumes the same Run,
+branch and checked candidate after ownership, worktree and pending-effect checks;
+stale terminal notifications cannot undo it. Existing open PRs continue through
+the Review feedback path rather than a replacement delivery.
 
 The daemon combines complete GitHub discovery with local runs requiring
 reconciliation, cleanup or notification delivery. Every tick binds discovery and

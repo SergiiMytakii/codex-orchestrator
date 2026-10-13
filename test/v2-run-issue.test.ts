@@ -38,6 +38,86 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('a fresh GitHub grant resumes a cancelled Run without stale cancellation labels undoing it', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' } });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  const stopped = (await fixture.store.read()).runs[0]!;
+  const priorEvidence = stopped.terminalOutcome!.evidencePath;
+  const grants: string[] = [];
+  const writeEvidence = fixture.dependencies.writeEvidence;
+  fixture.dependencies.writeEvidence = async input => {
+    if (input.code === 'github-reauthorization') grants.push(input.summary);
+    return writeEvidence(input);
+  };
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  fixture.dependencies.issues.isReauthorized = async () => true;
+  fixture.options.implementationResult = undefined;
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, grants, stopped: { pending: stopped.pendingEffect, active: stopped.activeAttempt, materialization: stopped.candidateMaterialization }, events: fixture.events, evidence: fixture.evidence }));
+  const resumed = (await fixture.store.read()).runs[0]!;
+  assert.equal(resumed.runId, stopped.runId);
+  assert.equal(resumed.branchName, stopped.branchName);
+  assert.equal(resumed.worktreePath, stopped.worktreePath);
+  assert.ok(grants.some(summary => summary.includes(priorEvidence)));
+  assert.ok((await readFile(resolve(fixture.targetRoot, priorEvidence), 'utf8')).includes('cancelled'));
+  assert.equal(fixture.events.filter(event => event === 'git:push').length, 1);
+});
+
+test('a fresh GitHub grant retains the checked candidate and resumes proof without reimplementation', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({
+    status: 'internal-error', receipt: { ...passedProof().receipt, summary: 'Proof artifact unavailable.' },
+  }) });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'internal-error');
+  const before = (await fixture.store.read()).runs[0]!;
+  const implementations = fixture.events.filter(event => event === 'agent:implementation').length;
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  fixture.dependencies.issues.isReauthorized = async () => true;
+  fixture.options.proof = async () => passedProof();
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, events: fixture.events }));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.deepEqual((fixture.checkedChangePayloads.at(-1)! as CheckedChangePayloadV2).binding, before.candidateBinding);
+  assert.deepEqual(after.checks, before.checks);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, implementations);
+});
+
+test('a journal cancellation remains progress history without a fresh GitHub grant', async () => {
+  const fixture = await runFixture({ implementationResult: { kind: 'cancelled' } });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  const implementations = fixture.events.filter(event => event === 'agent:implementation').length;
+  fixture.dependencies.issues.isReauthorized = async () => false;
+  fixture.options.implementationResult = undefined;
+  for (let tick = 0; tick < 2; tick++) assert.equal(
+    (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, implementations);
+});
+
+test('a fresh GitHub grant survives interrupted outcome evidence at both state boundaries', async () => {
+  for (const failure of [
+    { rejectStoreEvent: 'state:cancelled:outcome-evidence' },
+    { rejectStoreTransition: { from: 'outcome-evidence', to: 'none' } },
+  ] as const) {
+    const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' }, ...failure });
+    let grantId = '10';
+    fixture.dependencies.issues.getAuthorizationGrantId = async () => grantId;
+    fixture.dependencies.issues.isReauthorized = async (record) =>
+      !!record.terminalOutcome && BigInt(grantId) > BigInt(record.terminalAuthorizationGrantId ?? '0');
+    assert.ok(['cancelled', 'transport-failed'].includes(
+      (await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status));
+    const interrupted = (await fixture.store.read()).runs[0]!;
+    assert.equal(interrupted.pendingEffect?.kind, 'outcome-evidence');
+    const runId = interrupted.runId;
+    grantId = '11';
+    await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+    fixture.options.implementationResult = undefined;
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'review-ready', JSON.stringify({ failure, result, events: fixture.events }));
+    assert.equal((await fixture.store.read()).runs[0]!.runId, runId);
+    assert.equal(fixture.events.filter(event => event === 'git:push').length, 1);
+  }
+});
+
 test('new run persists GitHub comments through claim without leaking transport metadata', async () => {
   const fixture = await runFixture({ fileBackedStore: true, initialComments: [{
     id: '6010397751', body: 'Historical discussion', authorAssociation: 'COLLABORATOR',

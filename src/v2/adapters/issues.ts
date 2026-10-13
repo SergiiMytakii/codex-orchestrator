@@ -75,6 +75,7 @@ export interface CloseIssueEvidenceInput {
 }
 
 export interface GitHubIssueAdapter {
+  getLatestAuthorizationGrant?(issueNumber: number, label: string): Promise<{ id: string; createdAt: string } | undefined>;
   listOpenIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   listClosedIssuesWithAnyLabel(labels: string[]): Promise<GitHubIssue[]>;
   getIssue(number: number): Promise<GitHubIssue | undefined>;
