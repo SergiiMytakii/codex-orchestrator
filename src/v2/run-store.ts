@@ -84,6 +84,7 @@ export interface TerminalReportSnapshotV1 {
   outcome: 'review-ready' | 'blocked' | 'internal-error' | 'cancelled';
   summary: string;
   pullRequestUrl?: string;
+  retainedWork?: string[];
   passedChecks: string[];
   publishableProof: string[];
   unverified: string[];
@@ -862,10 +863,11 @@ function validateTerminalNotifications(value: unknown, field: string): void {
 
 function validateTerminalReport(value: unknown, field: string): void {
   const pullRequestUrl = hasOwn(value, 'pullRequestUrl') ? ['pullRequestUrl'] : [];
+  const retainedWork = hasOwn(value, 'retainedWork') ? ['retainedWork'] : [];
   const blocker = hasOwn(value, 'blocker') ? ['blocker'] : [];
   assertExactObject(value, [
     'version', 'outcome', 'summary', ...pullRequestUrl, 'passedChecks', 'publishableProof', 'unverified',
-    'risks', 'reviewFocus', 'nextAction', ...blocker,
+    'risks', 'reviewFocus', 'nextAction', ...blocker, ...retainedWork,
   ], field);
   if (value.version !== 1) throw new Error(`${field}.version is invalid`);
   assertTerminalNotificationOutcome(value.outcome, `${field}.outcome`);
@@ -874,6 +876,7 @@ function validateTerminalReport(value: unknown, field: string): void {
   for (const key of ['passedChecks', 'publishableProof', 'unverified', 'risks', 'reviewFocus'] as const) {
     validateStringList(value[key], `${field}.${key}`);
   }
+  if (hasOwn(value, 'retainedWork')) validateStringList(value.retainedWork, `${field}.retainedWork`);
   assertNonEmptyString(value.nextAction, `${field}.nextAction`);
   if (hasOwn(value, 'blocker')) {
     assertExactObject(value.blocker, ['kind', 'resumable', 'attempted'], `${field}.blocker`);

@@ -1567,6 +1567,17 @@ export class RunIssue {
       if (!this.dependencies.git.candidateV2) {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
       }
+      // Older interrupted runs retained an implementation report without an immutable candidate.
+      // Revalidate the existing files through the implementation owner; old receipts cannot prove them.
+      if (!active.record.changeBindingVersion && !active.record.candidateBinding
+        && active.record.implementationResult && !active.record.directReview
+        && !active.record.reviewFeedback?.activeBatch
+        && ['checking', 'proving'].includes(active.record.lifecycle)) {
+        active = await this.persist(active, {
+          lifecycle: 'implementing', checks: [], checkedChangeSha256: undefined,
+          failedCheckRepair: undefined, proofId: undefined, proofExecution: undefined, proofReceipt: undefined,
+        });
+      }
       attemptLoop: while (true) {
         if (!await this.authorized(active, config)) {
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'authorization-revoked');
@@ -4016,7 +4027,7 @@ export class RunIssue {
         // Terminal notification observation is best-effort and cannot change the Run outcome.
       }
     }
-    const notifications = terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments);
+    const notifications = terminalNotificationState(active.record, outcome, this.timestamp(), terminalComments, evidenceCode);
     const changes: Partial<RunRecord> & { pendingEffect?: PendingEffect | undefined } = {
       ...additionalChanges,
       ...(outcome.status === 'review-ready' ? { failedCheckRepair: undefined } : {}),
@@ -4102,21 +4113,24 @@ function terminalNotificationState(
   outcome: TerminalSeed,
   observedAt: string,
   comments: Array<{ id?: string }>,
+  evidenceCode?: string,
 ): TerminalNotificationStateV1 | undefined {
   if (outcome.status === 'transport-failed') return undefined;
   const commentId = issueCommentHighWaterMark(comments);
   return {
     version: 1,
     commentCutoff: { commentId, observedAt },
-    report: terminalReportSnapshot(record, outcome),
+    report: terminalReportSnapshot(record, outcome, evidenceCode),
     comment: { status: 'pending', attempts: 0 },
     labels: { status: 'pending', attempts: 0 },
   };
 }
 
-function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed, { status: 'transport-failed' }>): TerminalReportSnapshotV1 {
+function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed, { status: 'transport-failed' }>, evidenceCode?: string): TerminalReportSnapshotV1 {
+  const code = evidenceCode ?? (outcome.status === 'internal-error' ? outcome.code : outcome.status);
+  const diagnostic = blockedDiagnostic(code, record);
   const summary = outcome.status === 'blocked'
-    ? outcome.blocker?.summary ?? `The run stopped at ${outcome.kind}.`
+    ? `${outcome.blocker?.summary ?? diagnostic.summary} (Code: ${code})`
     : outcome.status === 'internal-error'
       ? internalErrorSummary(outcome.code)
       : outcome.status === 'cancelled'
@@ -4125,11 +4139,11 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
   const nextAction = outcome.status === 'review-ready'
     ? 'Review the draft PR. To request an in-scope follow-up, comment on this issue.'
     : outcome.status === 'blocked'
-      ? outcome.resumable
+      ? diagnostic.nextAction ?? (outcome.resumable
         ? 'Resolve the stated blocker, then rerun the same issue.'
         : outcome.kind === 'external'
           ? 'Inspect the retained report and Runner diagnostics, correct the reported condition, then explicitly retry the retained work.'
-          : 'Provide the missing decision or authority in this issue before continuing.'
+          : 'Provide the missing decision or authority in this issue before continuing.')
       : outcome.status === 'internal-error'
         ? 'Inspect the package-owned evidence for the code above, correct the runner condition, and retry the same issue.'
         : 'Re-add the authorization label and rerun the same issue if the work should continue.';
@@ -4138,6 +4152,12 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
     outcome: outcome.status,
     summary: publicTerminalText(summary, 'Terminal summary is unavailable.'),
     ...(outcome.status === 'review-ready' ? { pullRequestUrl: outcome.pullRequestUrl } : {}),
+    retainedWork: [
+      ...(record.implementationResult ? [publicTerminalText(
+        `Implementation report retained: ${record.implementationResult.summary}`, 'Implementation report retained; its detail was redacted.',
+      )] : []),
+      ...(record.candidateBinding ? ['An immutable Git candidate is retained.'] : []),
+    ],
     passedChecks: record.checks.filter((check) => check.status === 'passed').slice(0, 16)
       .map((check) => publicTerminalText(check.id, 'Unnamed check.', 200)),
     publishableProof: (record.proofReceipt?.publishableEvidence ?? []).slice(0, 4).map((proof) => publicTerminalText(
@@ -4156,6 +4176,36 @@ function terminalReportSnapshot(record: RunRecord, outcome: Exclude<TerminalSeed
         .map((attempt) => publicTerminalText(attempt, 'Attempt detail is unavailable.', 500)),
     } } : {}),
   };
+}
+
+function blockedDiagnostic(code: string, record: RunRecord): { summary: string; nextAction?: string } {
+  if (code === 'candidate-git-v2-required') return {
+    summary: record.candidateBinding
+      ? 'The Runner cannot freeze and verify the exact Git candidate because its candidate Git adapter is unavailable.'
+      : 'The Runner cannot freeze and verify the exact Git candidate: the required Git candidate adapter or immutable candidate binding is unavailable.',
+    nextAction: 'Repair the Runner candidate handling, then rerun this issue. Retain the existing worktree; checks, Acceptance Proof and Review must pass before publication.',
+  };
+  const summaries: Record<string, string> = {
+    'authorization-revoked': 'The issue no longer authorizes this run. The Runner stopped before doing further work.',
+    'denied-path-modified': 'Implementation changed a protected path that this issue is not allowed to modify.',
+    'implementation-head-drift': 'The implementation changed the worktree Git HEAD. The Runner cannot attribute those commits to its authorized candidate.',
+    'candidate-pin-missing': 'The saved Git reference for the exact candidate is missing. Previous checks cannot establish the identity of the remaining files.',
+    'candidate-pin-diverged': 'The saved Git reference points to a different candidate. Previous checks and proof cannot authorize publication of that version.',
+    'configured-check-policy-drift': 'The configured checks changed after validation started; the recorded results no longer match the required check policy.',
+    'candidate-check-launch-ownership-required': 'The check adapter cannot record ownership of its process, so the Runner cannot safely track completion or recovery.',
+    'checked-change-candidate-binding-drift': 'The checked change does not match the frozen Git candidate. Its check results cannot authorize proof or publication.',
+    'checked-change-recovery-binding-drift': 'The recovered check results do not match the frozen Git candidate. They cannot be reused.',
+    'config-invalid': 'The Runner configuration failed validation before publication.',
+    'configured-check-result-missing': 'The check process finished, but its saved result is missing. The Runner cannot count this check as passed.',
+    'configured-check-result-invalid': 'The saved check result is invalid. The Runner cannot count this check as passed.',
+    'configured-check-output-sha-invalid': 'The saved check output does not match its recorded digest. The Runner cannot trust the result.',
+    'candidate-materialization-state-missing': 'The saved state for the isolated candidate workspace is missing; its execution cannot be safely recovered.',
+    'candidate-materialization-mutated': 'The isolated candidate workspace changed during validation. Its results no longer prove the frozen candidate.',
+    'candidate-execution-not-quiescent': 'A candidate process may still be running. The Runner cannot safely change or publish its files.',
+    'review-feedback-pr-identity-missing': 'The Runner could not find the draft PR belonging to this run, so it cannot apply follow-up feedback safely.',
+    'review-feedback-worktree-diverged': 'The follow-up worktree no longer matches the published PR revision.',
+  };
+  return { summary: summaries[code] ?? `The Runner could not safely complete the operation identified by "${code}". Inspect the retained evidence for this operation before retrying.` };
 }
 
 function internalErrorSummary(code: string): string {
@@ -4200,9 +4250,12 @@ function terminalComment(runId: string, cycle: number, report: TerminalReportSna
     '',
     '## Retained work and state',
     ...terminalList([
+      ...(report.retainedWork ?? []),
       ...report.passedChecks.map((check) => `Passed check: ${check}`),
       ...report.publishableProof.map((proof) => `Proof: ${proof}`),
     ]),
+    '',
+    '## Not verified', ...terminalList(report.unverified),
     '',
     '## Next action', report.nextAction,
   ].join('\n');

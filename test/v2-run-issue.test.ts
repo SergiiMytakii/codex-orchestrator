@@ -130,6 +130,44 @@ test('a fresh GitHub grant retains the checked candidate and resumes proof witho
   assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, implementations);
 });
 
+test('restart revalidates retained legacy implementation before checks with or without a fresh grant', async () => {
+  for (const lifecycle of ['cancelled', 'checking'] as const) {
+    const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'cancelled' } });
+    await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    await writeFile(join(fixture.worktreePath, 'feature.txt'), 'retained implementation\n');
+    const state = await fixture.store.read();
+    const retained = structuredClone(state.runs[0]!);
+    retained.lifecycle = lifecycle;
+    delete retained.activeAttempt;
+    retained.implementationResult = { summary: 'Retained implementation', residualRisks: [] };
+    retained.checks = [{ id: 'old-check', command: 'old command', status: 'passed', outputSha256: sha256('old') }];
+    if (lifecycle === 'checking') {
+      delete retained.terminalOutcome;
+      delete retained.outcomeEvidenceId;
+      delete retained.terminalNotifications;
+    }
+    await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: [retained] });
+    await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+    fixture.dependencies.issues.isReauthorized = async () => true;
+    fixture.options.implementationResult = undefined;
+    fixture.options.agentWrites = false;
+    const before = fixture.events.length;
+    const result = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'review-ready', lifecycle);
+    const after = (await fixture.store.read()).runs[0]!;
+    assert.equal(after.runId, retained.runId);
+    assert.equal(after.worktreePath, retained.worktreePath);
+    assert.equal(await readFile(join(fixture.worktreePath, 'feature.txt'), 'utf8'), 'retained implementation\n');
+    assert.equal(fixture.checkedChangePayloads.at(-1)?.version, 2);
+    assert.equal(after.checks.some(check => check.id === 'old-check'), false);
+    const events = fixture.events.slice(before);
+    assert.ok(events.includes('agent:implementation'));
+    assert.ok(events.includes('proof'));
+    assert.ok(events.includes('review:code-review'));
+    assert.equal(events.filter(event => event === 'git:push').length, 1);
+  }
+});
+
 test('a journal cancellation remains progress history without a fresh GitHub grant', async () => {
   const fixture = await runFixture({ implementationResult: { kind: 'cancelled' } });
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
@@ -2855,6 +2893,32 @@ test('Review admits a large exact target and waits for denied paths', async () =
     status: 'transport-failed', resumable: true,
   });
   assert.equal(denied.reviewInputs.length, 0);
+});
+
+test('blocked comments explain the exact stop and retain implementation context', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, checkEnvironmentUnavailable: true });
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  fixture.dependencies.git.candidateV2 = undefined;
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'))?.body ?? '';
+  assert.match(comment, /candidate-git-v2-required/u);
+  assert.match(comment, /cannot freeze and verify the exact Git candidate/u);
+  assert.match(comment, /Implementation report retained: done/u);
+  assert.match(comment, /No publishable Acceptance Proof receipt/u);
+  assert.match(comment, /Repair the Runner/u);
+  assert.doesNotMatch(comment, /The run stopped at safety/u);
+});
+
+test('a missing candidate adapter before implementation does not invent retained work', async () => {
+  const fixture = await runFixture({ fileBackedStore: true });
+  fixture.dependencies.git.candidateV2 = undefined;
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  const comment = (await fixture.dependencies.issues.read(42))?.comments.find(item => item.body.includes(':blocked -->'))?.body ?? '';
+  assert.match(comment, /Git candidate adapter or immutable candidate binding is unavailable/u);
+  assert.match(comment, /candidate-git-v2-required/u);
+  assert.doesNotMatch(comment, /retained implementation|Implementation report retained/u);
+  assert.equal(fixture.events.includes('agent:implementation'), false);
 });
 
 test('ordinary external and safety terminals publish the blocked issue status', async () => {
