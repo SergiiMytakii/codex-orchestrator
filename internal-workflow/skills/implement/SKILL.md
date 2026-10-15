@@ -56,6 +56,8 @@ never activates the graph coordinator.
    return the decision or evidence gap. Read and record pre-existing changes;
    preserve them while adding the authorized edits on top. Disjoint dirty paths
    remain untouched and unstaged.
+   For UI work, load `$ui-evidence-proof` now, inspect the supplied design, and
+   establish its comparison criteria before implementation.
 2. Use `$tdd` where possible. Otherwise establish direct pre-change evidence
    when useful and apply the narrowest observable proof after the edit.
    When a diagnosis handoff exists, rerun the unchanged reproduction command
@@ -69,6 +71,9 @@ never activates the graph coordinator.
    superseded paths in scope; do not add aliases, wrappers, adapters, fallback
    routes, or speculative layers.
 4. Run targeted proof and the smallest affected integration check.
+   For UI work, complete `$ui-evidence-proof` against the final rendered result.
+   Fix in-scope design differences and repeat capture/comparison until it passes;
+   tests or an uninspected screenshot cannot replace this completion gate.
    During substantial work, run the relevant typecheck or single test file as
    the seam settles. Run a full suite once at the end only when repository
    policy, risk, or the changed shared contract makes it proportionate.
@@ -127,7 +132,8 @@ never activates the graph coordinator.
 
 Missing proof, terminally failed or interrupted review, or
 unisolatable scope produces no affected staging or commit. Never push or open a
-PR without separate authority.
+PR without separate authority. When drafting or updating an authorized PR
+body, read and apply `$pr` using the settled diff and actual proof.
 
 ## Handoff
 

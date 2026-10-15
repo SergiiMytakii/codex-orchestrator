@@ -41,7 +41,7 @@ The user-facing coding flow is Plan, Implement, Review.
 Direct non-ticket work stays in the current root context. Do not create a spec,
 ticket, or worker merely because a change spans files or touches an important
 contract. A real product or ownership decision gap returns to Plan. An approved
-multi-ticket dependency graph routes to `$tickets-orchestrator`; a single
+multi-ticket dependency graph routes to `$implement-spec`; a single
 executable ticket never does.
 
 Grilling uses dependency-aware frontier rounds. `$grilling` is the model-invoked,
@@ -67,9 +67,22 @@ return to Implement when a fix is authorized. External multi-source uncertainty
 uses `$research`. A requested throwaway logic or UI experiment uses `$prototype`
 to answer one bounded design question, then returns production delivery to
 Implement. Grilling, TDD, to-spec, to-tickets, diagnosis, research, prototype,
-and the graph-only Tickets Orchestrator are internal or side primitives.
+and the graph-only Implement Spec are internal or side primitives.
 Specialized runtime and platform skills remain side tools and do not compete
 with the main flow.
+
+## PR descriptions and retrospectives
+
+When drafting or updating a PR body, read and apply `$pr` after the applicable
+proof and Review settle. It shapes the description, not a new delivery phase:
+explain resulting behavior, cite observed evidence, and describe concrete
+impact and rollback constraints. Repository templates take precedence; small
+changes need no mandatory visual. Existing publication authority still applies.
+
+`$retro` runs only when the user requests a retrospective. Default to the current
+session, ground proposals in its evidence, and prioritize improvements to the
+agent environment. It does not automatically follow every Review or authorize
+implementation of its proposals.
 
 ## Phase boundaries
 
@@ -99,7 +112,7 @@ competing router. Plan, Implement, Review, prototype, `$to-spec`, and
   bounded write scope; verifies the child identity and completed wait; and
   remains the only Git owner.
 - Multiple executable tickets are graph work and remain owned by
-  `$tickets-orchestrator`.
+  `$implement-spec`.
 
 Children do not talk to the user, spawn grandchildren, or perform Git actions.
 Root integrates only isolated worker output and never overwrites unrelated work.
@@ -147,7 +160,7 @@ stop condition. A complete two-lens Review repeats only when repair impact
 cannot be isolated from previously approved scope.
 
 Graph children receive no per-ticket delivery Review. After every checkpoint,
-Tickets Orchestrator owns the initial cumulative review over the complete Parent
+Implement Spec owns the initial cumulative review over the complete Parent
 range, then follows the same unlimited repair loop with targeted Review of each
 repair delta and directly affected Parent obligations.
 

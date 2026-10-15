@@ -1,0 +1,6 @@
+interface:
+  display_name: "Implement Spec"
+  short_description: "Implement approved specs and ticket graphs"
+  default_prompt: "Use $implement-spec for this approved multi-ticket graph: unique fresh child implementers, strict dependency-safe root integration, root-owned checkpoints, direct cumulative Parent proof, and independent Spec and Standards review."
+policy:
+  allow_implicit_invocation: true

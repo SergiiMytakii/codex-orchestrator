@@ -31,7 +31,7 @@ deterministic proof is current on every final checkpoint.
    eligible for repair. For every authorized in-scope defect,
    assign a unique fresh implementer to the affected existing ticket under its
    original bounded assignment and explicit no-Git boundary. Root integrates
-   the worker result, reruns affected target-state checks and combined
+   the worker result, reruns affected behavioral checks and combined
    deterministic proof, creates a new scoped checkpoint, pins that revision,
    and launches only the affected fresh targeted lens: Spec for Parent behavior,
    Standards for correctness or mandatory rules, and both for mixed or
@@ -67,3 +67,6 @@ verdicts, skipped checks, and residual risk. This is a report, not durable
 workflow state. Reconcile tracker state only when explicitly authorized. Push,
 PR, merge, and release each require separate authority; local graph acceptance
 grants none of them.
+
+When drafting or updating an authorized PR body, read and apply `$pr` to the
+full cumulative result and actual Parent proof, rather than the last child diff.

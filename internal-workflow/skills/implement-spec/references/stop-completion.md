@@ -2,9 +2,9 @@
 
 ## Fail-closed conditions
 
-Create no new checkpoint in an unsettled repository and release no successor
-when any of these is true. Retain any earlier repository checkpoint already
-confirmed for a partially settled multi-repository wave:
+Create no checkpoint for the affected child or coupled group and release none
+of its successors when any of these is true. Independently proved isolated
+children may still settle. Retain every earlier confirmed checkpoint:
 
 - Parent authority, a ticket body, native blocker state, repository policy,
   owner, write scope, exclusion, or deterministic proof is missing or
@@ -16,12 +16,12 @@ confirmed for a partially settled multi-repository wave:
 - supposedly parallel children share an owner, write scope, public seam, proof
   resource, migration, generated artifact, or source-of-truth contract;
 - the root diff contains unexplained or dirty overlapping bytes;
-- target-state or combined deterministic proof is missing, failed, or stale;
+- behavioral checks or combined proof is missing, failed, or stale;
 - a ticket, checkpoint, proof result, or final range cannot be assigned to
   exactly one repository-keyed in-memory integration entry;
 - checkpoint ownership, message, scope, or commit result is ambiguous;
 - the final reviewer is missing, incomplete, failed, timed out, tied to another
-  revision, or does not approve; or
+  revision, or leaves a verified blocker or required-proof gap; or
 - work is interrupted while index or worktree ownership is uncertain.
 
 ## Recovery
@@ -32,7 +32,7 @@ tickets, Git, and unique root checkpoints. Worker narration and uncommitted
 state are not completion evidence. Recovery creates no additional durable
 workflow record.
 
-After a lost checkpoint response, reread Git in the affected repository before
+For the affected child or coupled group, after a lost checkpoint response, reread Git in the affected repository before
 any retry. Recover only one commit reachable from that repository's pinned
 baseline with the expected Parent-and-ticket message and exact authorized
 scope. Append that SHA to the matching in-memory checkpoint sequence and
@@ -49,8 +49,8 @@ until every repository checkpoint and the combined deterministic proof settle.
 
 ## Completion standard
 
-The graph is complete only when every child has one confirmed root checkpoint,
-all blockers are settled, every final repository worktree boundary is clean,
+The graph is complete only when confirmed root checkpoints cover every child
+and its authorized repairs, all blockers are settled, every final repository worktree boundary is clean,
 deterministic proof is current for every exact `baseline..final` range, the
 complete Parent PRD is proved directly against those full cumulative diffs, and
 one fresh Spec reviewer plus one fresh Standards reviewer completed on the
@@ -61,3 +61,11 @@ or review of only the final child cannot establish Parent completion.
 Report any skipped check, Decision Delta, unresolved overlap, remote Git action,
 or tracker action honestly. Never infer push or PR authority from local graph
 completion.
+
+## Independent and coupled failures
+
+A failure blocks the affected child, its dependents, and final Parent acceptance.
+Independent isolated children may still settle when ownership and proof remain
+valid. Shared-worktree writers must all stop before proof or commit; coupled
+multi-repository successors wait for every required checkpoint and combined proof.
+Unconfirmed worker output is never disposable merely because its report failed.

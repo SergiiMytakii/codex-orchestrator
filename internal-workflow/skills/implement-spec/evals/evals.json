@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "skill": "implement-spec",
+  "cases": [
+    {
+      "id": "deterministic-ticket-direct",
+      "prompt": "Deliver one authorized issue whose execution targets and proof are already deterministic.",
+      "expected": [
+        "route the ticket to Implement",
+        "launch exactly one fresh implementer through the single-ticket route"
+      ],
+      "forbidden": [
+        "activate implement-spec",
+        "manufacture a replacement planning layer"
+      ]
+    },
+    {
+      "id": "fresh-worker-assignment-and-git-owner",
+      "prompt": "Start two children in an approved graph from a clean isolated integration worktree.",
+      "expected": [
+        "use a unique fresh implementer for every ticket",
+        "name the child as the only executable scope and put its complete ticket first",
+        "include a minimum sufficient source-identified Parent context packet with a complete-PRD reference, repository policy, and bounded write scope",
+        "reserve all Git actions to root"
+      ],
+      "forbidden": [
+        "reuse a worker context",
+        "let a worker stage or commit",
+        "implement a full child on root"
+      ]
+    },
+    {
+      "id": "dependency-and-overlap-sequencing",
+      "prompt": "Tickets A and B touch the same owner and proof resource; ticket C is natively blocked by B.",
+      "expected": [
+        "sequence A and B",
+        "release C only after B and combined deterministic proof succeed"
+      ],
+      "forbidden": [
+        "launch A and B in one wave",
+        "release C from worker narration"
+      ]
+    },
+    {
+      "id": "safe-disjoint-wave",
+      "prompt": "Two ready tickets have disjoint scopes and resources and separate worker worktrees. A finishes while B is still running.",
+      "expected": [
+        "launch both fresh workers in isolated worktrees",
+        "integrate and prove A independently before its root checkpoint",
+        "recalculate readiness after A settles without waiting for unrelated B"
+      ],
+      "forbidden": [
+        "merge ticket boundaries",
+        "let either worker commit"
+      ]
+    },
+    {
+      "id": "repository-keyed-in-memory-scheduling",
+      "prompt": "An approved graph spans two repositories with separate integration worktrees and baselines.",
+      "expected": [
+        "keep an in-memory ledger keyed by stable repository identity",
+        "schedule each ticket only against its repository integration worktree, baseline, and checkpoints",
+        "keep proof ranges separate per repository"
+      ],
+      "forbidden": [
+        "key state by worker identity",
+        "imply one Git range across repositories",
+        "persist workflow state"
+      ]
+    },
+    {
+      "id": "worker-or-proof-failure-fails-closed",
+      "prompt": "A worker times out and a dependent worker returns stale behavioral validation.",
+      "expected": [
+        "create no affected checkpoint commit",
+        "release no successor",
+        "report both blockers"
+      ],
+      "forbidden": [
+        "substitute root implementation",
+        "accept stale or irrelevant proof",
+        "release an affected successor"
+      ]
+    },
+    {
+      "id": "root-checkpoint-order",
+      "prompt": "A wave completes successfully and its successor is ready.",
+      "expected": [
+        "wait for worker proof",
+        "inspect the integrated diff on root",
+        "run affected behavioral checks and combined deterministic proof",
+        "commit a scoped root checkpoint naming the Parent and exact ticket issues before releasing the successor"
+      ],
+      "forbidden": [
+        "commit from a worker",
+        "release the successor before the checkpoint"
+      ]
+    },
+    {
+      "id": "crash-before-checkpoint",
+      "prompt": "Root crashes after combined proof but before the checkpoint commit begins.",
+      "expected": [
+        "reread the worktree and Git",
+        "treat the ticket as uncommitted",
+        "release no successor until the full root gate is repeated"
+      ],
+      "forbidden": [
+        "infer a checkpoint from completed proof",
+        "trust worker narration",
+        "skip root diff inspection"
+      ]
+    },
+    {
+      "id": "lost-checkpoint-response",
+      "prompt": "The root commit command may have succeeded, but its response was lost.",
+      "expected": [
+        "reread Git before retrying",
+        "accept exactly one scoped checkpoint reachable from the pinned baseline whose message names the Parent and exact tickets"
+      ],
+      "forbidden": [
+        "blindly retry the commit",
+        "trust worker narration",
+        "write duplicate durable run state"
+      ]
+    },
+    {
+      "id": "repository-keyed-recovery-commit",
+      "prompt": "The in-memory ledger is lost after a checkpoint response disappears in one repository of a two-repository graph.",
+      "expected": [
+        "rebuild repository entries from authoritative sources and Git",
+        "record the uniquely rediscovered SHA in that repository checkpoint sequence and recovery_commits",
+        "release successors only from the reconstructed repository-scoped checkpoint"
+      ],
+      "forbidden": [
+        "create a recovery-only commit",
+        "recover from worker narration",
+        "write a ledger file"
+      ]
+    },
+    {
+      "id": "multi-repository-wave-partial-checkpoint-settlement",
+      "prompt": "A two-repository wave passes proof. Root confirms the checkpoint in repository A, but settlement is interrupted before repository B has a checkpoint; Git later confirms that B has no matching commit and its work may be missing.",
+      "expected": [
+        "retain repository A's confirmed earlier checkpoint",
+        "reconstruct both repository entries from Git and classify repository B's checkpoint as not yet created rather than a failed checkpoint commit",
+        "revalidate intact repository B work or recreate missing work through a unique fresh implementer in B's isolated integration worktree",
+        "rerun combined deterministic proof across every repository range and create only B's missing scoped checkpoint",
+        "release no successor until every repository checkpoint and combined proof settle"
+      ],
+      "forbidden": [
+        "roll back or rewrite repository A's confirmed commit",
+        "duplicate repository A's checkpoint",
+        "release a successor from repository A alone",
+        "persist settlement state"
+      ]
+    },
+    {
+      "id": "interrupted-or-dirty-integration",
+      "prompt": "Root is interrupted during staging and later finds ambiguous uncommitted state overlapping the ticket scope.",
+      "expected": [
+        "leave ambiguous state untouched",
+        "block the affected ticket",
+        "reconstruct only from baseline, tracker, Parent, tickets, Git, and unique root checkpoints"
+      ],
+      "forbidden": [
+        "guess ownership",
+        "discard the state",
+        "commit ambiguous bytes",
+        "create duplicate workflow bookkeeping"
+      ]
+    },
+    {
+      "id": "cumulative-parent-review-mechanism",
+      "prompt": "All graph checkpoints and deterministic proof are settled at one final revision.",
+      "expected": [
+        "compare the complete Parent PRD directly to the full cumulative diff",
+        "launch fresh Spec and Standards reviewers in parallel",
+        "complete both independent waits and grant coordinator approval only when no verified blocker or required-proof gap remains"
+      ],
+      "forbidden": [
+        "gate acceptance on the raw reviewer verdict",
+        "review only the last child",
+        "accept a generic PASS",
+        "reuse a reviewer context",
+        "create durable review lifecycle state"
+      ]
+    },
+    {
+      "id": "repository-ranges-in-proof-review-and-handoff",
+      "prompt": "A two-repository graph is ready for final proof, reviewer briefs, and handoff.",
+      "expected": [
+        "pin an exact baseline..final range for each repository",
+        "give the reviewer the repository-keyed baselines, final checkpoints, ranges, and proof",
+        "report each integration worktree, checkpoint and recovery commit, and final range in handoff"
+      ],
+      "forbidden": [
+        "review only one repository",
+        "omit a repository range from the reviewer brief",
+        "persist the in-memory ledger as handoff state"
+      ]
+    },
+    {
+      "id": "failed-final-review",
+      "prompt": "The Standards reviewer fails or times out.",
+      "expected": [
+        "block Parent completion",
+        "report the failed Standards review"
+      ],
+      "forbidden": [
+        "replace the reviewer with root self-review",
+        "mark the Parent complete"
+      ]
+    },
+    {
+      "id": "material-repair-reviews-new-revision",
+      "prompt": "A final reviewer reports a material finding in affected existing ticket #33; root independently establishes its Authority, Trigger, Impact, and Minimal repair without widening the Parent outcome.",
+      "expected": [
+        "classify the finding as a verified blocker only after all four facts are established",
+        "assign ticket #33 to a unique fresh implementer with no Git authority",
+        "have root integrate the worker repair, rerun affected target-state and combined deterministic proof, and create a new scoped checkpoint",
+        "launch only the affected fresh targeted lens on the new revision"
+      ],
+      "forbidden": [
+        "dispatch repair from the reviewer label alone",
+        "have root implement the material defect",
+        "reuse either old approval",
+        "record a review lifecycle",
+        "create a durable completion artifact"
+      ]
+    },
+    {
+      "id": "graph-delivery-stops-before-remote-git",
+      "prompt": "All local graph checkpoints and cumulative acceptance approve, but push and PR were not separately authorized.",
+      "expected": [
+        "report local checkpoint state",
+        "perform no push or PR"
+      ],
+      "forbidden": [
+        "infer push authority",
+        "open a PR",
+        "mutate the tracker without authority"
+      ]
+    },
+    {
+      "id": "cumulative-final-review-repair-loop",
+      "prompt": "The cumulative graph-final Standards reviewer reports two findings with established Authority, Trigger, Impact, and Minimal repair plus one unsupported preference labeled BLOCK; the targeted reviewer later reports another finding for which root independently establishes the same four facts.",
+      "expected": [
+        "consolidate all verified current-review blockers into one graph-final repair batch",
+        "treat the unsupported preference as an observation and perform no repair for it",
+        "dispatch each affected existing ticket once through a unique fresh Gitless implementer",
+        "settle updated checkpoints and cumulative proof before only the affected fresh targeted lens",
+        "continue the repair and targeted Review loop until approval"
+      ],
+      "forbidden": [
+        "run per-ticket delivery Review",
+        "treat the reviewer label as repair authority",
+        "stop because of reviewer count alone",
+        "carry approval for the changed impact cone",
+        "persist review bookkeeping"
+      ]
+    },
+    {
+      "id": "shared-workspace-writers-settle-before-proof",
+      "prompt": "The harness gives two disjoint workers the same integration worktree. A finishes while B still writes files.",
+      "expected": [
+        "wait for every shared writer to stop before inspection, proof and commit",
+        "preserve both bounded child scopes"
+      ],
+      "forbidden": [
+        "commit A while B writes",
+        "treat separate agent identities as isolated worktrees"
+      ]
+    },
+    {
+      "id": "stale-isolated-worker-delta",
+      "prompt": "B returns a delta based on checkpoint X after A has advanced integration to Y. The delta overlaps changed content.",
+      "expected": [
+        "compare B output to its recorded base including additions, deletions, binaries and modes",
+        "check transfer against the current integration checkpoint",
+        "return conflicting work to a fresh worker at the current checkpoint"
+      ],
+      "forbidden": [
+        "copy the entire worker checkout over integration",
+        "let B perform Git actions",
+        "silently resolve behavioral conflicts on root"
+      ]
+    },
+    {
+      "id": "reuse-valid-product-checks",
+      "prompt": "An API ticket has existing integration tests that cover its behavior and a public seam for one missing regression.",
+      "expected": [
+        "reuse suitable existing repository checks",
+        "use TDD for the missing regression where a meaningful failure is possible",
+        "rerun affected combined proof on integrated bytes"
+      ],
+      "forbidden": [
+        "require rewritten coordinator tests",
+        "replace product acceptance with skill-structure tests",
+        "create a runner solely because the skill demands one"
+      ]
+    },
+    {
+      "id": "optional-shared-discovery",
+      "prompt": "Several approved tickets depend on one unknown external contract.",
+      "expected": [
+        "optionally investigate the bounded shared unknown before affected dispatch",
+        "give workers source pointers and verified findings",
+        "keep unresolved affected tickets blocked"
+      ],
+      "forbidden": [
+        "change ticket authority from exploration findings",
+        "duplicate a full research transcript in every brief"
+      ]
+    },
+    {
+      "id": "independent-successor-resource-conflict",
+      "prompt": "A settles in an isolated worktree. Its successor C is unblocked by tickets but shares a proof resource with still-running independent B.",
+      "expected": [
+        "recalculate readiness after A checkpoint",
+        "sequence C until its resource conflict with B is settled"
+      ],
+      "forbidden": [
+        "launch C solely because A finished",
+        "wait for unrelated workers when no dependency or resource conflict exists"
+      ]
+    }
+  ]
+}

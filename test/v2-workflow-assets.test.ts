@@ -131,12 +131,12 @@ test('workflow packages only static target scenarios with no live execution meta
     'skill/diagnosing-bugs',
     'skill/grilling',
     'skill/implement',
+    'skill/implement-spec',
     'skill/plan',
     'skill/plan-review',
     'skill/prototype',
     'skill/research',
     'skill/tdd',
-    'skill/tickets-orchestrator',
     'skill/to-spec',
     'skill/to-tickets',
   ]);

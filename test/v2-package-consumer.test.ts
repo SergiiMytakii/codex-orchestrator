@@ -63,7 +63,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('internal-workflow/manifest.json'), true);
     for (const skill of [
       'bug-root-cause-explainer', 'code-review', 'diagnosing-bugs', 'grilling', 'implement', 'plan',
-      'prototype', 'research', 'tdd', 'tickets-orchestrator', 'to-spec', 'to-tickets',
+      'prototype', 'research', 'tdd', 'implement-spec', 'to-spec', 'to-tickets',
     ]) {
       assert.equal(packedPaths.includes(`internal-workflow/skills/${skill}/SKILL.md`), true, skill);
     }
@@ -206,12 +206,12 @@ async function assertInstalledContract(installed: string): Promise<void> {
     assert.match(metadata, /allow_implicit_invocation: true/u);
     assert.doesNotMatch(await readFile(join(installed, 'internal-workflow', 'skills', skill, 'SKILL.md'), 'utf8'), /CONFLICTING LOCAL/u);
   }
-  const graph = await readFile(join(installed, 'internal-workflow', 'skills', 'tickets-orchestrator', 'SKILL.md'), 'utf8');
+  const graph = await readFile(join(installed, 'internal-workflow', 'skills', 'implement-spec', 'SKILL.md'), 'utf8');
   const flatGraph = graph.replace(/\s+/gu, ' ');
   for (const contract of [
     'single deterministic ticket routes to `$implement`',
     'unique fresh `implementer`',
-    'fail the child on any worker Git event',
+    'Workers perform no Git action',
     'clean isolated integration worktree and pinned baseline',
     'one fresh `spec_reviewer` and one fresh `standards_reviewer`',
   ]) assert.match(flatGraph, new RegExp(contract.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'iu'));

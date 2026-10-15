@@ -7,6 +7,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Fixed
+- Synchronize packaged skills with the current Implement Spec workflow and UI
+  proof requirements, replacing the removed Tickets Orchestrator skill.
+- Isolate generated check outputs from pinned candidate source and recover saved
+  check results safely after process cleanup.
+- Resume retained implementations through validation and report concrete safety
+  stops and candidate reconciliation diagnostics.
 - Scope recognized npm/Jest checks to the immutable candidate's related tests;
   preserve full checks for configuration changes and unsupported commands, and
   never accept an empty test selection.
