@@ -459,6 +459,8 @@ function proofFixture(options: {
       reportRepairCount: number;
       reportRepairFindings: string[];
       passedReceipt: ProofReceipt;
+      runnerPreparedArtifactPaths: string[];
+      runnerPreparedArtifactSha256: Record<string, string>;
     }> = {}) => ({
       proofId: 'proof-1',
       attemptId: 'attempt-proof',
@@ -560,6 +562,23 @@ test('explicit live Android proof rejects non-visual acceptance', async () => {
       authentication: 'dev-account', steps: [{ action: 'expect', text: 'Top Picks' }],
     }) + '\n```',
   };
-  const result = await fixture.proof.proveChange(fixture.input({ issue }));
-  assert.notEqual(result.status, 'passed');
+  const missingPreparation = await fixture.proof.proveChange(fixture.input({ issue }));
+  assert.equal(missingPreparation.status, 'external-block');
+  if (missingPreparation.status === 'external-block') {
+    assert.equal(missingPreparation.blocker.summary, 'Required live Android proof could not be prepared.');
+  }
+  assert.deepEqual(fixture.agentCalls, []);
+
+  const prepared = proofFixture();
+  const result = await prepared.proof.proveChange(prepared.input({
+    issue,
+    runnerPreparedArtifactPaths: [artifactPath()],
+    runnerPreparedArtifactSha256: { [artifactPath()]: sha256(artifactBytes) },
+  }));
+  assert.equal(prepared.agentCalls.length, 1);
+  assert.equal(result.status, 'report-repair');
+  if (result.status === 'report-repair') {
+    assert.equal(result.reportRepairCount, 1);
+    assert.match(result.findings.join(' '), /Proof report does not satisfy the issue proof level/u);
+  }
 });

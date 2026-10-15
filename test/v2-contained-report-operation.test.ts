@@ -143,8 +143,9 @@ test('credential-bearing report bytes are rejected before payload adoption', asy
 
 test('quiescence uncertainty returns durable process evidence without an unsafe final snapshot', async () => {
   const baseline = stableSnapshot();
+  let snapshotCalls = 0;
   const dependencies: ContainedReportOperationDependencies = {
-    snapshot: async () => structuredClone(baseline),
+    snapshot: async () => { snapshotCalls += 1; return structuredClone(baseline); },
     prepare: async () => ({ operation: 'code-review', generationHash, policy: readOnlyPolicy, reviewers: ['spec_reviewer', 'standards_reviewer'] }),
     launch: async () => ({
       status: 'safe-halt',
@@ -157,6 +158,9 @@ test('quiescence uncertainty returns durable process evidence without an unsafe 
   assert.equal(result.status, 'safe-halt');
   if (result.status !== 'safe-halt') return;
   assert.deepEqual(result.process.baseline, baseline);
+  assert.equal(result.process.pid, 123);
+  assert.equal(result.process.processGroupId, 123);
+  assert.equal(snapshotCalls, 1, 'must not inspect a final worktree while the process may still be running');
 });
 
 test('launcher blocks authority or generation drift before starting the process', async () => {

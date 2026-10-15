@@ -25,6 +25,7 @@ import {
   type RunIssueResult,
 } from '../src/v2/run-issue.js';
 import {
+  createPendingEffect,
   FileRunRecordWriter,
   InMemoryRunRecordWriter,
   WorkflowGenerationUnrecoverableError,
@@ -277,7 +278,8 @@ test('Run retains proof failure diagnostics and existing candidate/workflow iden
   assert.equal(detail.packageVersion, record.packageVersion);
   assert.equal(detail.candidateCommitSha, record.candidateBinding!.candidateCommitSha);
   assert.equal(record.proofReceipt, undefined, 'failure receipt cannot become passed proof authority');
-  assert.equal(fixture.events.some((event) => event.startsWith('review:') || event === 'push'), false);
+  assert.equal(fixture.events.some((event) => event.startsWith('review:') || event === 'git:push' || event === 'effect:pr'), false);
+  assert.equal((await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'for-each-ref', '--format=%(refname)', 'refs/heads/codex/issue-42'])).stdout.trim(), '');
 });
 
 function reviewParticipants(coordinatorSessionId: string, verdict: 'approve' | 'block' = 'approve', targeted = false) {
@@ -700,6 +702,19 @@ test('runner commit preserves the checked pre-proof index and leaves proof artif
 
 test('public runIssue reaches review-ready only after ordered durable checks, proof, and publication', async () => {
   const fixture = await runFixture();
+  const candidate = fixture.dependencies.git.candidateV2!;
+  const createOrObserveCommit = candidate.createOrObserveCommit;
+  let committedWithDurableIntent = false;
+  candidate.createOrObserveCommit = async input => {
+    const record = (await fixture.store.read()).runs[0]!;
+    assert.deepEqual(record.pendingEffect, createPendingEffect({
+      kind: 'initial-commit', parentSha: input.parentSha, treeSha: input.treeSha,
+      message: input.message, candidateRef: input.candidateRef,
+    }));
+    assert.equal(record.candidateBinding?.candidateTreeSha, input.treeSha);
+    if (!input.observeOnly) committedWithDurableIntent = true;
+    return createOrObserveCommit(input);
+  };
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(result.status, 'review-ready', `${JSON.stringify(result)}\n${fixture.events.join('\n')}`);
   assertSubsequence(fixture.events, [
@@ -744,7 +759,7 @@ test('public runIssue reaches review-ready only after ordered durable checks, pr
   assert.equal(fixture.events.filter((event) => event === 'check:typecheck').length, 1);
   assert.equal(fixture.events.filter((event) => event === 'proof').length, 1);
   assert.equal((await execFileAsync('git', ['-C', fixture.worktreePath, 'log', '-1', '--format=%an <%ae>'])).stdout.trim(), 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>');
-  assert.ok(fixture.events.indexOf('state:publication-watermark') < fixture.events.indexOf('git:commit'));
+  assert.equal(committedWithDurableIntent, true);
 });
 
 test('review-ready persists before independent bounded terminal notifications', async () => {
@@ -1105,7 +1120,8 @@ test('missing retained reviewer authority stops as a Runner error without reques
   assert.equal(result.status, 'internal-error');
   assert.equal((await fixture.store.read()).runs[0]?.directReview?.terminalCode, 'review-validation-context-missing');
   assert.equal(fixture.events.filter((event) => event === 'review:code-review').length, 1);
-  assert.equal(fixture.events.includes('push'), false);
+  assert.equal(fixture.events.some(event => event === 'git:push' || event === 'effect:pr'), false);
+  assert.equal((await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'for-each-ref', '--format=%(refname)', 'refs/heads/codex/issue-42'])).stdout.trim(), '');
 });
 
 test('repeated malformed review retains report correction across ordinary Runner restarts', async () => {
@@ -2072,7 +2088,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
       resumable: false,
       reviewerRejectionDetail: `Reviewer rejected expanding ${phase} scope.`,
     };
-    const fixtureOptions: FixtureOptions = {};
+    const fixtureOptions: FixtureOptions = { fileBackedStore: true, rejectStoreEvent: 'state:blocked:none' };
     const fixture = await runFixture(fixtureOptions);
     const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.equal(initial.status, 'review-ready');
@@ -2148,13 +2164,34 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
     }
     await fixture.dependencies.issues.setLabels(42, ['agent:review']);
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    let replayed = first;
+    let blocked = first;
     if (phase === 'review') {
       assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, phase);
       assert.equal((await fixture.store.read()).runs[0]?.pendingEffect, undefined);
-      replayed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+      blocked = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     }
+    assert.equal(blocked.status, 'blocked', phase);
+    const interrupted = (await fixture.store.read()).runs[0]!;
+    assert.equal(interrupted.pendingEffect?.kind, 'outcome-evidence', phase);
+    const pending = interrupted.pendingEffect!;
+    if (pending.kind !== 'outcome-evidence') throw new Error('missing interrupted outcome evidence');
+    assert.equal(sha256(await readFile(resolve(fixture.targetRoot, pending.path))), pending.bytesSha256, phase);
     const workCalls = fixture.events.filter((event) => event === 'feedback-blocker-work').length;
+    assert.equal(workCalls, 1, phase);
+    const beforeReplay = fixture.events.length;
+    const remoteHead = (await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'rev-parse', record.branchName])).stdout.trim();
+    const replayed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.deepEqual(replayed, blocked, phase);
+    const settled = (await fixture.store.read()).runs[0]!;
+    assert.equal(settled.pendingEffect, undefined, phase);
+    assert.deepEqual(settled.terminalOutcome, replayed, phase);
+    assert.equal(settled.runId, record.runId, phase);
+    assert.equal(fixture.events.slice(beforeReplay).some(event =>
+      event === 'agent' || event.startsWith('agent:') || event === 'feedback-blocker-work'
+      || event.startsWith('check:') || event === 'proof' || event.startsWith('review:')
+      || event === 'git:push' || event === 'effect:pr'), false, phase);
+    assert.equal((await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'rev-parse', record.branchName])).stdout.trim(), remoteHead, phase);
+    assert.equal(remoteHead, oldHead, phase);
     if (phase === 'review') {
       assert.deepEqual(pick(replayed, ['status', 'kind', 'resumable']), {
         status: 'blocked', kind: expectedKind, resumable: false,
@@ -2879,7 +2916,7 @@ test('review blockers form one targeted repair batch bound to fresh affected pro
   assert.equal((await fixture.store.read()).runs[0]!.proofExecution, undefined);
   fixture.dependencies.now = () => '2026-07-16T12:10:00.000Z';
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(result.status, 'review-ready', JSON.stringify({ result, state: await fixture.store.read() }));
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
   assertFreshProofRecovery(proofInputs.at(-1)!, '2026-07-16T12:10:00.000Z');
   assert.equal(fixture.reviewInputs.length, 2);
   const [initial, repair] = fixture.reviewInputs;
@@ -3088,7 +3125,8 @@ test('credential-bearing Review target blocks durably instead of retrying transp
   assert.equal(result.status, 'blocked');
   assert.equal((await fixture.store.read()).runs[0]!.lifecycle, 'blocked');
   assert.equal(fixture.reviewInputs.length, 0);
-  assert.equal(fixture.events.some((event) => event === 'proof' || event === 'push'), false);
+  assert.equal(fixture.events.some((event) => event === 'proof' || event === 'git:push' || event === 'effect:pr'), false);
+  assert.equal((await execFileAsync('git', ['--git-dir', fixture.remoteRoot, 'for-each-ref', '--format=%(refname)', 'refs/heads/codex/issue-42'])).stdout.trim(), '');
   assert.equal(result.status === 'blocked' && result.blocker?.summary, 'Review target contains potential credential material; remove real credentials or use explicit dummy session tokens.');
   const issue = await fixture.dependencies.issues.read(42);
   assert.ok(issue?.labels.includes('agent:blocked'));
@@ -3799,9 +3837,10 @@ test('legacy explicit technical terminal resumes the same checked candidate with
 
 test('settled implementation, proof, and review infrastructure failures resume on the next bounded run', async () => {
   let proofCalls = 0;
-  const cases: Array<{ name: string; options: FixtureOptions; expectedImplementationCalls: number }> = [
+  const cases: Array<{ name: string; options: FixtureOptions; expectedImplementationCalls: number; expectedFailureCode: string }> = [
     {
       name: 'implementation',
+      expectedFailureCode: 'implementation-transport-retryable',
       options: { implementationResults: [
         { kind: 'transport-failed', resumable: true },
         { kind: 'completed', report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } },
@@ -3810,12 +3849,13 @@ test('settled implementation, proof, and review infrastructure failures resume o
     },
     {
       name: 'proof',
+      expectedFailureCode: 'acceptance-proof-transport-retryable',
       options: { proof: async () => (++proofCalls === 1
         ? { status: 'transport-failed', resumable: true, receipt: receipt() }
         : passedProof()) },
       expectedImplementationCalls: 1,
     },
-    { name: 'review', options: { reviewTransportOnce: true }, expectedImplementationCalls: 1 },
+    { name: 'review', options: { reviewTransportOnce: true }, expectedImplementationCalls: 1, expectedFailureCode: 'direct-review-transport-retryable' },
   ];
 
   for (const entry of cases) {
@@ -3823,10 +3863,11 @@ test('settled implementation, proof, and review infrastructure failures resume o
     const fixture = await runFixture(entry.options);
     const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
     assert.deepEqual(pick(first, ['status', 'resumable']), { status: 'transport-failed', resumable: true }, entry.name);
+    assert.equal(fixture.evidence.at(-1)?.code, entry.expectedFailureCode, JSON.stringify({ phase: entry.name, evidence: fixture.evidence, events: fixture.events }));
     assert.equal(fixture.events.includes('effect:pr'), false, entry.name);
     assert.equal(fixture.events.at(-1), 'owner-release', entry.name);
     const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-    assert.equal(resumed.status, 'review-ready', entry.name);
+    assert.equal(resumed.status, 'review-ready', JSON.stringify({ phase: entry.name, resumed, evidence: fixture.evidence, events: fixture.events, state: await fixture.store.read() }));
     assert.equal(fixture.events.filter((event) => event === 'agent:implementation').length, entry.expectedImplementationCalls, entry.name);
     assert.equal(fixture.events.filter((event) => event === 'effect:pr').length, 1, entry.name);
     assert.equal(fixture.events.filter((event) => event === 'owner-release').length, 2, entry.name);

@@ -115,7 +115,7 @@ const proof = new AcceptanceProof({
   androidLease: new FileAndroidLeaseVerifier({ leaseRoot: required(args['lease-root']), worktreeRoot: root }),
   proofArtifactDir: proofRoot,
 });
-const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: startedAt, transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 process.stdout.write(`${canonicalJson(result)}\n`);
 if (result.status !== 'passed') process.exitCode = 1;
 

@@ -79,7 +79,7 @@ const issue: IssueSnapshot = {
   url: 'https://example.invalid/issues/505', state: 'OPEN', labels: ['agent:auto'],
 };
 const criteria: FrozenCriterion[] = [{ id: 'ac-ios-real', order: 1, source: 'explicit', text: 'The iOS fixture visibly reaches the ready state.' }];
-const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: startedAt, transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 process.stdout.write(`${canonicalJson(result)}\n`);
 if (result.status !== 'passed') process.exitCode = 1;
 

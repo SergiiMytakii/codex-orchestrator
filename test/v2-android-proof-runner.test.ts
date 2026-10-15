@@ -25,7 +25,6 @@ for (const loginState of ['legacy', 'verified', 'unverified'] as const) test(`ru
   const calls: Array<{ file: string; args: string[] }> = [];
   let emulatorStarted = false;
   let hierarchyReads = 0;
-  let emulatorIdentityReads = 0;
   try {
     const adbPath = join(root, 'adb');
     const emulatorPath = join(root, 'emulator');
@@ -95,7 +94,6 @@ for (const loginState of ['legacy', 'verified', 'unverified'] as const) test(`ru
       now: () => new Date('2026-07-28T09:00:00.000Z'),
       createToken: () => 'runner-token',
       readProcessIdentity: async (pid) => {
-        if (pid === 31337) emulatorIdentityReads += 1;
         return pid === 31337 ? 'darwin:process-start' : undefined;
       },
     });
@@ -147,7 +145,6 @@ for (const loginState of ['legacy', 'verified', 'unverified'] as const) test(`ru
     assert.deepEqual(receipt.navigation, { launchUriConfigured: false, tapText: ['Live'] });
     assert.equal(calls.some((call) => call.args.join(' ').includes('shell input tap 60 50')), true);
     assert.equal(calls.some((call) => call.args.includes('PHYSICAL')), false);
-    assert.ok(emulatorIdentityReads >= 5, `expected repeated emulator ownership checks, got ${emulatorIdentityReads}`);
     await assert.rejects(readFile(join(leaseRoot, 'android.preparation.json')), { code: 'ENOENT' });
     const resumed = await controller.prepare({
       proofId: 'proof-177', worktreePath, artifactDir: '.codex-orchestrator/v2/proofs', leaseRoot, config,
@@ -514,3 +511,63 @@ test('failed emulator launch removes its unused data and preparation intent', as
     await assert.rejects(stat(join(leaseRoot, 'android.preparation.json')), { code: 'ENOENT' });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const driftAfter of ['boot', 'build', 'app-binding', 'navigation'] as const) {
+  test(`runner refuses foreign emulator effects after identity drift at ${driftAfter}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'codex-android-identity-boundary-'));
+    let emulatorStarted = false;
+    let foreign = false;
+    const reached: string[] = [];
+    const unsafeEffects: string[] = [];
+    const signals: number[] = [];
+    const transition = (boundary: string) => {
+      reached.push(boundary);
+      if (boundary === driftAfter) foreign = true;
+    };
+    try {
+      const adbPath = join(root, 'adb');
+      const emulatorPath = join(root, 'emulator');
+      const worktreePath = join(root, 'worktree');
+      await writeFile(adbPath, '#!/bin/sh\n'); await chmod(adbPath, 0o700);
+      await writeFile(emulatorPath, '#!/bin/sh\n'); await chmod(emulatorPath, 0o700);
+      let navigated = false;
+      const controller = new RunnerAndroidProofController({
+        adbPath, emulatorPath,
+        execute: async (file, args) => {
+          if (file === emulatorPath) return ok(`${config.avdName}\n`);
+          if (file === config.flutterCommand) {
+            await mkdir(join(worktreePath, 'build/app/outputs/flutter-apk'), { recursive: true });
+            await writeFile(join(worktreePath, config.apkPath), 'fresh apk');
+            transition('build'); return ok('built');
+          }
+          if (args[0] === 'devices') return ok(`List of devices attached\n${emulatorStarted ? 'emulator-5554 device\n' : ''}`);
+          if (args.includes('getprop')) { transition('boot'); return ok('1'); }
+          if (foreign) unsafeEffects.push(args.join(' '));
+          if (args.includes('pidof')) { transition(navigated ? 'navigation' : 'app-binding'); return ok('4242'); }
+          if (args.includes('input')) navigated = true;
+          return ok('Success');
+        },
+        executeBinary: async (_file, args) => {
+          if (foreign) unsafeEffects.push(args.join(' '));
+          if (args.includes('uiautomator')) return Buffer.from('<hierarchy><node text="Live" bounds="[10,20][110,80]" /></hierarchy>');
+          if (args.includes('screencap')) return Buffer.from('89504e470d0a1a0a', 'hex');
+          return Buffer.from('device log');
+        },
+        startEmulator: async () => { emulatorStarted = true; return { pid: 31337 }; },
+        createDataDir: async () => join(root, 'data'), removeDataDir: async () => {}, wait: async () => {},
+        readProcessIdentity: async () => foreign ? 'foreign-process' : 'owned-process',
+        signalProcess: (pid) => { signals.push(pid); },
+      });
+      const result = await controller.prepare({
+        proofId: 'proof-drift', worktreePath, artifactDir: 'proofs', leaseRoot: join(root, 'leases'),
+        config, checks: [], checkedChangeSha256: 'c'.repeat(64), proofAgentBudgetMs: 900_000,
+        signal: new AbortController().signal,
+      });
+      assert.ok(reached.includes(driftAfter), 'the intended action boundary must be reached');
+      assert.equal(result.status, 'blocked');
+      if (result.status === 'blocked') assert.match(result.summary, /ownership was lost/u);
+      assert.deepEqual(unsafeEffects, [], 'no install, navigation, diagnostic capture, or serial kill may target a foreign emulator');
+      assert.deepEqual(signals, [], 'cleanup must not signal the reused foreign PID');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}

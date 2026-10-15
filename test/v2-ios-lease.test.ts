@@ -129,12 +129,12 @@ test('runner iOS verifier matches exact ownership, invokes exact target release,
 });
 
 test('runner iOS verifier rejects target identity drift and an expired or unbound lease', async () => {
-  for (const mutation of [
-    (record: ReturnType<typeof leaseRecord>) => ({ ...record, token: 'changed-token' }),
-    (record: ReturnType<typeof leaseRecord>) => ({ ...record, bundleId: 'dev.codex.other' }),
-    (record: ReturnType<typeof leaseRecord>) => ({ ...record, appPid: 4343 }),
-    (record: ReturnType<typeof leaseRecord>) => ({ ...record, expiresAt: '2026-07-16T23:59:00.000Z' }),
-    (record: ReturnType<typeof leaseRecord>) => ({ ...record, appPid: null }),
+  for (const entry of [
+    { matching: false, mutate: (record: ReturnType<typeof leaseRecord>) => ({ ...record, token: 'changed-token' }) },
+    { matching: false, mutate: (record: ReturnType<typeof leaseRecord>) => ({ ...record, bundleId: 'dev.codex.other' }) },
+    { matching: false, mutate: (record: ReturnType<typeof leaseRecord>) => ({ ...record, appPid: 4343 }) },
+    { matching: true, mutate: (record: ReturnType<typeof leaseRecord>) => ({ ...record, expiresAt: '2026-07-16T23:59:00.000Z' }) },
+    { matching: true, mutate: (record: ReturnType<typeof leaseRecord>) => ({ ...record, appPid: null }) },
   ]) {
     const root = await mkdtemp(join(tmpdir(), 'codex-v2-ios-drift-'));
     try {
@@ -143,8 +143,8 @@ test('runner iOS verifier rejects target identity drift and an expired or unboun
       const relativePath = 'proofs/proof-ios/lease.json';
       await mkdir(leaseRoot, { recursive: true });
       await mkdir(join(worktreeRoot, 'proofs', 'proof-ios'), { recursive: true });
-      const external = leaseRecord();
-      const artifact = mutation(external);
+      const artifact = entry.mutate(leaseRecord());
+      const external = entry.matching ? artifact : leaseRecord();
       const bytes = Buffer.from(`${canonicalJson(artifact)}\n`);
       await writeFile(join(leaseRoot, 'ios.json'), `${canonicalJson(external)}\n`);
       await writeFile(join(worktreeRoot, relativePath), bytes);
@@ -153,7 +153,8 @@ test('runner iOS verifier rejects target identity drift and an expired or unboun
         targetController: { release: async () => undefined },
         now: () => new Date('2026-07-17T00:02:00.000Z'),
       });
-      await assert.rejects(verifier.verify({ proofId: 'proof-ios', artifactRelativePath: relativePath, artifactBytes: bytes }));
+      await assert.rejects(verifier.verify({ proofId: 'proof-ios', artifactRelativePath: relativePath, artifactBytes: bytes }),
+        { message: entry.matching ? /not bound and active/u : /does not match active ownership/u });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

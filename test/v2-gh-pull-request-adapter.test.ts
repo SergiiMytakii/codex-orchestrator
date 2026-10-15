@@ -162,8 +162,12 @@ test('reads paginated submitted reviews and pull request conversation comments w
         stderr: '',
       };
     }
+    const page = Number(args.find((argument) => argument.startsWith('page='))?.slice(5));
+    const comments = page === 1
+      ? [restConversationComment(), ...Array.from({ length: 99 }, (_, index) => ({ ...restConversationComment(), id: String(index + 1) }))]
+      : [{ ...restConversationComment(), id: '100', body: 'Last page' }];
     return {
-      stdout: `${JSON.stringify(restConversationComment())}\n`,
+      stdout: comments.map((comment) => JSON.stringify(comment)).join('\n'),
       stderr: '',
     };
   };
@@ -182,14 +186,21 @@ test('reads paginated submitted reviews and pull request conversation comments w
     submittedAt: '2026-07-27T10:00:00.000Z',
     author: { id: '90071992547409930004', login: 'writer', isBot: false },
   }]);
-  assert.deepEqual((await adapter.listConversationComments(17))[0], {
+  const comments = await adapter.listConversationComments(17);
+  assert.deepEqual(comments[0], {
     id: '90071992547409930005',
     url: 'https://github.com/owner/repo/pull/17#issuecomment-1',
     body: '<!-- marker -->', createdAt: '2026-07-27T10:00:00.000Z', updatedAt: '2026-07-27T10:00:00.000Z',
     author: { id: '90071992547409930004', login: 'writer', isBot: false },
   });
+  assert.equal(comments.length, 101);
+  assert.deepEqual(comments.map((comment) => comment.id), [
+    '90071992547409930005', ...Array.from({ length: 99 }, (_, index) => String(index + 1)), '100',
+  ]);
+  assert.equal(comments.at(-1)!.body, 'Last page');
   assert.equal(calls.some((args) => args.includes('--paginate')), false);
-  assert.equal(calls.every((args) => args.includes('page=1')), true);
+  assert.deepEqual(calls.filter((args) => args.some((arg) => arg.endsWith('/comments')))
+    .map((args) => args.find((arg) => arg.startsWith('page='))), ['page=1', 'page=2']);
 });
 
 test('rejects malformed review payloads and preserves nullable GraphQL actors', async () => {

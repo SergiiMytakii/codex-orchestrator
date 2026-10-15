@@ -378,8 +378,9 @@ export class RunnerAndroidProofController implements AndroidLeaseTargetControlle
     } catch (error) {
       if (installSnapshotPath) await rm(installSnapshotPath, { force: true }).catch(() => {});
       const capturedArtifactRefs: string[] = [];
-      if (serial && emulatorStarted && appPid) {
+      if (serial && emulatorStarted && appPid && emulatorPid && emulatorProcessIdentity) {
         try {
+          await this.assertOwnedEmulator(emulatorPid, emulatorProcessIdentity);
           await this.captureEvidence({ serial, proofId: input.proofId, appPid, proofRoot, worktreePath, signal: input.signal });
           capturedArtifactRefs.push(screenshotRelativePath, hierarchyRelativePath, logRelativePath);
         } catch {

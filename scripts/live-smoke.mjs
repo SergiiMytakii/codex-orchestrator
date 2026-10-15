@@ -79,10 +79,7 @@ async function main() {
     context.baselineCandidateRefs = new Set(await listCandidateRefs(context));
     context.baselineWorktrees = new Set(await listWorktrees(context));
     context.baselineLabels = new Set(await listRepositoryLabels(context));
-    const setup = await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
-    if (setup.result.status !== 'labels-prepared') throw new Error(`scratch label setup was incomplete: ${setup.result.status}`);
-    context.createdLabels = (await listRepositoryLabels(context)).filter((label) => !context.baselineLabels.has(label));
-    context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+    await prepareLabels(context);
     await configureTarget(context);
     for (const scenario of selected) {
       process.stdout.write(`[v2-live-smoke] ${scenario}\n`);
@@ -113,7 +110,7 @@ async function main() {
   }
 }
 
-function parseArgs(args) {
+export function parseArgs(args) {
   const options = {
     scenarios: [], profile: 'core-release', repo: defaultLiveSmokeRepo, cleanup: true,
     cleanupMode: 'delete', skipLocalTests: false, keepPackageTarball: false,
@@ -145,7 +142,7 @@ function parseArgs(args) {
   return options;
 }
 
-function selectScenarios(options) {
+export function selectScenarios(options) {
   if (options.scenarios.length > 0) {
     for (const scenario of options.scenarios) requireKnown('scenario', scenario, scenarioDefinitions);
     return [...new Set(options.scenarios)];
@@ -171,68 +168,75 @@ function helpText() {
   ].join('\n');
 }
 
-async function preparePackagedCandidate(context) {
+export async function preparePackagedCandidate(context) {
   if (!context.options.skipLocalTests) {
-    await runCommand('npm', ['run', 'typecheck', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
-    await runCommand('npm', ['run', 'build', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
-    await runCommand(process.execPath, [
+    await commandFor(context)('npm', ['run', 'typecheck', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
+    await commandFor(context)('npm', ['run', 'build', '--silent'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
+    await commandFor(context)(process.execPath, [
       'dist/test/v2-cli.test.js', 'dist/test/v2-package-consumer.test.js', 'dist/test/v2-live-smoke-script.test.js',
     ], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
   }
-  const packed = await runCommand('npm', ['pack', '--json'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
+  const packed = await commandFor(context)('npm', ['pack', '--json'], { cwd: sourceRoot, timeoutMs: context.options.timeoutMs });
   const file = parseNpmPackOutput(packed.stdout)?.[0]?.filename;
   if (typeof file !== 'string') throw new Error('npm pack did not return one tarball');
   const tarball = join(sourceRoot, file);
   const extracted = join(context.root, 'packed');
   await mkdir(extracted, { recursive: true });
-  await runCommand('tar', ['-xzf', tarball, '-C', extracted], { timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('tar', ['-xzf', tarball, '-C', extracted], { timeoutMs: context.options.timeoutMs });
   if (!context.options.keepPackageTarball) await rm(tarball, { force: true });
   const cliPath = join(extracted, 'package', 'dist', 'src', 'v2', 'cli.js');
   await readFile(cliPath);
-  const help = await runCommand(process.execPath, [cliPath, '--help'], { timeoutMs: context.options.timeoutMs });
+  const help = await commandFor(context)(process.execPath, [cliPath, '--help'], { timeoutMs: context.options.timeoutMs });
   if (!help.stdout.startsWith('codex-orchestrator\n')) throw new Error('packed CLI help is not public V2');
   return cliPath;
 }
 
-async function preflight(context) {
+export async function preflight(context) {
   if (context.repo === productionRepo || context.repo !== approvedLiveSmokeRepo) {
     throw new Error(`live smoke is restricted to approved scratch repository ${approvedLiveSmokeRepo}`);
   }
-  await runCommand('gh', ['auth', 'status'], { timeoutMs: context.options.timeoutMs });
-  await runCommand('codex', ['login', 'status'], { timeoutMs: context.options.timeoutMs });
-  await runCommand('gh', ['repo', 'view', context.repo, '--json', 'nameWithOwner'], { timeoutMs: context.options.timeoutMs });
-  const status = await runCommand('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=no'], {
+  await commandFor(context)('gh', ['auth', 'status'], { timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('codex', ['login', 'status'], { timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('gh', ['repo', 'view', context.repo, '--json', 'nameWithOwner'], { timeoutMs: context.options.timeoutMs });
+  const status = await commandFor(context)('git', ['-C', sourceRoot, 'status', '--porcelain', '--untracked-files=no'], {
     timeoutMs: context.options.timeoutMs,
   });
   if (status.stdout.trim()) throw new Error('live smoke source must be a clean immutable HEAD');
 }
 
-async function acquireScratchLock(context) {
-  const branch = await defaultBranch(context.repo);
-  const sha = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
+export async function acquireScratchLock(context) {
+  const branch = await defaultBranch(context.repo, commandFor(context));
+  const sha = (await commandFor(context)('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.trim();
-  await runCommand('gh', ['api', '--method', 'POST', `repos/${context.repo}/git/refs`,
+  await commandFor(context)('gh', ['api', '--method', 'POST', `repos/${context.repo}/git/refs`,
     '-f', `ref=refs/heads/${scratchLockBranch}`, '-f', `sha=${sha}`], { timeoutMs: context.options.timeoutMs });
   context.lockAcquired = true;
   context.createdBranches.push(scratchLockBranch);
 }
 
+export async function prepareLabels(context) {
+  const setup = await requireTypedSetup(context, ['setup', '--target', context.targetRoot, '--github-owner', ownerOf(context.repo), '--github-repo', repoOf(context.repo), '--prepare-labels']);
+  if (setup.result.status !== 'labels-prepared') throw new Error(`scratch label setup was incomplete: ${setup.result.status}`);
+  context.createdLabels = (await listRepositoryLabels(context)).filter((label) => !context.baselineLabels.has(label));
+  context.baseConfig = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
+}
+
 async function listRepositoryLabels(context) {
-  const result = await runCommand('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', '.[].name'], {
+  const result = await commandFor(context)('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', '.[].name'], {
     timeoutMs: context.options.timeoutMs,
   });
   return result.stdout.split('\n').filter(Boolean).sort();
 }
 
 async function listCandidateRefs(context) {
-  return (await runCommand('git', ['-C', context.targetRoot, 'for-each-ref', '--format=%(refname)', 'refs/codex-orchestrator/'], {
+  return (await commandFor(context)('git', ['-C', context.targetRoot, 'for-each-ref', '--format=%(refname)', 'refs/codex-orchestrator/'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.split('\n').filter(Boolean).sort();
 }
 
 async function listWorktrees(context) {
-  const output = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+  const output = (await commandFor(context)('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
   return [...output.matchAll(/^worktree (.+)$/gmu)].map((match) => match[1]);
@@ -275,12 +279,12 @@ function isResumableRunResult(result) {
 
 async function prepareTarget(context) {
   const target = join(context.root, 'target');
-  const branch = await defaultBranch(context.repo);
-  await runCommand('gh', ['repo', 'clone', context.repo, target, '--', '--branch', branch], { timeoutMs: context.options.timeoutMs });
+  const branch = await defaultBranch(context.repo, commandFor(context));
+  await commandFor(context)('gh', ['repo', 'clone', context.repo, target, '--', '--branch', branch], { timeoutMs: context.options.timeoutMs });
   return target;
 }
 
-async function configureTarget(context, overrides = {}) {
+export async function configureTarget(context, overrides = {}) {
   const config = structuredClone(context.baseConfig);
   config.runner.workspaceRoot = `.codex-orchestrator/workspaces-v2-${context.runId}`;
   config.runner.stateDir = `.codex-orchestrator/v2/state-${context.runId}`;
@@ -296,7 +300,7 @@ async function configureTarget(context, overrides = {}) {
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
-async function runReviewReadyScenario(context, scenario) {
+export async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
   const extraCriteria = scenario === 'initial-review-rework' ? [
     `Create src/live-smoke/${scenario}.txt as one line containing ${scenario}, followed by one LF newline.`,
@@ -333,7 +337,7 @@ async function runReviewReadyScenario(context, scenario) {
       || calls.filter((call) => call.operation === 'code-review').length !== 2) {
       throw new Error(`${scenario}: targeted Review repair did not refresh exact proof and independent Review`);
     }
-    const repaired = (await runCommand('git', ['-C', context.targetRoot, 'show', `${publication.headSha}:src/live-smoke/initial-review-rework-fixed.txt`], { timeoutMs: context.options.timeoutMs })).stdout;
+    const repaired = (await commandFor(context)('git', ['-C', context.targetRoot, 'show', `${publication.headSha}:src/live-smoke/initial-review-rework-fixed.txt`], { timeoutMs: context.options.timeoutMs })).stdout;
     if (repaired !== 'fixed\n') throw new Error(`${scenario}: published repair delta is missing`);
   }
   if (scenario === 'authoritative-candidate-publication') {
@@ -341,7 +345,7 @@ async function runReviewReadyScenario(context, scenario) {
   }
 }
 
-async function assertAuthoritativeCandidatePublication(context, record, publishedHeadSha) {
+export async function assertAuthoritativeCandidatePublication(context, record, publishedHeadSha) {
   const state = await readRunState(context);
   if (state.schema !== 'codex-orchestrator.run-state') throw new Error('authoritative-candidate-publication: unexpected state schema');
   const receipts = record.checks.filter((check) => check.status === 'passed');
@@ -353,24 +357,24 @@ async function assertAuthoritativeCandidatePublication(context, record, publishe
   }
   const [bindingId] = bindingIds;
   const [candidateTreeSha] = candidateTrees;
-  const publishedTreeSha = (await runCommand('git', [
+  const publishedTreeSha = (await commandFor(context)('git', [
     '-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`,
   ], { timeoutMs: context.options.timeoutMs })).stdout.trim();
   if (candidateTreeSha !== publishedTreeSha) {
     throw new Error('authoritative-candidate-publication: candidateTreeSha !== publishedTreeSha');
   }
-  const publishedContent = (await runCommand('git', [
+  const publishedContent = (await commandFor(context)('git', [
     '-C', context.targetRoot, 'show', `${publishedHeadSha}:src/live-smoke/authoritative-candidate-publication.txt`,
   ], { timeoutMs: context.options.timeoutMs })).stdout;
   if (publishedContent !== 'authoritative-candidate-publication\n') {
     throw new Error('authoritative-candidate-publication: staged content became authoritative');
   }
   const pin = `refs/codex-orchestrator/candidates/${record.runId}/${bindingId}`;
-  const pinProbe = await runCommand('git', ['-C', context.targetRoot, 'show-ref', '--verify', '--quiet', pin], {
+  const pinProbe = await commandFor(context)('git', ['-C', context.targetRoot, 'show-ref', '--verify', '--quiet', pin], {
     timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 1],
   });
   if (pinProbe.status === 0) throw new Error('authoritative-candidate-publication: candidate pin survived successful publication');
-  const worktrees = (await runCommand('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
+  const worktrees = (await commandFor(context)('git', ['-C', context.targetRoot, 'worktree', 'list', '--porcelain'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
   if (worktrees.includes('/.candidate-executions/')) {
@@ -398,7 +402,7 @@ async function assertReworkCycle(context, issueNumber) {
   if (run?.cycle !== 2) throw new Error(`acceptance-proof-rework: expected cycle=2, received ${run?.cycle ?? 'missing'}`);
 }
 
-async function runReviewFeedbackContinuationScenario(context, scenario) {
+export async function runReviewFeedbackContinuationScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const initial = await continueRepairReady(() => runIssue(context, issue.number));
@@ -437,15 +441,15 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   }
 
   const branch = `codex/issue-${issue.number}`;
-  await runCommand('git', ['-C', context.targetRoot, 'fetch', 'origin', branch], { timeoutMs: context.options.timeoutMs });
-  const commitCount = await runCommand('git', ['-C', context.targetRoot, 'rev-list', '--count', `${publication.headSha}..origin/${branch}`], {
+  await commandFor(context)('git', ['-C', context.targetRoot, 'fetch', 'origin', branch], { timeoutMs: context.options.timeoutMs });
+  const commitCount = await commandFor(context)('git', ['-C', context.targetRoot, 'rev-list', '--count', `${publication.headSha}..origin/${branch}`], {
     timeoutMs: context.options.timeoutMs,
   });
-  const parent = await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}^`], { timeoutMs: context.options.timeoutMs });
+  const parent = await commandFor(context)('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}^`], { timeoutMs: context.options.timeoutMs });
   if (commitCount.stdout.trim() !== '1' || parent.stdout.trim() !== publication.headSha) {
     throw new Error(`${scenario}: review feedback was not published as one fast-forward commit`);
   }
-  const pulls = JSON.parse((await runCommand('gh', [
+  const pulls = JSON.parse((await commandFor(context)('gh', [
     'pr', 'list', '--repo', context.repo, '--head', branch, '--state', 'open', '--json', 'number', '--limit', '2',
   ], { timeoutMs: context.options.timeoutMs })).stdout);
   if (pulls.length !== 1 || pulls[0]?.number !== publication.number) {
@@ -456,7 +460,7 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   if (comments.filter((comment) => comment.body?.split('\n')[0] === summaryMarker).length !== 1) {
     throw new Error(`${scenario}: expected exactly one review feedback summary marker`);
   }
-  const labels = JSON.parse((await runCommand('gh', [
+  const labels = JSON.parse((await commandFor(context)('gh', [
     'issue', 'view', String(issue.number), '--repo', context.repo, '--json', 'labels',
   ], { timeoutMs: context.options.timeoutMs })).stdout).labels.map((label) => label.name).sort();
   if (labels.join(',') !== 'agent:review') throw new Error(`${scenario}: final label is not agent:review`);
@@ -469,7 +473,7 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   const callsAfterReplay = (await readModelAudit(context)).length;
   const replayState = JSON.stringify(await readRunRecord(context, issue.number));
   const replayComments = JSON.stringify(await listConversationComments(context, publication.number));
-  const replayRemote = (await runCommand('git', ['-C', context.targetRoot, 'ls-remote', 'origin', `refs/heads/${branch}`], {
+  const replayRemote = (await commandFor(context)('git', ['-C', context.targetRoot, 'ls-remote', 'origin', `refs/heads/${branch}`], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.trim().split(/\s/u)[0];
   if (callsAfterReplay !== callsBeforeReplay) throw new Error(`${scenario}: model calls during effect-free replay`);
@@ -478,7 +482,7 @@ async function runReviewFeedbackContinuationScenario(context, scenario) {
   }
 }
 
-async function runPackageInstallScenario(context, scenario) {
+export async function runPackageInstallScenario(context, scenario) {
   const installedCliPath = await installPackedConsumer(context, 'consumer');
   const packedCliPath = context.cliPath;
   context.cliPath = installedCliPath;
@@ -491,7 +495,7 @@ async function installPackedConsumer(context, name) {
   await mkdir(external, { recursive: true });
   await writeFile(join(external, 'package.json'), '{"private":true,"type":"module"}\n');
   const packageRoot = resolve(dirname(context.cliPath), '../../..');
-  await runCommand('npm', ['install', packageRoot, '--ignore-scripts'], { cwd: external, timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('npm', ['install', packageRoot, '--ignore-scripts'], { cwd: external, timeoutMs: context.options.timeoutMs });
   const installedCliPath = join(external, 'node_modules', 'codex-orchestrator', 'dist', 'src', 'v2', 'cli.js');
   await readFile(installedCliPath);
   return installedCliPath;
@@ -520,21 +524,21 @@ async function runCommitPolicyScenario(context, scenario) {
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
   const record = await readRunRecord(context, issue.number);
-  const author = (await runCommand('git', ['-C', record.worktreePath, 'show', '-s', '--format=%an', 'HEAD'], {
+  const author = (await commandFor(context)('git', ['-C', record.worktreePath, 'show', '-s', '--format=%an', 'HEAD'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.trim();
   if (author !== 'fake-agent') throw new Error(`${scenario}: blocked for a reason other than the agent-authored commit`);
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runDiagnosticsScenario(context, scenario) {
+export async function runDiagnosticsScenario(context, scenario) {
   await configureTarget(context);
   const packedCliPath = context.cliPath;
   context.cliPath = await installPackedConsumer(context, 'diagnostics-consumer');
   try {
   const configPath = join(context.targetRoot, '.codex-orchestrator', 'config.json');
   const configBefore = await readFile(configPath, 'utf8');
-  const statusBefore = (await runCommand('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
+  const statusBefore = (await commandFor(context)('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
   const remoteBefore = await readRemoteSnapshot(context);
@@ -542,7 +546,7 @@ async function runDiagnosticsScenario(context, scenario) {
     const envelope = await requireTypedSetup(context, [command, '--target', context.targetRoot]);
     if (envelope.result.status !== 'inspected') throw new Error(`${command} did not return an inspected Setup result`);
   }
-  const statusAfter = (await runCommand('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
+  const statusAfter = (await commandFor(context)('git', ['-C', context.targetRoot, 'status', '--porcelain=v1'], {
     timeoutMs: context.options.timeoutMs,
   })).stdout;
   if (await readFile(configPath, 'utf8') !== configBefore || statusAfter !== statusBefore
@@ -552,7 +556,7 @@ async function runDiagnosticsScenario(context, scenario) {
   } finally { context.cliPath = packedCliPath; }
 }
 
-async function runConfiguredCheckReworkScenario(context, scenario) {
+export async function runConfiguredCheckReworkScenario(context, scenario) {
   await configureTarget(context, { reworkCheck: true });
   const issue = await createIssue(context, scenario, true);
   const first = await runIssue(context, issue.number);
@@ -567,7 +571,7 @@ async function runConfiguredCheckReworkScenario(context, scenario) {
   await assertValidationBindings(context, record, publication.headSha, scenario);
 }
 
-async function runPublicationReconciliationScenario(context, scenario) {
+export async function runPublicationReconciliationScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const fault = await writeFaultingGh(context, scenario);
@@ -581,7 +585,7 @@ async function runPublicationReconciliationScenario(context, scenario) {
   const publication = await recordPublication(context, issue.number);
   const callsAfter = (await readModelAudit(context)).length;
   if (callsAfter !== callsBefore) throw new Error(`${scenario}: reconciliation repeated model work`);
-  const pulls = JSON.parse((await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--head', `codex/issue-${issue.number}`, '--state', 'all', '--json', 'number', '--limit', '2'], { timeoutMs: context.options.timeoutMs })).stdout);
+  const pulls = JSON.parse((await commandFor(context)('gh', ['pr', 'list', '--repo', context.repo, '--head', `codex/issue-${issue.number}`, '--state', 'all', '--json', 'number', '--limit', '2'], { timeoutMs: context.options.timeoutMs })).stdout);
   if (pulls.length !== 1 || pulls[0].number !== publication.number) throw new Error(`${scenario}: reconciliation duplicated the pull request`);
   const record = await readRunRecord(context, issue.number);
   const handoffMarker = `<!-- codex-orchestrator:run:${record.runId}:cycle:${record.cycle}:handoff -->`;
@@ -591,19 +595,19 @@ async function runPublicationReconciliationScenario(context, scenario) {
   }
 }
 
-async function runAuthorizationRevokedScenario(context, scenario) {
+export async function runAuthorizationRevokedScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const first = await runIssue(context, issue.number);
   assertResult(first, { status: 'repair-ready', source: 'proof' }, scenario);
-  await runCommand('gh', ['issue', 'edit', String(issue.number), '--repo', context.repo, '--remove-label', 'agent:auto'], { timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('gh', ['issue', 'edit', String(issue.number), '--repo', context.repo, '--remove-label', 'agent:auto'], { timeoutMs: context.options.timeoutMs });
   const result = await runIssue(context, issue.number);
   assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
   await assertEvidenceCode(context, result, 'authorization-revoked');
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runReviewFeedbackNegativeScenario(context, scenario) {
+export async function runReviewFeedbackNegativeScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const initial = await continueRepairReady(() => runIssue(context, issue.number));
@@ -626,7 +630,7 @@ async function runReviewFeedbackNegativeScenario(context, scenario) {
   }
 }
 
-async function runIssueVerificationScenario(context, scenario) {
+export async function runIssueVerificationScenario(context, scenario) {
   await configureTarget(context);
   const verification = 'npm exec -- sh -c issue-text-must-not-execute';
   const issue = await createIssue(context, scenario, true, [], true, verification);
@@ -645,7 +649,7 @@ async function assertValidationBindings(context, record, publishedHeadSha, scena
   const checks = record.checks.filter((check) => check.status === 'passed');
   const bindingIds = new Set(checks.map((check) => check.bindingId));
   const candidateTrees = new Set(checks.map((check) => check.candidateTreeSha));
-  const publishedTree = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  const publishedTree = (await commandFor(context)('git', ['-C', context.targetRoot, 'rev-parse', `${publishedHeadSha}^{tree}`], { timeoutMs: context.options.timeoutMs })).stdout.trim();
   if (checks.length === 0 || bindingIds.size !== 1 || bindingIds.has(undefined)
     || candidateTrees.size !== 1 || !candidateTrees.has(publishedTree)
     || !record.checkedChangeSha256 || !record.proofId || record.proofReceipt?.proofId !== record.proofId
@@ -655,7 +659,7 @@ async function assertValidationBindings(context, record, publishedHeadSha, scena
   }
 }
 
-async function runAcceptanceProofNegativeScenario(context, scenario) {
+export async function runAcceptanceProofNegativeScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
@@ -663,7 +667,7 @@ async function runAcceptanceProofNegativeScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runSafetyNegativeScenario(context, scenario) {
+export async function runSafetyNegativeScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
   const result = await runIssue(context, issue.number);
@@ -686,7 +690,7 @@ async function createIssue(context, scenario, eligible, extraCriteria = [], mark
     ...(verification ? ['', '## Verification', `- \`${verification}\``] : []),
   ].join('\n')];
   if (eligible) args.push('--label', 'agent:auto');
-  const created = await runCommand('gh', args, { timeoutMs: context.options.timeoutMs });
+  const created = await commandFor(context)('gh', args, { timeoutMs: context.options.timeoutMs });
   const number = Number(created.stdout.match(/\/issues\/(\d+)/u)?.[1]);
   if (!Number.isSafeInteger(number) || number <= 0) throw new Error('GitHub did not return a created issue number');
   context.createdIssues.push(number);
@@ -694,7 +698,7 @@ async function createIssue(context, scenario, eligible, extraCriteria = [], mark
 }
 
 async function runIssue(context, issueNumber, extraEnv = {}) {
-  const command = await runCommand(process.execPath, [context.cliPath, 'run', '--target', context.targetRoot, '--issue', String(issueNumber)], {
+  const command = await commandFor(context)(process.execPath, [context.cliPath, 'run', '--target', context.targetRoot, '--issue', String(issueNumber)], {
     cwd: context.targetRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 21, 70, 130],
     env: liveSmokeEnv(context, extraEnv),
   });
@@ -708,9 +712,9 @@ export function parseRunIssueEnvelope(stdout, exitStatus) {
   return envelope.result;
 }
 
-async function runDaemonOnce(context, issueNumber) {
+export async function runDaemonOnce(context, issueNumber) {
   await assertExclusiveDaemonCandidate(context, issueNumber);
-  await runCommand(process.execPath, [
+  await commandFor(context)(process.execPath, [
     context.cliPath, 'daemon', '--target', context.targetRoot, '--once', '--issue', String(issueNumber),
   ], {
     cwd: context.targetRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 21, 70, 130],
@@ -725,7 +729,7 @@ async function runDaemonOnce(context, issueNumber) {
 async function assertExclusiveDaemonCandidate(context, issueNumber) {
   const candidates = new Set();
   for (const label of ['agent:auto', 'agent:review']) {
-    const result = await runCommand('gh', [
+    const result = await commandFor(context)('gh', [
       'issue', 'list', '--repo', context.repo, '--state', 'open', '--label', label,
       '--json', 'number', '--limit', '100',
     ], { timeoutMs: context.options.timeoutMs });
@@ -760,17 +764,17 @@ async function assertEvidenceCode(context, result, expectedCode) {
 
 async function assertNoPublication(context, issueNumber, scenario) {
   const branch = `codex/issue-${issueNumber}`;
-  const pulls = JSON.parse((await runCommand('gh', [
+  const pulls = JSON.parse((await commandFor(context)('gh', [
     'pr', 'list', '--repo', context.repo, '--head', branch, '--state', 'all', '--json', 'number', '--limit', '2',
   ], { timeoutMs: context.options.timeoutMs })).stdout);
-  const remote = (await runCommand('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], {
+  const remote = (await commandFor(context)('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.trim();
   if (pulls.length !== 0 || remote) throw new Error(`${scenario}: negative scenario published a branch or PR`);
 }
 
 async function postTrustedReviewThread(context, pullRequestNumber, commitSha, path, body) {
-  const result = await runCommand('gh', [
+  const result = await commandFor(context)('gh', [
     'api', '--method', 'POST', `repos/${context.repo}/pulls/${pullRequestNumber}/comments`,
     '-f', `body=${body}`, '-f', `commit_id=${commitSha}`, '-f', `path=${path}`, '-F', 'line=1', '-f', 'side=RIGHT',
   ], { timeoutMs: context.options.timeoutMs });
@@ -780,7 +784,7 @@ async function postTrustedReviewThread(context, pullRequestNumber, commitSha, pa
 }
 
 async function resolveReviewThread(context, pullRequestNumber, commentId) {
-  const query = await runCommand('gh', [
+  const query = await commandFor(context)('gh', [
     'api', 'graphql', '-f', `owner=${ownerOf(context.repo)}`, '-f', `repo=${repoOf(context.repo)}`,
     '-F', `number=${pullRequestNumber}`,
     '-f', 'query=query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{id comments(first:100){nodes{databaseId}}}}}}}',
@@ -788,7 +792,7 @@ async function resolveReviewThread(context, pullRequestNumber, commentId) {
   const threads = JSON.parse(query.stdout).data.repository.pullRequest.reviewThreads.nodes;
   const thread = threads.find((candidate) => candidate.comments.nodes.some((comment) => comment.databaseId === commentId));
   if (!thread) throw new Error('review feedback thread could not be resolved');
-  await runCommand('gh', [
+  await commandFor(context)('gh', [
     'api', 'graphql', '-f', `threadId=${thread.id}`,
     '-f', 'query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}',
   ], { timeoutMs: context.options.timeoutMs });
@@ -802,8 +806,8 @@ async function assertReviewFeedbackObservable(context, issueNumber, pullRequestN
     import(pathToFileURL(join(packageRoot, 'dist', 'src', 'v2', 'adapters', 'gh-issue-adapter.js')).href),
   ]);
   const coordinator = new ReviewFeedbackObserver({
-    pullRequests: new GhCliPullRequestAdapter(ownerOf(context.repo), repoOf(context.repo)),
-    issues: new GhCliIssueAdapter(ownerOf(context.repo), repoOf(context.repo)),
+    pullRequests: new GhCliPullRequestAdapter(ownerOf(context.repo), repoOf(context.repo), context.commandRunner),
+    issues: new GhCliIssueAdapter(ownerOf(context.repo), repoOf(context.repo), context.commandRunner),
   });
   const observed = await coordinator.observeAndFreeze({
     runId: record.runId,
@@ -821,14 +825,14 @@ async function assertReviewFeedbackObservable(context, issueNumber, pullRequestN
 }
 
 async function listConversationComments(context, pullRequestNumber) {
-  const result = await runCommand('gh', [
+  const result = await commandFor(context)('gh', [
     'api', '--paginate', `repos/${context.repo}/issues/${pullRequestNumber}/comments`,
   ], { timeoutMs: context.options.timeoutMs });
   return JSON.parse(result.stdout);
 }
 
 async function listIssueComments(context, issueNumber) {
-  const result = await runCommand('gh', [
+  const result = await commandFor(context)('gh', [
     'api', '--paginate', `repos/${context.repo}/issues/${issueNumber}/comments`,
   ], { timeoutMs: context.options.timeoutMs });
   return JSON.parse(result.stdout);
@@ -836,16 +840,16 @@ async function listIssueComments(context, issueNumber) {
 
 async function readRemoteSnapshot(context) {
   const [refs, labels, issues, pulls] = await Promise.all([
-    runCommand('git', ['-C', context.targetRoot, 'ls-remote', 'origin'], { timeoutMs: context.options.timeoutMs }),
-    runCommand('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', 'sort_by(.name)|map({name,color,description})'], { timeoutMs: context.options.timeoutMs }),
-    runCommand('gh', ['issue', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,labels'], { timeoutMs: context.options.timeoutMs }),
-    runCommand('gh', ['pr', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,headRefName,baseRefName,isDraft'], { timeoutMs: context.options.timeoutMs }),
+    commandFor(context)('git', ['-C', context.targetRoot, 'ls-remote', 'origin'], { timeoutMs: context.options.timeoutMs }),
+    commandFor(context)('gh', ['api', '--paginate', `repos/${context.repo}/labels`, '--jq', 'sort_by(.name)|map({name,color,description})'], { timeoutMs: context.options.timeoutMs }),
+    commandFor(context)('gh', ['issue', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,labels'], { timeoutMs: context.options.timeoutMs }),
+    commandFor(context)('gh', ['pr', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,state,title,headRefName,baseRefName,isDraft'], { timeoutMs: context.options.timeoutMs }),
   ]);
   return JSON.stringify({ refs: refs.stdout, labels: labels.stdout, issues: issues.stdout, pulls: pulls.stdout });
 }
 
 async function requireTypedSetup(context, args) {
-  const command = await runCommand(process.execPath, [context.cliPath, ...args], {
+  const command = await commandFor(context)(process.execPath, [context.cliPath, ...args], {
     cwd: context.targetRoot || sourceRoot, timeoutMs: context.options.timeoutMs, allowedExitCodes: [0, 20, 70],
     env: liveSmokeEnv(context),
   });
@@ -872,22 +876,22 @@ function assertResult(actual, expected, scenario) {
 async function recordPublication(context, issueNumber) {
   const branch = `codex/issue-${issueNumber}`;
   context.createdBranches.push(branch);
-  const result = await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--head', branch, '--state', 'open', '--json', 'number,isDraft', '--limit', '2'], {
+  const result = await commandFor(context)('gh', ['pr', 'list', '--repo', context.repo, '--head', branch, '--state', 'open', '--json', 'number,isDraft', '--limit', '2'], {
     timeoutMs: context.options.timeoutMs,
   });
   const pulls = JSON.parse(result.stdout);
   if (!Array.isArray(pulls) || pulls.length !== 1 || !Number.isSafeInteger(pulls[0].number) || pulls[0].isDraft !== true) {
     throw new Error(`one draft PR was not found for ${branch}`);
   }
-  await runCommand('git', ['-C', context.targetRoot, 'fetch', 'origin', branch], { timeoutMs: context.options.timeoutMs });
-  const commits = await runCommand('git', ['-C', context.targetRoot, 'log', '--format=%an <%ae>', `${context.baseConfig.github.baseBranch}..origin/${branch}`], {
+  await commandFor(context)('git', ['-C', context.targetRoot, 'fetch', 'origin', branch], { timeoutMs: context.options.timeoutMs });
+  const commits = await commandFor(context)('git', ['-C', context.targetRoot, 'log', '--format=%an <%ae>', `${context.baseConfig.github.baseBranch}..origin/${branch}`], {
     timeoutMs: context.options.timeoutMs,
   });
   if (commits.stdout.trim() !== 'codex-orchestrator <codex-orchestrator@users.noreply.github.com>') {
     throw new Error(`${branch} was not published as exactly one runner-authored commit`);
   }
   context.createdPullRequests.push(pulls[0].number);
-  const headSha = (await runCommand('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
+  const headSha = (await commandFor(context)('git', ['-C', context.targetRoot, 'rev-parse', `origin/${branch}`], {
     timeoutMs: context.options.timeoutMs,
   })).stdout.trim();
   return { number: pulls[0].number, headSha };
@@ -895,7 +899,7 @@ async function recordPublication(context, issueNumber) {
 
 async function writeFakeCodex(context) {
   const path = join(context.root, 'fake-codex');
-  const installedVersion = (await runCommand('codex', ['--version'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  const installedVersion = (await commandFor(context)('codex', ['--version'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
   await writeFile(path, fakeCodexSource(process.execPath, installedVersion));
   await chmod(path, 0o700);
   return path;
@@ -911,7 +915,7 @@ async function writeLiveCodex(context) {
 async function writeFaultingGh(context, scenario) {
   const directory = join(context.root, `faulting-gh-${scenario}`);
   const path = join(directory, 'gh');
-  const realGh = (await runCommand('which', ['gh'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
+  const realGh = (await commandFor(context)('which', ['gh'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
   const marker = join(directory, 'pr-create-effect-observed');
   await mkdir(directory, { recursive: true });
   await writeFile(path, `#!${process.execPath}\n`
@@ -926,7 +930,7 @@ async function writeFaultingGh(context, scenario) {
   return path;
 }
 
-function liveSmokeEnv(context, extra = {}) {
+export function liveSmokeEnv(context, extra = {}) {
   return {
     ...process.env,
     CODEX_ORCHESTRATOR_HOME: context.orchestratorHome,
@@ -941,7 +945,7 @@ async function readModelAudit(context) {
   return content.split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-function assertScenarioModelUsage(scenario, calls) {
+export function assertScenarioModelUsage(scenario, calls) {
   const modelBacked = !['discovery-matrix', 'diagnostics'].includes(scenario);
   if (modelBacked && calls.length === 0) throw new Error(`${scenario}: no real Codex model invocation was observed`);
   if (!modelBacked && calls.length !== 0) throw new Error(`${scenario}: model was invoked on a model-free gate`);
@@ -950,7 +954,7 @@ function assertScenarioModelUsage(scenario, calls) {
   }
 }
 
-function liveCodexSource(nodePath, auditPath) {
+export function liveCodexSource(nodePath, auditPath) {
   return `#!${nodePath}
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
@@ -1385,26 +1389,26 @@ function writeChange(scenario) {
 `;
 }
 
-async function cleanup(context) {
+export async function cleanup(context) {
   const failures = [];
   await discoverRunArtifacts(context, failures);
   for (const pr of [...new Set(context.createdPullRequests)].reverse()) {
-    await bestEffort(failures, `PR #${pr}`, () => runCommand('gh', ['pr', 'close', String(pr), '--repo', context.repo, '--delete-branch'], { timeoutMs: context.options.timeoutMs }));
+    await bestEffort(failures, `PR #${pr}`, () => commandFor(context)('gh', ['pr', 'close', String(pr), '--repo', context.repo, '--delete-branch'], { timeoutMs: context.options.timeoutMs }));
   }
   for (const branch of [...new Set(context.createdBranches)].reverse()) {
     await bestEffort(failures, `branch ${branch}`, async () => {
-      const remote = await runCommand('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], { timeoutMs: context.options.timeoutMs });
-      if (remote.stdout.trim()) await runCommand('git', ['-C', context.targetRoot, 'push', 'origin', '--delete', branch], { timeoutMs: context.options.timeoutMs });
+      const remote = await commandFor(context)('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], { timeoutMs: context.options.timeoutMs });
+      if (remote.stdout.trim()) await commandFor(context)('git', ['-C', context.targetRoot, 'push', 'origin', '--delete', branch], { timeoutMs: context.options.timeoutMs });
     });
   }
   for (const issue of [...new Set(context.createdIssues)].reverse()) {
     const args = context.options.cleanupMode === 'delete'
       ? ['issue', 'delete', String(issue), '--repo', context.repo, '--yes']
       : ['issue', 'close', String(issue), '--repo', context.repo, '--comment', `[live-smoke:${context.runId}] cleanup`];
-    await bestEffort(failures, `issue #${issue}`, () => runCommand('gh', args, { timeoutMs: context.options.timeoutMs }));
+    await bestEffort(failures, `issue #${issue}`, () => commandFor(context)('gh', args, { timeoutMs: context.options.timeoutMs }));
   }
   for (const label of [...new Set(context.createdLabels)].reverse()) {
-    await bestEffort(failures, `label ${label}`, () => runCommand('gh', [
+    await bestEffort(failures, `label ${label}`, () => commandFor(context)('gh', [
       'api', '--method', 'DELETE', `repos/${context.repo}/labels/${encodeURIComponent(label)}`,
     ], { timeoutMs: context.options.timeoutMs }));
   }
@@ -1418,20 +1422,20 @@ async function cleanup(context) {
   process.stdout.write(`[v2-live-smoke] report\n${report}`);
 }
 
-async function cleanupLocalSafetyResources(context, failures) {
+export async function cleanupLocalSafetyResources(context, failures) {
   if (!context.targetRoot || !context.lockAcquired) return;
   await bestEffort(failures, 'candidate refs', async () => {
     const refs = (await listCandidateRefs(context)).filter((ref) => !context.baselineCandidateRefs.has(ref));
-    for (const ref of refs) await runCommand('git', ['-C', context.targetRoot, 'update-ref', '-d', ref], { timeoutMs: context.options.timeoutMs });
+    for (const ref of refs) await commandFor(context)('git', ['-C', context.targetRoot, 'update-ref', '-d', ref], { timeoutMs: context.options.timeoutMs });
   });
   await bestEffort(failures, 'candidate worktrees', async () => {
     const added = (await listWorktrees(context)).filter((path) => !context.baselineWorktrees.has(path));
-    for (const path of added) await runCommand('git', ['-C', context.targetRoot, 'worktree', 'remove', '--force', path], { timeoutMs: context.options.timeoutMs });
-    await runCommand('git', ['-C', context.targetRoot, 'worktree', 'prune', '--expire', 'now'], { timeoutMs: context.options.timeoutMs });
+    for (const path of added) await commandFor(context)('git', ['-C', context.targetRoot, 'worktree', 'remove', '--force', path], { timeoutMs: context.options.timeoutMs });
+    await commandFor(context)('git', ['-C', context.targetRoot, 'worktree', 'prune', '--expire', 'now'], { timeoutMs: context.options.timeoutMs });
   });
 }
 
-async function terminateRunProcesses(context, failures) {
+export async function terminateRunProcesses(context, failures) {
   await bestEffort(failures, 'terminate live-smoke processes', async () => {
     const owned = await listRunProcessIds(context);
     for (const pid of owned) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error; } }
@@ -1441,7 +1445,7 @@ async function terminateRunProcesses(context, failures) {
 }
 
 async function listRunProcessIds(context) {
-  return (await runCommand('ps', ['-axo', 'pid=,command='], { timeoutMs: context.options.timeoutMs })).stdout
+  return (await commandFor(context)('ps', ['-axo', 'pid=,command='], { timeoutMs: context.options.timeoutMs })).stdout
     .split('\n').map((line) => line.trim()).filter(Boolean)
     .map((line) => ({ pid: Number(line.split(/\s+/u)[0]), command: line }))
     .filter((entry) => Number.isSafeInteger(entry.pid) && entry.pid > 1 && entry.pid !== process.pid
@@ -1450,13 +1454,13 @@ async function listRunProcessIds(context) {
 }
 
 export async function removeTemporaryArtifacts(context) {
-  await runCommand('chmod', ['-R', 'u+w', context.root], { timeoutMs: context.options.timeoutMs });
+  await commandFor(context)('chmod', ['-R', 'u+w', context.root], { timeoutMs: context.options.timeoutMs });
   await rm(context.root, { recursive: true, force: true });
 }
 
 async function discoverRunArtifacts(context, failures) {
   await bestEffort(failures, 'discover run issues', async () => {
-    const result = await runCommand('gh', ['issue', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,title,body'], {
+    const result = await commandFor(context)('gh', ['issue', 'list', '--repo', context.repo, '--state', 'all', '--limit', '1000', '--json', 'number,title,body'], {
       timeoutMs: context.options.timeoutMs,
     });
     for (const issue of JSON.parse(result.stdout)) {
@@ -1466,7 +1470,7 @@ async function discoverRunArtifacts(context, failures) {
     }
   });
   await bestEffort(failures, 'discover run pull requests', async () => {
-    const result = await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--state', 'all', '--search', `live-smoke:${context.runId}`, '--limit', '1000', '--json', 'number,state,headRefName'], {
+    const result = await commandFor(context)('gh', ['pr', 'list', '--repo', context.repo, '--state', 'all', '--search', `live-smoke:${context.runId}`, '--limit', '1000', '--json', 'number,state,headRefName'], {
       timeoutMs: context.options.timeoutMs,
     });
     for (const pull of JSON.parse(result.stdout)) {
@@ -1478,7 +1482,7 @@ async function discoverRunArtifacts(context, failures) {
 
 async function verifyCleanup(context, failures) {
   await bestEffort(failures, 'verify no open run issues', () => retryCleanupObservation(async () => {
-    const result = await runCommand('gh', ['issue', 'list', '--repo', context.repo, '--state', 'open', '--limit', '1000', '--json', 'number,title,body'], {
+    const result = await commandFor(context)('gh', ['issue', 'list', '--repo', context.repo, '--state', 'open', '--limit', '1000', '--json', 'number,title,body'], {
       timeoutMs: context.options.timeoutMs,
     });
     const remaining = JSON.parse(result.stdout).filter((issue) => issue.title?.includes(`[live-smoke:${context.runId}]`)
@@ -1486,7 +1490,7 @@ async function verifyCleanup(context, failures) {
     if (remaining.length > 0) throw new Error(`open issues remain: ${remaining.map((issue) => issue.number).join(', ')}`);
   }));
   await bestEffort(failures, 'verify no open run pull requests', () => retryCleanupObservation(async () => {
-    const result = await runCommand('gh', ['pr', 'list', '--repo', context.repo, '--state', 'open', '--search', `live-smoke:${context.runId}`, '--limit', '1000', '--json', 'number'], {
+    const result = await commandFor(context)('gh', ['pr', 'list', '--repo', context.repo, '--state', 'open', '--search', `live-smoke:${context.runId}`, '--limit', '1000', '--json', 'number'], {
       timeoutMs: context.options.timeoutMs,
     });
     const remaining = JSON.parse(result.stdout);
@@ -1495,14 +1499,14 @@ async function verifyCleanup(context, failures) {
   if (context.targetRoot) {
     for (const branch of [...new Set(context.createdBranches)]) {
       await bestEffort(failures, `verify branch ${branch}`, () => retryCleanupObservation(async () => {
-        const result = await runCommand('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], { timeoutMs: context.options.timeoutMs });
+        const result = await commandFor(context)('git', ['-C', context.targetRoot, 'ls-remote', '--heads', 'origin', branch], { timeoutMs: context.options.timeoutMs });
         if (result.stdout.trim()) throw new Error('remote branch remains');
       }));
     }
   }
   if (context.options.cleanupMode === 'delete') {
     for (const issue of [...new Set(context.createdIssues)]) {
-      const result = await runCommand('gh', ['issue', 'view', String(issue), '--repo', context.repo, '--json', 'number'], {
+      const result = await commandFor(context)('gh', ['issue', 'view', String(issue), '--repo', context.repo, '--json', 'number'], {
         timeoutMs: context.options.timeoutMs,
         allowedExitCodes: [0, 1],
       });
@@ -1681,8 +1685,8 @@ async function bestEffort(failures, label, action) {
   catch (error) { failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`); }
 }
 
-async function defaultBranch(repo) {
-  const result = await runCommand('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef'], { timeoutMs: defaultTimeoutMs });
+async function defaultBranch(repo, command = runCommand) {
+  const result = await command('gh', ['repo', 'view', repo, '--json', 'defaultBranchRef'], { timeoutMs: defaultTimeoutMs });
   const branch = JSON.parse(result.stdout)?.defaultBranchRef?.name;
   if (typeof branch !== 'string' || !branch) throw new Error('default branch is unavailable');
   return branch;
@@ -1697,7 +1701,10 @@ async function appendReport(context, value) {
   await writeFile(context.reportPath, existing + value, 'utf8');
 }
 
-function runCommand(command, args, options = {}) {
+// Callers may supply an offline executor for external process boundaries.
+function commandFor(context) { return context.commandRunner ?? runCommand; }
+
+export function runCommand(command, args, options = {}) {
   return new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = ''; let settled = false;

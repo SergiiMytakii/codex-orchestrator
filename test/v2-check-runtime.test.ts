@@ -27,9 +27,11 @@ case "$*" in
 esac
 `);
     await chmod(join(cwd, 'node_modules/.bin/jest'), 0o700);
-    const run = (changedFiles?: string[]) => runShellCheck('npm test', cwd, new AbortController().signal, 5000, undefined, changedFiles);
+    // This contract exercises npm/Jest selection, not process deadline timing.
+    const commandTimeoutMs = 30_000;
+    const run = (changedFiles?: string[]) => runShellCheck('npm test', cwd, new AbortController().signal, commandTimeoutMs, undefined, changedFiles);
     assert.equal((await run()).status, 'failed');
-    await assert.rejects(runShellCheck('npm test', cwd, new AbortController().signal, 5000,
+    await assert.rejects(runShellCheck('npm test', cwd, new AbortController().signal, commandTimeoutMs,
       async () => { throw new Error('ownership rejected'); }, ['src/feature.ts']), /ownership rejected/u);
     await assert.rejects(readFile(join(cwd, 'config-probe.marker')), 'config probing must wait for persisted launch ownership');
     const affected = await run(['src/feature.ts']);
@@ -100,26 +102,47 @@ test('timed-out check proves a TERM-ignoring descendant is absent before returni
   ));
 });
 
-test('cancelled check proves a TERM-ignoring descendant is absent before returning', async () => {
+test('cancelled check proves a TERM-ignoring descendant is absent before returning', { timeout: 15_000 }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-check-cancel-'));
   const controller = new AbortController();
+  let processGroupId: number | undefined;
   const check = runShellCheck(
     "(trap '' TERM; exec sleep 300) </dev/null >/dev/null 2>&1 & echo $! > child.pid; wait",
     cwd,
     controller.signal,
     10_000,
+    async (launched) => { processGroupId = launched.processGroupId; },
   );
-  while (true) {
-    try { await readFile(join(cwd, 'child.pid'), 'utf8'); break; }
-    catch { await new Promise((resolveWait) => setTimeout(resolveWait, 10)); }
+  void check.catch(() => {});
+  try {
+    const deadline = Date.now() + 5_000;
+    while (true) {
+      try { await readFile(join(cwd, 'child.pid'), 'utf8'); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        if (Date.now() >= deadline) throw new Error('test child did not create its PID checkpoint within 5000ms');
+        await Promise.race([
+          new Promise((resolveWait) => setTimeout(resolveWait, 10)),
+          check.then(() => { throw new Error('check exited before its PID checkpoint'); }),
+        ]);
+      }
+    }
+    controller.abort();
+    await check;
+    const pid = Number((await readFile(join(cwd, 'child.pid'), 'utf8')).trim());
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+    assert.throws(() => process.kill(pid, 0), (error: unknown) => (
+      error instanceof Error && 'code' in error && error.code === 'ESRCH'
+    ));
+  } finally {
+    controller.abort();
+    await check.catch(() => {});
+    if (processGroupId !== undefined) {
+      try { process.kill(-processGroupId, 'SIGKILL'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    }
+    await rm(cwd, { recursive: true, force: true });
   }
-  controller.abort();
-  await check;
-
-  const pid = Number((await readFile(join(cwd, 'child.pid'), 'utf8')).trim());
-  assert.throws(() => process.kill(pid, 0), (error: unknown) => (
-    error instanceof Error && 'code' in error && error.code === 'ESRCH'
-  ));
 });
 
 test('normal leader exit reports a live descendant process group instead of quiescence', async () => {
@@ -145,16 +168,27 @@ test('normal leader exit reports a live descendant process group instead of quie
   }
 });
 
-test('check command cannot execute before launched ownership persistence resolves', async () => {
+test('check command cannot execute before launched ownership persistence resolves', { timeout: 15_000 }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-check-launch-gate-'));
   let release!: () => void;
-  const launched = new Promise<void>((resolve) => { release = resolve; });
-  const check = runShellCheck('printf executed > marker.txt', cwd, new AbortController().signal, 10_000, async () => launched);
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  await assert.rejects(readFile(join(cwd, 'marker.txt')));
-  release();
-  assert.equal((await check).status, 'passed');
-  assert.equal(await readFile(join(cwd, 'marker.txt'), 'utf8'), 'executed');
+  const persistence = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const launched = new Promise<void>((resolve) => { entered = resolve; });
+  const controller = new AbortController();
+  const check = runShellCheck('printf executed > marker.txt', cwd, controller.signal, 10_000, async () => { entered(); await persistence; });
+  void check.catch(() => {});
+  try {
+    await Promise.race([launched, check.then(() => { throw new Error('check exited without launch persistence'); })]);
+    await assert.rejects(readFile(join(cwd, 'marker.txt')), { code: 'ENOENT' });
+    release();
+    assert.equal((await check).status, 'passed');
+    assert.equal(await readFile(join(cwd, 'marker.txt'), 'utf8'), 'executed');
+  } finally {
+    release();
+    controller.abort();
+    await check.catch(() => {});
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test('rejected launched ownership persistence terminates the gated check without executing it', async () => {

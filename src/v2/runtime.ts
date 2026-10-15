@@ -528,7 +528,8 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     const [headSha, indexTreeSha, trackedDiff, untrackedPaths, canonicalPath, gitDirectory] = await Promise.all([
       this.getHead(worktreePath),
       this.getTreeSha(worktreePath),
-      this.git(['-C', worktreePath, 'diff', '--binary', 'HEAD']),
+      // Snapshot readers must not refresh the index beside write-tree.
+      this.git(['--no-optional-locks', '-C', worktreePath, 'diff', '--binary', 'HEAD']),
       this.git(['-C', worktreePath, 'ls-files', '--others', '--exclude-standard', '-z']),
       realpath(worktreePath),
       this.git(['-C', worktreePath, 'rev-parse', '--git-dir']),

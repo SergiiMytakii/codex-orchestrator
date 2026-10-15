@@ -137,13 +137,13 @@ export class GitWorktreeManager {
   }
 
   public async listChangedFiles(worktreePath: string): Promise<string[]> {
-    const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
+    const result = await this.git(['--no-optional-locks', '-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
     return parsePorcelainChangedFiles(result.stdout);
   }
 
   public async listChangedFilesIgnoringUntrackedRoot(worktreePath: string, ignoredRoot: string): Promise<string[]> {
     const root = normalizePath(ignoredRoot);
-    const result = await this.git(['-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
+    const result = await this.git(['--no-optional-locks', '-C', worktreePath, 'status', '--porcelain=v1', '--untracked-files=all', '-z']);
     return parsePorcelainChangedFiles(result.stdout, root);
   }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -521,7 +521,7 @@ test('large run histories are lossless hashed evidence and stay bounded per stat
 });
 
 
-test('migration resumes after a killed writer and preserves the original journal', async () => {
+test('migration resumes after a killed writer and preserves the original journal', { timeout: 120_000 }, async () => {
   for (const crashPoint of ['before-file-fsync', 'before-rename', 'after-rename', 'before-parent-fsync']) {
   const root = await temporaryRoot();
   const legacyPath = join(root, 'run-state.json');
@@ -541,29 +541,55 @@ test('migration resumes after a killed writer and preserves the original journal
     setInterval(()=>{},1000);
     await FileRunRecordWriter.forRepository(${JSON.stringify(legacyPath)},'owner/repo',options).migrateLegacy();
   `], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  const closed = once(child, 'close');
+  void closed.catch(() => {});
+  let fresh: ChildProcess | undefined;
+  let freshClosed: Promise<unknown[]> | undefined;
+  const checkpointAbort = new AbortController();
   try {
-    await once(child, 'message');
-    const closed = once(child, 'close');
+    const [checkpoint] = await boundedChildWait(Promise.race([
+      once(child, 'message', { signal: checkpointAbort.signal }),
+      closed.then(([code, signal]) => { throw new Error(`migration exited before checkpoint: ${code}/${signal}`); }),
+    ]), 'migration checkpoint');
+    assert.equal(checkpoint, 'persisted');
+    checkpointAbort.abort();
     child.kill('SIGKILL');
-    await closed;
+    await boundedChildWait(closed, 'killed migration close');
     assert.equal(await readFile(legacyPath, 'utf8'), bytes);
-    const fresh = spawn(process.execPath, ['--input-type=module', '-e', `
+    fresh = spawn(process.execPath, ['--input-type=module', '-e', `
       import {FileRunRecordWriter} from ${JSON.stringify(moduleUrl)};
       const writer=FileRunRecordWriter.forRepository(${JSON.stringify(legacyPath)},'owner/repo',${optionsCode});
       await writer.migrateLegacy();
       const inventory=await writer.inventory();
       if(inventory.runs.length!==2)throw Error('lost run');
     `], { stdio: ['ignore', 'pipe', 'pipe'] });
+    freshClosed = once(fresh, 'close');
+    void freshClosed.catch(() => {});
     let error = '';
-    fresh.stderr.on('data', (chunk) => { error += chunk.toString(); });
-    const [code] = await once(fresh, 'close');
+    fresh.stderr!.on('data', (chunk: Buffer) => { error += chunk.toString(); });
+    const [code] = await boundedChildWait(freshClosed, 'fresh migration close');
     assert.equal(code, 0, error);
     assert.equal(await readFile(`${legacyPath}.backup`, 'utf8'), bytes);
     const writer = FileRunRecordWriter.forRepository(legacyPath, 'owner/repo', { ...deterministicAtomicOptions(), exclusiveRepositoryOwnership: true });
     assert.deepEqual((await writer.inventory()).runs.map((run) => run.runId).sort(), old.runs.map((run) => run.runId).sort());
-  } finally { child.kill('SIGKILL'); }
+  } finally {
+    checkpointAbort.abort();
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (fresh && fresh.exitCode === null && fresh.signalCode === null) fresh.kill('SIGKILL');
+    await boundedChildWait(Promise.allSettled([closed, ...(freshClosed ? [freshClosed] : [])]), 'migration fixture cleanup');
+  }
   }
 });
+
+async function boundedChildWait<T>(result: Promise<T>, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      result,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${label} did not settle within 15000ms`)), 15_000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 
 test('migration divergence preserves both destination and original bytes', async () => {
   const root = await temporaryRoot();

@@ -12,27 +12,28 @@ import {
 import { createPendingEffect } from '../src/v2/run-store.js';
 
 test('every finite handler observes a confirmed postcondition without repeating the effect', async () => {
+  const confirmed = { observe: async () => 'confirmed' as const, invoke: async () => { assert.fail('confirmed effects must never be invoked again'); } };
   const cases = [
     () => settleCommitEffect(createPendingEffect({
       kind: 'initial-commit', parentSha: sha('a'), treeSha: sha('b'), message: 'commit',
-    }), adapter('confirmed')),
+    }), confirmed),
     () => settlePushEffect(createPendingEffect({
       kind: 'initial-push', branch: 'codex/issue-1', sha: sha('c'),
-    }), adapter('confirmed')),
+    }), confirmed),
     () => settleDraftPullRequestEffect(createPendingEffect({
       kind: 'draft-pr', owner: 'owner', repo: 'repo', head: 'codex/issue-1', base: 'main', issueNumber: 1, marker: 'marker',
-    }), adapter('confirmed')),
+    }), confirmed),
     () => settleCommentEffect(createPendingEffect({
       kind: 'terminal-comment', issueNumber: 1, marker: 'marker', bodySha256: sha('d'),
       outcome: 'review-ready', attempt: 1,
-    }), adapter('confirmed')),
+    }), confirmed),
     () => settleLabelsEffect(createPendingEffect({
       kind: 'terminal-labels', issueNumber: 1, add: ['agent:review'], remove: ['agent:running'],
       outcome: 'review-ready', attempt: 1,
-    }), adapter('confirmed')),
+    }), confirmed),
     () => settleCleanupEffect(createPendingEffect({
       kind: 'candidate-pin-release', bindingId: 'f'.repeat(64), expectedPinnedCommitSha: sha('e'),
-    }), adapter('confirmed')),
+    }), confirmed),
   ];
   for (const run of cases) assert.equal((await run()).status, 'confirmed');
 });
@@ -75,18 +76,22 @@ test('diverged and unobserved postconditions fail closed with the intent unchang
   const effect = createPendingEffect({
     kind: 'claim-labels', issueNumber: 1, expected: ['agent:auto', 'agent:running'],
   });
+  const original = structuredClone(effect);
   let invokes = 0;
   const diverged = await settleLabelsEffect(effect, {
     observe: async () => 'diverged',
     invoke: async () => { invokes += 1; },
   });
   assert.equal(diverged.status, 'diverged');
+  assert.equal(invokes, 0, 'diverged authority cannot invoke an effect');
+  assert.deepEqual(effect, original);
   const unobserved = await settleLabelsEffect(effect, {
     observe: async () => 'absent',
     invoke: async () => { invokes += 1; },
   });
   assert.equal(unobserved.status, 'unobserved');
   assert.equal(invokes, 1);
+  assert.deepEqual(effect, original);
 });
 
 test('typed handlers reject the wrong finite effect kind before observation or invocation', async () => {
@@ -99,15 +104,6 @@ test('typed handlers reject the wrong finite effect kind before observation or i
   }), /push effect kind/u);
   assert.equal(calls, 0);
 });
-
-function adapter(observation: 'confirmed') {
-  let invokes = 0;
-  return {
-    observe: async () => observation,
-    invoke: async () => { invokes += 1; },
-    get invokes() { return invokes; },
-  };
-}
 
 function sha(character: string): string {
   return character.repeat(40);

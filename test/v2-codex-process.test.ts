@@ -320,15 +320,37 @@ test('wall timeout terminates the group and escalates to SIGKILL before returnin
   });
 });
 
-test('idle timeout is reset by stream activity and is distinct from wall timeout', async () => {
+test('idle timeout is reset by stream activity and is distinct from wall timeout', { timeout: 5_000 }, async (context) => {
   await withRunFixture(async (fixture) => {
+    context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000 });
     const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
-    child.activityAt = Date.now();
-    setTimeout(() => { child.activityAt = Date.now(); }, 15);
-    const result = await new CodexProcess(async () => child).run(fixture.input({ timeoutMs: 250, idleTimeoutMs: 35 }), new AbortController().signal);
+    let monitorStarted!: () => void;
+    const monitoring = new Promise<void>((resolve) => { monitorStarted = resolve; });
+    child.lastActivityAt = () => { monitorStarted(); return child.activityAt; };
+    const resultPromise = new CodexProcess(async () => child).run(fixture.input({ timeoutMs: 250, idleTimeoutMs: 35 }), new AbortController().signal);
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      await monitoring;
+      await flush();
+      context.mock.timers.tick(20);
+      child.activityAt = Date.now();
+      await flush();
+      context.mock.timers.tick(15);
+      await flush();
+      assert.equal(Date.now(), child.startedAt + 35);
+      assert.deepEqual(child.terminations, [], 'stream activity keeps the process alive beyond its original idle deadline');
+      context.mock.timers.tick(19);
+      await flush();
+      assert.deepEqual(child.terminations, [], 'new idle deadline has not yet expired');
+      context.mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(child.terminations, ['SIGTERM'], 'idle timeout expires exactly after the last activity');
+    } finally {
+      context.mock.timers.reset();
+    }
+    const result = await resultPromise;
     assert.equal(result.kind, 'idle-timeout');
-    assert.equal(Date.now() - child.startedAt >= 35, true);
-    assert.deepEqual(child.terminations, ['SIGTERM']);
+    assert.equal(child.events.includes('wait-streams'), true);
   });
 });
 

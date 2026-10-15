@@ -13,7 +13,8 @@ test('owned command parent exit drains and terminates inherited descendant pipes
 });
 
 test('owned command deadline includes output callbacks after successful parent exit', { timeout: 2_000 }, async () => {
-  const result = await defaultProcessExecutor(process.execPath, ['-e', "process.stdout.write('done')"], {
+  // Exercise callback settlement within the deadline without a Node VM startup.
+  const result = await defaultProcessExecutor('/bin/sh', ['-c', 'printf done'], {
     timeoutMs: 150, onStdoutChunk: () => new Promise<void>(() => undefined),
   });
   assert.equal(result.exitCode, 124);

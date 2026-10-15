@@ -317,8 +317,14 @@ test('CLI delegates setup, doctor, and status policy to Setup and renders its ty
 
 test('CLI help and version are side-effect free', async () => {
   const output: string[] = [];
-  assert.equal(await runCli(['--help'], { write: (text) => { output.push(text); } }), 0);
+  const dependencies = {
+    executeRun: async () => { assert.fail('help/version cannot launch a Run'); },
+    executeDaemon: async () => { assert.fail('help/version cannot launch the daemon'); },
+    executeSetup: async () => { assert.fail('help/version cannot execute Setup'); },
+    write: (text: string) => { output.push(text); },
+  };
+  assert.equal(await runCli(['--help'], dependencies), 0);
   assert.match(output.pop() ?? '', /^codex-orchestrator\n/m);
-  assert.equal(await runCli(['--version'], { packageVersion: '9.8.7', write: (text) => { output.push(text); } }), 0);
+  assert.equal(await runCli(['--version'], { ...dependencies, packageVersion: '9.8.7' }), 0);
   assert.equal(output.pop(), '9.8.7\n');
 });

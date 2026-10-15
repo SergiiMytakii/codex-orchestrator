@@ -249,8 +249,12 @@ test('answer-only and boundary reports require active issue feedback', () => {
     residualRisks: [],
     response: 'The answer.',
   };
-  assert.equal(validateImplementationReport(answer, { issueFeedbackActive: true }).status, 'answer-only');
-  assert.throws(() => validateImplementationReport(answer), /requires active issue feedback/u);
+  const boundary = { ...answer, status: 'boundary' as const, boundary: { kind: 'authority-boundary' as const } };
+  for (const report of [answer, boundary]) {
+    assert.equal(validateImplementationReport(report, { issueFeedbackActive: true }).status, report.status);
+    assert.throws(() => validateImplementationReport(report), /requires active issue feedback/u);
+    assert.throws(() => validateImplementationReport(report, { issueFeedbackActive: false }), /requires active issue feedback/u);
+  }
 });
 
 test('canonical overlay and immutable packaged implementation schemas equal the runtime owner', async () => {
@@ -445,18 +449,23 @@ test('proof runtime binds decisions to matching visual evidence omitted from the
 });
 
 test('proof runtime validation rejects dangling evidence, duplicate IDs, and non-canonical artifact paths', () => {
+  assert.deepEqual(validateProofReport(passedProof), passedProof, 'the distinct-ID control must be valid');
   assert.throws(() => validateProofReport({
     ...passedProof,
     criteria: [{ ...passedProof.criteria[0], evidenceRefs: ['artifact:missing'] }],
-  }));
+  }), /references unknown evidence artifact:missing/u);
   assert.throws(() => validateProofReport({
     ...passedProof,
-    checks: [passedProof.checks[0], passedProof.checks[0]],
-  }));
+    artifacts: [passedProof.artifacts[0], { ...passedProof.artifacts[1], id: passedProof.artifacts[0]!.id }],
+  }), /artifact ids must be unique/u);
+  assert.throws(() => validateProofReport({
+    ...passedProof,
+    criteria: [passedProof.criteria[0], { ...passedProof.criteria[0] }],
+  }), /criteria ids must be unique/u);
   assert.throws(() => validateProofReport({
     ...passedProof,
     artifacts: [{ ...passedProof.artifacts[0], relativePath: '../outside.txt' }],
-  }));
+  }), /relativePath/u);
 });
 
 test('ProofReceipt contains only sanitized references and never raw local artifact paths', () => {

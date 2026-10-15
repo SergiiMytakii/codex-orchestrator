@@ -145,6 +145,8 @@ test('V2 accepts a strict optional Runner-owned Android proof recipe and rejects
 test('CLI JSON and exit mapping are total over every public runIssue outcome', () => {
   const cases: Array<{ result: RunIssueResult; exit: number }> = [
     { result: { status: 'review-ready', pullRequestUrl: 'https://example.invalid/pr/1', evidencePath: 'evidence/1.json' }, exit: 0 },
+    { result: { status: 'repair-ready', source: 'review', blockerIds: ['REV-1'], evidencePath: 'evidence/repair.json' }, exit: 0 },
+    { result: { status: 'state-schema-unsupported' }, exit: 20 },
     { result: { status: 'not-eligible', reason: 'missing label', evidencePath: 'evidence/2.json' }, exit: 21 },
     { result: { status: 'blocked', kind: 'external', resumable: true, evidencePath: 'evidence/3.json' }, exit: 20 },
     { result: { status: 'blocked', kind: 'safety', resumable: true, evidencePath: 'evidence/4.json' }, exit: 20 },
@@ -153,6 +155,7 @@ test('CLI JSON and exit mapping are total over every public runIssue outcome', (
     { result: { status: 'cancelled', evidencePath: 'evidence/8.json' }, exit: 130 },
     { result: { status: 'requeued', reason: 'owner-contention', evidencePath: 'evidence/requeue.json' }, exit: 0 },
   ];
+  assert.deepEqual([...new Set(cases.map(({ result }) => result.status))].sort(), [...RUN_ISSUE_STATUSES].sort());
   for (const entry of cases) {
     assert.equal(runIssueExitCode(entry.result), entry.exit);
     assert.deepEqual(JSON.parse(renderRunResultJson(entry.result)), {
