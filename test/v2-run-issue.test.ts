@@ -459,7 +459,7 @@ test('restart settles an exactly created continuation worktree before validation
   assert.equal(fixture.events.filter((event) => event === 'git:ensure-continuation-worktree').length, 1);
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 8585, processGroupId: 8585, launchedAt: '2026-07-16T12:10:03.000Z' });
       return { kind: 'completed', attemptId, report: {
         version: 1, status: 'answer-only', summary: 'Answered after recovery.', changedFiles: [], residualRisks: [], response: 'Recovered.',
@@ -850,7 +850,7 @@ test('active feedback terminals quiesce before persistence and tolerate permanen
       fixture.options.permanentlyRejectEffect = failedEffect;
       fixture.dependencies.implementationAgent = {
         run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
           await onLaunched?.({ attemptId, pid: 8383, processGroupId: 8383, launchedAt: '2026-07-16T12:10:01.000Z' });
           return { ...outcome.result, attemptId } as ImplementationAgentResult;
         },
@@ -1196,7 +1196,7 @@ test('trusted issue question answers on the same Run and PR without code, checks
         number: 1, headSha: oldHead, headRefName: before.branchName,
         url: 'https://github.com/owner/repo/pull/1',
       });
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:01:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:01:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 9191, processGroupId: 9191, launchedAt: '2026-07-16T12:01:03.000Z' });
       fixture.events.push('issue-answer-agent');
       return { kind: 'completed', attemptId, report: {
@@ -1290,7 +1290,7 @@ test('trusted issue question answers on the same Run and PR without code, checks
   } as unknown as ReviewFeedbackObserver;
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 9291, processGroupId: 9291, launchedAt: '2026-07-16T12:02:03.000Z' });
       return { kind: 'completed', attemptId, report: {
         version: 1, status: 'answer-only', summary: 'Clarified without a change.', changedFiles: [], residualRisks: [],
@@ -1330,7 +1330,7 @@ test('trusted issue question answers on the same Run and PR without code, checks
   } as unknown as ReviewFeedbackObserver;
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:02:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 9292, processGroupId: 9292, launchedAt: '2026-07-16T12:02:03.000Z' });
       return { kind: 'completed', attemptId, report: {
         version: 1, status: 'boundary', summary: 'The request exceeds the issue.', changedFiles: [], residualRisks: [],
@@ -1373,7 +1373,7 @@ for (const fault of ['before-send', 'after-send', 'revoked-auto'] as const) {
     let answers = 0;
     fixture.dependencies.implementationAgent.run = async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
       answers += 1;
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 9191, processGroupId: 9191, launchedAt: '2026-07-16T12:10:03.000Z' });
       return { kind: 'completed', attemptId, report: { version: 1, status: 'answer-only', summary: 'Answer ready.', changedFiles: [], residualRisks: [], response: 'The exact answer.' } };
     };
@@ -1428,7 +1428,7 @@ test('answer-only fails closed when the discovered open PR no longer matches the
   };
   fixture.dependencies.implementationAgent = {
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:02.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
       await onLaunched?.({ attemptId, pid: 8484, processGroupId: 8484, launchedAt: '2026-07-16T12:10:03.000Z' });
       return { kind: 'completed', attemptId, report: {
         version: 1, status: 'answer-only', summary: 'Answer ready.', changedFiles: [], residualRisks: [], response: 'The answer.',
@@ -1701,7 +1701,7 @@ test('trusted issue-comment repair runs checks, proof, review, and updates the s
       feedbackImplementationCalls += 1;
       const baseline = await fixture.dependencies.git.snapshot(worktreePath);
       await onPrepared?.({
-        attemptId, reportPath: `/tmp/${attemptId}-report.json`,
+        attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`),
         preparedAt: '2026-07-16T12:00:00.000Z', baseline,
       });
       await onLaunched?.({ attemptId, pid: 5050 + feedbackImplementationCalls, processGroupId: 5050 + feedbackImplementationCalls, launchedAt: '2026-07-16T12:00:00.000Z' });
@@ -1979,7 +1979,7 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
       assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false,
         'new feedback clears the previous failure before implementation');
       const baseline = await fixture.dependencies.git.snapshot(worktreePath);
-      await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:00:00.000Z', baseline });
+      await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:00:00.000Z', baseline });
       await onLaunched?.({ attemptId, pid: 7000 + implementationRound, processGroupId: 7000 + implementationRound, launchedAt: '2026-07-16T12:00:01.000Z' });
       fixture.events.push('feedback-implementation');
       await writeFile(join(worktreePath, 'feature.txt'), `trusted feedback repair ${implementationRound}\n`);
@@ -2113,7 +2113,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
     if (phase === 'implementation') {
       fixture.dependencies.implementationAgent = {
         run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
           await onLaunched?.({ attemptId, pid: 8181, processGroupId: 8181, launchedAt: '2026-07-16T12:10:01.000Z' });
           fixture.events.push('feedback-blocker-work');
           return { kind: 'completed', attemptId, report: { version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker } };
@@ -2122,7 +2122,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
     } else if (phase === 'proof') {
       fixture.dependencies.implementationAgent = {
         run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
           await onLaunched?.({ attemptId, pid: 8182, processGroupId: 8182, launchedAt: '2026-07-16T12:10:01.000Z' });
           await writeFile(join(worktreePath, 'feature.txt'), 'proof feedback repair\n');
           return { kind: 'completed', attemptId, report: { version: 1, status: 'completed', summary: 'repair ready for proof', changedFiles: ['feature.txt'], residualRisks: [] } };
@@ -2138,7 +2138,7 @@ test('trusted feedback preserves exact Implement, Proof, and rejected Review blo
       fixtureOptions.reviewRejectedAlways = true;
       fixture.dependencies.implementationAgent = {
         run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
-          await onPrepared?.({ attemptId, reportPath: `/tmp/${attemptId}-report.json`, preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
+          await onPrepared?.({ attemptId, reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`), preparedAt: '2026-07-16T12:10:00.000Z', baseline: await fixture.dependencies.git.snapshot(worktreePath) });
           await onLaunched?.({ attemptId, pid: 8183, processGroupId: 8183, launchedAt: '2026-07-16T12:10:01.000Z' });
           fixture.events.push('feedback-blocker-work');
           await writeFile(join(worktreePath, 'feature.txt'), 'review feedback repair\n');
@@ -2527,6 +2527,186 @@ test('failed checks and proof findings rework the same worktree until review-rea
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
 });
 
+test('configured check outputs cannot contaminate the next check or published source', async () => {
+  const fixture = await runFixture({ configuredChecks: {
+    diagnostics: `node -e 'const fs = require("node:fs"); fs.mkdirSync("unexpected/reports", {recursive:true}); fs.writeFileSync("unexpected/reports/new.format", "diagnostic"); fs.writeFileSync("unexpected/reports/picture.png", "pixels"); fs.writeFileSync("scratch.ts", "generated code"); fs.writeFileSync("opaque-output", "temporary");'`,
+    isolated: `node -e 'const fs = require("node:fs"); if (fs.existsSync("unexpected") || fs.existsSync("scratch.ts") || fs.existsSync("opaque-output") || !fs.existsSync("feature.txt")) process.exit(8);'`,
+  } });
+  fixture.dependencies.checks.run = input => runShellCheck(
+    input.command, input.cwd, input.signal, 10_000, input.onLaunched,
+  );
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence }));
+  const published = (await execFileAsync('git', ['-C', fixture.worktreePath, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout.trim().split('\n');
+  assert.deepEqual(published, ['README.md', 'feature.txt']);
+  assert.deepEqual((await fixture.store.read()).runs[0]!.checks.map(check => check.status), ['passed', 'passed']);
+});
+
+test('configured check outputs do not mask a failing check or block its repair', async () => {
+  const fixture = await runFixture({ configuredChecks: {
+    diagnostics: `node -e 'require("node:fs").writeFileSync("unfamiliar-output", "diagnostic"); console.error("real assertion failed"); process.exit(1);'`,
+  } });
+  fixture.dependencies.checks.run = input => runShellCheck(
+    input.command, input.cwd, input.signal, 10_000, input.onLaunched,
+  );
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'repair-ready', JSON.stringify(result));
+  const record = (await fixture.store.read()).runs[0]!;
+  assert.equal(record.candidateMaterialization, undefined);
+  assert.match(JSON.stringify(record.reworkFindings), /real assertion failed/u);
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
+test('configured checks still reject edited, deleted, staged and committed source changes', async () => {
+  for (const command of [
+    `node -e 'require("node:fs").writeFileSync("feature.txt", "mutated implementation-added source");'`,
+    `node -e 'require("node:fs").unlinkSync("README.md");'`,
+    `node -e 'require("node:fs").writeFileSync("new-source.ts", "staged code");' && git add new-source.ts`,
+    `git -c user.name=check -c user.email=check@example.invalid commit --allow-empty -m unexpected`,
+  ]) {
+    const fixture = await runFixture({ configuredChecks: { mutation: command } });
+    fixture.dependencies.checks.run = input => runShellCheck(
+      input.command, input.cwd, input.signal, 10_000, input.onLaunched,
+    );
+    const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(result.status, 'blocked', JSON.stringify({ command, result }));
+    assert.equal(fixture.events.includes('proof'), false);
+    assert.equal(fixture.events.includes('git:push'), false);
+  }
+});
+
+test('configured check output isolation survives restart after result adoption', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, configuredChecks: {
+    diagnostics: `node -e 'require("node:fs").writeFileSync("new-output.data", "diagnostic");'`,
+  } });
+  let checkCalls = 0;
+  fixture.dependencies.checks.run = input => {
+    checkCalls += 1;
+    return runShellCheck(input.command, input.cwd, input.signal, 10_000, input.onLaunched);
+  };
+  const candidate = fixture.dependencies.git.candidateV2!;
+  const remove = candidate.removeMaterialization;
+  let rejectCleanup = true;
+  candidate.removeMaterialization = async input => {
+    if (rejectCleanup) {
+      rejectCleanup = false;
+      return { kind: 'failed', code: 'candidate-materialization-io-failed', detailSha256: sha256('cleanup interrupted') };
+    }
+    return remove(input);
+  };
+
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'transport-failed', JSON.stringify(first));
+  const retained = (await fixture.store.read()).runs[0]!;
+  assert.equal(retained.activeAttempt?.operationId, 'configured-check');
+  assert.equal(retained.activeAttempt?.stage, 'adopted');
+  assert.equal(await readFile(join(retained.candidateMaterialization!.path, 'new-output.data'), 'utf8'), 'diagnostic');
+
+  const resumed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal(checkCalls, 1);
+});
+
+test('configured check outputs survive receipt recovery without rerunning the check', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, configuredChecks: {
+    diagnostics: `node -e 'require("node:fs").writeFileSync("new-output.data", "diagnostic");'`,
+  } });
+  let checkCalls = 0;
+  fixture.dependencies.checks.run = input => {
+    checkCalls += 1;
+    return runShellCheck(input.command, input.cwd, input.signal, 10_000, input.onLaunched);
+  };
+  const write = fixture.dependencies.writeAttemptResult;
+  let rejectObservation = true;
+  fixture.dependencies.writeAttemptResult = async input => {
+    await write(input);
+    if (rejectObservation) {
+      rejectObservation = false;
+      throw new Error('write completed but caller lost confirmation');
+    }
+  };
+
+  const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(first.status, 'transport-failed', JSON.stringify(first));
+  const resumed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'review-ready', JSON.stringify(resumed));
+  assert.equal(checkCalls, 1);
+});
+
+test('a check without a saved result discards its outputs before a fresh execution', async () => {
+  for (const safeHalt of [false, true]) {
+    const fixture = await runFixture({ fileBackedStore: true, configuredChecks: {
+      diagnostics: `node -e 'const fs = require("node:fs"); if (fs.existsSync("temporary-output")) process.exit(8); fs.writeFileSync("temporary-output", "diagnostic");'`,
+    } });
+    let checkCalls = 0;
+    fixture.dependencies.checks.run = async input => {
+      checkCalls += 1;
+      const result = await runShellCheck(input.command, input.cwd, input.signal, 10_000, input.onLaunched);
+      if (checkCalls === 1) {
+        if (safeHalt) throw new CheckProcessQuiescenceError(987654);
+        throw new Error('command completed without a saved result');
+      }
+      return result;
+    };
+    const first = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(first.status, 'transport-failed', JSON.stringify(first));
+    const resumed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+    assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, safeHalt, evidence: fixture.evidence }));
+    assert.equal(checkCalls, 2, 'a missing receipt cannot count as a passed check');
+  }
+});
+
+test('a missing check result cannot hide changed pinned source on restart', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, configuredChecks: {
+    mutation: `node -e 'const fs = require("node:fs"); fs.writeFileSync("feature.txt", "changed source"); fs.writeFileSync("temporary-output", "diagnostic");'`,
+  } });
+  let checkCalls = 0;
+  fixture.dependencies.checks.run = async input => {
+    checkCalls += 1;
+    await runShellCheck(input.command, input.cwd, input.signal, 10_000, input.onLaunched);
+    throw new Error('command completed without a saved result');
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'transport-failed');
+  const resumed = await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(resumed.status, 'blocked', JSON.stringify(resumed));
+  assert.equal(checkCalls, 1);
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
+test('cancelled check outputs cannot turn the retained cancellation into source mutation', async () => {
+  const controller = new AbortController();
+  const fixture = await runFixture({ signal: controller.signal, fileBackedStore: true, configuredChecks: {
+    diagnostics: `node -e 'require("node:fs").writeFileSync("temporary-output", "diagnostic");'`,
+  } });
+  let checkCalls = 0;
+  fixture.dependencies.checks.run = async input => {
+    checkCalls += 1;
+    const result = await runShellCheck(input.command, input.cwd, input.signal, 10_000, input.onLaunched);
+    controller.abort();
+    return result;
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
+  const replay = await new RunIssue({ ...fixture.dependencies, signal: new AbortController().signal })
+    .runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(replay.status, 'cancelled', JSON.stringify(replay));
+  assert.equal(checkCalls, 1);
+  assert.equal((await fixture.store.read()).runs[0]!.candidateMaterialization, undefined);
+});
+
+test('untracked source additions by a reviewer still block publication', async () => {
+  const fixture = await runFixture();
+  const review = fixture.dependencies.implementationReviewer.run;
+  fixture.dependencies.implementationReviewer.run = async input => {
+    await writeFile(join(input.worktreePath, 'unreviewed-source.ts'), 'unexpected agent code');
+    return review(input);
+  };
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked', JSON.stringify(result));
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
 test('configured checks receive the complete immutable candidate file set', async () => {
   const fixture = await runFixture();
   const original = fixture.dependencies.checks.run;
@@ -2729,7 +2909,7 @@ test('answer-only outside issue feedback retries the report instead of terminati
     run: async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
       await onPrepared?.({
         attemptId,
-        reportPath: `/tmp/${attemptId}-report.json`,
+        reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`),
         preparedAt: '2026-07-16T12:10:02.000Z',
         baseline: await fixture.dependencies.git.snapshot(worktreePath),
       });
@@ -2751,7 +2931,7 @@ test('answer-only outside issue feedback retries the report instead of terminati
   fixture.dependencies.implementationAgent.run = async ({ attemptId, worktreePath, onPrepared, onLaunched }) => {
     await onPrepared?.({
       attemptId,
-      reportPath: `/tmp/${attemptId}-report.json`,
+      reportPath: join(fixture.targetRoot, '.attempt-results', `${attemptId}-report.json`),
       preparedAt: '2026-07-16T12:10:04.000Z',
       baseline: await fixture.dependencies.git.snapshot(worktreePath),
     });
@@ -4268,6 +4448,7 @@ interface FixtureOptions {
 
 async function runFixture(options: FixtureOptions = {}) {
   const targetRoot = await mkdtemp(join(tmpdir(), 'codex-v2-run-issue-'));
+  await mkdir(join(targetRoot, '.attempt-results'));
   const remoteRoot = await mkdtemp(join(tmpdir(), 'codex-v2-run-remote-'));
   const workspaceRoot = join(targetRoot, '.worktrees');
   const worktreePath = join(workspaceRoot, 'issue-42');
@@ -4454,7 +4635,7 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         await onPrepared?.({
           attemptId,
-          reportPath: `/tmp/${attemptId}-report.json`,
+          reportPath: join(targetRoot, '.attempt-results', `${attemptId}-report.json`),
           preparedAt: '2026-07-16T12:00:00.000Z',
           baseline: await dependencies.git.snapshot(path),
         });
@@ -4541,7 +4722,7 @@ async function runFixture(options: FixtureOptions = {}) {
             defects: [], residualRisks: [], reviewerSessionId: input.reviewerSessionId,
             reviewers: reviewParticipants(input.reviewerSessionId), repairFindingOutcomes: [],
           } }));
-          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
+          await writeFile(join(targetRoot, '.attempt-results', `${input.attemptId}-report.json`), originalReportBytes);
           const validation = validateCompletedReport(input.operation, input.attemptId, originalReportBytes, {
             operation: input.operation, targetRevision: input.targetRevision,
             targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
@@ -4556,7 +4737,7 @@ async function runFixture(options: FixtureOptions = {}) {
           || (options.reviewMalformedCount ?? 0) > 0) {
           if ((options.reviewMalformedCount ?? 0) > 0) options.reviewMalformedCount!--;
           const originalReportBytes = Buffer.from('{"report":{"version":1}}');
-          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
+          await writeFile(join(targetRoot, '.attempt-results', `${input.attemptId}-report.json`), originalReportBytes);
           return {
             kind: 'report-invalid', diagnostic: 'missing operation', originalReportBytes,
             originalReportSha256: sha256(originalReportBytes),
@@ -4565,7 +4746,7 @@ async function runFixture(options: FixtureOptions = {}) {
         if (options.reviewIncoherentNeedsWorkOnce) {
           options.reviewIncoherentNeedsWorkOnce = false;
           const originalReportBytes = Buffer.from(JSON.stringify({ verdict: 'needs-work', defects: [] }));
-          await writeFile(`/tmp/${input.attemptId}-report.json`, originalReportBytes);
+          await writeFile(join(targetRoot, '.attempt-results', `${input.attemptId}-report.json`), originalReportBytes);
           return {
             kind: 'report-invalid', diagnostic: 'needs-work review requires an open or reopened defect or repair finding',
             originalReportBytes, originalReportSha256: sha256(originalReportBytes),
@@ -4775,7 +4956,7 @@ async function runFixture(options: FixtureOptions = {}) {
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, bytes);
     },
-    attemptResultPath: ({ attemptId }) => `/tmp/${attemptId}-report.json`,
+    attemptResultPath: ({ attemptId }) => join(targetRoot, '.attempt-results', `${attemptId}-report.json`),
     now: () => '2026-07-16T12:00:00.000Z',
     signal: options.signal,
   };

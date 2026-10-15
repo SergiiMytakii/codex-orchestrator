@@ -78,6 +78,8 @@ export interface CandidateGitV2 {
     binding: CandidateBindingV2;
     materialization: CandidateMaterializationV2;
     artifactDir: string;
+    /** Trusted checks may create disposable files outside the pinned source tree. */
+    operation?: 'configured-check';
   }): Promise<CandidateResult<'matching' | 'mutated' | 'missing'>>;
   removeMaterialization(input: { materialization: CandidateMaterializationV2 }): Promise<CandidateResult<void>>;
   copyProofArtifacts(input: {

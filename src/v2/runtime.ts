@@ -273,12 +273,20 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
         if (isErrorCode(error, 'ENOENT')) return 'missing';
         throw error;
       }
-      const [head, tree, changed] = await Promise.all([
+      const [head, tree, unchanged] = await Promise.all([
         this.getHead(input.materialization.path),
         this.git(['-C', input.materialization.path, 'rev-parse', 'HEAD^{tree}']).then((value) => value.trim()),
-        this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.materialization.path, input.artifactDir),
+        input.operation === 'configured-check'
+          // Each check receives a fresh detached copy. Newly created files are
+          // execution outputs, never input to the next check or publication.
+          // Implementation-added source is already tracked in the pinned tree;
+          // edits, deletions and staged additions must still reject the result.
+          ? this.git(['-C', input.materialization.path, 'status', '--porcelain=v1', '--untracked-files=no', '-z'])
+            .then(status => status.length === 0)
+          : this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.materialization.path, input.artifactDir)
+            .then(files => files.length === 0),
       ]);
-      return head === input.binding.candidateCommitSha && tree === input.binding.candidateTreeSha && changed.length === 0 ? 'matching' : 'mutated';
+      return head === input.binding.candidateCommitSha && tree === input.binding.candidateTreeSha && unchanged ? 'matching' : 'mutated';
     });
   }
 

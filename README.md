@@ -242,8 +242,23 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-on the final candidate before Acceptance Proof, Review, and publication. For a
-plain npm script invoking Jest, source changes with optional Markdown changes use Jest's native
+on the final candidate before Acceptance Proof, Review, and publication.
+
+The pinned Git tree is the source authority. Each configured check runs in its
+own fresh detached copy of that tree. Files newly created by a check are
+disposable execution outputs regardless of their names, extensions, or paths;
+they are removed with that copy and never carried into the next check, Proof,
+Review, or published commit. This does not depend on target-repository ignore
+rules. Changes or deletions of any pinned file (including newly implemented
+source), staged additions, or Git HEAD/tree drift still block the result.
+Implementation capture still includes new source, and the stricter untracked
+file checks for Proof and Review agents remain in force. The captured check
+output and result receipt are retained separately from the disposable copy.
+Failed checks still enter repair; restart recovers an existing receipt without
+repeating the command just because it produced temporary files.
+
+For a plain npm script invoking Jest, source changes with optional Markdown
+changes use Jest's native
 `--findRelatedTests` selector over the complete immutable candidate file set,
 including transitive dependents and changed tests. Unrelated suites are outside
 that blocking check; the Agent cannot waive a failure with a narrative report.

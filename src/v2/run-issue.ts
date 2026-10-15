@@ -2690,7 +2690,7 @@ export class RunIssue {
       const cleanup = await this.observeSafeHaltCleanup(active);
       if ('status' in cleanup) return cleanup;
       active = cleanup.active;
-      if (attempt.result) return { active };
+      if (attempt.result || (attempt.operationId === 'configured-check' && active.record.candidateMaterialization)) return { active };
       if (active.record.lifecycle === 'safe-halt') {
         active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
       }
@@ -2722,7 +2722,7 @@ export class RunIssue {
     const cleanup = await this.observeSafeHaltCleanup(active);
     if ('status' in cleanup) return cleanup;
     active = cleanup.active;
-    if (observed.result) return { active };
+    if (observed.result || (attempt.operationId === 'configured-check' && active.record.candidateMaterialization)) return { active };
     if (active.record.lifecycle === 'safe-halt') {
       active = await this.persist(active, { lifecycle: lifecycleForAttempt(attempt.operationId) });
     }
@@ -2937,6 +2937,30 @@ export class RunIssue {
     const binding = active.record.candidateBinding;
     if (!candidate || !binding) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'candidate-git-v2-required');
     const materializationId = sha256(canonicalJson({ bindingId: binding.bindingId, operation, operationSourceId }));
+    const retained = active.record.candidateMaterialization;
+    const attempt = active.record.activeAttempt;
+    if (operation === 'final-check' && attempt?.operationId === 'configured-check'
+      && attempt.operationSourceId === operationSourceId && attempt.stage === 'observed' && retained) {
+      // Inspect the previous execution before either adopting its receipt or
+      // discarding a receipt-less copy for a fresh execution.
+      if (retained.bindingId !== binding.bindingId || retained.candidateCommitSha !== binding.candidateCommitSha
+        || resolve(retained.path) !== resolve(dirname(active.record.worktreePath), '.candidate-materializations',
+          active.record.runId, binding.bindingId, materializationId)) {
+        return this.persistCandidateEvidenceSafetyTerminal(active, 'path-diverged');
+      }
+      const inspection = await candidate.inspectMaterialization({
+        binding, materialization: retained, artifactDir: config.proof.artifactDir, operation: 'configured-check',
+      });
+      if (inspection.kind === 'failed') return this.mapCandidateFailure(active, inspection.code);
+      if (inspection.value !== 'matching') {
+        return this.persistCandidateEvidenceSafetyTerminal(active,
+          inspection.value === 'missing' ? 'candidate-execution-missing' : 'candidate-materialization-mutated');
+      }
+      if (attempt.result) return { active, materialization: retained };
+      const settled = await this.settleCandidateMaterialization(active, config);
+      if ('status' in settled) return settled;
+      active = settled.active;
+    }
     const prepared = await candidate.prepareMaterialization({
       binding,
       runId: active.record.runId,
@@ -2965,10 +2989,16 @@ export class RunIssue {
     const binding = active.record.candidateBinding;
     const materialization = active.record.candidateMaterialization;
     if (!candidate || !binding || !materialization) return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-state-missing');
-    if (active.record.activeAttempt?.stage !== (settledPreLaunch ? 'prepared' : 'adopted')) {
+    const attempt = active.record.activeAttempt;
+    const abandonedCheck = attempt?.operationId === 'configured-check' && attempt.stage === 'observed'
+      && !attempt.result && attempt.cleanup === 'confirmed';
+    if (attempt?.stage !== (settledPreLaunch ? 'prepared' : 'adopted') && !abandonedCheck) {
       return this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-result-adoption-unconfirmed');
     }
-    const inspection = await candidate.inspectMaterialization({ binding, materialization, artifactDir: config.proof.artifactDir });
+    const inspection = await candidate.inspectMaterialization({
+      binding, materialization, artifactDir: config.proof.artifactDir,
+      ...(active.record.activeAttempt?.operationId === 'configured-check' ? { operation: 'configured-check' as const } : {}),
+    });
     if (inspection.kind === 'failed') return this.mapCandidateFailure(active, inspection.code);
     if (inspection.value !== 'matching') {
       return this.reconcilePersistedCandidateMaterialization(active, config);
@@ -2996,7 +3026,10 @@ export class RunIssue {
     if (!candidate || !binding || !materialization) {
       return this.persistCandidateEvidenceSafetyTerminal(active, 'candidate-materialization-state-missing');
     }
-    const inspection = await candidate.inspectMaterialization({ binding, materialization, artifactDir: config.proof.artifactDir });
+    const inspection = await candidate.inspectMaterialization({
+      binding, materialization, artifactDir: config.proof.artifactDir,
+      ...(active.record.activeAttempt?.operationId === 'configured-check' ? { operation: 'configured-check' as const } : {}),
+    });
     if (inspection.kind === 'failed') return this.mapCandidateFailure(active, inspection.code);
     if (inspection.value === 'missing') {
       return active.record.terminalOutcome
