@@ -38,6 +38,25 @@ import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
 
+test('unknown candidate ownership reports reconciliation failure before claim and preserves the candidate', async () => {
+  const fixture = await runFixture();
+  const ref = 'refs/codex-orchestrator/candidates/retained/unknown-owner';
+  await execFileAsync('git', ['-C', fixture.targetRoot, 'update-ref', ref, 'HEAD']);
+
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+
+  assert.equal(result.status, 'transport-failed');
+  const evidence = fixture.evidence.find(entry => entry.code === 'candidate-reconciliation-failed');
+  assert.ok(evidence, JSON.stringify(fixture.evidence));
+  assert.match(evidence.summary, /candidate-io-failed/u);
+  assert.ok(evidence.summary.includes('5a34167c57c1e180ed95a5e0fdf577a8dbc6b921ded1a191fb2ae1a6d03f3a53'));
+  assert.equal(fixture.evidence.some(entry => entry.code === 'issue-read-failed'), false);
+  assert.equal((await fixture.store.read()).runs.length, 0);
+  assert.equal(fixture.events.includes('agent'), false);
+  assert.equal((await execFileAsync('git', ['-C', fixture.targetRoot, 'rev-parse', ref])).stdout,
+    (await execFileAsync('git', ['-C', fixture.targetRoot, 'rev-parse', 'HEAD'])).stdout);
+});
+
 test('issue read failures retain the original transport reason before claim', async () => {
   const fixture = await runFixture();
   fixture.dependencies.issues.read = async () => {

@@ -1275,7 +1275,10 @@ export class RunIssue {
             ? [{ path: run.candidateMaterialization.path, candidateCommitSha: run.candidateMaterialization.candidateCommitSha }]
             : []),
         });
-        if (reconciled.kind === 'failed') return this.preClaimTransport(input.issueNumber);
+        if (reconciled.kind === 'failed') {
+          return this.preClaimTransport(input.issueNumber, 'candidate-reconciliation-failed',
+            `Candidate reconciliation failed: ${reconciled.code}; detail SHA-256: ${reconciled.detailSha256}.`);
+        }
       }
       const matchingRuns = persisted.runs.filter((run) => run.issueNumber === input.issueNumber && run.canonicalRepository === canonicalRepository);
       if (matchingRuns.length > 1) return await this.preClaimInternal('ambiguous-run-state', input.issueNumber);
