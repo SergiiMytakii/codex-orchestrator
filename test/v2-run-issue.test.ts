@@ -5014,7 +5014,7 @@ function assertFreshProofRecovery(input: ProofInput, startedAt: string): void {
 
 async function prepareActiveIssueFeedback(fixture: Awaited<ReturnType<typeof runFixture>>): Promise<void> {
   const initial = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.equal(initial.status, 'review-ready');
+  assert.equal(initial.status, 'review-ready', JSON.stringify({ result: initial, evidence: fixture.evidence }));
   if (initial.status !== 'review-ready') throw new Error('initial publication failed');
   const record = (await fixture.store.read()).runs[0]!;
   const head = record.reviewFeedback!.previousPublishedHeadSha!;

@@ -185,7 +185,12 @@ function runSpawn(
 function signalOwnedProcess(pid: number | undefined, processGroup: boolean, signal: NodeJS.Signals): void {
   if (!pid) return;
   try { process.kill(processGroup ? -pid : pid, signal); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // A group can briefly reject signals while its last member exits. The
+    // close/deadline barrier must still confirm absence; EPERM is not absence.
+    if (code !== 'ESRCH' && !(processGroup && code === 'EPERM')) throw error;
+  }
 }
 function groupPresent(pid: number): boolean {
   try { process.kill(-pid, 0); return true; }

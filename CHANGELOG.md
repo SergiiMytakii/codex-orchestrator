@@ -7,6 +7,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Fixed
+- Confirm process-group absence after a cleanup signal races group exit and
+  returns EPERM; retain the existing deadline when cleanup remains unconfirmed.
 - Synchronize packaged skills with the current Implement Spec workflow and UI
   proof requirements, replacing the removed Tickets Orchestrator skill.
 - Isolate generated check outputs from pinned candidate source and recover saved

@@ -32,3 +32,41 @@ test('owned command deadline interrupts blocked stdin and preserves binary bytes
   });
   assert.equal(blocked.exitCode, 124);
 });
+
+test('owned command confirms group absence after exit races a denied cleanup signal', async (t) => {
+  const kill = process.kill.bind(process);
+  let observedExitingGroup = false;
+  let deniedCleanup = false;
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0 && signal === 0 && !observedExitingGroup) {
+      observedExitingGroup = true;
+      throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    }
+    if (pid < 0 && signal === 'SIGTERM' && !deniedCleanup) {
+      deniedCleanup = true;
+      throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    }
+    return kill(pid, signal);
+  });
+
+  const result = await defaultProcessExecutor(process.execPath, ['-e', "process.stdout.write('done')"]);
+
+  assert.equal(observedExitingGroup, true);
+  assert.equal(deniedCleanup, true);
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, 'done');
+});
+
+test('owned command keeps denied group cleanup blocked until the existing barrier expires', { timeout: 12_000 }, async (t) => {
+  const kill = process.kill.bind(process);
+  t.mock.method(process, 'kill', (pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid < 0) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    return kill(pid, signal);
+  });
+
+  await assert.rejects(
+    defaultProcessExecutor(process.execPath, ['-e', "process.stdout.write('done')"]),
+    (error: unknown) => error instanceof Error && 'code' in error
+      && error.code === 'command-process-quiescence-unconfirmed',
+  );
+});
