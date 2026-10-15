@@ -1,11 +1,84 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { runShellCheck } from '../src/v2/runtime.js';
+
+test('Jest checks select the immutable change and exclude unrelated failing suites', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'codex-affected-jest-'));
+  try {
+    await mkdir(join(cwd, 'node_modules/.bin'), { recursive: true });
+    await mkdir(join(cwd, 'src'));
+    await writeFile(join(cwd, 'src/feature.ts'), 'export const feature = true;');
+    await writeFile(join(cwd, 'jest.config.js'), 'module.exports = {};');
+    await writeFile(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --config jest.config.js' } }));
+    // Process-boundary fixture: an unscoped suite fails; the native related-test invocation succeeds.
+    await writeFile(join(cwd, 'node_modules/.bin/jest'), `#!/bin/sh
+printf "%s\\n" "$@"
+case "$*" in
+  *--showConfig*) echo observed > config-probe.marker; if [ -f resolved-config.json ]; then cat resolved-config.json; else printf '{"configs":[{}],"globalConfig":{}}'; fi; exit 0;;
+  *./src/broken.ts*) exit 1;;
+  *./src/uncovered.ts*) case "$*" in *--passWithNoTests=false*) exit 1;; *) exit 0;; esac;;
+  *"--findRelatedTests ./src/feature.ts"*) exit 0;;
+  *) exit 1;;
+esac
+`);
+    await chmod(join(cwd, 'node_modules/.bin/jest'), 0o700);
+    const run = (changedFiles?: string[]) => runShellCheck('npm test', cwd, new AbortController().signal, 5000, undefined, changedFiles);
+    assert.equal((await run()).status, 'failed');
+    await assert.rejects(runShellCheck('npm test', cwd, new AbortController().signal, 5000,
+      async () => { throw new Error('ownership rejected'); }, ['src/feature.ts']), /ownership rejected/u);
+    await assert.rejects(readFile(join(cwd, 'config-probe.marker')), 'config probing must wait for persisted launch ownership');
+    const affected = await run(['src/feature.ts']);
+    assert.equal(affected.status, 'passed');
+    assert.match(affected.output.toString(), /--findRelatedTests/u);
+    assert.match(affected.output.toString(), /\.\/src\/feature\.ts/u);
+    assert.equal(affected.outputSha256, createHash('sha256').update(affected.output).digest('hex'));
+    await writeFile(join(cwd, 'src/broken.ts'), 'throw new Error("regression");');
+    assert.equal((await run(['src/feature.ts', 'src/broken.ts'])).status, 'failed', 'a related failure remains blocking');
+    await writeFile(join(cwd, 'README.md'), 'documentation');
+    await writeFile(join(cwd, 'jest.config.js'), 'module.exports = {};');
+    assert.equal((await run(['src/feature.ts', 'README.md'])).status, 'passed', 'incidental docs must not restore unrelated blocking');
+    await writeFile(join(cwd, 'src/uncovered.ts'), 'export const uncovered = true;');
+    assert.equal((await run(['src/uncovered.ts'])).status, 'failed', 'config-based no-tests success cannot waive the check');
+    await mkdir(join(cwd, 'test'));
+    await writeFile(join(cwd, 'test/bootstrap.js'), 'beforeEach(() => {});');
+    await writeFile(join(cwd, 'resolved-config.json'), JSON.stringify({ configs: [{ setupFilesAfterEnv: [join(cwd, 'test/bootstrap.js')] }], globalConfig: {} }));
+    const setup = await run(['src/feature.ts', 'test/bootstrap.js']);
+    assert.equal(setup.status, 'failed', 'global setup changes can affect suites outside ordinary imports');
+    assert.doesNotMatch(setup.output.toString(), /--findRelatedTests/u);
+    assert.equal((await run(['src/feature.ts'])).status, 'failed', 'local hook dependencies also require conservative full execution');
+    await writeFile(join(cwd, 'resolved-config.json'), JSON.stringify({ configs: [{ snapshotSerializers: [join(cwd, 'test/bootstrap.js')] }], globalConfig: {} }));
+    assert.equal((await run(['src/feature.ts'])).status, 'failed', 'local serializers affect suites without import edges');
+    await rm(join(cwd, 'resolved-config.json'));
+    for (const config of [
+      "module.exports = process.env.npm_lifecycle_event === 'test' ? { setupFilesAfterEnv: ['./test/bootstrap.js'] } : {};",
+      "module.exports = { globals: require('./src/feature.ts') };",
+    ]) {
+      await writeFile(join(cwd, 'jest.config.js'), config);
+      assert.equal((await run(['src/feature.ts'])).status, 'failed', 'executable config dependencies cannot authorize narrower checks');
+    }
+    await writeFile(join(cwd, 'jest.config.js'), 'module.exports = {};');
+    for (const files of [['jest.config.js'], ['src/deleted.ts'], [], ['../outside.ts']]) {
+      const result = await run(files);
+      assert.equal(result.status, 'failed', JSON.stringify(files));
+      assert.doesNotMatch(result.output.toString(), /--findRelatedTests/u);
+    }
+    await writeFile(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --config jest.config.js', pretest: 'echo prepared' } }));
+    const hooked = await run(['src/feature.ts']);
+    assert.equal(hooked.status, 'failed', 'npm lifecycle hooks can change effective configuration after the probe');
+    assert.doesNotMatch(hooked.output.toString(), /--findRelatedTests/u);
+    // Existing filters, custom wrappers and no-tests success flags cannot become a weaker gate.
+    for (const script of ['jest --passWithNoTests', 'jest --testPathPattern feature', 'node wrapper.js', 'jest && echo ok']) {
+      await writeFile(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: script } }));
+      const result = await run(['src/feature.ts']);
+      assert.doesNotMatch(result.output.toString(), /--findRelatedTests/u, script);
+    }
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test('timed-out check proves a TERM-ignoring descendant is absent before returning', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-check-timeout-'));

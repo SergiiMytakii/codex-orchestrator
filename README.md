@@ -137,10 +137,11 @@ repeat implementation or an app scenario. Coverage corrections retain the
 independent reviewer identities, verdicts and findings. Repeated malformed reports
 never authorize publication and do not exhaust a lifetime attempt budget.
 
-Repeated failed checks on the same tree do not establish a permanent external
-blocker. Unavailable tooling resumes checks after recovery; behavioral failures
-continue through the existing semantic repair path. Every final check still has
-to pass on the exact candidate.
+Unavailable tooling resumes checks after recovery. A behavioral failure opens
+an in-scope repair. If the same check fails again after implementation returns
+the same candidate tree, the Run stops with `configured-check-no-progress` and
+removes `agent:running`; it neither accepts the failure nor repeats unchanged
+work. Code changes or a different check policy still permit further repairs.
 
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
@@ -241,8 +242,23 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-on the final candidate before Acceptance Proof, Review, and publication. A failed
-check requires repair; an unavailable check retains the work and resumes through
+on the final candidate before Acceptance Proof, Review, and publication. For a
+plain npm script invoking Jest, source changes with optional Markdown changes use Jest's native
+`--findRelatedTests` selector over the complete immutable candidate file set,
+including transitive dependents and changed tests. Unrelated suites are outside
+that blocking check; the Agent cannot waive a failure with a narrative report.
+The retained check output names the actual invocation. No related tests is a
+failure, not a successful check, even if Jest configuration enables
+`passWithNoTests`. Config changes, other non-source or removed files, custom
+wrappers, unsupported flags and other test runners retain the complete configured
+command. The Runner inspects resolved Jest configuration within the same owned
+check process. Narrowing requires static JSON/package configuration or a JS/TS
+config exporting only an object literal, parsed as data without evaluating code.
+Executable configuration, npm lifecycle hooks, presets, multiple projects, local global modules
+(setup, environments, transforms, serializers and similar hooks), or
+uninspectable configuration require the full command: ordinary suite imports
+cannot establish their dependency scope. Typecheck and build remain complete checks.
+A failed check requires repair; an unavailable check retains the work and resumes through
 the existing lifecycle after environment recovery without repeating implementation.
 Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
@@ -303,9 +319,11 @@ Starting a new journal requires preserving the old file and checking ownership/r
 - `checks`: mandatory commands executed on the final candidate. Issue descriptions
   cannot change this set. Checks run before Acceptance Proof and Review against
   the immutable candidate, including after Review repairs.
-  A failed check becomes a bounded finding for the next implementation cycle;
-  there is no qualification operation or separate retry coordinator. Final
-  checks must all pass; failures are never accepted by comparing output hashes.
+  Recognized Jest scripts may use the native affected-test scope described above;
+  other commands run in full. A failed check becomes a finding for an in-scope
+  repair; repeating that failure on an unchanged tree stops the Run. There is
+  no qualification operation or separate retry coordinator, and failures are
+  never accepted by comparing output hashes.
 - File lists in issues are starting points, not exhaustive allowlists. The
   authorized outcome owns scope: implementation may update directly affected
   callers, tests, fixtures, and wiring needed to complete that same outcome;

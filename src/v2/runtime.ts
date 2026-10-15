@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { writeDurableAtomicFile } from './adapters/durable-atomic-file.js';
 import { GitWorktreeManager } from './adapters/worktree.js';
@@ -25,7 +26,7 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError } from './issue-check-policy.js';
+import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, parseIssueCheckInvocation } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError, inspectProcessIdentity, readProcessStartIdentity, type OwnerControlLockHandle } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -1582,9 +1583,9 @@ export function createV2Runtime(input: {
     implementationReviewer,
     checks: {
       supportsLaunchOwnership: true,
-      run: async ({ command, cwd, signal, onLaunched }) => {
+      run: async ({ command, cwd, signal, onLaunched, changedFiles }) => {
         const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
-        return runShellCheck(command, cwd, signal, timeoutMs, onLaunched);
+        return runShellCheck(command, cwd, signal, timeoutMs, onLaunched, changedFiles);
       },
     },
     proof,
@@ -1821,12 +1822,60 @@ export async function runShellCheck(
   signal: AbortSignal,
   timeoutMs: number,
   onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
+  changedFiles?: readonly string[],
 ): Promise<CheckExecutionResult> {
+  const affected = await affectedJestInvocation(command, cwd, changedFiles);
+  if (affected) {
+    // Config inspection and execution share one owned process group/deadline.
+    return runSpawnCheck(process.execPath, [fileURLToPath(new URL('./jest-affected-check.js', import.meta.url)),
+      JSON.stringify(affected)], cwd, signal, timeoutMs, onLaunched);
+  }
   const pub = command.match(/^(\/[^\s]+\/flutter) pub get$/u);
   if (pub) return runProcessCheck({ file: pub[1]!, args: ['pub', 'get'] }, cwd, signal, timeoutMs, onLaunched);
   const flutter = command.match(/^(\/[^\s]+\/flutter) (analyze|test)((?: --no-pub| --no-fatal-infos| test\/[A-Za-z0-9_./-]+\.dart)*)$/u);
   if (flutter) return runProcessCheck({ file: flutter[1]!, args: [flutter[2]!, '--no-pub', ...flutter[3]!.split(' ').filter(arg => arg && arg !== '--no-pub')] }, cwd, signal, timeoutMs, onLaunched);
   return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
+}
+
+/** Only a known native dependency selector may narrow a configured test command. */
+async function affectedJestInvocation(command: string, cwd: string, changedFiles?: readonly string[]) {
+  if (!changedFiles?.length) return undefined;
+  let invocation: ReturnType<typeof parseIssueCheckInvocation>;
+  try { invocation = parseIssueCheckInvocation(command); } catch { return undefined; }
+  const args = [...invocation.args];
+  const prefix = args[0] === '--prefix' ? args.splice(0, 2)[1]! : '';
+  const operation = args.shift();
+  const script = operation === 'test' ? 'test' : args.shift();
+  if (!script) return undefined;
+  let packageJson: { scripts?: Record<string, unknown> };
+  try { packageJson = JSON.parse((await readRegularFile(resolve(cwd, prefix, 'package.json'))).toString('utf8')); }
+  catch { return undefined; }
+  // npm hooks can regenerate configuration after inspection or add obligations
+  // outside Jest's import graph. They retain the complete configured invocation.
+  if (packageJson.scripts?.[`pre${script}`] || packageJson.scripts?.[`post${script}`]) return undefined;
+  const scriptCommand = packageJson.scripts?.[script];
+  // Wrappers, shell pipelines and unfamiliar flags retain the complete configured check.
+  if (typeof scriptCommand !== 'string' || !/^jest(?:\s+[A-Za-z0-9_./:@%+=[\],-]+)*$/u.test(scriptCommand)) return undefined;
+  if (args.length && (args[0] !== '--' || args.slice(1).includes('--'))) return undefined;
+  const flags = [...scriptCommand.split(/\s+/u).slice(1), ...args.filter(arg => arg !== '--')];
+  const flagValues = new Set(['--config', '--maxWorkers', '-w', '--testTimeout']);
+  for (let index = 0; index < flags.length; index += 1) {
+    const flag = flags[index]!;
+    if (flagValues.has(flag)) { if (!flags[++index]) return undefined; continue; }
+    if (!/^(?:--(?:runInBand|ci|coverage|silent|verbose|detectOpenHandles|forceExit|no-cache|logHeapUsage|errorOnDeprecated|bail)(?:=(?:true|false|[0-9]+))?|--(?:config|maxWorkers|testTimeout)=[A-Za-z0-9_./%-]+)$/u.test(flag)) return undefined;
+  }
+  const files: string[] = [];
+  for (const file of changedFiles) {
+    // Config, setup, fixtures, removed files and changes outside this npm project
+    // have no safe source-only dependency closure: validate the whole command.
+    if (file !== posix.normalize(file) || file.startsWith('/') || file.startsWith('../')) return undefined;
+    const scoped = prefix ? file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : undefined : file;
+    if (!scoped || !/\.(?:[cm]?[jt]s|[jt]sx|md|mdx)$/u.test(scoped)
+      || /(?:^|\/)[^/]*(?:config|setup)[^/]*$/iu.test(scoped)) return undefined;
+    try { if (!(await lstat(resolve(cwd, file))).isFile()) return undefined; } catch { return undefined; }
+    files.push(`./${scoped}`);
+  }
+  return { args: invocation.args, projectRoot: resolve(cwd, prefix), jestArgs: flags, files };
 }
 
 async function runProcessCheck(

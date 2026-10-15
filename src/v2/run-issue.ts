@@ -251,6 +251,7 @@ export interface RunIssueDependencies {
     supportsLaunchOwnership?: true;
     run(input: {
       id: string; command: string; cwd: string; phase: 'changed'; signal: AbortSignal;
+      changedFiles: readonly string[];
       onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>;
     }): Promise<{
       status: 'passed' | 'failed' | 'unavailable'; output: Buffer; outputSha256: string;
@@ -1868,6 +1869,17 @@ export class RunIssue {
         }
         if (check.status === 'failed') {
           const summary = `Check ${id} failed:\n${check.output.toString('utf8').slice(0, 8 * 1024)}`;
+          if (previous?.id === id && previous.command === command
+            && previous.candidateTreeSha === finalBinding.candidateTreeSha) {
+            return this.terminal(active, {
+              status: 'blocked', kind: 'safety', resumable: false,
+              blocker: {
+                kind: 'safety', resumable: false,
+                summary: `Check ${id} failed again on the unchanged candidate. No in-scope repair was demonstrated; inspect check scope and failure evidence before reauthorizing.`,
+                attempted: ['Ran the configured check on the candidate.', 'Returned the failure for an in-scope implementation repair.', summary],
+              },
+            }, 'configured-check-no-progress');
+          }
           const reopened = await this.startNextCycleFromCandidate(active, [summary], [{
             provenance: 'check', sourceId: `check:${id}:${check.outputSha256}`, summary,
             affectedContracts: ['configured-checks'],
@@ -2879,7 +2891,7 @@ export class RunIssue {
     let executed: Awaited<ReturnType<RunIssueDependencies['checks']['run']>>;
     try {
       executed = await this.dependencies.checks.run({
-        ...input, signal: this.signal,
+        ...input, changedFiles: active.record.candidateBinding!.canonicalChangedFiles, signal: this.signal,
         onLaunched: async ({ pid, processGroupId }) => { active = await this.launchAttempt(active, pid, processGroupId); },
       });
     } catch (error) {

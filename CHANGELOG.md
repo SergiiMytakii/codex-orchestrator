@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Scope recognized npm/Jest checks to the immutable candidate's related tests;
+  preserve full checks for configuration changes and unsupported commands, and
+  never accept an empty test selection.
+- Stop repeated failed checks after an unchanged implementation repair instead
+  of leaving the issue in an endless `agent:running` cycle.
+
 ## [2.0.27] - 2026-10-13
 
 ### Fixed

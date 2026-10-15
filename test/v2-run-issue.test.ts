@@ -2527,7 +2527,19 @@ test('failed checks and proof findings rework the same worktree until review-rea
   assert.equal((await proofFixture.store.read()).runs[0]?.cycle, 2);
 });
 
-test('repeated failed check on unchanged candidate remains a bounded semantic repair', async () => {
+test('configured checks receive the complete immutable candidate file set', async () => {
+  const fixture = await runFixture();
+  const original = fixture.dependencies.checks.run;
+  const checkedFiles: string[][] = [];
+  fixture.dependencies.checks.run = async input => {
+    checkedFiles.push([...input.changedFiles]);
+    return original(input);
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  assert.deepEqual(checkedFiles, [['feature.txt']]);
+});
+
+test('repeated failed check on unchanged candidate stops instead of cycling or accepting it', async () => {
   let checkCalls = 0;
   const fixture = await runFixture({ fileBackedStore: true,
     check: async () => ({ status: 'failed', output: Buffer.from(`failure observation ${++checkCalls}`) }),
@@ -2536,14 +2548,21 @@ test('repeated failed check on unchanged candidate remains a bounded semantic re
   assert.equal((await fixture.runner.runIssue(input)).status, 'repair-ready');
   const candidateContent = await readFile(join(fixture.worktreePath, 'feature.txt'));
   fixture.options.agentWrites = false;
-  for (let tick = 0; tick < 4; tick += 1) {
-    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'repair-ready');
+  const stopped = await new RunIssue(fixture.dependencies).runIssue(input);
+  assert.deepEqual(pick(stopped, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+  for (let tick = 0; tick < 3; tick += 1) {
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'blocked');
   }
   assert.deepEqual(await readFile(join(fixture.worktreePath, 'feature.txt')), candidateContent);
-  assert.equal(checkCalls, 5);
+  assert.equal(checkCalls, 2);
+  assert.equal(fixture.events.filter(event => event === 'agent').length, 2);
   assert.equal(fixture.events.includes('proof'), false);
   assert.equal(fixture.events.includes('git:push'), false);
-  assert.equal((await fixture.store.read()).runs[0]!.terminalOutcome, undefined);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, 2);
+  assert.ok(stopped.status === 'blocked' && stopped.blocker?.summary.includes('unchanged candidate'));
+  const issue = await fixture.dependencies.issues.read(42);
+  assert.ok(issue?.labels.includes('agent:blocked'));
+  assert.equal(issue?.labels.includes('agent:running'), false);
 });
 
 test('successful check clears its failure marker before a later unchanged-code repair', async () => {
@@ -2566,7 +2585,7 @@ test('successful check clears its failure marker before a later unchanged-code r
   assert.equal(Object.hasOwn((await fixture.store.read()).runs[0]!, 'failedCheckRepair'), false);
   const freshCheckFailure = await restart().runIssue(input);
   assert.deepEqual(pick(freshCheckFailure, ['status', 'source']), { status: 'repair-ready', source: 'check' });
-  assert.equal((await restart().runIssue(input)).status, 'repair-ready');
+  assert.equal((await restart().runIssue(input)).status, 'blocked');
   assert.equal(checkCalls, 4);
 });
 
