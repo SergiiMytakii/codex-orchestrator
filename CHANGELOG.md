@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.28] - 2026-10-15
+
 ### Fixed
 - Confirm process-group absence after a cleanup signal races group exit and
   returns EPERM; retain the existing deadline when cleanup remains unconfirmed.
