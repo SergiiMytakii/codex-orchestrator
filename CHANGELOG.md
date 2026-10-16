@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.29] - 2026-10-16
+
 ### Changed
 - Use synchronized global skills as the sole process authority; keep local
   operations, profiles and prompts limited to invocation contracts.
