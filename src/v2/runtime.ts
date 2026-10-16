@@ -900,7 +900,7 @@ export class ContainedImplementationAgent {
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           'In a completed report, changedFiles is the complete current candidate diff relative to the original HEAD, including files retained from earlier cycles. A verification-only repair with no new edits still returns completed with that complete current diff.',
-          `Required configured checks: ${canonicalJson(config.checks)}.`,
+          `For every completed report, including verification-only repairs, run all exact configured commands on the final candidate: ${canonicalJson(config.checks)}. Include these commands in any Implement child assignment. Report a passing result for each exact command; focused tests are additional evidence.`,
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,

@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Make the existing implementation invocation explicit that every completed repair must execute all exact configured commands, and pass that policy into any Implement child assignment; focused tests remain additional verification.
+
 ## [2.0.33] - 2026-10-16
 
 ### Fixed
