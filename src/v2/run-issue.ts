@@ -3197,6 +3197,7 @@ export class RunIssue {
           })),
         checkedChangeSha256: active.record.checkedChangeSha256!,
         checks: structuredClone(active.record.checks),
+        implementationChecks: structuredClone(active.record.implementationResult?.checks ?? []),
         proofReceipt: structuredClone(active.record.proofReceipt!),
         issue,
         frozenCriteria: reviewScope.criteria,

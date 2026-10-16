@@ -40,6 +40,7 @@ export interface ImplementationReviewerInput {
   repairFindings: Array<{ id: string; sourceId: string; summary: string; affectedContracts: string[] }>;
   checkedChangeSha256: string;
   checks: unknown[];
+  implementationChecks?: unknown[];
   proofReceipt: unknown;
   issue: unknown;
   frozenCriteria: unknown[];
@@ -186,6 +187,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     proof: {
       checkedChangeSha256: input.checkedChangeSha256,
       checks: input.checks,
+      implementationChecks: input.implementationChecks ?? [],
       receipt: input.proofReceipt,
     },
     issue: input.issue, frozenCriteria: input.frozenCriteria,

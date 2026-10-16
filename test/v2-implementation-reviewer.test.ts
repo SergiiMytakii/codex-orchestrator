@@ -37,6 +37,18 @@ test('complete and targeted Review launch with the exact 19207-character candida
   assert.equal(JSON.parse(capsules[1]!).target.repairPatch, patch);
 });
 
+test('review capsule retains additional implementation verification beside configured proof', async () => {
+  let prompt = '';
+  const reviewer = new ContainedImplementationReviewer({
+    operation: { run: async call => { prompt = call.promptFacts[0]!; return { status: 'cancelled' }; } },
+  });
+  const lint = { id: 'lint', command: 'npm run lint', status: 'passed', outputSha256: 'e'.repeat(64) };
+  await reviewer.run(input({ implementationChecks: [lint] }));
+  const capsule = JSON.parse(prompt);
+  assert.deepEqual(capsule.proof.implementationChecks, [lint]);
+  assert.deepEqual(capsule.proof.checks, []);
+});
+
 test('Review passes large exact capsules through Runner-owned files without truncating patches', async () => {
   const calls: Parameters<ContainedReportOperation['run']>[0][] = [];
   const reviewer = new ContainedImplementationReviewer({ operation: { run: async (call) => { calls.push(call); return { status: 'cancelled' }; } } });

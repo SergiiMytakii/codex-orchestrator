@@ -47,6 +47,26 @@ test('the implementation owner supplies verification; runner never launches a se
   assert.equal(fixture.reviewInputs[0]!.checks.length, 1);
 });
 
+test('Review receives additional owner verification without replacing configured receipts', async () => {
+  const fixture = await runFixture();
+  const implement = fixture.dependencies.implementationAgent.run;
+  const lint = { id: 'lint', command: 'npm run lint', status: 'passed', outputSha256: sha256('lint output') };
+  fixture.dependencies.implementationAgent.run = async input => {
+    const result = await implement(input);
+    assert.equal(result.kind, 'completed');
+    if (result.kind !== 'completed') throw new Error('Expected completed implementation');
+    const report = structuredClone(result.report) as Record<string, any>;
+    report.checks.push(lint);
+    return { ...result, report };
+  };
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
+  const review = fixture.reviewInputs[0]!;
+  assert.deepEqual(review.implementationChecks?.at(-1), lint);
+  assert.equal(review.checks.length, 1);
+  assert.equal(review.checks[0].command, 'npm run typecheck');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
+});
+
 test('tests-only uses implementation verification and independent Review without a separate proof execution', async () => {
   const fixture = await runFixture({ issueBody: [
     '## Acceptance Criteria', '- Tests prove the requested behavior.', '## Proof requirements', '```json',

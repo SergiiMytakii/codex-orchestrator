@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve all implementation-owner verification results in Review context, alongside exact configured check receipts, so completed lint/build checks do not cause needless implementation repairs.
+
 ## [2.0.31] - 2026-10-16
 
 ### Fixed
