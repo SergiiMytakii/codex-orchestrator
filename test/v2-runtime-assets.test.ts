@@ -123,7 +123,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   assert.equal(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')), false);
   const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
   assert.equal(profile.name, 'implementer');
-  assert.equal(profile.model, 'gpt-5.6-sol');
+  assert.equal(profile.model, 'gpt-6.1-sol');
   assert.equal(profile.reasoningEffort, 'medium');
   await verifyRuntimeAssetSnapshot(left);
 });

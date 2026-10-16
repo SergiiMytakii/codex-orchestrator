@@ -1,7 +1,7 @@
 name = "implementer"
 description = "Write-capable worker for exactly one approved executable ticket."
 nickname_candidates = ["Forge"]
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "medium"
 default_permissions = "orchestrator-worktree"
 developer_instructions = """
