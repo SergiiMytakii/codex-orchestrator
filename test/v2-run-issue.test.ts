@@ -61,7 +61,10 @@ test('Review receives additional owner verification without replacing configured
   };
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
   const review = fixture.reviewInputs[0]!;
-  assert.deepEqual(review.implementationChecks?.at(-1), lint);
+  assert.deepEqual(review.implementationChecks?.at(-1), {
+    ...lint, bindingId: review.checks[0].bindingId,
+    candidateTreeSha: review.currentTreeSha,
+  });
   assert.equal(review.checks.length, 1);
   assert.equal(review.checks[0].command, 'npm run typecheck');
   assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, 1);
@@ -2174,6 +2177,10 @@ test('four trusted post-PR feedback batches update the same Run and PR through f
     assert.match(reviewInput.repairPatch, /diff --git a\/feature\.txt b\/feature\.txt/u);
     assert.match(reviewInput.repairPatch, new RegExp(`trusted feedback repair ${round}`, 'u'));
     assert.deepEqual(reviewInput.checks.map((check: { id: string }) => check.id), ['typecheck']);
+    assert.deepEqual(reviewInput.implementationChecks, [{
+      id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: sha256('worker output'),
+      bindingId: reviewInput.checks[0].bindingId, candidateTreeSha: reviewInput.currentTreeSha,
+    }]);
     assert.equal(reviewerSessions.has(reviewInput.reviewerSessionId), false);
     reviewerSessions.add(reviewInput.reviewerSessionId);
     const newHead = after.reviewFeedback!.previousPublishedHeadSha!;
