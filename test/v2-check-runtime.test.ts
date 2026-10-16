@@ -82,6 +82,34 @@ esac
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
+test('Jest checks use npm ancestor dependency resolution in isolated worktrees', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-ancestor-jest-'));
+  const cwd = join(root, 'worktrees/issue-448');
+  try {
+    await mkdir(join(root, 'node_modules/.bin'), { recursive: true });
+    await mkdir(join(cwd, 'src'), { recursive: true });
+    await writeFile(join(cwd, 'src/feature.ts'), 'export const feature = true;');
+    await writeFile(join(cwd, 'jest.config.js'), 'module.exports = {};');
+    await writeFile(join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --config jest.config.js' } }));
+    await writeFile(join(root, 'node_modules/.bin/jest'), `#!/bin/sh
+case "$*" in
+  *--showConfig*) printf '{"configs":[{}],"globalConfig":{}}'; exit 0;;
+  *"--passWithNoTests=false --findRelatedTests ./src/feature.ts"*) exit 0;;
+  *) echo unrelated-suite-failed; exit 1;;
+esac
+`);
+    await chmod(join(root, 'node_modules/.bin/jest'), 0o700);
+    const run = (files?: string[]) => runShellCheck('npm test', cwd, new AbortController().signal, 30_000, undefined, files);
+    assert.equal((await run()).status, 'failed', 'the full suite contains an unrelated failure');
+    const result = await run(['src/feature.ts']);
+    assert.equal(result.status, 'passed', result.output.toString());
+    assert.match(result.output.toString(), /Runner affected Jest/u);
+    const prefixed = await runShellCheck('npm --prefix worktrees/issue-448 test', root,
+      new AbortController().signal, 30_000, undefined, ['worktrees/issue-448/src/feature.ts']);
+    assert.equal(prefixed.status, 'passed', prefixed.output.toString());
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('timed-out check proves a TERM-ignoring descendant is absent before returning', async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'codex-check-timeout-'));
   const controller = new AbortController();

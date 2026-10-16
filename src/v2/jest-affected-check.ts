@@ -9,10 +9,13 @@ const input = JSON.parse(process.argv[2]!) as {
   args: string[]; projectRoot: string; jestArgs: string[]; files: string[];
 };
 let scoped = false;
+const npmSeparator = input.args.includes('--') ? [] : ['--'];
 try {
   if (hasStaticConfig()) {
-    const probe = spawnSync(join(input.projectRoot, 'node_modules/.bin/jest'), [...input.jestArgs, '--showConfig'], {
-      cwd: input.projectRoot, encoding: 'utf8', maxBuffer: 5 * 1024 * 1024,
+    // Match npm's script PATH, including ancestor dependencies in isolated
+    // worktrees. The caller has already excluded lifecycle hooks and wrappers.
+    const probe = spawnSync('npm', [...input.args, ...npmSeparator, '--showConfig'], {
+      encoding: 'utf8', maxBuffer: 5 * 1024 * 1024,
     });
     if (probe.status === 0) {
       const config = JSON.parse(probe.stdout.slice(probe.stdout.indexOf('{'))) as {
@@ -25,7 +28,7 @@ try {
   }
 } catch { /* Unknown config cannot authorize a narrower check. */ }
 
-const args = scoped ? [...input.args, ...(input.args.includes('--') ? [] : ['--']),
+const args = scoped ? [...input.args, ...npmSeparator,
   '--passWithNoTests=false', '--findRelatedTests', ...input.files] : input.args;
 console.log(`[Runner ${scoped ? 'affected Jest' : 'full configured'} check: ${JSON.stringify(args)}]`);
 const result = spawnSync('npm', args, { stdio: 'inherit' });
