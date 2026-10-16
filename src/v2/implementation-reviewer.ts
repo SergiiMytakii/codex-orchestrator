@@ -135,7 +135,12 @@ export class ContainedImplementationReviewer {
           requiredCoverage: input.repairPatch === null ? [...input.reviewFocus] : [],
           requireAllReviewers: input.repairPatch === null,
         },
-        onPrepared: (validationContext) => input.onPrepared({ ...structuredClone(invocation), validationContext }),
+        onPrepared: async (validationContext) => {
+          if (input.repairOnly && !retainedReview(input, validationContext)) {
+            throw new Error('review report correction correlation mismatch');
+          }
+          await input.onPrepared({ ...structuredClone(invocation), validationContext });
+        },
         onLaunched: ({ pid, processGroupId }) => input.onLaunched({ ...structuredClone(invocation), pid, processGroupId }),
       });
     } catch {
@@ -149,6 +154,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
   const repair = input.repairOnly
     ? validateRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes)
     : rejectUnexpectedRepairInput(input.originalReportSha256, input.validationDiagnostic, input.originalReportBytes);
+  if (repair && !retainedReview(input)) throw new Error('report repair lacks retained review evidence');
   const repairFindings = input.repairFindings.map((finding) => {
     assertText(finding.id, 'repair finding ID');
     assertText(finding.sourceId, 'repair finding source ID');
@@ -185,7 +191,7 @@ function buildCapsule(input: ImplementationReviewerInput): string {
     issue: input.issue, frozenCriteria: input.frozenCriteria,
     deliveryAuthority: input.deliveryAuthority, defects: input.defects,
     reviewFocus: sortedUnique(input.reviewFocus, 'review focus'),
-    repairOnly: input.repairOnly, repair: repair ? { ...repair, retainReview: retainedReview(input) !== undefined } : null,
+    repairOnly: input.repairOnly, repair,
   });
   if (containsCredentialEvidence(text)) {
     throw new Error('review capsule is unsafe or oversized');
@@ -210,11 +216,9 @@ function rejectUnexpectedRepairInput(hash: string | null, diagnostic: string | n
   return null;
 }
 
-/** Only coverage format repairs can reuse a semantically valid independent Review. */
-function retainedReview(input: ImplementationReviewerInput): CodeReviewReportV1 | undefined {
-  if (!input.repairOnly || !input.originalReportBytes || ![
-    'approved review is missing required coverage', 'code review report has unknown coverage category',
-  ].includes(input.validationDiagnostic ?? '')) return undefined;
+/** Format correction preserves the exact independent semantic review on this target. */
+function retainedReview(input: ImplementationReviewerInput, context?: CodeReviewValidationContext): CodeReviewReportV1 | undefined {
+  if (!input.repairOnly || !input.originalReportBytes) return undefined;
   try {
     const original = decodeAgentReportForValidation(input.originalReportBytes) as CodeReviewReportV1;
     return validateCodeReviewReport({ ...original, coverage: [] }, {
@@ -222,6 +226,7 @@ function retainedReview(input: ImplementationReviewerInput): CodeReviewReportV1 
       targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId,
       availableReviewers: original.reviewers.map((reviewer) => reviewer.role),
       requireAllReviewers: input.repairPatch === null, requireReviewerEvidence: true,
+      ...context, requiredCoverage: [],
       previousFindingIds: (input.repairPatch !== null
         ? [...input.defects.filter((defect) => defect.status === 'fixed').map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]
         : [...input.defects.map((defect) => defect.id), ...input.repairFindings.map((finding) => finding.id)]).sort(),

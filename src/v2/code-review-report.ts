@@ -55,10 +55,9 @@ export interface CodeReviewDefectV1 {
   supersededBy: string | null;
 }
 
-export interface RepairFindingOutcomeV1 {
-  id: string;
-  status: 'verified' | 'reopened';
-}
+/** Current findings returned by reviewers; historical transitions belong to Runner. */
+export type CodeReviewFindingV1 = Omit<CodeReviewDefectV1,
+  'status' | 'introducedTargetRevision' | 'statusTargetRevision' | 'supersededBy'>;
 
 export interface CodeReviewReportV1 {
   version: 1;
@@ -67,11 +66,10 @@ export interface CodeReviewReportV1 {
   targetFingerprint: string;
   verdict: ReviewVerdict;
   coverage: string[];
-  defects: CodeReviewDefectV1[];
+  defects: CodeReviewFindingV1[];
   residualRisks: string[];
   reviewerSessionId: string;
   reviewers: Array<{ role: string; sessionId: string; verdict: 'approve' | 'block' }>;
-  repairFindingOutcomes: RepairFindingOutcomeV1[];
 }
 
 export interface CodeReviewValidationContext {
@@ -93,7 +91,7 @@ export function hashCodeReviewReport(report: CodeReviewReportV1): string {
 export function validateCodeReviewReport(value: unknown, context: CodeReviewValidationContext): CodeReviewReportV1 {
   assertExactObject(value, [
     'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
-    'residualRisks', 'reviewerSessionId', 'reviewers', 'repairFindingOutcomes',
+    'residualRisks', 'reviewerSessionId', 'reviewers',
   ], 'code review report');
   if (value.version !== 1) throw new Error('code review report.version is invalid');
   assertOperation(value.operation);
@@ -116,15 +114,10 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
     || value.targetFingerprint !== context.targetFingerprint || value.reviewerSessionId !== context.reviewerSessionId) {
     throw new Error('code review report correlation mismatch');
   }
-  const defects = validateDefects(value.defects, value.targetRevision as number);
-  const repairFindingOutcomes = validateRepairFindingOutcomes(value.repairFindingOutcomes);
-  const expectedFindingIds = [...(context.previousFindingIds ?? [])].sort();
-  const actualFindingIds = repairFindingOutcomes.map((outcome) => outcome.id).sort();
-  if (!sameStrings(actualFindingIds, expectedFindingIds)) throw new Error('review finding outcomes must match previous finding IDs');
-  const unresolved = defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
-    && defect.status !== 'verified' && defect.status !== 'superseded');
-  if (value.verdict === 'approved' && (unresolved || repairFindingOutcomes.some((outcome) => outcome.status === 'reopened'))) {
-    throw new Error('approved review has unresolved defects or repair findings');
+  const defects = validateCurrentFindings(value.defects);
+  const unresolved = defects.some(defect => defect.class === 'blocker' || defect.class === 'execution-risk');
+  if (value.verdict === 'approved' && unresolved) {
+    throw new Error('approved review has unresolved defects');
   }
   if (value.verdict === 'approved' && reviewers.some((reviewer) => reviewer.verdict !== 'approve')) {
     throw new Error('approved review has a blocking reviewer');
@@ -132,17 +125,14 @@ export function validateCodeReviewReport(value: unknown, context: CodeReviewVali
   if (value.verdict === 'approved' && requiredCoverage.some((item) => !coverage.includes(item))) {
     throw new Error('approved review is missing required coverage');
   }
-  if (value.verdict === 'needs-work'
-    && !defects.some((defect) => defect.status === 'open' || defect.status === 'reopened')
-    && !repairFindingOutcomes.some((outcome) => outcome.status === 'reopened')) {
-    throw new Error('needs-work review requires an open or reopened defect or repair finding');
+  if (value.verdict === 'needs-work' && defects.length === 0) {
+    throw new Error('needs-work review requires a current finding');
   }
   return {
     ...(structuredClone(value) as unknown as CodeReviewReportV1),
     coverage,
     defects,
     residualRisks,
-    repairFindingOutcomes,
     reviewers,
   };
 }
@@ -158,26 +148,21 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
   const defect = {
     type: 'object', additionalProperties: false,
     required: [
-      'id', 'class', 'severity', 'confidence', 'status', 'invariant', 'failure', 'evidence', 'repair',
-      'affectedTargets', 'introducedTargetRevision', 'statusTargetRevision', 'supersededBy',
+      'id', 'class', 'severity', 'confidence', 'invariant', 'failure', 'evidence', 'repair', 'affectedTargets',
     ],
     properties: {
       id: text,
       class: { type: 'string', enum: ['blocker', 'execution-risk', 'improvement'] },
       severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
       confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-      status: { type: 'string', enum: ['open', 'fixed', 'verified', 'reopened', 'superseded'] },
       invariant: text, failure: text, evidence: stringList, repair: text, affectedTargets: stringList,
-      introducedTargetRevision: { type: 'integer', minimum: 1 },
-      statusTargetRevision: { type: 'integer', minimum: 1 },
-      supersededBy: { anyOf: [text, { type: 'null' }] },
     },
   };
   const report = {
     type: 'object', additionalProperties: false,
     required: [
       'version', 'operation', 'targetRevision', 'targetFingerprint', 'verdict', 'coverage', 'defects',
-      'residualRisks', 'reviewerSessionId', 'reviewers', 'repairFindingOutcomes',
+      'residualRisks', 'reviewerSessionId', 'reviewers',
     ],
     properties: {
       version: { type: 'integer', const: 1 },
@@ -194,13 +179,6 @@ export function codeReviewReportOutputSchema(): Record<string, unknown> {
         items: {
           type: 'object', additionalProperties: false, required: ['role', 'sessionId', 'verdict'],
           properties: { role: text, sessionId: text, verdict: { type: 'string', enum: ['approve', 'block'] } },
-        },
-      },
-      repairFindingOutcomes: {
-        type: 'array',
-        items: {
-          type: 'object', additionalProperties: false, required: ['id', 'status'],
-          properties: { id: text, status: { type: 'string', enum: ['verified', 'reopened'] } },
         },
       },
     },
@@ -246,20 +224,15 @@ function validateDefects(value: unknown, targetRevision: number): CodeReviewDefe
       'id', 'class', 'severity', 'confidence', 'status', 'invariant', 'failure', 'evidence', 'repair',
       'affectedTargets', 'introducedTargetRevision', 'statusTargetRevision', 'supersededBy',
     ], `code review defect[${index}]`);
-    for (const field of ['id', 'invariant', 'failure', 'repair'] as const) assertText(item[field], `code review defect.${field}`);
-    if (!['blocker', 'execution-risk', 'improvement'].includes(item.class as string)) throw new Error('code review defect.class is invalid');
-    if (!['critical', 'high', 'medium', 'low'].includes(item.severity as string)) throw new Error('code review defect.severity is invalid');
-    if (!['high', 'medium', 'low'].includes(item.confidence as string)) throw new Error('code review defect.confidence is invalid');
+    const finding = validateFindingFields(item);
     if (!['open', 'fixed', 'verified', 'reopened', 'superseded'].includes(item.status as string)) throw new Error('code review defect.status is invalid');
-    const evidence = sortedUniqueStrings(item.evidence, 'code review defect.evidence');
-    const affectedTargets = sortedUniqueStrings(item.affectedTargets, 'code review defect.affectedTargets');
     assertPositiveInteger(item.introducedTargetRevision, 'code review defect.introducedTargetRevision');
     assertPositiveInteger(item.statusTargetRevision, 'code review defect.statusTargetRevision');
     if ((item.introducedTargetRevision as number) > (item.statusTargetRevision as number)
       || (item.statusTargetRevision as number) > targetRevision) throw new Error('code review defect revisions are invalid');
     if (item.status === 'superseded') assertText(item.supersededBy, 'code review defect.supersededBy');
     else if (item.supersededBy !== null) throw new Error('non-superseded defect has replacement');
-    return { ...(structuredClone(item) as unknown as CodeReviewDefectV1), evidence, affectedTargets };
+    return { ...(structuredClone(item) as unknown as CodeReviewDefectV1), ...finding };
   });
   assertUnique(defects.map((defect) => defect.id), 'code review defect IDs');
   validateSupersession(defects);
@@ -283,17 +256,28 @@ function validateSupersession(defects: CodeReviewDefectV1[]): void {
   }
 }
 
-function validateRepairFindingOutcomes(value: unknown): RepairFindingOutcomeV1[] {
-  if (!Array.isArray(value)) throw new Error('repair finding outcomes are invalid');
-  const output = value.map((item, index) => {
-    assertExactObject(item, ['id', 'status'], `repair finding outcome[${index}]`);
-    assertText(item.id, 'repair finding outcome.id');
-    if (item.status !== 'verified' && item.status !== 'reopened') throw new Error('repair finding outcome.status is invalid');
-    return structuredClone(item) as unknown as RepairFindingOutcomeV1;
+function validateCurrentFindings(value: unknown): CodeReviewFindingV1[] {
+  if (!Array.isArray(value)) throw new Error('code review report.defects is invalid');
+  const findings = value.map(finding => {
+    assertExactObject(finding, [
+      'id', 'class', 'severity', 'confidence', 'invariant', 'failure', 'evidence', 'repair', 'affectedTargets',
+    ], 'code review finding');
+    return validateFindingFields(finding);
   });
-  const ids = output.map((item) => item.id);
-  assertUnique(ids, 'repair finding outcome IDs');
-  return output.sort((left, right) => left.id.localeCompare(right.id));
+  assertUnique(findings.map(finding => finding.id), 'code review finding IDs');
+  return findings;
+}
+
+function validateFindingFields(item: Record<string, unknown>): CodeReviewFindingV1 {
+  for (const field of ['id', 'invariant', 'failure', 'repair'] as const) assertText(item[field], `code review finding.${field}`);
+  if (!['blocker', 'execution-risk', 'improvement'].includes(item.class as string)) throw new Error('code review finding.class is invalid');
+  if (!['critical', 'high', 'medium', 'low'].includes(item.severity as string)) throw new Error('code review finding.severity is invalid');
+  if (!['high', 'medium', 'low'].includes(item.confidence as string)) throw new Error('code review finding.confidence is invalid');
+  const { id, class: findingClass, severity, confidence, invariant, failure, repair } = item;
+  return { id, class: findingClass, severity, confidence, invariant, failure, repair,
+    evidence: sortedUniqueStrings(item.evidence, 'code review finding.evidence'),
+    affectedTargets: sortedUniqueStrings(item.affectedTargets, 'code review finding.affectedTargets'),
+  } as CodeReviewFindingV1;
 }
 
 function sortedUniqueStrings(value: unknown, field: string): string[] {

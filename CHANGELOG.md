@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+- Use synchronized global skills as the sole process authority; keep local
+  operations, profiles and prompts limited to invocation contracts.
+- Return current findings from Review while Runner owns historical transitions.
+  Preserve independent reviewer results during report format correction and stop
+  explicitly when the original semantic review cannot be verified.
+- Give the implementation worker ownership of code and configured verification
+  in one worktree. Remove separate check execution, log relay, per-check recovery
+  and automatic Jest command rewriting; keep candidate, authorization, process,
+  independent Review and publication guards. Explicit tests-only issues use
+  worker acceptance evidence without a second proof process.
+
 ## [2.0.28] - 2026-10-15
 
 ### Fixed

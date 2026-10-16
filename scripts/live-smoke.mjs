@@ -27,7 +27,6 @@ const scenarioDefinitions = new Map([
   ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
   ['safety-negative', runSafetyNegativeScenario],
-  ['configured-check-rework', runConfiguredCheckReworkScenario],
   ['initial-review-rework', runReviewReadyScenario],
   ['publication-reconciliation', runPublicationReconciliationScenario],
   ['authorization-revoked', runAuthorizationRevokedScenario],
@@ -42,7 +41,7 @@ const scenarioProfiles = new Map([
   ['v2-regression', [
     'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
     'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'review-feedback-continuation', 'configured-check-rework',
+    'acceptance-proof-negative', 'review-feedback-continuation',
     'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
     'review-feedback-negative', 'issue-verification',
   ]],
@@ -292,10 +291,8 @@ export async function configureTarget(context, overrides = {}) {
   config.codex.command = context.liveCodexPath;
   config.codex.timeoutMs = 600_000;
   config.codex.idleTimeoutMs = overrides.idleTimeoutMs ?? 60_000;
-  config.checks = overrides.reworkCheck
-    ? { smoke: `test -f src/live-smoke/configured-check-rework-fixed.txt` }
-    : overrides.authoritativeCandidate
-      ? { smoke: 'if [ -e src/live-smoke/authoritative-candidate-publication.txt ]; then [ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ] && git diff --cached --quiet; else git diff --cached --quiet; fi' }
+  config.checks = overrides.authoritativeCandidate
+      ? { smoke: '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ]' }
       : { smoke: `${process.execPath} --version` };
   await writeFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
@@ -554,21 +551,6 @@ export async function runDiagnosticsScenario(context, scenario) {
     throw new Error(`${scenario}: read-only diagnostics mutated the target`);
   }
   } finally { context.cliPath = packedCliPath; }
-}
-
-export async function runConfiguredCheckReworkScenario(context, scenario) {
-  await configureTarget(context, { reworkCheck: true });
-  const issue = await createIssue(context, scenario, true);
-  const first = await runIssue(context, issue.number);
-  assertResult(first, { status: 'repair-ready', source: 'check' }, scenario);
-  const result = await continueRepairReady(() => runIssue(context, issue.number));
-  assertResult(result, { status: 'review-ready' }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  if (record.cycle !== 2 || record.checks.length !== 1 || record.checks.some((check) => check.status !== 'passed')) {
-    throw new Error(`${scenario}: failed check did not produce one repaired, fully checked candidate`);
-  }
-  const publication = await recordPublication(context, issue.number);
-  await assertValidationBindings(context, record, publication.headSha, scenario);
 }
 
 export async function runPublicationReconciliationScenario(context, scenario) {
@@ -1025,8 +1007,8 @@ function forward(prompt) {
           normalizeReviewFeedbackImplementation(reportPath, prompt);
         }
         applyFault(scenario, operation, prompt);
-        if (operation === 'implementation' && ['configured-check-rework', 'initial-review-rework', 'issue-verification'].includes(scenario)) {
-          normalizeImplementationReport(reportPath, scenario);
+        if (operation === 'implementation' && ['authoritative-candidate-publication', 'initial-review-rework', 'issue-verification'].includes(scenario)) {
+          normalizeImplementationReport(reportPath, scenario, prompt);
         }
       }
       process.exitCode = code ?? (signal ? 1 : 0);
@@ -1039,28 +1021,23 @@ function normalizeCodeReview(reportPath, prompt, scenario) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
   const target = capsule.target?.current ?? {};
-  const previousDefects = capsule.target?.repairPatch === null
-    ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
-  const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
   const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   if (scenario === 'initial-review-rework') {
     const marker = auditPath + '.initial-review-rework';
     try { readFileSync(marker); } catch {
       writeFileSync(marker, 'reviewed\\n');
       const defect = {
-        id: 'live-review-finding', class: 'blocker', severity: 'high', confidence: 'high', status: 'open',
+        id: 'live-review-finding', class: 'blocker', severity: 'high', confidence: 'high',
         invariant: 'The reviewed candidate includes the required repair marker.',
         failure: 'The initial candidate lacks the required repair marker.', evidence: ['immutable candidate Review'],
         repair: 'Create src/live-smoke/initial-review-rework-fixed.txt.',
         affectedTargets: ['path:src/live-smoke/initial-review-rework-fixed.txt'],
-        introducedTargetRevision: target.targetRevision, statusTargetRevision: target.targetRevision, supersededBy: null,
       };
       writeFileSync(reportPath, JSON.stringify({ report: {
         version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
         targetFingerprint: target.targetFingerprint, verdict: 'needs-work', coverage: capsule.reviewFocus ?? [],
         defects: [defect], residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
         reviewers: reviewerRoles.map((role) => ({ role, sessionId: capsule.reviewerSessionId + ':' + role, verdict: 'block' })),
-        repairFindingOutcomes: [],
       } }));
       return;
     }
@@ -1069,10 +1046,9 @@ function normalizeCodeReview(reportPath, prompt, scenario) {
     version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
     targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
-    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
+    defects: [],
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
     reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
-    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
   };
   writeFileSync(reportPath, JSON.stringify({ report }));
 }
@@ -1089,15 +1065,15 @@ function normalizeReviewFeedbackImplementation(reportPath, prompt) {
     .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
   writeFileSync(reportPath, JSON.stringify({ report: {
     version: 1, status: 'completed', summary: 'Review feedback continuation fixture prepared.',
-    changedFiles, residualRisks: [],
+    changedFiles, residualRisks: [], checks: verifyImplementation(prompt),
   } }));
 }
 
-function normalizeImplementationReport(reportPath, scenario) {
+function normalizeImplementationReport(reportPath, scenario, prompt) {
   const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
     .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
   writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, status: 'completed', summary: scenario + ' fixture prepared.', changedFiles, residualRisks: [],
+    version: 1, status: 'completed', summary: scenario + ' fixture prepared.', changedFiles, residualRisks: [], checks: verifyImplementation(prompt),
   } }));
 }
 
@@ -1111,11 +1087,6 @@ function applyFault(scenario, operation, prompt) {
       writeFileSync(reportPath, '{bad json');
       return;
     }
-  }
-  if (operation === 'implementation' && scenario === 'configured-check-rework') {
-    const marker = auditPath + '.configured-check-rework';
-    try { readFileSync(marker); writeFileSync('src/live-smoke/configured-check-rework-fixed.txt', 'fixed\\n'); }
-    catch { writeFileSync(marker, 'attempted\\n'); }
   }
   if (operation === 'implementation' && scenario === 'initial-review-rework') {
     const marker = auditPath + '.initial-review-implementation';
@@ -1190,7 +1161,7 @@ function applyFault(scenario, operation, prompt) {
   }
   if ([
     'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'authoritative-candidate-publication', 'acceptance-proof-rework', 'configured-check-rework',
+    'authoritative-candidate-publication', 'acceptance-proof-rework',
     'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
     'review-feedback-negative', 'issue-verification',
   ].includes(scenario)) {
@@ -1230,6 +1201,17 @@ function writeProofReport(reportPath, report) {
 
 function gitPath(name) { return runGit(['rev-parse', '--git-path', name]).trim(); }
 function gitCommonPath(name) { return join(runGit(['rev-parse', '--git-common-dir']).trim(), name); }
+// Smoke fixture verification runs inside the implementation owner, after its final edit.
+function verifyImplementation(prompt) {
+  const encoded = prompt.match(/configured checks: (\\{[^\\n]+\\})\\./u)?.[1];
+  if (!encoded) throw new Error('Missing implementation check policy');
+  const policy = JSON.parse(encoded);
+  return Object.entries(policy).map(([id, command]) => {
+    const output = execFileSync('/bin/sh', ['-c', command], { timeout: 30000 });
+    return { id, command, status: 'passed', outputSha256: createHash('sha256').update(output).digest('hex') };
+  });
+}
+
 function runGit(argv) { return execFileSync('git', argv, { encoding: 'utf8' }); }
 `;
 }
@@ -1261,18 +1243,25 @@ function writeReview(reportPath, prompt) {
   const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   const capsule = JSON.parse(facts[0] ?? '{}');
   const target = capsule.target?.current ?? {};
-  const previousDefects = capsule.target?.repairPatch === null
-    ? (capsule.defects ?? []) : (capsule.defects ?? []).filter((defect) => defect.status === 'fixed');
-  const previous = [...previousDefects, ...(capsule.repairFindings ?? [])];
   const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
   writeAgentReport(reportPath, {
     version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
     targetFingerprint: target.targetFingerprint, verdict: 'approved',
     coverage: capsule.reviewFocus ?? [],
-    defects: (capsule.defects ?? []).map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: target.targetRevision })),
+    defects: [],
     residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
     reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
-    repairFindingOutcomes: previous.map((finding) => ({ id: finding.id, status: 'verified' })),
+  });
+}
+
+// Smoke fixture verification runs inside the implementation owner, after its final edit.
+function verifyImplementation(prompt) {
+  const encoded = prompt.match(/configured checks: (\\{[^\\n]+\\})\\./u)?.[1];
+  if (!encoded) throw new Error('Missing implementation check policy');
+  const policy = JSON.parse(encoded);
+  return Object.entries(policy).map(([id, command]) => {
+    const output = execFileSync('/bin/sh', ['-c', command], { timeout: 30000 });
+    return { id, command, status: 'passed', outputSha256: createHash('sha256').update(output).digest('hex') };
   });
 }
 
@@ -1304,7 +1293,7 @@ function writeImplementation(scenario, reportPath, prompt) {
   const changedFiles = scenario === 'commit-policy'
     ? execFileSync('git', ['diff', '--name-only', 'HEAD^', 'HEAD'], { encoding: 'utf8' }).trim().split('\\n').filter(Boolean).sort()
     : execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { encoding: 'utf8' }).split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeAgentReport(reportPath, { version: 1, status: 'completed', summary: 'V2 live-smoke implementation complete.', changedFiles, residualRisks: [] });
+  writeAgentReport(reportPath, { version: 1, status: 'completed', summary: 'V2 live-smoke implementation complete.', changedFiles, residualRisks: [], checks: verifyImplementation(prompt) });
 }
 
 function writeProof(scenario, criteria, reportPath, prompt) {
@@ -1621,7 +1610,7 @@ async function selfTestFakeAgent() {
     const implementationPath = join(root, 'implementation.json');
     await runCommand(fakePath, ['exec', '--output-last-message', implementationPath], {
       cwd: root,
-      stdin: `Implement issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
+      stdin: `Implement issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
     });
     const implementation = JSON.parse(await readFile(implementationPath, 'utf8')).report;
     if (implementation.version !== 1 || implementation.status !== 'completed'
@@ -1631,11 +1620,11 @@ async function selfTestFakeAgent() {
     const retryCriteria = [{ id: 'ac-retry', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=report-repair' }];
     const retryPath = join(root, 'implementation-retry.json');
     await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
-      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\n`,
+      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
     });
     if (await readFile(retryPath, 'utf8') !== '{bad json') throw new Error('fake agent did not inject the first malformed report');
     await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
-      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\n`,
+      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
     });
     const retriedImplementation = JSON.parse(await readFile(retryPath, 'utf8')).report;
     if (retriedImplementation.status !== 'completed' || !retriedImplementation.changedFiles.includes('src/live-smoke/report-repair.txt')) {
@@ -1660,7 +1649,7 @@ async function selfTestFakeAgent() {
     const proofPath = join(root, 'proof.json');
     await runCommand(fakePath, ['exec', '--output-last-message', proofPath], {
       cwd: root,
-      stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
+      stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
     });
     const proof = JSON.parse(await readFile(proofPath, 'utf8')).report;
     if (proof.version !== 1 || proof.status !== 'passed' || proof.criteria?.[0]?.id !== 'ac-001'

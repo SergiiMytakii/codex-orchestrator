@@ -41,3 +41,20 @@ contract. Reads retain the original bytes; the next ordinary CAS writes the
 current envelope. Unknown keys, removed route/spec fields, and missing authority
 are still rejected. This does not restore removed execution owners or synthesize
 receipts. Rejection returns a bounded actionable reason without raw state contents.
+
+## Global skill authority amendment (2026-10-16)
+
+The implementation owner now performs code changes and configured verification
+in one worktree. Runner no longer executes a separate check/repair cycle.
+Explicit tests-only issues proceed from that evidence to independent Review;
+other required runtime proof retains its protected execution. Exact command,
+candidate, authorization, containment and publication guards remain mandatory.
+
+Synchronized global Implement, TDD, Diagnosing Bugs and Code Review define agent
+procedures. Local operations, profiles and prompts supply invocation contracts
+rather than alternative procedures. Workflow refresh imports their current
+sources; an existing Run retains its immutable generation. Reviewers return
+current findings and verdicts; Runner owns historical transitions. Report-format
+correction preserves completed independent review evidence. This replaces the
+separate-check ownership described above without adding a second lifecycle or
+cross-version execution compatibility path.

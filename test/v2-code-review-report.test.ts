@@ -9,7 +9,7 @@ function report(overrides: Partial<CodeReviewReportV1> = {}): CodeReviewReportV1
   return {
     version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     verdict: 'approved', coverage: ['correctness'], defects: [], residualRisks: [],
-    reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [], ...overrides,
+    reviewerSessionId: 'review-session-1', reviewers: [], ...overrides,
   };
 }
 
@@ -69,21 +69,6 @@ test('retained malformed review can require independent reviewer evidence withou
   assert.throws(() => validateCodeReviewReport(report({ reviewerSessionId: 'coordinator-session', reviewers: [] }), context), /available roles/u);
 });
 
-test('every repair review accounts for every previous finding ID', () => {
-  const repaired = report({
-    targetRevision: 2,
-    repairFindingOutcomes: [{ id: 'finding-1', status: 'verified' }],
-  });
-  assert.deepEqual(validateCodeReviewReport(repaired, {
-    operation: 'code-review', targetRevision: 2, targetFingerprint: fingerprint,
-    reviewerSessionId: 'review-session-1', previousFindingIds: ['finding-1'],
-  }), repaired);
-  assert.throws(() => validateCodeReviewReport({ ...repaired, repairFindingOutcomes: [] }, {
-    operation: 'code-review', targetRevision: 2, targetFingerprint: fingerprint,
-    reviewerSessionId: 'review-session-1', previousFindingIds: ['finding-1'],
-  }), /previous finding IDs/u);
-});
-
 test('generated schema has no Full Closure or closure hash contract', () => {
   const text = JSON.stringify(codeReviewReportOutputSchema());
   assert.equal(text.includes('closure'), false);
@@ -117,14 +102,13 @@ test('needs-work requires an open or reopened defect or repair finding', () => {
   assert.throws(() => validateCodeReviewReport(report({ verdict: 'needs-work' }), {
     operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', previousFindingIds: [],
-  }), /needs-work.*open or reopened/u);
+  }), /needs-work.*current finding/u);
   assert.throws(() => validateCodeReviewReport(report({
     verdict: 'needs-work', targetRevision: 2,
-    repairFindingOutcomes: [{ id: 'finding-1', status: 'verified' }],
   }), {
     operation: 'code-review', targetRevision: 2, targetFingerprint: fingerprint,
     reviewerSessionId: 'review-session-1', previousFindingIds: ['finding-1'],
-  }), /needs-work.*open or reopened/u);
+  }), /needs-work.*current finding/u);
 });
 
 test('machine coverage rejects narrative prose and exposes the same categories in the schema', () => {

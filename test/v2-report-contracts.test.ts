@@ -16,12 +16,17 @@ import {
 import { decodeAgentReportForValidation, unwrapAgentReportEnvelope } from '../src/v2/report-envelope.js';
 import { codeReviewReportOutputSchema } from '../src/v2/code-review-report.js';
 
-const completedImplementation: ImplementationReportV1 = {
-  version: 1,
-  status: 'completed',
+const implementationBase = {
+  version: 1 as const,
+  status: 'completed' as const,
   summary: 'Implemented the requested behavior.',
   changedFiles: ['src/feature.ts'],
   residualRisks: [],
+};
+
+const completedImplementation: ImplementationReportV1 = {
+  ...implementationBase,
+  checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: 'a'.repeat(64) }],
 };
 
 test('package-owned and generated code-review schemas equal the runtime schema owner', async () => {
@@ -162,7 +167,7 @@ test('implementation output schema and runtime validator have parity across stat
     { value: completedImplementation, accepted: true },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'external-block',
         changedFiles: [],
         blocker: { kind: 'credential', summary: 'Login required.', attempted: ['codex login status'], resumable: false },
@@ -171,7 +176,7 @@ test('implementation output schema and runtime validator have parity across stat
     },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'external-block',
         changedFiles: [],
         blocker: {
@@ -183,7 +188,7 @@ test('implementation output schema and runtime validator have parity across stat
     },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'external-block',
         changedFiles: [],
         blocker: {
@@ -197,7 +202,7 @@ test('implementation output schema and runtime validator have parity across stat
     { value: { ...completedImplementation, changedFiles: [] }, accepted: false },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'answer-only',
         changedFiles: [],
         response: 'The existing draft PR already preserves the requested behavior.',
@@ -206,7 +211,7 @@ test('implementation output schema and runtime validator have parity across stat
     },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'boundary',
         changedFiles: [],
         response: 'This request changes the approved product decision and needs new authority.',
@@ -216,7 +221,7 @@ test('implementation output schema and runtime validator have parity across stat
     },
     {
       value: {
-        ...completedImplementation,
+        ...implementationBase,
         status: 'answer-only',
         response: 'An answer-only result cannot claim code changes.',
       },
@@ -229,7 +234,7 @@ test('implementation output schema and runtime validator have parity across stat
       },
       accepted: false,
     },
-    { value: { ...completedImplementation, status: 'external-block' }, accepted: false },
+    { value: { ...implementationBase, status: 'external-block' }, accepted: false },
     { value: { ...completedImplementation, residualRisks: [''] }, accepted: false },
     { value: { ...completedImplementation, summary: 'x'.repeat(4097) }, accepted: false },
     { value: { ...completedImplementation, extra: true }, accepted: false },
@@ -238,6 +243,25 @@ test('implementation output schema and runtime validator have parity across stat
   assertParity(fixtures, implementationReportOutputSchema(), (value) => validateImplementationReport(value, {
     issueFeedbackActive: true,
   }));
+});
+
+test('completed implementation requires exact passing worker verification evidence', () => {
+  const check = completedImplementation.checks![0]!;
+  const { checks: _checks, ...missing } = completedImplementation;
+  for (const invalid of [
+    missing,
+    { ...completedImplementation, checks: [{ ...check, status: 'failed' }] },
+    { ...completedImplementation, checks: [{ ...check, outputSha256: 'not-a-digest' }] },
+    { ...completedImplementation, checks: [{ ...check, command: '' }] },
+    { ...completedImplementation, checks: [{ ...check, output: 'raw logs must remain worker-owned' }] },
+  ]) {
+    assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: invalid }), false);
+    assert.throws(() => validateImplementationReport(invalid));
+  }
+  const duplicated = { ...completedImplementation, checks: [check, { ...check }] };
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: duplicated }), true);
+  assert.throws(() => validateImplementationReport(duplicated), /unique/u);
+  assert.deepEqual(validateImplementationReport(completedImplementation), completedImplementation);
 });
 
 test('answer-only and boundary reports require active issue feedback', () => {

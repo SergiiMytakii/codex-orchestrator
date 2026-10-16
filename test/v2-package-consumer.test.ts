@@ -143,7 +143,7 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
       materializeWorkflowGeneration(input: {
         packageRoot: string; runtimeRoot: string; packageVersion: string; bootId: string;
       }): Promise<{ generationHash: string; generationRoot: string }>;
-      resolveWorkflowOperation(receipt: object, operationId: string): Promise<{ entryPath: string; schemaPath: string; workflowRoot: string }>;
+      resolveWorkflowOperation(receipt: object, operationId: string): Promise<{ entryPath: string; sourceSkillPath?: string; schemaPath: string; workflowRoot: string }>;
     };
     const receipt = await workflowAssets.materializeWorkflowGeneration({
       packageRoot: installed,
@@ -154,14 +154,14 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
     const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
     const codeReview = await workflowAssets.resolveWorkflowOperation(receipt, 'code-review');
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
-    assert.match(await readFile(implementation.entryPath, 'utf8'), /Follow packaged \[Implement\]/u);
+    for (const [operation, skill] of [[implementation, 'implement'], [codeReview, 'code-review']] as const) {
+      assert.equal(operation.sourceSkillPath, join(receipt.generationRoot, 'skills', skill, 'SKILL.md'));
+      assert.equal(await readFile(operation.sourceSkillPath!, 'utf8'),
+        await readFile(join(installed, 'internal-workflow', 'skills', skill, 'SKILL.md'), 'utf8'));
+      const contract = await readFile(operation.entryPath, 'utf8');
+      assert.ok(contract.includes(`../../skills/${skill}/SKILL.md`));
+    }
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
-    const codeReviewOperation = await readFile(codeReview.entryPath, 'utf8');
-    const flatReviewOperation = codeReviewOperation.replace(/\s+/gu, ' ');
-    assert.match(flatReviewOperation, /For complete Review launch every available role/u);
-    assert.match(flatReviewOperation, /For targeted Review select only the affected role/u);
-    assert.match(flatReviewOperation, /Capture each non-empty identity/u);
-    assert.match(flatReviewOperation, /approval requires all selected reviewers to approve/u);
     assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);

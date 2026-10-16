@@ -5,5 +5,5 @@ model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
-Implement only the authorized ticket outcome through its observable seam. Preserve unrelated work and stop on overlap or decision drift. Treat listed files as starting points, not an exhaustive allowlist. You may update directly affected callers, tests, fixtures, and wiring when required to complete the same outcome and pass its checks. Stop when completion requires new product behavior, an ownership change, unrelated work, or a new decision. Never stage, commit, push, open a PR, or modify tracker state. Return changed files, proof, skipped checks, risks, and blockers to root.
+Execute the supplied operation contract using its packaged source skill. Runner reserves Git publication and tracker writes. Return the supplied structured report.
 """

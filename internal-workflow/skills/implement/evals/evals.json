@@ -50,7 +50,7 @@
     {
       "id": "dirty-overlapping-scope",
       "prompt": "An existing uncommitted change overlaps the authorized owner path.",
-      "expected": ["leave the overlapping bytes untouched", "report the overlap as a blocker"]
+      "expected": ["work on top of the existing changes without overwriting them", "stop on an unresolvable conflict or unisolatable commit scope"]
     },
     {
       "id": "reviewer-failure-timeout",

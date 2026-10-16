@@ -14,12 +14,21 @@ export interface ExternalBlocker {
   reviewerRejectionDetail?: string;
 }
 
+export interface ImplementationCheck {
+  id: string;
+  command: string;
+  status: 'passed';
+  outputSha256: string;
+}
+
+/** Verification belongs to the same worker that owns the source change. */
 export interface ImplementationReportV1 {
   version: 1;
   status: 'completed' | 'external-block' | 'answer-only' | 'boundary';
   summary: string;
   changedFiles: string[];
   residualRisks: string[];
+  checks?: ImplementationCheck[];
   blocker?: ExternalBlocker;
   response?: string;
   boundary?: { kind: 'decision-delta' | 'out-of-scope' | 'authority-boundary' };
@@ -31,7 +40,7 @@ export function validateImplementationReport(
 ): ImplementationReportV1 {
   assertRecord(value, 'implementation report');
   if (value.status === 'completed') {
-    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks'], 'implementation report');
+    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'], 'implementation report');
   } else if (value.status === 'external-block') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'blocker'], 'implementation report');
   } else if (value.status === 'answer-only') {
@@ -47,6 +56,7 @@ export function validateImplementationReport(
   for (const file of value.changedFiles) assertRelativePath(file, 'implementation report.changedFiles');
   assertUnique(value.changedFiles, 'implementation report.changedFiles');
   assertStringArray(value.residualRisks, 'implementation report.residualRisks');
+  if (value.status === 'completed') validateImplementationChecks(value.checks);
   if (value.status === 'completed' && value.changedFiles.length === 0) {
     throw new Error('completed implementation report requires changedFiles');
   }
@@ -85,10 +95,15 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
       {
         type: 'object',
         additionalProperties: false,
-        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks'],
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'],
         properties: {
           ...commonProperties,
           status: { type: 'string', const: 'completed' },
+          checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: {
+            type: 'object', additionalProperties: false, required: ['id', 'command', 'status', 'outputSha256'],
+            properties: { id: boundedStringSchema(MAX_STRING_LENGTH), command: boundedStringSchema(MAX_STRING_LENGTH),
+              status: { type: 'string', const: 'passed' }, outputSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' } },
+          } },
           changedFiles: { ...commonProperties.changedFiles, minItems: 1 },
         },
       },
@@ -137,7 +152,7 @@ export function implementationReportRepairDiagnostic(error: unknown): string {
 }
 
 export function implementationReportSkillExcerpt(): string {
-  return 'Complete the work, answer a trusted issue question, state an authority boundary, or report one external blocker. Answer-only and boundary results have no changed files. Return only the JSON object required by the runner-supplied output schema; never publish, push, open a PR, or include credential/path material.';
+  return 'Use the packaged Implement skill through the operation contract. Return the supplied report schema with exact configured check evidence for completed work; Git publication and tracker writes are reserved to Runner.';
 }
 
 function validateExternalBlocker(value: unknown, field: string): asserts value is ExternalBlocker {
@@ -250,5 +265,22 @@ function assertExactObject(value: unknown, keys: string[], field: string): asser
   const expected = [...keys].sort();
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new Error(`${field} has unknown or missing keys`);
+  }
+}
+
+/** Reject missing, duplicate or unsuccessful worker verification instead of publishing unchecked code. */
+export function validateImplementationChecks(value: unknown): asserts value is ImplementationCheck[] {
+  if (!Array.isArray(value) || value.length > MAX_ARRAY_LENGTH) throw new Error('implementation checks must be an array');
+  const ids = new Set<string>();
+  for (const check of value) {
+    assertRecord(check, 'implementation check');
+    assertExactObject(check, ['id', 'command', 'status', 'outputSha256'], 'implementation check');
+    assertBoundedString(check.id, 'implementation check.id', MAX_STRING_LENGTH, true);
+    assertBoundedString(check.command, 'implementation check.command', MAX_STRING_LENGTH, true);
+    if (check.status !== 'passed' || typeof check.outputSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(check.outputSha256)) {
+      throw new Error('implementation check must have passed with an output hash');
+    }
+    if (ids.has(check.id)) throw new Error('implementation check ids must be unique');
+    ids.add(check.id);
   }
 }

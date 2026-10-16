@@ -1,8 +1,6 @@
 import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
@@ -26,7 +24,6 @@ import {
   parseJsonWithoutDuplicateKeys,
   sha256,
 } from './containment.js';
-import { CheckProcessQuiescenceError, FlutterCheckEnvironmentError, parseIssueCheckInvocation } from './issue-check-policy.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError, inspectProcessIdentity, readProcessStartIdentity, type OwnerControlLockHandle } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { CodexProcess, ProcessQuiescenceError } from './codex-process.js';
@@ -37,7 +34,7 @@ import {
   type AttemptCleanupIdentity, type ImplementationAgentResult, type RunIssueGit, type RunIssueSnapshot,
 } from './run-issue.js';
 import { FileRunRecordWriter, type RunRecordWriter, type RunRecord } from './run-store.js';
-import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity, type ProcessGroupObservation } from './process-identity.js';
+import { captureProcessStartIdentity, observeProcessGroup, observeProcessIdentity } from './process-identity.js';
 import {
   parseWorkflowExecutionProfile,
   type WorkflowExecutionProfile,
@@ -276,15 +273,8 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
       const [head, tree, unchanged] = await Promise.all([
         this.getHead(input.materialization.path),
         this.git(['-C', input.materialization.path, 'rev-parse', 'HEAD^{tree}']).then((value) => value.trim()),
-        input.operation === 'configured-check'
-          // Each check receives a fresh detached copy. Newly created files are
-          // execution outputs, never input to the next check or publication.
-          // Implementation-added source is already tracked in the pinned tree;
-          // edits, deletions and staged additions must still reject the result.
-          ? this.git(['-C', input.materialization.path, 'status', '--porcelain=v1', '--untracked-files=no', '-z'])
-            .then(status => status.length === 0)
-          : this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.materialization.path, input.artifactDir)
-            .then(files => files.length === 0),
+        this.worktrees.listChangedFilesIgnoringUntrackedRoot(input.materialization.path, input.artifactDir)
+          .then(files => files.length === 0),
       ]);
       return head === input.binding.candidateCommitSha && tree === input.binding.candidateTreeSha && unchanged ? 'matching' : 'mutated';
     });
@@ -888,11 +878,13 @@ export class ContainedImplementationAgent {
         parentEnv: process.env,
         prompt: input.reportCorrection ? [
           reportCorrectionPrompt(input.reportCorrection),
+          `Required configured checks: ${canonicalJson(config.checks)}. Correct evidence only; do not execute commands in report-only mode.`,
           `Use the exact structured output schema at ${attempt.schemaPath}.`,
           `Retain the existing operation ${attempt.operationPath}; correct its report only.`,
         ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
+          `Process authority: ${attempt.sourceSkillPath}`,
+          `Invocation contract: ${attempt.operationPath}`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
           `Implementation cycle: ${input.cycle}.`,
@@ -906,6 +898,7 @@ export class ContainedImplementationAgent {
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           'In a completed report, changedFiles is the complete current candidate diff relative to the original HEAD, including files retained from earlier cycles. A verification-only repair with no new edits still returns completed with that complete current diff.',
+          `Required configured checks: ${canonicalJson(config.checks)}.`,
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
@@ -1021,7 +1014,8 @@ export class ContainedProofAgent implements ProofAgent<import('./checked-change.
           `Retain the existing operation ${attempt.operationPath}; correct its report only.`,
         ].join('\n') : [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
+          `Process authority: ${attempt.sourceSkillPath}`,
+          `Invocation contract: ${attempt.operationPath}`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Independently prove issue #${input.issue.number}.`]),
           `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
@@ -1279,7 +1273,7 @@ export function createV2Runtime(input: {
     launch: async ({ attempt, worktreePath, promptFacts, runnerFacts, signal, onLaunched }) => {
       const config = requireConfig(currentConfig);
       if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
-        || !attempt.profile || !attempt.operationPath || !attempt.workflowRoot) {
+        || !attempt.profile || !attempt.operationPath || !attempt.sourceSkillPath || !attempt.workflowRoot) {
         return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
       }
       try {
@@ -1315,7 +1309,8 @@ export function createV2Runtime(input: {
         parentEnv: process.env,
         prompt: [
           `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Follow the exact operation at ${attempt.operationPath}.`,
+          `Process authority: ${attempt.sourceSkillPath}`,
+          `Invocation contract: ${attempt.operationPath}`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           `Runner-provided facts: ${canonicalJson(promptFacts)}`,
           `Available reviewer roles: ${canonicalJson(attempt.reviewers ?? [])}`,
@@ -1590,13 +1585,6 @@ export function createV2Runtime(input: {
     git,
     implementationAgent,
     implementationReviewer,
-    checks: {
-      supportsLaunchOwnership: true,
-      run: async ({ command, cwd, signal, onLaunched, changedFiles }) => {
-        const timeoutMs = requireConfig(currentConfig).codex.timeoutMs;
-        return runShellCheck(command, cwd, signal, timeoutMs, onLaunched, changedFiles);
-      },
-    },
     proof,
     checkedChangeMint: capabilities,
     runRecords: records,
@@ -1816,228 +1804,6 @@ async function inspectRegularFile(path: string): Promise<{ modifiedAt: string }>
   } finally {
     await handle.close();
   }
-}
-
-export interface CheckExecutionResult {
-  status: 'passed' | 'failed' | 'unavailable';
-  output: Buffer;
-  outputSha256: string;
-  observation: { leader: 'absent'; group: ProcessGroupObservation };
-}
-
-export async function runShellCheck(
-  command: string,
-  cwd: string,
-  signal: AbortSignal,
-  timeoutMs: number,
-  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-  changedFiles?: readonly string[],
-): Promise<CheckExecutionResult> {
-  const affected = await affectedJestInvocation(command, cwd, changedFiles);
-  if (affected) {
-    // Config inspection and execution share one owned process group/deadline.
-    return runSpawnCheck(process.execPath, [fileURLToPath(new URL('./jest-affected-check.js', import.meta.url)),
-      JSON.stringify(affected)], cwd, signal, timeoutMs, onLaunched);
-  }
-  const pub = command.match(/^(\/[^\s]+\/flutter) pub get$/u);
-  if (pub) return runProcessCheck({ file: pub[1]!, args: ['pub', 'get'] }, cwd, signal, timeoutMs, onLaunched);
-  const flutter = command.match(/^(\/[^\s]+\/flutter) (analyze|test)((?: --no-pub| --no-fatal-infos| test\/[A-Za-z0-9_./-]+\.dart)*)$/u);
-  if (flutter) return runProcessCheck({ file: flutter[1]!, args: [flutter[2]!, '--no-pub', ...flutter[3]!.split(' ').filter(arg => arg && arg !== '--no-pub')] }, cwd, signal, timeoutMs, onLaunched);
-  return runSpawnCheck('/bin/sh', ['-lc', command], cwd, signal, timeoutMs, onLaunched);
-}
-
-/** Only a known native dependency selector may narrow a configured test command. */
-async function affectedJestInvocation(command: string, cwd: string, changedFiles?: readonly string[]) {
-  if (!changedFiles?.length) return undefined;
-  let invocation: ReturnType<typeof parseIssueCheckInvocation>;
-  try { invocation = parseIssueCheckInvocation(command); } catch { return undefined; }
-  const args = [...invocation.args];
-  const prefix = args[0] === '--prefix' ? args.splice(0, 2)[1]! : '';
-  const operation = args.shift();
-  const script = operation === 'test' ? 'test' : args.shift();
-  if (!script) return undefined;
-  let packageJson: { scripts?: Record<string, unknown> };
-  try { packageJson = JSON.parse((await readRegularFile(resolve(cwd, prefix, 'package.json'))).toString('utf8')); }
-  catch { return undefined; }
-  // npm hooks can regenerate configuration after inspection or add obligations
-  // outside Jest's import graph. They retain the complete configured invocation.
-  if (packageJson.scripts?.[`pre${script}`] || packageJson.scripts?.[`post${script}`]) return undefined;
-  const scriptCommand = packageJson.scripts?.[script];
-  // Wrappers, shell pipelines and unfamiliar flags retain the complete configured check.
-  if (typeof scriptCommand !== 'string' || !/^jest(?:\s+[A-Za-z0-9_./:@%+=[\],-]+)*$/u.test(scriptCommand)) return undefined;
-  if (args.length && (args[0] !== '--' || args.slice(1).includes('--'))) return undefined;
-  const flags = [...scriptCommand.split(/\s+/u).slice(1), ...args.filter(arg => arg !== '--')];
-  const flagValues = new Set(['--config', '--maxWorkers', '-w', '--testTimeout']);
-  for (let index = 0; index < flags.length; index += 1) {
-    const flag = flags[index]!;
-    if (flagValues.has(flag)) { if (!flags[++index]) return undefined; continue; }
-    if (!/^(?:--(?:runInBand|ci|coverage|silent|verbose|detectOpenHandles|forceExit|no-cache|logHeapUsage|errorOnDeprecated|bail)(?:=(?:true|false|[0-9]+))?|--(?:config|maxWorkers|testTimeout)=[A-Za-z0-9_./%-]+)$/u.test(flag)) return undefined;
-  }
-  const files: string[] = [];
-  for (const file of changedFiles) {
-    // Config, setup, fixtures, removed files and changes outside this npm project
-    // have no safe source-only dependency closure: validate the whole command.
-    if (file !== posix.normalize(file) || file.startsWith('/') || file.startsWith('../')) return undefined;
-    const scoped = prefix ? file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : undefined : file;
-    if (!scoped || !/\.(?:[cm]?[jt]s|[jt]sx|md|mdx)$/u.test(scoped)
-      || /(?:^|\/)[^/]*(?:config|setup)[^/]*$/iu.test(scoped)) return undefined;
-    try { if (!(await lstat(resolve(cwd, file))).isFile()) return undefined; } catch { return undefined; }
-    files.push(`./${scoped}`);
-  }
-  return { args: invocation.args, projectRoot: resolve(cwd, prefix), jestArgs: flags, files };
-}
-
-async function runProcessCheck(
-  invocation: { file: string; args: string[] },
-  cwd: string,
-  signal: AbortSignal,
-  timeoutMs: number,
-  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-): Promise<CheckExecutionResult> {
-  if (invocation.file.endsWith('/flutter')) {
-    try {
-      await access(invocation.file, constants.X_OK);
-      await new Promise<void>((resolveReady, rejectReady) => {
-        const server = createServer();
-        server.once('error', rejectReady);
-        server.listen(0, '127.0.0.1', () => server.close(error => error ? rejectReady(error) : resolveReady()));
-      });
-    } catch (error) {
-      throw new FlutterCheckEnvironmentError(`Flutter verification environment is unavailable: ${error instanceof Error ? error.message : 'SDK executable or loopback socket denied'}`);
-    }
-  }
-  if (invocation.file.endsWith('/flutter') && ['analyze', 'test'].includes(invocation.args[0] ?? '')) {
-    // Each immutable materialization needs its own package resolution before --no-pub.
-    return runSpawnCheck('/bin/sh', ['-c', '"$1" pub get && exec "$@"', 'flutter-check', invocation.file, ...invocation.args], cwd, signal, timeoutMs, onLaunched);
-  }
-  return runSpawnCheck(invocation.file, invocation.args, cwd, signal, timeoutMs, onLaunched);
-}
-
-async function runSpawnCheck(
-  file: string,
-  args: string[],
-  cwd: string,
-  signal: AbortSignal,
-  timeoutMs: number,
-  onLaunched?: (input: { pid: number; processGroupId: number }) => Promise<void>,
-): Promise<CheckExecutionResult> {
-  return new Promise((resolveCheck, rejectCheck) => {
-    const child = spawn('/bin/sh', [
-      '-c', 'IFS= read -r _ || exit 125; exec "$@"', 'codex-orchestrator-check-gate', file, ...args,
-    ], { cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    const launchOwnership = child.pid && onLaunched
-      ? onLaunched({ pid: child.pid, processGroupId: child.pid })
-      : Promise.resolve();
-    const chunks: Buffer[] = [];
-    let retained = 0;
-    let outputTruncated = false;
-    let settled = false;
-    let timedOut = false;
-    let terminationRequested = false;
-    let launchFailure: unknown;
-    let killTimer: NodeJS.Timeout | undefined;
-    let drainTimer: NodeJS.Timeout | undefined;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      terminate();
-    }, timeoutMs);
-    timeout.unref();
-    const collect = (chunk: Buffer) => {
-      if (retained + chunk.length > 1024 * 1024) outputTruncated = true;
-      if (retained >= 1024 * 1024) return;
-      const kept = chunk.subarray(0, 1024 * 1024 - retained);
-      chunks.push(kept);
-      retained += kept.length;
-    };
-    child.stdout.on('data', collect);
-    child.stderr.on('data', collect);
-    const terminate = () => {
-      terminationRequested = true;
-      if (!child.pid) return;
-      try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already absent */ }
-      if (killTimer) return;
-      killTimer = setTimeout(() => {
-        if (settled || !child.pid) return;
-        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already absent */ }
-      }, 500);
-      killTimer.unref();
-      drainTimer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
-        signal.removeEventListener('abort', terminate);
-        clearTimeout(timeout);
-        rejectCheck(new CheckProcessQuiescenceError(child.pid!));
-      }, 2_000);
-      drainTimer.unref();
-    };
-    child.stdin.on('error', () => terminate());
-    void launchOwnership.then(() => { if (!terminationRequested) child.stdin.end('\n'); }).catch((error) => { launchFailure = error; terminate(); });
-    signal.addEventListener('abort', terminate, { once: true });
-    if (signal.aborted) terminate();
-    child.once('error', (error) => {
-      settled = true;
-      signal.removeEventListener('abort', terminate);
-      clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      if (drainTimer) clearTimeout(drainTimer);
-      rejectCheck(error);
-    });
-    child.once('close', (code) => {
-      if (settled) return;
-      settled = true;
-      if (drainTimer) clearTimeout(drainTimer);
-      signal.removeEventListener('abort', terminate);
-      clearTimeout(timeout);
-      void (async () => {
-        if (terminationRequested && child.pid) {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
-            if (!isErrorCode(error, 'ESRCH')) {
-              rejectCheck(new CheckProcessQuiescenceError(child.pid));
-              return;
-            }
-          }
-          if (!await waitForProcessGroupAbsentWithin(child.pid, 5_000)) {
-            rejectCheck(new CheckProcessQuiescenceError(child.pid));
-            return;
-          }
-        }
-        if (killTimer) clearTimeout(killTimer);
-        if (timedOut) {
-          rejectCheck(new Error(`Check exceeded ${timeoutMs}ms and was terminated.`));
-          return;
-        }
-        if (launchFailure) throw launchFailure;
-        if (!terminationRequested) await launchOwnership;
-        const output = Buffer.concat([...chunks, ...(outputTruncated
-          ? [Buffer.from('\n[diagnostic output truncated]\n')] : [])]);
-        resolveCheck({
-          // POSIX reserves 126/127 for a command that cannot be invoked/found.
-          // This is environment recovery, never a request to edit the candidate.
-          status: code === 0 ? 'passed' : code === 126 || code === 127 ? 'unavailable' : 'failed',
-          output,
-          outputSha256: sha256(output),
-          observation: {
-            leader: 'absent',
-            group: child.pid ? observeProcessGroup(child.pid) : 'unknown',
-          },
-        });
-      })().catch(rejectCheck);
-    });
-  });
-}
-
-async function waitForProcessGroupAbsentWithin(processGroupId: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try { process.kill(-processGroupId, 0); }
-    catch (error) {
-      if (isErrorCode(error, 'ESRCH')) return true;
-      if (!isErrorCode(error, 'EPERM')) throw error;
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
-  }
-  return false;
 }
 
 function requireConfig(config: AgentAutoConfig | undefined): AgentAutoConfig {

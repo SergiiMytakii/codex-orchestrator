@@ -19,7 +19,8 @@ create a replacement plan, spec, ticket, workflow state, or compatibility path.
   Preserve all pre-existing changes and user-owned runtimes. Work on top of
   existing changes, including in overlapping files, without reverting or
   altering them or asking for confirmation solely because of overlap. Stop on
-  a decision that changes behavior, ownership, or boundaries.
+  an unresolvable conflict or a decision that changes behavior, ownership, or
+  boundaries.
 - **Proof:** prove the final observable outcome through the real caller seam.
   Authority-defined proof cannot be replaced by weaker tests or a completion
   claim.

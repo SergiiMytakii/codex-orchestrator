@@ -63,6 +63,7 @@ export interface PreparedContainedReportAttempt {
   policy: WorkflowOperationPolicy;
   workflowRoot?: string;
   operationPath?: string;
+  sourceSkillPath?: string;
   schemaPath?: string;
   reportPath?: string;
   toolHome?: string;

@@ -26,12 +26,6 @@ import {
 const packageRoot = join(import.meta.dirname, '..', '..');
 const execFileAsync = promisify(execFile);
 
-test('implementer profile treats listed files as starting points for the authorized outcome', async () => {
-  const profile = await readFile(join(packageRoot, 'internal-workflow', 'profiles', 'implementer.toml'), 'utf8');
-  assert.match(profile, /listed files as starting points, not an exhaustive allowlist/u);
-  assert.match(profile, /directly affected callers, tests, fixtures, and wiring/u);
-});
-
 test('production proof freshness requires the entire current configured check authority', () => {
   const authority = { typecheck: 'npm run typecheck', lint: 'npm run lint' };
   const passed = [
@@ -350,6 +344,14 @@ test('contained implementation and proof map a settled launch-gate failure to re
     signal: new AbortController().signal,
   });
   assert.deepEqual(implementationResult, { kind: 'transport-failed', resumable: true });
+  const sourceSkill = implementationPrompt.match(/^Process authority: (.+)$/mu)?.[1];
+  assert.ok(sourceSkill, 'Launch must identify the imported process authority');
+  assert.equal(await readFile(sourceSkill, 'utf8'),
+    await readFile(join(packageRoot, 'internal-workflow/skills/implement/SKILL.md'), 'utf8'));
+  const workflowRoot = implementationPrompt.match(/^The operation's immutable workflow root is (.+)\.$/mu)?.[1];
+  assert.ok(workflowRoot);
+  assert.equal(sourceSkill, join(workflowRoot, 'skills/implement/SKILL.md'));
+
   assert.match(implementationPrompt, /Frozen trusted feedback:.*issue-comment:105/u);
   assert.match(implementationPrompt, /Current same-branch draft pull request:.*codex\/issue-42/u);
   assert.match(implementationPrompt, /in-scope repair/u);

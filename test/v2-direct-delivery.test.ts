@@ -5,20 +5,19 @@ import {
   acceptApprovedDirectReview, acceptNeedsWorkDirectReview, beginDirectReviewRepair,
   createInitialDirectReview, prepareDirectReview, validateDirectReview,
 } from '../src/v2/direct-delivery.js';
-import type { CodeReviewDefectV1, CodeReviewReportV1 } from '../src/v2/code-review-report.js';
+import type { CodeReviewFindingV1, CodeReviewReportV1 } from '../src/v2/code-review-report.js';
 
 const fingerprint = 'a'.repeat(64);
-const defect: CodeReviewDefectV1 = {
-  id: 'finding-1', class: 'blocker', severity: 'high', confidence: 'high', status: 'open',
+const defect: CodeReviewFindingV1 = {
+  id: 'finding-1', class: 'blocker', severity: 'high', confidence: 'high',
   invariant: 'works', failure: 'broken', evidence: ['test'], repair: 'fix', affectedTargets: ['src/a.ts'],
-  introducedTargetRevision: 1, statusTargetRevision: 1, supersededBy: null,
 };
 
 function report(overrides: Partial<CodeReviewReportV1>): CodeReviewReportV1 {
   return {
     version: 1, operation: 'code-review', targetRevision: 1, targetFingerprint: fingerprint,
     verdict: 'approved', coverage: ['all'], defects: [], residualRisks: [], reviewerSessionId: 'review-1',
-    reviewers: [], repairFindingOutcomes: [], ...overrides,
+    reviewers: [], ...overrides,
   };
 }
 
@@ -40,10 +39,8 @@ test('repair creates a targeted revision that retains the previous reviewed targ
     candidateTreeSha: '1'.repeat(40),
   });
   assert.equal(JSON.stringify(next).includes('closure'), false);
-  const verified = { ...defect, status: 'verified' as const, statusTargetRevision: 2 };
   const clear = acceptApprovedDirectReview(next, report({
-    targetRevision: 2, targetFingerprint: 'c'.repeat(64), reviewerSessionId: 'review-2', defects: [verified],
-    repairFindingOutcomes: [{ id: 'finding-1', status: 'verified' }],
+    targetRevision: 2, targetFingerprint: 'c'.repeat(64), reviewerSessionId: 'review-2', defects: [],
   }), 'd'.repeat(64), '2'.repeat(40), 'targeted');
   assert.equal(clear.status, 'clear');
 });
@@ -63,7 +60,6 @@ test('every later repair anchors to the immediately previous approved target wit
       targetRevision: revision,
       targetFingerprint: state.targetFingerprint,
       reviewerSessionId: `review-${revision}`,
-      repairFindingOutcomes: [{ id, status: 'verified' }],
     }), String(revision + 1).repeat(64).slice(0, 64), String(revision).repeat(40).slice(0, 40), 'targeted');
   }
   assert.equal(state.targetRevision, 6);
@@ -80,7 +76,7 @@ test('targeted approval merges repaired coverage with untouched historical appro
   state = prepareDirectReview(state, 'c'.repeat(64), 'review-2');
   state = acceptApprovedDirectReview(state, report({
     targetRevision: 2, targetFingerprint: 'c'.repeat(64), reviewerSessionId: 'review-2',
-    coverage: ['correctness'], repairFindingOutcomes: [{ id: 'repair-correctness', status: 'verified' }],
+    coverage: ['correctness'],
   }), 'd'.repeat(64), '2'.repeat(40), 'targeted');
   assert.deepEqual(state.review.coverage, ['correctness', 'requirements']);
   assert.deepEqual(state.repairFindings, []);
@@ -115,7 +111,7 @@ test('more than 256 sequential repairs compact verified findings into coverage t
     state = prepareDirectReview(state, targetFingerprint, `review-${revision}`);
     state = acceptApprovedDirectReview(state, report({
       targetRevision: revision, targetFingerprint, reviewerSessionId: `review-${revision}`,
-      coverage: ['correctness'], repairFindingOutcomes: [{ id, status: 'verified' }],
+      coverage: ['correctness'],
     }), String(((revision + 1) % 9) + 1).repeat(64), String(((revision + 2) % 9) + 1).repeat(40), 'targeted');
     assert.equal(state.repairFindings.length, 0);
     assert.equal(state.review.defects.length, 0);
@@ -135,8 +131,8 @@ test('targeted needs-work preserves untouched approval but removes blocked cover
   state = acceptNeedsWorkDirectReview(state, report({
     targetRevision: 2, targetFingerprint: 'c'.repeat(64), reviewerSessionId: 'review-2', verdict: 'needs-work',
     coverage: ['correctness'], defects: [{
-      ...defect, id: 'repair-blocked', affectedTargets: ['contract:correctness'], introducedTargetRevision: 2, statusTargetRevision: 2,
-    }], repairFindingOutcomes: [{ id: 'repair-correctness', status: 'reopened' }],
+      ...defect, id: 'repair-blocked', affectedTargets: ['contract:correctness'],
+    }],
   }), 'd'.repeat(64), '2'.repeat(40));
   assert.deepEqual(state.review.coverage, ['requirements']);
 });

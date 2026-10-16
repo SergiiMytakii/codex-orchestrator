@@ -1,56 +1,17 @@
 # Code Review Operation
 
-You own one packaged Review invocation selected by the Runner.
+For semantic review execute packaged [Review](../../skills/code-review/SKILL.md).
+That skill owns reviewer selection, independence, findings and repair scope.
+The packaged [confidence rubric](../../docs/agents/confidence-rubric.md) is supplied as a review resource.
+Runner supplies the exact target, authority, proof, previous findings and repair
+delta in the review capsule. Available named reviewer profiles are immutable
+files at `../../profiles/<role>.toml` from this workflow snapshot.
 
-If the capsule has `repairOnly: true` and `repair.retainReview: true`, correct
-only `coverage` in the supplied original report. Retain every other field,
-including reviewer identities, verdicts, defects and finding outcomes. The
-Runner has kept the same candidate and validated the retained semantic review;
-do not launch new reviewers for this format correction. Return the corrected
-schema-bound report. If `retainReview` is false, perform the Review procedure
-below and return a new independently reviewed report.
+This invocation is read-only, without external writes. Return only the supplied
+code-review report schema. Include selected reviewer identities and verdicts,
+current findings and the capsule's exact coverage category IDs. Keep the existing
+ID for a retained finding. Historical statuses and revisions belong to Runner.
 
-For semantic Review, follow the
-procedural and lens semantics of packaged
-[Review](../../skills/code-review/SKILL.md). The available roles and their
-packaged profiles are the sole concrete role authority for this invocation;
-do not infer a fixed role inventory from examples in that skill. Launch roles
-available in the supplied capsule through its packaged named agent profile.
-For complete Review launch every available role. For targeted Review select
-only the affected role, or all affected roles when the repair crosses lenses
-or cannot be isolated. Launch each selected role as a fresh child without
-inherited history. The Runner binds every available role to its immutable
-`../../profiles/<role>.toml`; never substitute an ambient profile.
-Capture each non-empty identity, and complete the wait for every child. Apply
-the declared [confidence rubric](../../docs/agents/confidence-rubric.md). The
-supplied review capsule is the exact target and authority.
-
-For `complete`, review the full authorized result for requirement fidelity and
-correctness. For `targeted`, review the supplied exact tree-to-tree repair patch
-against its previous and current immutable target identities, blocker/source
-IDs, and current proof; preserve approval outside the changed scope. Use
-complete review after repair only when the exact repair delta itself cannot be
-proven or safely supplied. Account for every supplied previous finding ID and
-copy canonical defect identity fields exactly. Express verification through
-status, revision, evidence, and finding outcomes.
-
-Use `needs-work` for concrete defects that the bounded implementation cycle can
-repair. Reserve `rejected` for a target or authority that cannot safely proceed
-through the normal repair lifecycle.
-
-For each repairable defect, use exact identities already present in the capsule
-and exact repository paths when relevant. Do not infer impact from partial
-words or command/criterion prose. An unknown validation subset expands the
-Runner-owned checks and Acceptance Proof conservatively; it does not reopen
-untouched Review scope while the exact tree repair delta remains proven.
-
-Do not edit files, repair findings, or mutate external state. Reconcile the
-independent reviewer results without erasing a verified blocker. Include every
-selected reviewer role, identity, and verdict in `reviewers`; approval requires
-all selected reviewers to approve. Complete Review selects every available
-reviewer.
-Use exact category IDs from the capsule's `reviewFocus` in `coverage`, never
-sentences or synonyms. A complete approved review includes every category.
-Put explanations in finding evidence and residual risks, keeping actual risks
-separate from descriptions of work. The schema lists the accepted category IDs.
-Return only `schemas/code-review-v1.json` with operation `code-review`.
+For `repairOnly: true`, correct the supplied report format using the validation
+diagnostic, preserving the completed independent reviewer results, verdict,
+findings and risks. This is report correction, not semantic review.

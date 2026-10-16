@@ -49,9 +49,6 @@ Its scenarios are intentionally bound to these current owner behaviors:
   before publication.
 - `acceptance-proof-negative`: an external proof blocker stops without a branch
   or PR.
-- `configured-check-rework`: one real configured check fails, the next
-  implementation repairs it, and only the freshly checked candidate reaches
-  proof, Review, and publication.
 - `initial-review-rework`: the first complete Review returns one in-scope
   blocker; the targeted repair is reviewed against its exact delta before the
   repaired candidate is published.

@@ -1,3 +1,4 @@
+import { validateImplementationChecks, type ImplementationCheck } from './implementation-report.js';
 import type { ProofReceipt } from './proof-report.js';
 import type { SettledProveChangeResult } from './acceptance-proof.js';
 import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
@@ -175,7 +176,7 @@ export interface RunRecord {
     reportCorrection?: { path: string; sha256: string; diagnostic: string };
   };
   proofReceipt?: ProofReceipt;
-  implementationResult?: { summary: string; residualRisks: string[] };
+  implementationResult?: { summary: string; residualRisks: string[]; checks?: ImplementationCheck[] };
   implementationReportCorrection?: { path: string; sha256: string; diagnostic: string };
   terminalNotifications?: TerminalNotificationStateV1;
   pendingEffect?: PendingEffect;
@@ -845,7 +846,8 @@ function validatePendingEffect(value: unknown, field: string): void {
 }
 
 function validateImplementationResult(value: unknown, field: string): void {
-  assertExactObject(value, ['summary', 'residualRisks'], field);
+  assertExactObject(value, ['summary', 'residualRisks', ...(hasOwn(value, 'checks') ? ['checks'] : [])], field);
+  if (hasOwn(value, 'checks')) validateImplementationChecks(value.checks);
   assertNonEmptyString(value.summary, `${field}.summary`);
   validateStringList(value.residualRisks, `${field}.residualRisks`);
 }

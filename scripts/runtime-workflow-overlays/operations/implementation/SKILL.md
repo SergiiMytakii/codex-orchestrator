@@ -1,39 +1,26 @@
 # Implementation Operation
 
-Follow packaged [Implement](../../skills/implement/SKILL.md) for the authorized
-change. Use packaged [coding routing](../../docs/agents/coding-skill-routing.md)
-for the minimal Plan/Implement/Review boundary. Use
-[TDD](../../skills/tdd/SKILL.md) where a natural public seam can fail before the
-change, or direct observable proof otherwise. Use
-[Diagnosing Bugs](../../skills/diagnosing-bugs/SKILL.md) only when the failing
-signal is hard, flaky, unclear, or performance-related. Apply the declared
-[bug routing](../../docs/agents/bug-workflow-routing.md) and
-[tool policy](../../docs/agents/tool-usage.md) only when relevant.
+Execute packaged [Implement](../../skills/implement/SKILL.md). It and its
+referenced global skills own the procedure; this file defines only the Runner
+invocation contract. Packaged references available to that procedure:
+[TDD](../../skills/tdd/SKILL.md),
+[Diagnosing Bugs](../../skills/diagnosing-bugs/SKILL.md),
+[coding routing](../../docs/agents/coding-skill-routing.md),
+[bug routing](../../docs/agents/bug-workflow-routing.md), and
+[tool policy](../../docs/agents/tool-usage.md).
 
-Within this operation, Diagnosing Bugs is a side procedure of the enclosing
-Implement procedure, not a terminal response. Return its reproduction and
-root-cause evidence to that same Implement procedure, then continue the
-authorized fix through TDD or other regression proof and post-fix verification.
-Continue applicable Review and commit steps only when this operation has not
-reserved them to the Runner. Do not emit the Diagnosing Bugs output contract;
-finish by emitting the non-empty implementation report required below.
+Inputs are the authorized issue, frozen criteria, delivery authority, retained
+repair findings, worktree and exact configured check commands supplied by Runner.
+Runner reserves independent Review, commits, publication, external writes and
+device leases. This invocation may edit its assigned worktree and run checks;
+it has no publication credentials or authority.
 
-The issue is already authorized for implementation. Do not start planning,
-ticket publication, independent review, or delivery. Preserve the same logical
-Implement ownership for supplied repair findings. The Runner owns affected
-checks, proof, review, commits, publication, and
-external state. For Flutter, do not run Flutter/Dart analysis, tests, or builds in
-this operation, copy the SDK, or attempt sandbox workarounds. Return the complete
-candidate as `completed` with locally skipped verification in `residualRisks`;
-Runner-owned verification decides whether it is deliverable. A skipped local
-Flutter command is not an `external-block`. Repair only concrete product
-failures returned by the Runner. Never commit, push, publish, mutate GitHub, or expose
-credentials. In the final report, `changedFiles` is the complete current product
-change set across the Run, not only files touched in this
-attempt; exclude Runner-owned proof artifacts. For a trusted issue-comment
-follow-up, return `answer-only` when no code change is required, or `boundary`
-when the request is ambiguous, changes a settled decision, or exceeds the
-original issue authority. Those outcomes must keep `changedFiles` empty and
-must not invent checks, proof, review, commit, push, or a replacement PR.
-Return only
-`schemas/implementation-report-v1.json`.
+Return the supplied implementation report schema. For `completed`, `changedFiles`
+is the complete current source diff relative to the original HEAD, including
+retained earlier changes, excluding ignored test outputs. `checks` contains each
+required configured command's exact id, command, passed status and SHA-256 of its
+actual output, for the final source revision. A failed or unavailable mandatory
+check cannot authorize `completed`. Keep command logs local.
+
+Trusted feedback may return `answer-only` or `boundary` with no changed files.
+Report correction is read-only and corrects existing evidence only.

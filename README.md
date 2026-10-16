@@ -2,11 +2,11 @@
 
 Codex Orchestrator turns one explicitly authorized GitHub Issue into a controlled Codex delivery run. Planning remains external. The package implements the issue in an isolated Git worktree, validates the immutable candidate, and—only after all required gates pass—pushes a branch and opens a draft pull request.
 
-The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, checks, recovery, and publication; Codex owns the bounded analysis, implementation, review, and proof tasks assigned to it.
+The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, independent review and publication. One implementation worker owns the code and its checks in the same worktree.
 
 ## What happens to an issue
 
-Add the configured `agent:auto` label to an open executable issue, then run the orchestrator. That label authorizes only that issue. The lifecycle is `implementation → affected checks → Acceptance Proof → Review → publication`. A product or ownership decision gap is returned as an issue-local blocker for external Plan; the package does not create a PRD, spec, or ticket graph.
+Add the configured `agent:auto` label to an open executable issue, then run the orchestrator. That label authorizes only that issue. The lifecycle is `implementation with verification → independent Review → publication` (device proof remains separate when required). A product or ownership decision gap is returned as an issue-local blocker for external Plan; the package does not create a PRD, spec, or ticket graph.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
@@ -133,15 +133,23 @@ not a request for the agent to invent reviewer authority.
 Malformed implementation, proof and Review reports retain exact report bytes,
 validation diagnostics and the unchanged candidate. Each ordinary call makes one
 bounded report-only correction in a read-only view. Format correction does not
-repeat implementation or an app scenario. Coverage corrections retain the
-independent reviewer identities, verdicts and findings. Repeated malformed reports
-never authorize publication and do not exhaust a lifetime attempt budget.
+repeat implementation or an app scenario. Review format corrections retain the
+independent reviewer identities, verdicts, current findings and risks without
+launching reviewers again. A report without a verifiable independent semantic
+result stops for an explicit Runner error. Malformed reports never authorize
+publication.
 
-Unavailable tooling resumes checks after recovery. A behavioral failure opens
-an in-scope repair. If the same check fails again after implementation returns
-the same candidate tree, the Run stops with `configured-check-no-progress` and
-removes `agent:running`; it neither accepts the failure nor repeats unchanged
-work. Code changes or a different check policy still permit further repairs.
+Reviewers return the current findings and verdict for the supplied scope.
+Runner reconciles historical statuses and revisions; agents do not reproduce a
+second finding-outcome ledger. An accepted repair review clears prior findings
+absent from its reviewed scope and reopens findings that remain. Targeted Review
+preserves approval outside that scope.
+
+The implementation worker runs the configured checks and reads their output directly.
+A completed report must include successful verification for every exact configured
+command. Missing or unsuccessful verification cannot authorize Review or publication.
+For explicit tests-only issues the worker's acceptance evidence goes directly to
+independent Review. Device proof retains the separate protected runtime and leases.
 
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
@@ -174,7 +182,7 @@ root or a non-empty `CHANGES_REQUESTED` review from a current repository writer
 or admin, the Runner freezes that exact feedback batch and resumes the existing
 run through the same targeted repair lifecycle.
 
-The frozen batch enters the same implementation → affected checks → proof →
+The frozen batch enters the same implementation with verification → required device proof →
 targeted independent review loop used by in-scope repair. The reviewer receives
 the previous revision, repair delta, blocker IDs, direct impact cone, and affected
 proof. There is no semantic round limit. Publication appends one fast-forward
@@ -242,39 +250,22 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-on the final candidate before Acceptance Proof, Review, and publication.
+after the final source edit before required device proof, Review, and publication.
 
-The pinned Git tree is the source authority. Each configured check runs in its
-own fresh detached copy of that tree. Files newly created by a check are
-disposable execution outputs regardless of their names, extensions, or paths;
-they are removed with that copy and never carried into the next check, Proof,
-Review, or published commit. This does not depend on target-repository ignore
-rules. Changes or deletions of any pinned file (including newly implemented
-source), staged additions, or Git HEAD/tree drift still block the result.
-Implementation capture still includes new source, and the stricter untracked
-file checks for Proof and Review agents remain in force. The captured check
-output and result receipt are retained separately from the disposable copy.
-Failed checks still enter repair; restart recovers an existing receipt without
-repeating the command just because it produced temporary files.
+Checks run in the implementation worktree, after the final source edit. The worker
+keeps full logs locally and reads failures itself; Runner never relays a truncated
+log or rewrites Jest commands. Generated logs belong in ignored artifact paths;
+the completed report identifies the complete source diff. Runner captures and pins
+that exact source tree, binds the worker's check results to it, and supplies those
+results to independent Review. Later source drift, changed required commands,
+missing verification, denied-path changes, ambiguous process ownership and
+publication divergence still prevent delivery. A report is worker evidence, not
+an independent execution attestation; Review must evaluate its adequacy.
 
-For a plain npm script invoking Jest, source changes with optional Markdown
-changes use Jest's native
-`--findRelatedTests` selector over the complete immutable candidate file set,
-including transitive dependents and changed tests. Unrelated suites are outside
-that blocking check; the Agent cannot waive a failure with a narrative report.
-The retained check output names the actual invocation. No related tests is a
-failure, not a successful check, even if Jest configuration enables
-`passWithNoTests`. Config changes, other non-source or removed files, custom
-wrappers, unsupported flags and other test runners retain the complete configured
-command. The Runner inspects resolved Jest configuration within the same owned
-check process. Narrowing requires static JSON/package configuration or a JS/TS
-config exporting only an object literal, parsed as data without evaluating code.
-Executable configuration, npm lifecycle hooks, presets, multiple projects, local global modules
-(setup, environments, transforms, serializers and similar hooks), or
-uninspectable configuration require the full command: ordinary suite imports
-cannot establish their dependency scope. Typecheck and build remain complete checks.
-A failed check requires repair; an unavailable check retains the work and resumes through
-the existing lifecycle after environment recovery without repeating implementation.
+A failed mandatory check stays with the implementation owner for an in-scope
+repair or a concrete blocker. Runner has no separate check process, check-result
+recovery loop, output parser, affected-Jest selector or no-progress counter.
+
 Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
 and static workflow evals do not establish live browser or agent behavior.
@@ -331,14 +322,9 @@ Starting a new journal requires preserving the old file and checking ownership/r
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: mandatory commands executed on the final candidate. Issue descriptions
-  cannot change this set. Checks run before Acceptance Proof and Review against
-  the immutable candidate, including after Review repairs.
-  Recognized Jest scripts may use the native affected-test scope described above;
-  other commands run in full. A failed check becomes a finding for an in-scope
-  repair; repeating that failure on an unchanged tree stops the Run. There is
-  no qualification operation or separate retry coordinator, and failures are
-  never accepted by comparing output hashes.
+- `checks`: mandatory commands executed by the implementation worker after its
+  final source edit, including after Review repairs. Issue descriptions cannot
+  waive them. Runner requires exact successful results before publication.
 - File lists in issues are starting points, not exhaustive allowlists. The
   authorized outcome owns scope: implementation may update directly affected
   callers, tests, fixtures, and wiring needed to complete that same outcome;
@@ -367,13 +353,13 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 {"version":1,"level":"tests-only","reason":"Focused tests establish the async completion contract.","authentication":"none","steps":[]}
 ```
 
-`tests-only` runs the configured checks and non-visual Acceptance Proof without starting Android. `android-live` requires a Runner-owned emulator and fresh Android visual evidence; its `steps` are bounded `tap`/`expect` actions with exact UI text, `back`, or `swipe` (`up`/`down`). The final step must be an `expect`. `authentication: "dev-account"` additionally requires a configured `proof.android.login` command and args; the trusted helper receives the exact debug APK build arguments, digest, live emulator lease and serial on stdin, then must return `authenticated_identity_verified` with the same app PID and canonical user ID. These inputs and credential handling remain with the host Runner. Missing tools, login or required evidence blocks publication rather than becoming a warning. Issues without this block retain their existing proof policy.
+`tests-only` uses the implementation owner's configured checks and acceptance evidence, followed by independent Review, without a separate Acceptance Proof process or Android launch. `android-live` requires a Runner-owned emulator and fresh Android visual evidence; its `steps` are bounded `tap`/`expect` actions with exact UI text, `back`, or `swipe` (`up`/`down`). The final step must be an `expect`. `authentication: "dev-account"` additionally requires a configured `proof.android.login` command and args; the trusted helper receives the exact debug APK build arguments, digest, live emulator lease and serial on stdin, then must return `authenticated_identity_verified` with the same app PID and canonical user ID. These inputs and credential handling remain with the host Runner. Missing tools, login or required evidence blocks publication rather than becoming a warning. Issues without this block retain their existing proof policy.
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`, alongside the configured absolute `flutter pub get` command. Every analysis/test materialization runs its own dependency preparation before `--no-pub`, so package resolution cannot fall through to a different checkout. Flutter execution belongs to the host Runner; the implementation Agent returns its candidate with local checks skipped. Before launching Flutter, the Runner checks executable access and loopback socket availability. An unavailable environment defers checks with the candidate retained; recovery resumes checks without repeating implementation. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in the check output.
+Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. The implementation Agent runs these exact commands in its worktree and returns successful results for its final source revision. The Runner admits the receipts against the configured policy and immutable candidate; it does not execute another Flutter check phase. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
 
-Delivery remains checks → Acceptance Proof → Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
+Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 
 ## Development and release checks
 
@@ -387,6 +373,12 @@ npm pack --dry-run --json
 ```
 
 `npm run refresh:workflow` rebuilds the package-owned workflow inventory from the explicit allowlist in `scripts/agent-auto-workflow-source.json`, validates operation bindings, and runs focused contract tests. `npm run check:workflow` is the non-writing drift check; `npm run verify:workflow` verifies the committed generated workflow without reading local skills.
+
+Global personal skills are the process authority. Local operations and profiles
+only define invocation inputs, reserved authority and report formats; runtime
+prompts point directly to the imported source skill. Update generated copies
+through workflow refresh, never by hand. Each Run keeps its immutable workflow
+snapshot, so a later refresh affects new Runs without changing active ones.
 
 Packaged skill eval files are static target scenarios. Workflow refresh and
 package tests validate their schema, uniqueness, and exact generated bytes;

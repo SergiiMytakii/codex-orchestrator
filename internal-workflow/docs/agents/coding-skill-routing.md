@@ -12,8 +12,9 @@ facts, runtime constraints, and domain language remain in repository policy.
   applicable Review unless user or repository policy explicitly forbids or
   reserves Git. Push and PR require separate authority.
 - **Preservation** — preserve unrelated and concurrent work plus user-owned
-  runtimes. Dirty overlapping or unisolatable scope blocks the affected write
-  and commit.
+  runtimes. Work on top of existing changes, including in overlapping files,
+  without overwriting them. An unresolvable conflict or unisolatable scope
+  blocks the affected write and commit.
 - **Proof** — claim only the observable outcome proved through the real caller
   seam. Missing required proof or independent-review approval blocks completion
   and the affected commit.
@@ -108,8 +109,9 @@ competing router. Plan, Implement, Review, prototype, `$to-spec`, and
 
 - A direct request is implemented by root in the current context.
 - One executable ticket launches exactly one fresh `implementer` child. Root
-  supplies the complete ticket, Parent PRD, applicable repository policy, and
-  bounded write scope; verifies the child identity and completed wait; and
+  supplies the complete ticket, bounded Parent acceptance context and a
+  read-only complete-PRD reference, applicable repository policy, and bounded
+  write scope; verifies the child identity and completed wait; and
   remains the only Git owner.
 - Multiple executable tickets are graph work and remain owned by
   `$implement-spec`.

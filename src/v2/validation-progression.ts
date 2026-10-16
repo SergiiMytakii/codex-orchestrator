@@ -201,11 +201,7 @@ export function projectValidationReviewNeedsWork(
   const repaired = acceptNeedsWorkDirectReview(run.directReview, report, artifactSha256, run.candidateBinding.candidateTreeSha);
   const findings = [
     ...report.defects
-      .filter((defect) => defect.status === 'open' || defect.status === 'reopened')
       .map((defect) => `${defect.id}: ${defect.failure}\nRepair: ${defect.repair}`),
-    ...repaired.repairFindings
-      .filter((finding) => finding.status === 'reopened')
-      .map((finding) => `${finding.id}: ${finding.summary}`),
   ];
   return casTransition(run, 'review-needs-work', {
     lifecycle: 'implementing',
@@ -311,6 +307,8 @@ export function projectValidationProofPassed(
   }
   return casTransition(run, 'proof-passed', {
     lifecycle: 'reviewing',
+    checkedChangeSha256: input.checkedChangeSha256,
+    proofId: input.proofId,
     proofReceipt: structuredClone(input.proofReceipt),
     directReview,
     reworkFindings: [],

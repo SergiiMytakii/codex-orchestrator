@@ -109,9 +109,9 @@ async function executeWorker(root: string, checkpoint: string) {
       }
       await event('implementation');
       await writeFile(join(input.worktreePath, 'feature.txt'), 'implemented\n');
-      return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [] } };
+      for (const id of Object.keys(config.checks)) await event(`worker-check:${id}`);
+      return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [], checks: Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed', outputSha256: sha256('ok') })) } };
     } },
-    checks: { supportsLaunchOwnership: true, run: async (input) => { await input.onLaunched?.({ pid: process.pid, processGroupId: process.pid }); await event(`check:${input.id}`); const output = Buffer.from('ok'); return { status: 'passed', output, outputSha256: sha256(output), observation: { leader: 'absent', group: 'absent' } }; } },
     proof: { proveChange: async (input) => {
       if (scenario.mode === 'malformed-proof') {
         const bytes = Buffer.from('{"version":1}');
@@ -152,7 +152,7 @@ async function executeWorker(root: string, checkpoint: string) {
       await input.onPrepared({ ...invocation, validationContext: { operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId, availableReviewers: ['spec_reviewer', 'standards_reviewer'], requiredCoverage: input.reviewFocus, previousFindingIds: [], requireAllReviewers: true, requireReviewerEvidence: true } });
       await input.onLaunched({ ...invocation, pid: process.pid, processGroupId: process.pid }); await event('review');
       await event(`review-target:${input.currentTreeSha}`);
-      return { kind: 'completed', attemptId: input.attemptId, artifactSha256: '8'.repeat(64), report: { version: 1, operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint, verdict: 'approved', coverage: input.reviewFocus, defects: [], residualRisks: [], reviewerSessionId: input.reviewerSessionId, reviewers: [{ role: 'spec_reviewer', sessionId: `${input.reviewerSessionId}:spec`, verdict: 'approve' }, { role: 'standards_reviewer', sessionId: `${input.reviewerSessionId}:standards`, verdict: 'approve' }], repairFindingOutcomes: [] } };
+      return { kind: 'completed', attemptId: input.attemptId, artifactSha256: '8'.repeat(64), report: { version: 1, operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint, verdict: 'approved', coverage: input.reviewFocus, defects: [], residualRisks: [], reviewerSessionId: input.reviewerSessionId, reviewers: [{ role: 'spec_reviewer', sessionId: `${input.reviewerSessionId}:spec`, verdict: 'approve' }, { role: 'standards_reviewer', sessionId: `${input.reviewerSessionId}:standards`, verdict: 'approve' }] } };
     } },
     checkedChangeMint: mint, runRecords: traced,
     writeEvidence: async (entry) => { const path = join(root, 'evidence', `${entry.runId}-${entry.code}.json`); await writeBound({ path, bytes: Buffer.from(canonicalJson(entry)) }); return { id: entry.code, path }; },

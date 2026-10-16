@@ -97,7 +97,7 @@ export function acceptApprovedDirectReview(
     || report.operation !== 'code-review' || report.reviewerSessionId !== state.review.reviewerSessionId) {
     throw new Error('accepted direct review report correlation mismatch');
   }
-  const defects = mergeDefectLedger(state, report);
+  const defects = reconcileReviewDefects(state, report, mode);
   if (defects.some((defect) => (defect.class === 'blocker' || defect.class === 'execution-risk')
     && defect.status !== 'verified' && defect.status !== 'superseded')) {
     throw new Error('approved direct review merge has unresolved defects');
@@ -122,15 +122,14 @@ export function acceptApprovedDirectReview(
     acceptedReportSha256: artifactSha256,
   };
   delete clearTrack.reportCorrection;
-  const outcomes = new Map(report.repairFindingOutcomes.map((outcome) => [outcome.id, outcome.status]));
   return {
     ...structuredClone(state),
     status: 'clear',
     previousTarget: mode === 'targeted' ? structuredClone(state.previousTarget) : null,
     review: clearTrack,
     repairFindings: state.repairFindings.map((finding) => {
-      const outcome = outcomes.get(finding.id);
-      return outcome ? { ...structuredClone(finding), status: outcome } : structuredClone(finding);
+      return finding.status === 'fixed'
+        ? { ...structuredClone(finding), status: 'verified' as const } : structuredClone(finding);
     }).filter((finding) => finding.status !== 'verified'),
   };
 }
@@ -143,20 +142,17 @@ export function acceptNeedsWorkDirectReview(
 ): DirectReviewV1 {
   assertSha256(artifactSha256, 'direct review accepted report hash');
   assertGitSha(candidateTreeSha, 'direct review candidate tree');
-  const reopenedFinding = report.repairFindingOutcomes.some((outcome) => outcome.status === 'reopened');
   if (state.status !== 'active' || state.stage === null || report.verdict !== 'needs-work'
     || report.targetRevision !== state.targetRevision || report.targetFingerprint !== state.targetFingerprint
     || report.operation !== 'code-review' || report.reviewerSessionId !== state.review.reviewerSessionId
-    || (!report.defects.some((defect) => defect.status === 'open' || defect.status === 'reopened') && !reopenedFinding)) {
+    || report.defects.length === 0) {
     throw new Error('needs-work direct review report correlation mismatch');
   }
-  const outcomes = new Map(report.repairFindingOutcomes.map((outcome) => [outcome.id, outcome.status]));
   const blockedContracts = new Set([
     ...report.defects
-      .filter((defect) => defect.status === 'open' || defect.status === 'reopened')
       .flatMap((defect) => defect.affectedTargets),
     ...state.repairFindings
-      .filter((finding) => outcomes.get(finding.id) === 'reopened')
+      .filter((finding) => report.defects.some(defect => defect.id === finding.id))
       .flatMap((finding) => finding.affectedContracts),
   ].filter((target) => target.startsWith('contract:')).map((target) => target.slice('contract:'.length)));
   const mergedCoverage = [...new Set([
@@ -176,47 +172,44 @@ export function acceptNeedsWorkDirectReview(
       ...structuredClone(state.review),
       disposition: 'active',
       coverage: mergedCoverage,
-      defects: mergeDefectLedger(state, report),
+      defects: reconcileReviewDefects(state, report),
       acceptedReportSha256: artifactSha256,
     },
     repairFindings: state.repairFindings.map((finding) => {
-      const outcome = outcomes.get(finding.id);
-      return outcome ? { ...structuredClone(finding), status: outcome } : structuredClone(finding);
+      return finding.status === 'fixed' ? { ...structuredClone(finding),
+        status: report.defects.some(defect => defect.id === finding.id) ? 'reopened' as const : 'verified' as const,
+      } : structuredClone(finding);
     }),
   };
   delete nextState.review.reportCorrection;
   return nextState;
 }
 
-function mergeDefectLedger(state: DirectReviewV1, report: CodeReviewReportV1): CodeReviewDefectV1[] {
-  const current = state.review.defects;
-  if (current.length === 0) return structuredClone(report.defects);
-  const reported = new Map(report.defects.map((defect) => [defect.id, defect]));
-  const merged = current.map((existing) => {
+/** Reconcile current findings into Runner-owned history for the reviewed revision. */
+export function reconcileReviewDefects(
+  state: DirectReviewV1,
+  report: CodeReviewReportV1,
+  mode: 'complete' | 'targeted' = state.review.validationContext?.requireAllReviewers ? 'complete' : 'targeted',
+): CodeReviewDefectV1[] {
+  const reported = new Map(report.defects.map(defect => [defect.id, defect]));
+  const merged = state.review.defects.map(existing => {
     const next = reported.get(existing.id);
     if (!next) {
-      if (existing.status === 'fixed') throw new Error('review omitted an impacted defect ID');
-      return structuredClone(existing);
+      const reviewed = existing.status === 'fixed'
+        || (mode === 'complete' && (existing.status === 'open' || existing.status === 'reopened'));
+      return reviewed
+        ? { ...structuredClone(existing), status: 'verified' as const, statusTargetRevision: state.targetRevision }
+        : structuredClone(existing);
     }
     reported.delete(existing.id);
-    if (existing.status === 'fixed'
-      && !['verified', 'reopened', 'superseded'].includes(next.status)) {
-      throw new Error('full review defect transition is invalid');
-    }
-    return {
-      ...structuredClone(next),
-      id: existing.id,
-      class: existing.class,
-      invariant: existing.invariant,
-      failure: existing.failure,
+    return { ...structuredClone(next), id: existing.id, class: existing.class,
+      invariant: existing.invariant, failure: existing.failure,
       introducedTargetRevision: existing.introducedTargetRevision,
-    };
+      status: 'reopened' as const, statusTargetRevision: state.targetRevision, supersededBy: null };
   });
-  for (const added of reported.values()) {
-    if (added.status !== 'open' || added.introducedTargetRevision !== state.targetRevision
-      || added.statusTargetRevision !== state.targetRevision) throw new Error('full review introduced defect is invalid');
-    merged.push(structuredClone(added));
-  }
+  for (const finding of reported.values()) merged.push({ ...structuredClone(finding),
+    status: 'open', introducedTargetRevision: state.targetRevision,
+    statusTargetRevision: state.targetRevision, supersededBy: null });
   return merged.sort((left, right) => left.id.localeCompare(right.id));
 }
 

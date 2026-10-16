@@ -36,7 +36,7 @@ const retainedScenarios = [
   'package-install', 'discovery-matrix', 'commit-policy',
   'incomplete-progress-rework', 'report-repair', 'diagnostics',
   'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'review-feedback-continuation', 'safety-negative', 'configured-check-rework',
+  'review-feedback-continuation', 'safety-negative',
   'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
   'review-feedback-negative', 'issue-verification',
 ];
@@ -211,14 +211,6 @@ test('synthetic browser proof is not a GitHub live-smoke scenario', async () => 
 
 
 
-test('implementation operation resumes Implement after diagnosis and defines cumulative changedFiles', async () => {
-  const operation = await readFile(fileURLToPath(new URL('../../scripts/runtime-workflow-overlays/operations/implementation/SKILL.md', import.meta.url)), 'utf8');
-  assert.match(operation, /Diagnosing Bugs is a side procedure of the enclosing\s+Implement procedure, not a terminal response/isu);
-  assert.match(operation, /Return its reproduction and\s+root-cause evidence to that same Implement procedure, then continue the\s+authorized fix through TDD or other regression proof and post-fix verification/isu);
-  assert.match(operation, /Do not emit the Diagnosing Bugs output contract;\s+finish by emitting the non-empty implementation report/isu);
-  assert.match(operation, /changedFiles.*complete current product\s+change set across the Run/isu);
-});
-
 test('strict cleanup retries eventually consistent observations before failing', async () => {
   const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
     retryCleanupObservation: (action: () => Promise<void>, options: { attempts: number; delayMs: number }) => Promise<void>;
@@ -330,13 +322,13 @@ async function wrapperFixture(t: TestContext) {
   const stub = join(context.root, 'codex');
   await writeFile(stub, `#!${process.execPath}\nimport { appendFileSync,writeFileSync } from 'node:fs';\nconst a=process.argv.slice(2);let p='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>p+=c);process.stdin.on('end',()=>{appendFileSync(${JSON.stringify(join(context.root, 'forwarded.jsonl'))},JSON.stringify({args:a,prompt:p})+'\\n');writeFileSync(a[a.indexOf('--output-last-message')+1],JSON.stringify({report:{version:1,status:'model-result',targetFingerprint:'wrong-model-target',coverage:['wrong-model-coverage']}}));});\n`);
   await chmod(stub, 0o700);
-  const invoke = async (scenario: string, operation: string, extra = '', cwd = context.targetRoot, pin = true) => {
+  const invoke = async (scenario: string, operation: string, extra = '', cwd = context.targetRoot, pin = true, checks = { smoke: `${process.execPath} --version` }) => {
     const reportPath = join(context.root, 'last-report.json');
     const artifacts = join(cwd, '.codex-orchestrator/proof-attempt');
     await mkdir(artifacts, { recursive: true });
     await writeFile(join(artifacts, 'transient.txt'), 'discard me');
     await writeFile(join(cwd, '.codex-orchestrator/sentinel.txt'), 'preserve me');
-    const prompt = `${operation === 'proof' ? 'Independently prove issue' : operation === 'code-review' ? '"operation":"code-review"' : 'Implement issue'}\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nConfigured check receipts: [{"id":"smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
+    const prompt = `${operation === 'proof' ? 'Independently prove issue' : operation === 'code-review' ? '"operation":"code-review"' : 'Implement issue'}\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nRequired configured checks: ${JSON.stringify(checks)}.\nConfigured check receipts: [{"id":"smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
     const result = await smoke.runCommand(wrapper, ['exec', '--output-last-message', reportPath, '-c', 'model_reasoning_effort="high"', ...(pin ? ['-c', 'model="gpt-5.6-luna"'] : [])], {
       cwd, env: { ...process.env, PATH: `${context.root}:${process.env.PATH ?? ''}` }, stdin: prompt, timeoutMs: 30_000, allowedExitCodes: [0, 1, 64],
     });
@@ -346,6 +338,44 @@ async function wrapperFixture(t: TestContext) {
   };
   return { context, invoke };
 }
+
+test('implementation smoke owner executes configured checks and reports real output hashes', async (t) => {
+  const { invoke } = await wrapperFixture(t);
+  const result = await invoke('issue-verification', 'implementation');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.status, 'completed');
+  assert.deepEqual(result.report.checks.map((check: any) => [check.id, check.command, check.status]),
+    [['smoke', `${process.execPath} --version`, 'passed']]);
+  assert.match(result.report.checks[0].outputSha256, /^[a-f0-9]{64}$/u);
+});
+
+test('implementation smoke owner cannot report success for a failed configured command', async (t) => {
+  const { context, invoke } = await wrapperFixture(t);
+  const result = await invoke('issue-verification', 'implementation', '', context.targetRoot, true,
+    { smoke: `${process.execPath} -e "process.exit(1)"` });
+  assert.notEqual(result.status, 0);
+  assert.notEqual(result.report?.status, 'completed');
+});
+
+test('authoritative smoke verifies final working bytes after its staged-source fault', async (t) => {
+  const { context, invoke } = await wrapperFixture(t);
+  const command = '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ]';
+  const result = await invoke('authoritative-candidate-publication', 'implementation', '', context.targetRoot, true, { smoke: command });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.report.status, 'completed');
+  assert.equal(result.report.checks[0].command, command);
+  assert.equal(result.report.checks[0].status, 'passed');
+  const staged = (await context.git(['show', ':src/live-smoke/authoritative-candidate-publication.txt'])).stdout;
+  assert.equal(staged, 'staged content must not become authoritative\n');
+});
+
+test('authoritative smoke cannot retain earlier success when final working bytes fail verification', async (t) => {
+  const { context, invoke } = await wrapperFixture(t);
+  const result = await invoke('authoritative-candidate-publication', 'implementation', '', context.targetRoot, true,
+    { smoke: '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "wrong final content" ]' });
+  assert.notEqual(result.status, 0);
+  assert.notEqual(result.report?.status, 'completed');
+});
 
 for (const profile of ['core-release', 'v2-regression']) {
   test(`profile ${profile} selects executable scenarios without source parsing`, () => {
@@ -521,10 +551,9 @@ test('review wrapper normalizes full and repair capsules independently of the mo
     assert.equal(validated.verdict, 'approved');
     assert.deepEqual(result.report, {
       version: 1, operation: 'code-review', targetRevision: 3, targetFingerprint: 'a'.repeat(64), verdict: 'approved',
-      coverage: ['correctness', 'requirements'], defects: input.defects.map((defect) => ({ ...defect, status: 'verified', statusTargetRevision: 3 })),
+      coverage: ['correctness', 'requirements'], defects: [],
       residualRisks: [], reviewerSessionId: 'runner-session',
       reviewers: ['spec', 'standards'].map((role) => ({ role, sessionId: 'runner-session:' + role, verdict: 'approve' })),
-      repairFindingOutcomes: (repair ? ['fixed', 'repair-finding'] : ['fixed', 'open', 'repair-finding']).map((id) => ({ id, status: 'verified' })),
     });
   }
   const audit = (await readFile(context.modelAuditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
@@ -536,10 +565,10 @@ test('initial Review fault produces a blocker once and verifies its repair on th
   const prompt = (revision: number) => `Runner-provided facts: ${JSON.stringify([JSON.stringify({ operation: 'code-review', reviewerSessionId: 'review', reviewFocus: ['spec'], defects: [], repairFindings: [{ id: 'live-review-finding' }], target: { current: { targetRevision: revision, targetFingerprint: 'target-' + revision }, repairPatch: {} } })])}\nAvailable reviewer roles: ["spec"]\n`;
   const first = await invoke('initial-review-rework', 'code-review', prompt(1));
   assert.equal(first.report.verdict, 'needs-work'); assert.equal(first.report.defects[0].id, 'live-review-finding');
-  assert.equal(first.report.defects[0].statusTargetRevision, 1); assert.equal(first.report.reviewers[0].verdict, 'block');
+  assert.equal('statusTargetRevision' in first.report.defects[0], false); assert.equal(first.report.reviewers[0].verdict, 'block');
   const second = await invoke('initial-review-rework', 'code-review', prompt(2));
   assert.equal(second.report.verdict, 'approved'); assert.equal(second.report.targetFingerprint, 'target-2');
-  assert.deepEqual(second.report.repairFindingOutcomes, [{ id: 'live-review-finding', status: 'verified' }]);
+  assert.deepEqual(second.report.defects, []);
 });
 
 test('proof rework is one-shot across linked candidate worktrees and removes only transient evidence', async (t) => {
@@ -574,7 +603,8 @@ test('negative proof removes transient evidence and emits an exact non-resumable
 
 test('all happy proof fixtures normalize configured receipt evidence after a real child invocation', async (t) => {
   const { context, invoke } = await wrapperFixture(t);
-  for (const scenario of ['package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'configured-check-rework', 'initial-review-rework', 'publication-reconciliation', 'review-feedback-negative', 'issue-verification', 'review-feedback-continuation']) {
+  const scenarios = ['package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'initial-review-rework', 'publication-reconciliation', 'review-feedback-negative', 'issue-verification', 'review-feedback-continuation'];
+  for (const scenario of scenarios) {
     const result = await invoke(scenario, 'proof');
     assert.equal(result.status, 0, result.stderr); assert.equal(result.report.status, 'passed', scenario);
     assert.deepEqual(result.report.criteria, [{ id: 'ac-1', status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: ['smoke'], analysis: 'Current checked change satisfies this criterion.' }]);
@@ -582,7 +612,7 @@ test('all happy proof fixtures normalize configured receipt evidence after a rea
     await assert.rejects(access(result.artifacts), /ENOENT/);
   }
   const audit = (await readFile(context.modelAuditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(audit.length, 11); assert.ok(audit.every((entry) => entry.exitCode === 0));
+  assert.equal(audit.length, scenarios.length); assert.ok(audit.every((entry) => entry.exitCode === 0));
 });
 
 test('incomplete implementation fails cleanly before a child launch and retries once', async (t) => {
@@ -682,7 +712,6 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
       }
       assert.equal(args[1], 'run'); runs += 1;
       assert.equal(options.env.CODEX_ORCHESTRATOR_HOME, context.orchestratorHome);
-      if (scenario === 'configured-check-rework' && runs === 1) return envelope({ status: 'repair-ready', source: 'check' });
       if (scenario === 'publication-reconciliation' && runs === 1) return { ...envelope({ status: 'transport-failed', resumable: true }), status: 70 };
       if (scenario === 'authorization-revoked' && runs === 1) return envelope({ status: 'repair-ready', source: 'proof' });
       if (scenario === 'authorization-revoked') {
@@ -746,7 +775,7 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
 
 for (const [scenario, entry] of [
   ['authoritative-candidate-publication', 'runReviewReadyScenario'],
-  ['configured-check-rework', 'runConfiguredCheckReworkScenario'], ['initial-review-rework', 'runReviewReadyScenario'],
+  ['initial-review-rework', 'runReviewReadyScenario'],
   ['publication-reconciliation', 'runPublicationReconciliationScenario'], ['authorization-revoked', 'runAuthorizationRevokedScenario'],
   ['review-feedback-negative', 'runReviewFeedbackNegativeScenario'], ['issue-verification', 'runIssueVerificationScenario'],
   ['safety-negative', 'runSafetyNegativeScenario'], ['acceptance-proof-negative', 'runAcceptanceProofNegativeScenario'],
@@ -770,7 +799,6 @@ for (const [scenario, entry] of [
 for (const [scenario, entry, fault, diagnostic] of [
   ['authoritative-candidate-publication', 'runReviewReadyScenario', 'retained-pin', /candidate pin survived successful publication/],
   ['authoritative-candidate-publication', 'runReviewReadyScenario', 'retained-worktree', /candidate execution worktree survived successful publication/],
-  ['configured-check-rework', 'runConfiguredCheckReworkScenario', 'bad-cycle', /failed check did not produce/],
   ['publication-reconciliation', 'runPublicationReconciliationScenario', 'repeated-model', /repeated model work/],
   ['issue-verification', 'runIssueVerificationScenario', 'bad-check', /Issue text replaced/],
   ['review-feedback-negative', 'runReviewFeedbackNegativeScenario', 'resolved-feedback-effect', /resolved feedback produced work or durable state/],

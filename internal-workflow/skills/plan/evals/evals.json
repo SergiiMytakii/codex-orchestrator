@@ -34,7 +34,7 @@
     },
     {
       "id": "local-fix-conserves-scope",
-      "prompt": "Plan a fix for one proven subcategory pairing defect while other search modes already work.",
+      "prompt": "Plan a fix for one proven subcategory pairing defect while other search modes already work. The current PairingService owns all necessary behavior. An unapproved draft additionally proposes a new universal resolver and reconstructing legacy search state. Local source evidence shows neither addition is needed for this defect. Keep those additions only if new authority or evidence establishes necessity.",
       "expected": ["state the direct fix in the existing owner", "keep other search modes unchanged", "delete a universal resolver and legacy reconstruction unless evidence requires them"],
       "forbidden": ["promote agent proposals into approved architecture", "redesign every search mode for completeness"]
     },
@@ -58,7 +58,7 @@
     },
     {
       "id": "review-and-save-preserves-density",
-      "prompt": "Deeply review this settled ten-point implementation plan, incorporate justified findings, and save it to a Markdown file.",
+      "prompt": "Deeply review the following settled ten-point implementation plan, incorporate justified findings, and save it to a Markdown file.\n\nSettled plan (keep this order and level of detail):\n1. Scope: fix only duplicate saved-filter names in the existing FilterService; other filter modes stay unchanged.\n2. Authority: a user may save distinct filters, but duplicate names within the same account must be rejected.\n3. Evidence: save_filter currently accepts a second filter called Work for account A; account B may still use Work.\n4. Existing seam: implement the check through save_filter and its existing account-scoped repository.\n5. Change: normalize surrounding whitespace using the current name normalizer before the duplicate check.\n6. Compatibility: do not rename or delete existing saved filters, and keep the current successful return record.\n7. Concurrency: the existing unique account/name constraint remains the final authority; translate its duplicate error to the same public conflict response.\n8. Proof: use the public save_filter call to show duplicate rejection and acceptance of a distinct name.\n9. Delivery: run the affected suite and required independent review, then create only the authorized local commit; no push or deployment.\n10. Completion: report the observed behavior, checks and remaining limitations without adding adjacent cleanup.\n\nRepository evidence for review: account-scoped names are case-insensitive under the existing normalizer and unique constraint. The proof in point 8 must therefore also cover Work versus work. An optional observation suggests a new global filter cache, which is outside the request. Preserve the ten-point structure; reconcile only independently verified findings.",
       "expected": [
         "invoke plan-review and receive findings rather than a replacement plan",
         "apply only verified blockers through one minimal revision",
@@ -72,7 +72,7 @@
     },
     {
       "id": "save-local-plan-runs-one-deep-review",
-      "prompt": "Save the compact implementation plan from this conversation as a local Markdown file.",
+      "prompt": "Save the compact implementation plan below from this conversation as a local Markdown file. Run the required independent plan-review before saving; no implementation is authorized.\n\nSettled plan (keep this order and level of detail):\n1. Scope: fix only duplicate saved-filter names in the existing FilterService; other filter modes stay unchanged.\n2. Authority: a user may save distinct filters, but duplicate names within the same account must be rejected.\n3. Evidence: save_filter currently accepts a second filter called Work for account A; account B may still use Work.\n4. Existing seam: implement the check through save_filter and its existing account-scoped repository.\n5. Change: normalize surrounding whitespace using the current name normalizer before the duplicate check.\n6. Compatibility: do not rename or delete existing saved filters, and keep the current successful return record.\n7. Concurrency: the existing unique account/name constraint remains the final authority; translate its duplicate error to the same public conflict response.\n8. Proof: use the public save_filter call to show duplicate rejection and acceptance of a distinct name.\n9. Delivery: run the affected suite and required independent review, then create only the authorized local commit; no push or deployment.\n10. Completion: report the observed behavior, checks and remaining limitations without adding adjacent cleanup.\n\nAvailable evidence: the existing tests already cover case-insensitive duplicate names and the account/name constraint; no unresolved product decision is known. Do not assume a review verdict in advance; keep this draft as the fixed base and apply only independently verified minimal corrections.",
       "expected": [
         "route through Plan and invoke one plan-review before saving",
         "keep the conversation draft as the fixed base",

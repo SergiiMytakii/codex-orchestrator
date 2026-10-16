@@ -42,7 +42,6 @@ const codeReviewArtifact = {
     { role: 'spec_reviewer', sessionId: 'spec-session-1', verdict: 'approve' },
     { role: 'standards_reviewer', sessionId: 'standards-session-1', verdict: 'approve' },
   ],
-  repairFindingOutcomes: [],
 };
 
 test('implementation reviewer persists prepared and launched identity before accepting a correlated report', async () => {

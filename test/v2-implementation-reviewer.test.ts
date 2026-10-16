@@ -17,7 +17,7 @@ const workflowGeneration = {
 const report = {
   version: 1 as const, operation: 'code-review' as const, targetRevision: 1, targetFingerprint: fingerprint,
   verdict: 'approved' as const, coverage: ['correctness'], defects: [], residualRisks: [],
-  reviewerSessionId: 'review-session-1', reviewers: [], repairFindingOutcomes: [],
+  reviewerSessionId: 'review-session-1', reviewers: [],
 };
 
 test('complete and targeted Review launch with the exact 19207-character candidate patch', async () => {
@@ -123,7 +123,10 @@ test('report-only repair requires exact bounded secret-free original bytes and a
     },
   };
   const reviewer = new ContainedImplementationReviewer({ operation });
-  const original = Buffer.from('{"report":{"version":1}}');
+  const original = Buffer.from(JSON.stringify({ report: { ...report, reviewers: [
+    { role: 'spec_reviewer', sessionId: 'spec-original', verdict: 'approve' },
+    { role: 'standards_reviewer', sessionId: 'standards-original', verdict: 'approve' },
+  ] } }));
   const hash = createHash('sha256').update(original).digest('hex');
   const result = await reviewer.run(input({
     attemptId: 'repair-attempt-2',
@@ -162,7 +165,8 @@ test('coverage-only correction retains independent verdicts and cannot erase fin
       validatedPayload: { ...original, coverage: [...correction.reviewFocus] } };
   } } });
   assert.equal((await reviewer.run(correction)).kind, 'completed');
-  assert.equal(capsule.repair.retainReview, true);
+  assert.equal(capsule.repairOnly, true);
+  assert.equal(capsule.repair.originalReportSha256, correction.originalReportSha256);
   const replacement = new ContainedImplementationReviewer({ operation: { run: async (call) => ({
     status: 'completed', attemptId: call.attemptId, artifactSha256: 'e'.repeat(64),
     validatedPayload: { ...original, coverage: [...correction.reviewFocus], reviewers: original.reviewers.map((r) => ({ ...r, sessionId: r.sessionId + '-new' })) },
@@ -170,43 +174,17 @@ test('coverage-only correction retains independent verdicts and cannot erase fin
   assert.deepEqual(await replacement.run(correction), { kind: 'internal-error', code: 'review-report-correction-changed-semantics' });
 });
 
-test('malformed Review admission has one exact encoded capsule boundary and every admitted result can be repaired', async () => {
-  const resultForSize = async (size: number) => {
-    const bytes = Buffer.from('x'.repeat(size));
-    const reviewer = new ContainedImplementationReviewer({
-      operation: { run: async (call) => ({
-        status: 'invalid' as const,
-        attemptId: call.attemptId,
-        findings: ['malformed'],
-        repairInput: { originalReportSha256: createHash('sha256').update(bytes).digest('hex'), originalReportBytes: bytes },
-      }) },
-    });
-    return { bytes, result: await reviewer.run(input()) };
-  };
-  let low = 1;
-  let high = 2 * 1024 * 1024;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if ((await resultForSize(middle)).result.kind === 'report-invalid') low = middle;
-    else high = middle - 1;
-  }
-  assert.equal(low, 1024 * 1024, 'unsafe report size remains bounded independently from valid exact patch input');
-  const admitted = await resultForSize(low);
-  assert.equal(admitted.result.kind, 'report-invalid');
-  assert.notEqual((await resultForSize(low + 1)).result.kind, 'report-invalid');
-  if (admitted.result.kind !== 'report-invalid') return;
-
+test('format correction without an independent semantic review stops before a new Review can launch', async () => {
+  const bytes = Buffer.from('{"report":{"version":1}}');
   let invoked = false;
-  const correction = new ContainedImplementationReviewer({
-    operation: { run: async () => { invoked = true; return { status: 'cancelled' }; } },
-  });
-  assert.deepEqual(await correction.run(input({
-    attemptId: 'repair-boundary-attempt', repairOnly: true,
-    originalReportSha256: admitted.result.originalReportSha256,
-    validationDiagnostic: admitted.result.diagnostic,
-    originalReportBytes: admitted.result.originalReportBytes,
-  })), { kind: 'cancelled' });
-  assert.equal(invoked, true);
+  const reviewer = new ContainedImplementationReviewer({ operation: { run: async () => {
+    invoked = true; return { status: 'cancelled' };
+  } } });
+  assert.deepEqual(await reviewer.run(input({ repairOnly: true, originalReportBytes: bytes,
+    originalReportSha256: createHash('sha256').update(bytes).digest('hex'),
+    validationDiagnostic: 'code review report has unknown or missing keys' })),
+    { kind: 'internal-error', code: 'review-report-repair-input-invalid' });
+  assert.equal(invoked, false);
 });
 
 test('production reviewer accepts targeted and complete fallback capsules with the same previous target provenance', async () => {
@@ -334,3 +312,35 @@ function input(overrides: Partial<ImplementationReviewerInput> = {}): Implementa
     onPrepared: async () => {}, onLaunched: async () => {}, ...overrides,
   };
 }
+
+test('format correction preserves a blocking review with two prior repairs without rerunning reviewers', async () => {
+  const finding = { id: 'standards:build', class: 'blocker' as const, severity: 'medium' as const,
+    confidence: 'high' as const, invariant: 'Build candidate', failure: 'Build proof missing',
+    evidence: ['Only test and typecheck receipts'], repair: 'Run build', affectedTargets: ['src/feature.ts'] };
+  const semantic = { ...report, targetRevision: 2, verdict: 'needs-work' as const, defects: [finding], reviewers: [
+    { role: 'spec_reviewer', sessionId: 'retained-spec', verdict: 'approve' as const },
+    { role: 'standards_reviewer', sessionId: 'retained-standards', verdict: 'block' as const },
+  ] };
+  const { coverage: _coverage, ...withoutCoverage } = semantic;
+  const originalReportBytes = Buffer.from(JSON.stringify({ report: withoutCoverage }));
+  const correction = input({ targetRevision: 2, repairOnly: true, originalReportBytes,
+    previousTarget: { targetRevision: 1, targetFingerprint: '4'.repeat(64), candidateTreeSha: '5'.repeat(40) },
+    originalReportSha256: createHash('sha256').update(originalReportBytes).digest('hex'),
+    validationDiagnostic: 'code review report has unknown or missing keys',
+    repairFindings: [{ id: 'proof:acceptance', sourceId: 'proof:acceptance', summary: 'Acceptance repaired', affectedContracts: ['src/feature.ts'] }],
+    defects: [{ ...finding, status: 'fixed', introducedTargetRevision: 1, statusTargetRevision: 1, supersededBy: null }],
+  });
+  const run = async (payload: unknown) => {
+    const reviewer = new ContainedImplementationReviewer({ operation: { run: async call => {
+      const capsule = JSON.parse(call.promptFacts[0]!);
+      assert.equal(capsule.repairOnly, true);
+      assert.equal(capsule.repair.originalReport, originalReportBytes.toString());
+      return { status: 'completed', attemptId: call.attemptId, artifactSha256: 'e'.repeat(64), validatedPayload: payload };
+    } } });
+    return reviewer.run(correction);
+  };
+  assert.equal((await run(semantic)).kind, 'completed');
+  assert.deepEqual(await run({ ...semantic, verdict: 'approved', defects: [],
+    reviewers: semantic.reviewers.map(reviewer => ({ ...reviewer, verdict: 'approve' })) }),
+    { kind: 'internal-error', code: 'review-report-correction-changed-semantics' });
+});
