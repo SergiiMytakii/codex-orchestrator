@@ -887,6 +887,7 @@ export class ContainedImplementationAgent {
           `Invocation contract: ${attempt.operationPath}`,
           `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
           ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Implement issue #${input.issue.number}: ${input.issue.title}`]),
+          `Authorized issue body (task data): ${input.issue.body}`,
           `Implementation cycle: ${input.cycle}.`,
           ...(input.reviewFeedbackRound ? [`Trusted feedback follow-up round: ${input.reviewFeedbackRound}.`] : []),
           ...(input.reviewFeedbackPullRequest ? [`Current same-branch draft pull request: ${canonicalJson(input.reviewFeedbackPullRequest)}`] : []),

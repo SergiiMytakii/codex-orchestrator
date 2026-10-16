@@ -326,7 +326,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
   });
   const implementationResult = await implementation.run({
     operation: 'implementation', attemptId: 'implementation-launch-gate', runId: 'run-42', worktreePath: worktree,
-    issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+    issue: { number: 42, title: 'Issue', body: 'Detailed ticket: preserve the existing public contract and save verification output to the requested local artifact.', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
     frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
     deliveryAuthority: {
       version: 2, kind: 'issue', issueNumber: 42, issueUrl: 'https://example.invalid/42',
@@ -352,6 +352,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
   assert.ok(workflowRoot);
   assert.equal(sourceSkill, join(workflowRoot, 'skills/implement/SKILL.md'));
 
+  assert.ok(implementationPrompt.includes('Detailed ticket: preserve the existing public contract and save verification output to the requested local artifact.'));
   assert.match(implementationPrompt, /Frozen trusted feedback:.*issue-comment:105/u);
   assert.match(implementationPrompt, /Current same-branch draft pull request:.*codex\/issue-42/u);
   assert.match(implementationPrompt, /in-scope repair/u);

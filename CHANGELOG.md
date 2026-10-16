@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Pass the complete authorized issue body to the implementation owner alongside
+  frozen criteria and configured commands.
+
 ## [2.0.29] - 2026-10-16
 
 ### Changed
