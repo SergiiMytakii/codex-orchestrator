@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.33] - 2026-10-16
+
 ### Fixed
 
 - Link every implementation-owner verification result in Review to the current candidate binding and tree, including additional lint/build checks, so reviewers can establish their exact provenance without repeating implementation.
