@@ -53,14 +53,12 @@ async function executeWorker(root: string, checkpoint: string) {
       const run = saved.runs.at(-1)!;
       if (run.lifecycle === 'checking' && run.candidateBinding && run.checks.length === 0) await pause('implementation');
       if (run.checks.length === 2 && run.checks.every((check) => check.status === 'passed') && !run.proofReceipt) await pause('checks');
-      if (run.proofReceipt && run.lifecycle !== 'publishing' && !run.terminalOutcome) await pause('proof');
-      if (run.lifecycle === 'publishing' && run.directReview) await pause('review');
+      if (run.proofReceipt && !run.terminalOutcome) await pause('proof');
+      if (run.lifecycle === 'publishing' && run.implementationResult?.review) await pause('review');
       if (run.terminalOutcome?.status === 'review-ready') await pause('publication');
       if (run.pendingEffect?.kind === 'issue-feedback-comment') await pause('before:answer-comment');
-      if (run.activeAttempt?.operationId === 'acceptance-proof' && run.activeAttempt.stage === 'adopted') {
-        if (run.proofExecution?.reportCorrection) await pause('proof:correction-persisted');
-        else if (!run.proofReceipt) await pause('proof:result-adopted');
-      }
+      if (run.activeAttempt?.operationId === 'implementation' && run.activeAttempt.stage === 'observed') await pause('owner:result-observed');
+      if (run.implementationReportCorrection && run.activeAttempt?.stage === 'adopted') await pause('owner:correction-persisted');
       return saved;
     },
   };
@@ -101,58 +99,49 @@ async function executeWorker(root: string, checkpoint: string) {
     },
     git,
     implementationAgent: { run: async (input) => {
+      const retained = (await store.read()).runs[0]?.activeAttempt;
+      if (retained?.stage === 'observed' && retained.result) {
+        const bytes = await readFile(retained.result.path);
+        if (sha256(bytes) !== retained.result.sha256) throw new Error('retained owner result changed');
+        return { kind: 'completed', attemptId: input.attemptId, report: JSON.parse(bytes.toString('utf8')) };
+      }
       await input.onPrepared?.({ attemptId: input.attemptId, reportPath: join(root, 'reports', `${input.attemptId}.json`), preparedAt: new Date().toISOString(), baseline: await git.snapshot(input.worktreePath) });
       await input.onLaunched?.({ attemptId: input.attemptId, pid: process.pid, processGroupId: process.pid, launchedAt: new Date().toISOString() });
+      await input.onSessionStarted?.(input.sessionId ?? '01000000-0000-4000-8000-000000000001');
       if (scenario.mode === 'answer' && input.reviewFeedback?.length) {
         await event('answer-agent');
         return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'answer-only', summary: 'Answered without a change.', changedFiles: [], residualRisks: [], response: 'The existing checked behavior is preserved.' } };
       }
-      await event('implementation');
+      if (input.reportCorrection) {
+        if (!input.sessionId || sha256(input.reportCorrection.bytes) !== input.reportCorrection.sha256) throw new Error('owner correction lost exact report or native session');
+        await event('owner-correction');
+      } else await event('implementation');
       await writeFile(join(input.worktreePath, 'feature.txt'), 'implemented\n');
       for (const id of Object.keys(config.checks)) await event(`worker-check:${id}`);
-      return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [], checks: Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed', outputSha256: sha256('ok') })) } };
-    } },
-    proof: { proveChange: async (input) => {
-      if (scenario.mode === 'malformed-proof') {
-        const bytes = Buffer.from('{"version":1}');
-        const diagnostic = 'missing proof fields';
-        const malformed = { status: 'report-repair' as const, reportRepairCount: 1, findings: [diagnostic], reportCorrection: { bytes, sha256: sha256(bytes), diagnostic } };
-        const artifact = join(input.materialization!.path, config.proof.artifactDir, 'scenario.txt');
-        if (input.recoverOnly) {
-          await event('proof-result-observation');
-          const retained = (await store.read()).runs[0]!.activeAttempt;
-          if (!retained || !('result' in retained) || !retained.result) throw new Error('original proof result identity was lost');
-          const saved = await readFile(retained.result.path);
-          if (sha256(saved) !== retained.result.sha256 || !saved.equals(Buffer.from(canonicalJson(malformed)))) throw new Error('original malformed result bytes changed');
-          if ((await readFile(artifact, 'utf8')) !== 'original scenario evidence') throw new Error('original proof artifacts were lost');
-          return malformed;
-        }
-        if (!input.reportCorrection) {
-          await input.beforeAgentLaunch?.(); await input.onLaunched?.({ pid: process.pid, processGroupId: process.pid, launchedAt: new Date().toISOString() });
-          await event('proof'); await event('proof-scenario');
-          await mkdir(dirname(artifact), { recursive: true }); await writeFile(artifact, 'original scenario evidence');
-          await event(`proof-materialization:${input.materialization!.path}`);
-          await event(`proof-target:${canonicalJson(mint.verifyAndRead(input.checkedChange).payload)}`);
-          await writeBound({ path: join(root, 'reports', `${input.attemptId}.json`), bytes: Buffer.from(canonicalJson(malformed)) });
-          return malformed;
-        }
-        if (!input.reportCorrection.bytes.equals(bytes) || input.reportCorrection.sha256 !== sha256(bytes) || input.reportCorrection.diagnostic !== diagnostic) throw new Error('correction lost exact report bytes or diagnostic');
-        if ((await readFile(artifact, 'utf8')) !== 'original scenario evidence') throw new Error('report correction lost original proof artifacts');
-        await input.beforeAgentLaunch?.(); await input.onLaunched?.({ pid: process.pid, processGroupId: process.pid, launchedAt: new Date().toISOString() });
-        await event('proof-correction'); await event(`correction-materialization:${input.materialization!.path}`);
-        return { status: 'passed', receipt: { proofId: input.proofId, bindingSha256: 'c'.repeat(64), summary: 'passed', publishableEvidence: [], localEvidenceId: `proof:${input.proofId}` } };
+      if (scenario.mode === 'blocked') return { kind: 'completed', report: { version: 1, status: 'external-block', summary: 'Unavailable test service.', changedFiles: ['feature.txt'], residualRisks: [], blocker: { kind: 'service', summary: 'Unavailable test service.', attempted: ['Observe service.'], resumable: false } } };
+      const source = await git.snapshot(input.worktreePath);
+      await event('proof'); await event('review');
+      if (scenario.mode === 'malformed-proof' && !input.reportCorrection) {
+        await event('owner-malformed-report');
+        const report = { version: 1, status: 'completed', summary: 'malformed owner proof', changedFiles: ['feature.txt'], residualRisks: [], checks: Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed', outputSha256: sha256('ok') })) };
+        await writeBound({ path: join(root, 'reports', `${input.attemptId}.json`), bytes: Buffer.from(canonicalJson(report)) });
+        return { kind: 'completed', report };
       }
-      await input.beforeAgentLaunch?.(); await input.onLaunched?.({ pid: process.pid, processGroupId: process.pid, launchedAt: new Date().toISOString() }); await event('proof');
-      await event(`proof-target:${canonicalJson(mint.verifyAndRead(input.checkedChange).payload)}`);
-      if (scenario.mode === 'blocked') return { status: 'external-block', blocker: { kind: 'service', summary: 'Unavailable test service.', attempted: ['Observe service.'], resumable: false }, receipt: { proofId: input.proofId, bindingSha256: 'c'.repeat(64), summary: 'service unavailable', publishableEvidence: [], localEvidenceId: `proof:${input.proofId}` } };
-      return { status: 'passed', receipt: { proofId: input.proofId, bindingSha256: 'c'.repeat(64), summary: 'passed', publishableEvidence: [], localEvidenceId: `proof:${input.proofId}` } };
+      const checks = Object.entries(config.checks).map(([id, command]) => ({ id, command, status: 'passed' as const, outputSha256: sha256('ok') }));
+      return { kind: 'completed', attemptId: input.attemptId, report: { version: 1, status: 'completed', summary: 'done', changedFiles: ['feature.txt'], residualRisks: [], checks,
+        proof: { version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
+          criteria: input.frozenCriteria.map(c => ({ id: c.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [checks[0]!.id], analysis: 'The requested public behavior passes.' })),
+          checks: [], artifacts: [], findings: [], residualRisks: [] },
+        review: { summary: 'Independent reviewers approved the final source.', trackedContentSha256: source.trackedContentSha256,
+          untrackedContentSha256: source.untrackedContentSha256,
+          coverage: ['candidate-proof-binding', 'correctness', 'duplicate-ownership', 'maintainability', 'repository-standards', 'requirements', 'tests', 'zero-legacy'],
+          reviewers: [{ role: 'spec_reviewer', sessionId: '01000000-0000-4000-8000-000000000002', verdict: 'approve' },
+            { role: 'standards_reviewer', sessionId: '01000000-0000-4000-8000-000000000003', verdict: 'approve' }] } } };
     } },
-    implementationReviewer: { run: async (input) => {
-      const invocation = { attemptId: input.attemptId, operation: input.operation, reviewerSessionId: input.reviewerSessionId, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint };
-      await input.onPrepared({ ...invocation, validationContext: { operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint, reviewerSessionId: input.reviewerSessionId, availableReviewers: ['spec_reviewer', 'standards_reviewer'], requiredCoverage: input.reviewFocus, previousFindingIds: [], requireAllReviewers: true, requireReviewerEvidence: true } });
-      await input.onLaunched({ ...invocation, pid: process.pid, processGroupId: process.pid }); await event('review');
-      await event(`review-target:${input.currentTreeSha}`);
-      return { kind: 'completed', attemptId: input.attemptId, artifactSha256: '8'.repeat(64), report: { version: 1, operation: input.operation, targetRevision: input.targetRevision, targetFingerprint: input.targetFingerprint, verdict: 'approved', coverage: input.reviewFocus, defects: [], residualRisks: [], reviewerSessionId: input.reviewerSessionId, reviewers: [{ role: 'spec_reviewer', sessionId: `${input.reviewerSessionId}:spec`, verdict: 'approve' }, { role: 'standards_reviewer', sessionId: `${input.reviewerSessionId}:standards`, verdict: 'approve' }] } };
+    proof: { admitReport: async (input) => {
+      await event('proof-admission');
+      await event(`proof-target:${canonicalJson(mint.verifyAndRead(input.checkedChange).payload)}`);
+      return { status: 'passed', receipt: { proofId: input.proofId, bindingSha256: 'c'.repeat(64), summary: 'passed', publishableEvidence: [], localEvidenceId: `proof:${input.proofId}` } };
     } },
     checkedChangeMint: mint, runRecords: traced,
     writeEvidence: async (entry) => { const path = join(root, 'evidence', `${entry.runId}-${entry.code}.json`); await writeBound({ path, bytes: Buffer.from(canonicalJson(entry)) }); return { id: entry.code, path }; },
@@ -161,7 +150,7 @@ async function executeWorker(root: string, checkpoint: string) {
     writeOutcomeEvidence: (input) => writeBound({ ...input, path: resolve(root, input.path) }),
     packageVersion: '0.1.51',
     createWorkflowGeneration: async () => ({ receipt: { generationHash: '1'.repeat(64), manifestSha256: 'e'.repeat(64), packageVersion: '0.1.51', generationRoot: join(root, 'workflow'), contentSha256: 'f'.repeat(64) }, skillHashes: { 'agent-auto': 'a'.repeat(64), 'acceptance-proof': 'b'.repeat(64) } }),
-    verifyWorkflowGeneration: async () => {}, createRunId: randomUUID, createProofId: () => 'proof-1', createReviewSessionId: () => 'review-session-1', now: () => new Date().toISOString(),
+    verifyWorkflowGeneration: async () => {}, createRunId: randomUUID, createProofId: () => 'proof-1', now: () => new Date().toISOString(),
     processIdentity: { host, bootId,
       capture: async (pid, processGroupId) => { const result = await captureProcessStartIdentity({ platform: process.platform, pid, processGroupId }); return result.status === 'available' ? result.identity : undefined; },
       observe: async (processInfo) => ({ leader: await observeProcessIdentity({ platform: process.platform, ...processInfo }), group: observeProcessGroup(processInfo.processGroupId) }),

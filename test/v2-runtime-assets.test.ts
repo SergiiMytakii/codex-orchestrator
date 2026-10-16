@@ -9,7 +9,6 @@ import { promisify } from 'node:util';
 import { publishRuntimeAssetSnapshot, verifyRuntimeAssetSnapshot } from '../src/v2/runtime-assets.js';
 import {
   ContainedImplementationAgent,
-  ContainedProofAgent,
   materializeReportReadView,
   configuredCheckPolicySha256,
 } from '../src/v2/runtime.js';
@@ -107,7 +106,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
     workflowGeneration,
     runtimeRoot: join(root, 'runtime'),
     snapshotRelativePath: 'runs/run-a/attempts/attempt-a/snapshot',
-    operation: 'acceptance-proof',
+    operation: 'implementation',
     bootId: 'boot-a',
   };
   const snapshots = await Promise.all(Array.from({ length: 16 }, async () => publishRuntimeAssetSnapshot(input)));
@@ -116,10 +115,10 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   assert.equal(left.snapshotRoot, right.snapshotRoot);
   assert.equal(new Set(snapshots.map((snapshot) => snapshot.snapshotRoot)).size, 1);
   assert.equal(left.generationHash, workflowGeneration.generationHash);
-  assert.equal(left.operation, 'acceptance-proof');
-  assert.equal(left.policy.runnerPostcondition, 'proof-only');
-  assert.match(left.operationPath, /operations\/acceptance-proof\/SKILL\.md$/u);
-  assert.match(left.schemaPath, /schemas\/proof-report-v1\.json$/u);
+  assert.equal(left.operation, 'implementation');
+  assert.equal(left.policy.runnerPostcondition, 'change-set');
+  assert.match(left.operationPath, /operations\/implementation\/SKILL\.md$/u);
+  assert.match(left.schemaPath, /schemas\/implementation-report-v1\.json$/u);
   assert.equal(left.files.some((file) => file.path.endsWith('tools/android-lease.mjs')), false);
   const profile = parseWorkflowExecutionProfile(await readFile(left.profilePath, 'utf8'), left.policy);
   assert.equal(profile.name, 'implementer');
@@ -193,111 +192,64 @@ test('operation snapshots resolve contained references and complete referenced s
   }
 });
 
-test('contained Android proof receives only Runner-prepared evidence and no host mutation authority', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'runtime-android-proof-prompt-'));
+test('one contained owner receives proof, independent Review, session identity, and durable launch authority', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-owner-prompt-'));
   const orchestratorHome = join(root, 'orchestrator');
-  const targetRoot = join(root, 'target');
-  const worktree = join(targetRoot, '.codex-orchestrator/worktrees/issue-177');
-  const candidateWorktree = join(targetRoot, '.codex-orchestrator/worktrees/.candidate-executions/run/binding/proof');
-  await mkdir(worktree, { recursive: true });
-  await mkdir(candidateWorktree, { recursive: true });
+  const worktree = join(root, 'worktree');
+  await mkdir(worktree);
   const workflowGeneration = await materializeWorkflowGeneration({
-    packageRoot,
-    runtimeRoot: orchestratorHome,
-    packageVersion: '2.0.1',
-    bootId: 'boot-a',
+    packageRoot, runtimeRoot: orchestratorHome, packageVersion: '2.0.1', bootId: 'boot-a',
   });
-  let prompt = '';
-  let proofCwd = '';
+  const sessionId = '019a1435-06c0-7860-8f62-b1faadb9662b';
+  const persistedSessions: string[] = [];
   let launchPersisted = false;
   let processRuns = 0;
-  const process = {
-    run: async (invocation: { prompt: string; cwd: string; onSpawned?: (input: { pid: number; processGroupId: number }) => Promise<void> }) => {
-      processRuns += 1;
-      prompt = invocation.prompt;
-      proofCwd = invocation.cwd;
-      await invocation.onSpawned?.({ pid: 177, processGroupId: 177 });
-      return { kind: 'cancelled' as const };
-    },
+  const process = { run: async (invocation: any) => {
+    processRuns++;
+    assert.equal(invocation.cwd, worktree);
+    assert.equal(invocation.sessionId, sessionId);
+    await invocation.onSessionStarted(sessionId);
+    await invocation.onSpawned({ pid: 177, processGroupId: 177 });
+    assert.equal(invocation.operationPolicy.sandboxMode, 'workspace-write');
+    assert.equal(invocation.operationPolicy.runnerPostcondition, 'change-set');
+    assert.equal(invocation.operationPolicy.approvalCeiling, 'never');
+    assert.equal(invocation.operationPolicy.externalWrite, false);
+    assert.match(invocation.prompt, /Proof artifacts belong under \.codex-orchestrator\/v2\/proofs\/proof-177\//u);
+    assert.match(invocation.prompt, /Complete proof and independent Review through the packaged global skills/u);
+    assert.match(invocation.prompt, /Run heavy checks sequentially/u);
+    assert.match(invocation.prompt, /Do not commit, push, publish/u);
+    assert.match(invocation.prompt, /Android Live renders/u);
+    assert.deepEqual(Object.keys(invocation.agentProfilePaths).sort(), ['implementer', 'spec_reviewer', 'standards_reviewer']);
+    for (const profile of Object.values(invocation.agentProfilePaths)) await readFile(profile as string, 'utf8');
+    const schema = JSON.parse(await readFile(invocation.schemaPath, 'utf8'));
+    assert.ok(schema.properties);
+    return { kind: 'cancelled' as const };
+  } };
+  const agent = new ContainedImplementationAgent({
+    config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'),
+    safePath: '/usr/bin:/bin', bootId: 'boot-a', process: process as never,
+    git: { snapshot: async () => runtimeFreshness() } as never,
+  });
+  const input = {
+    ...ownerInput(worktree, workflowGeneration), attemptId: 'owner-177', proofId: 'proof-177', sessionId,
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit' as const, text: 'Android Live renders.' }],
+    onSessionStarted: async (id: string) => { persistedSessions.push(id); },
+    onLaunched: async ({ pid, processGroupId }: { pid: number; processGroupId: number }) => { launchPersisted = pid === 177 && processGroupId === 177; },
   };
-  const agent = new ContainedProofAgent({
-    config: androidConfigFixture,
-    orchestratorHome,
-    parentCodexHome: join(root, 'codex-home'),
-    safePath: '/usr/bin:/bin',
-    targetRoot,
-    bootId: 'boot-a',
-    androidAdbPath: '/android-sdk/platform-tools/adb',
-    iosXcrunPath: '/usr/bin/xcrun',
-    processExecutor: async () => ({ stdout: '', stderr: '', exitCode: 1 }),
-    process: process as never,
-    createAttemptId: () => 'attempt-android-proof',
-  });
-  const result = await agent.run({
-    attemptId: 'attempt-android-proof',
-    proofId: 'proof-177',
-    runId: 'run-177',
-    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
-    checkedChangeSha256: 'a'.repeat(64),
-    changedFiles: ['test/widget_test.dart'],
-    checks: [],
-    worktreePath: candidateWorktree,
-    onLaunched: async ({ pid, processGroupId }) => { launchPersisted = pid === 177 && processGroupId === 177; },
-    runnerPreparedArtifactPaths: ['.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json'],
-    runnerPreparedArtifactSha256: { '.codex-orchestrator/v2/proofs/proof-177/android-runner-receipt.json': 'b'.repeat(64) },
-    runnerPreparationWarnings: ['Android UI proof unfinished: emulator boot timed out.'],
-    repairOnly: false,
-    repairFindings: [],
-    workflowGeneration,
-    signal: new AbortController().signal,
-  });
-  assert.equal(result.kind, 'cancelled');
-  assert.equal(proofCwd, candidateWorktree);
+  assert.deepEqual(await agent.run(input), { kind: 'cancelled' });
   assert.equal(launchPersisted, true);
-  assert.ok(prompt.includes('Write evidence only below .codex-orchestrator/v2/proofs/proof-177/.'));
-  assert.match(prompt, /Runner-owned Android artifact paths/u);
-  assert.match(prompt, /Do not invoke adb, emulator, Flutter run, or an Android lease helper/u);
-  assert.match(prompt, /Android UI proof unfinished: emulator boot timed out/u);
-  assert.match(prompt, /Android infrastructure failure alone must not block delivery/u);
-  assert.doesNotMatch(prompt, /Android lease root:/u);
-  assert.doesNotMatch(prompt, /Android adb path:/u);
-
-  const recoveredAttemptId = 'attempt-android-proof';
-  const recoveredReportPath = join(
-    orchestratorHome, 'v2', sha256('m-ivonin/tipsterbro'), 'runs', 'run-177', 'attempts', recoveredAttemptId, 'report.json',
-  );
-  await writeFile(recoveredReportPath, '{"version":1,"status":"external-block"}\n');
-  const recovered = await agent.run({
-    attemptId: recoveredAttemptId,
-    proofId: 'proof-177', runId: 'run-177',
-    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
-    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
-    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
-    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
-    signal: new AbortController().signal,
-  });
-  assert.equal(recovered.kind, 'report');
-  assert.equal(processRuns, 1);
-
-  await unlink(recoveredReportPath);
-  const missingRecovery = await agent.run({
-    attemptId: recoveredAttemptId,
-    recoverOnly: true,
-    proofId: 'proof-177', runId: 'run-177',
-    issue: { number: 177, title: 'Android screen', body: 'Open Live.', url: 'https://example.invalid/177', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Android Live renders.' }],
-    checkedChangeSha256: 'a'.repeat(64), changedFiles: ['test/widget_test.dart'], checks: [],
-    worktreePath: candidateWorktree, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
-    runnerPreparationWarnings: [], repairOnly: false, repairFindings: [], workflowGeneration,
-    signal: new AbortController().signal,
-  });
-  assert.equal(missingRecovery.kind, 'internal-error');
+  assert.deepEqual(persistedSessions, [sessionId]);
+  const reportPath = join(orchestratorHome, 'v2', sha256('m-ivonin/tipsterbro'), 'runs', input.runId, 'attempts', input.attemptId, 'report.json');
+  const reportBytes = Buffer.from('{"version":1,"status":"external-block"}\n');
+  await writeFile(reportPath, reportBytes);
+  const recovered = await agent.run(input);
+  assert.equal(recovered.kind, 'completed');
+  if (recovered.kind !== 'completed') assert.fail('Expected exact persisted owner report recovery');
+  assert.deepEqual(recovered.reportBytes, reportBytes);
   assert.equal(processRuns, 1);
 });
 
-test('contained implementation and proof map a settled launch-gate failure to resumable infrastructure', async () => {
+test('contained owner maps settled infrastructure failures to resumable outcomes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-launch-gate-resume-'));
   const orchestratorHome = join(root, 'orchestrator');
   const targetRoot = join(root, 'target');
@@ -325,7 +277,7 @@ test('contained implementation and proof map a settled launch-gate failure to re
     process: process as never,
   });
   const implementationResult = await implementation.run({
-    operation: 'implementation', attemptId: 'implementation-launch-gate', runId: 'run-42', worktreePath: worktree,
+    operation: 'implementation', proofId: 'proof-42', attemptId: 'implementation-launch-gate', runId: 'run-42', worktreePath: worktree,
     issue: { number: 42, title: 'Issue', body: 'Detailed ticket: preserve the existing public contract and save verification output to the requested local artifact.', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
     frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
     deliveryAuthority: {
@@ -361,54 +313,22 @@ test('contained implementation and proof map a settled launch-gate failure to re
   assert.match(implementationPrompt, /complete current candidate diff relative to the original HEAD/u);
   assert.match(implementationPrompt, /verification-only repair with no new edits still returns completed/u);
 
-  const proof = new ContainedProofAgent({
-    config: androidConfigFixture, orchestratorHome, parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin',
-    targetRoot, bootId: 'boot-a', androidAdbPath: '/android/adb', iosXcrunPath: '/usr/bin/xcrun',
-    processExecutor: async () => ({ stdout: '', stderr: '', exitCode: 1 }), process: process as never,
-  });
-  const proofResult = await proof.run({
-    attemptId: 'proof-launch-gate', proofId: 'proof-42', runId: 'run-42',
-    issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
-    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
-    checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
-    runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
-    repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
-  });
-  assert.deepEqual(proofResult, { kind: 'transport-failed', resumable: true, failure: {
-    kind: 'launch-gate-failed', exitCode: null, signal: null, reportStatus: 'missing', detail: 'No process diagnostic was captured.',
-  } });
   for (const kind of ['idle-timeout', 'timeout', 'transport-failed', 'spawn-failed']) {
     processResult = { kind, exitCode: 1, signal: 'SIGTERM', stderr: Buffer.from('stream disconnected before completion'), report: { kind: 'missing' } };
-    const result = await proof.run({
-      attemptId: `proof-${kind}`, proofId: 'proof-42', runId: 'run-42',
-      issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
-      frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
-      checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
-      runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
-      repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
-    });
-    assert.deepEqual(result, { kind: 'transport-failed', resumable: true, failure: {
-      kind, exitCode: 1, signal: 'SIGTERM', reportStatus: 'missing', detail: 'Proof process: stream disconnected before completion',
-    } });
+    const result = await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: `owner-${kind}` });
+    assert.deepEqual(result, { kind: 'transport-failed', resumable: true });
   }
+  processResult = Object.assign({ kind: 'transport-failed', exitCode: 0, signal: null, stderr: Buffer.alloc(0), report: { kind: 'missing' } }, { error: 'session CAS rejected' });
+  assert.deepEqual(await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'owner-session-persistence-failure' }),
+    { kind: 'transport-failed', resumable: true });
+  processResult = Object.assign({ kind: 'transport-failed', exitCode: 0, signal: null, stderr: Buffer.alloc(0), report: { kind: 'missing' } },
+    { error: 'session CAS rejected', sessionIdentityFailed: true });
+  assert.deepEqual(await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'owner-session-identity-failure' }),
+    { kind: 'internal-error' });
   for (const diagnostic of ['Selected model is at capacity. Please try a different model.', 'x'.repeat(2000) + ' token=credential-material-12345', 'ENOENT /Users/example/private/auth.json', 'plain\n' + 'x'.repeat(2000)]) {
     processResult = { kind: 'transport-failed', exitCode: 1, signal: null, stderr: Buffer.from(diagnostic), report: { kind: 'missing' } };
-    const result = await proof.run({
-      attemptId: `proof-diagnostic-${diagnostic.length}`, proofId: 'proof-42', runId: 'run-42',
-      issue: { number: 42, title: 'Issue', body: '', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
-      frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
-      checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
-      runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
-      repairOnly: false, repairFindings: [], workflowGeneration, signal: new AbortController().signal,
-    });
-    assert.equal(result.kind, 'transport-failed');
-    if (result.kind !== 'transport-failed') assert.fail('must preserve a resumable process failure');
-    assert.ok(result.failure!.detail.length <= 1024);
-    assert.equal(result.failure!.detail.includes('credential-material'), false);
-    assert.equal(result.failure!.detail.includes('/Users/'), false);
-    assert.equal(result.failure!.detail.includes('\n'), false);
-    if (diagnostic.startsWith('Selected model')) assert.equal(result.failure!.detail, `Proof process: ${diagnostic}`);
-    if (diagnostic.includes('token=') || diagnostic.includes('/Users/')) assert.match(result.failure!.detail, /\[redacted\]/u);
+    const result = await implementation.run({ ...ownerInput(worktree, workflowGeneration), attemptId: `owner-diagnostic-${diagnostic.length}` });
+    assert.deepEqual(result, { kind: 'transport-failed', resumable: true });
   }
 
 });
@@ -714,7 +634,7 @@ function androidConfigFixture(): AgentAutoConfig {
 }
 
 
-test('implementation and proof format correction use exact bytes/schema in read-only view without semantic instructions', async () => {
+test('owner format correction retains exact bytes/schema and session in a read-only view', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-report-correction-'));
   const orchestratorHome = join(root, 'orchestrator');
   const targetRoot = join(root, 'target');
@@ -727,10 +647,13 @@ test('implementation and proof format correction use exact bytes/schema in read-
   const reportCorrection = { bytes, sha256: sha256(bytes), diagnostic: 'Unexpected end of JSON input' };
   let calls = 0;
   let transientFailure = false;
+  let mutated = false;
+  const sessionId = '019a1435-06c0-7860-8f62-b1faadb9662b';
   const process = { run: async (invocation: any) => {
     calls++;
     if (transientFailure) throw Object.assign(new Error('EIO: temporary filesystem error'), { code: 'EIO' });
     assert.notEqual(invocation.cwd, worktree);
+    assert.equal(invocation.sessionId, sessionId);
     assert.equal(invocation.operationPolicy.sandboxMode, 'read-only');
     assert.equal(invocation.operationPolicy.runnerPostcondition, 'report-only');
     assert.deepEqual(invocation.operationPolicy.writableRootClasses, []);
@@ -749,26 +672,40 @@ test('implementation and proof format correction use exact bytes/schema in read-
   const signal = new AbortController().signal;
   const implementation = new ContainedImplementationAgent({ config: androidConfigFixture, orchestratorHome,
     parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', bootId: 'boot-a',
-    git: { snapshot: async () => ({ headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64), untrackedContentSha256: '4'.repeat(64), worktreeIdentity: 'fixture' }) } as never,
+    git: { snapshot: async () => runtimeFreshness(mutated ? 'changed' : 'fixture') } as never,
     process: process as never });
-  const runImplementation = () => implementation.run({ operation: 'implementation', attemptId: 'format-implementation', runId: 'run-42', worktreePath: worktree,
+  const runImplementation = () => implementation.run({ operation: 'implementation', proofId: 'proof-42', sessionId, attemptId: 'format-implementation', runId: 'run-42', worktreePath: worktree,
     issue, frozenCriteria, deliveryAuthority: { version: 2, kind: 'issue', issueNumber: 42, issueUrl: issue.url, issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64) },
     cycle: 1, reworkFindings: [], workflowGeneration, reportCorrection, signal });
   assert.deepEqual(await runImplementation(), { kind: 'cancelled' });
-  const proof = new ContainedProofAgent({ config: androidConfigFixture, orchestratorHome,
-    parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', targetRoot, bootId: 'boot-a',
-    androidAdbPath: '/android/adb', iosXcrunPath: '/usr/bin/xcrun', processExecutor: async () => { assert.fail('Correction cannot discover iOS or launch tooling'); }, process: process as never });
-  const runProof = () => proof.run({ attemptId: 'format-proof', proofId: 'proof-42', runId: 'run-42', issue, frozenCriteria,
-    checkedChangeSha256: '7'.repeat(64), changedFiles: ['feature.txt'], checks: [], worktreePath: worktree,
-    runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {}, runnerPreparationWarnings: [],
-    repairOnly: true, repairFindings: [reportCorrection.diagnostic], reportCorrection, workflowGeneration, signal });
-  assert.deepEqual(await runProof(), { kind: 'cancelled' });
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   transientFailure = true;
   await assert.rejects(runImplementation(), /EIO/u);
-  await assert.rejects(runProof(), /EIO/u);
   transientFailure = false;
   assert.deepEqual(await runImplementation(), { kind: 'cancelled' });
-  assert.deepEqual(await runProof(), { kind: 'cancelled' });
+  const originalRun = process.run;
+  process.run = async (invocation: any) => {
+    const result = await originalRun(invocation);
+    mutated = true;
+    return result;
+  };
+  assert.deepEqual(await runImplementation(), { kind: 'internal-error' });
   assert.equal(await readFile(join(worktree, 'feature.txt'), 'utf8'), 'checked candidate');
 });
+
+
+function runtimeFreshness(worktreeIdentity = 'fixture') {
+  return { headSha: '1'.repeat(40), indexTreeSha: '2'.repeat(40), trackedContentSha256: '3'.repeat(64),
+    untrackedContentSha256: '4'.repeat(64), worktreeIdentity };
+}
+
+function ownerInput(worktreePath: string, workflowGeneration: Parameters<ContainedImplementationAgent['run']>[0]['workflowGeneration']): Parameters<ContainedImplementationAgent['run']>[0] {
+  return {
+    operation: 'implementation', proofId: 'proof-42', attemptId: 'owner-42', runId: 'run-42', worktreePath,
+    issue: { number: 42, title: 'Issue', body: 'Authorized issue.', url: 'https://example.invalid/42', state: 'OPEN', labels: [] },
+    frozenCriteria: [{ id: 'ac-1', order: 1, source: 'explicit', text: 'Works.' }],
+    deliveryAuthority: { version: 2, kind: 'issue', issueNumber: 42, issueUrl: 'https://example.invalid/42',
+      issueSnapshotSha256: '5'.repeat(64), authorizationLabel: 'agent:auto', sourceSha256: '5'.repeat(64), authoritySha256: '6'.repeat(64) },
+    cycle: 1, reworkFindings: [], workflowGeneration, signal: new AbortController().signal,
+  };
+}

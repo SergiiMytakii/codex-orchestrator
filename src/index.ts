@@ -1,5 +1,5 @@
 export { AcceptanceProof } from './v2/acceptance-proof.js';
-export type { FrozenCriterion, IssueSnapshot, ProveChangeResult, ProofAgent, ProofAgentResult } from './v2/acceptance-proof.js';
+export type { FrozenCriterion, IssueSnapshot, ProveChangeResult } from './v2/acceptance-proof.js';
 export { createCheckedChangeCapabilities, checkedChangeFreshnessMatches, checkedChangePayloadSha256 } from './v2/checked-change.js';
 export type {
   CheckedChange,
@@ -20,8 +20,6 @@ export type {
 } from './v2/candidate.js';
 export { codeReviewReportOutputSchema, hashCodeReviewReport, validateCodeReviewDefects, validateCodeReviewReport } from './v2/code-review-report.js';
 export type { CodeReviewDefectV1, CodeReviewReportV1, CodeReviewValidationContext } from './v2/code-review-report.js';
-export { ContainedImplementationReviewer } from './v2/implementation-reviewer.js';
-export type { ImplementationReviewerInput, ImplementationReviewerResult } from './v2/implementation-reviewer.js';
 export { parseAgentAutoConfig } from './v2/config.js';
 export type { AgentAutoConfig } from './v2/config.js';
 export { validateImplementationReport } from './v2/implementation-report.js';

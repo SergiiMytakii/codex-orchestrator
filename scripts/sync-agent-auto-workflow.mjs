@@ -8,9 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const SOURCE_MAGIC = 'codex-orchestrator-workflow-source-v2\0';
 const GENERATION_MAGIC = 'codex-orchestrator-workflow-generation-v2\0';
 const PRODUCTION_OPERATION_BINDINGS = {
-  'acceptance-proof': ['acceptance-proof', [], 'schemas/proof-report-v1.json'],
-  'code-review': ['code-review', [], 'schemas/code-review-v1.json'],
-  implementation: ['implement', ['diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json'],
+  implementation: ['implement', ['acceptance-proof', 'diagnosing-bugs', 'tdd'], 'schemas/implementation-report-v1.json'],
 };
 
 const options = parseArgs(process.argv.slice(2));
@@ -350,9 +348,15 @@ async function runAfterConfigReadTestHook() {
   }
 }
 
+function isPythonCacheArtifact(entry) {
+  return entry.isDirectory() && entry.name === '__pycache__'
+    || entry.isFile() && /\.py[co]$/u.test(entry.name);
+}
+
 async function copyTree(input) {
   for (const entry of await sortedEntries(input.sourceRoot)) {
     if (entry.name.startsWith('.env')) throw new Error(`Protected source path rejected: ${entry.name}`);
+    if (isPythonCacheArtifact(entry)) continue;
     const source = join(input.sourceRoot, entry.name);
     const target = input.targetRoot ? `${input.targetRoot}/${entry.name}` : entry.name;
     if (entry.isSymbolicLink()) throw new Error(`Symlink source rejected: ${source}`);
@@ -548,6 +552,7 @@ async function snapshotSourceTree(root) {
   const rows = [];
   const visit = async (directory, prefix = '') => {
     for (const entry of await sortedEntries(directory)) {
+      if (isPythonCacheArtifact(entry)) continue;
       const path = join(directory, entry.name);
       const logical = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isSymbolicLink()) throw new Error(`Symlink source rejected: ${path}`);
@@ -702,7 +707,9 @@ function validateGeneratedAuthority(manifest, physical, tree) {
       const binding = bindings[id];
       const [sourceSkill, dependencySkills, outputSchema] = binding;
       if (operation.sourceSkill !== sourceSkill || canonicalJson(operation.dependencySkills ?? []) !== canonicalJson(dependencySkills)
-        || operation.outputSchema !== outputSchema) {
+        || operation.outputSchema !== outputSchema
+        || operation.profile !== 'implementer'
+        || canonicalJson(operation.reviewers) !== canonicalJson(['spec_reviewer', 'standards_reviewer'])) {
         throw new Error(`Production workflow operation binding is invalid: ${id}`);
       }
     }

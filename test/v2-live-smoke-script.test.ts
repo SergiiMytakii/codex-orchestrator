@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { validateCodeReviewReport } from '../src/v2/code-review-report.js';
 
 interface CommandResult { status: number | null; stdout: string; stderr: string }
 
@@ -33,12 +32,8 @@ async function source(): Promise<string> {
 }
 
 const retainedScenarios = [
-  'package-install', 'discovery-matrix', 'commit-policy',
-  'incomplete-progress-rework', 'report-repair', 'diagnostics',
-  'authoritative-candidate-publication', 'acceptance-proof-rework', 'acceptance-proof-negative',
-  'review-feedback-continuation', 'safety-negative',
-  'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
-  'review-feedback-negative', 'issue-verification',
+  'package-install', 'discovery-matrix', 'diagnostics', 'authoritative-candidate-publication',
+  'review-feedback-continuation', 'publication-reconciliation', 'review-feedback-negative', 'issue-verification',
 ];
 
 test('live smoke help pins the V2 scenario and profile matrix', async () => {
@@ -73,13 +68,7 @@ test('live smoke rejects unknown profile before package or GitHub work', async (
   assert.doesNotMatch(result.stdout, /npm pack|scenario/u);
 });
 
-test('generated fake agent emits exact V2 implementation, code-review, and proof reports without GitHub work', async () => {
-  const result = await runLiveSmoke(['--self-test-fake-agent']);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, 'V2 fake agent self-test passed.\n');
-});
-
-test('generated live Codex wrapper pins Luna, records the invocation, and injects faults after it', async () => {
+test('generated live Codex wrapper preserves native reports and records each invocation', async () => {
   const result = await runLiveSmoke(['--self-test-live-codex']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, 'V2 live Codex wrapper self-test passed.\n');
@@ -193,24 +182,6 @@ test('live smoke omits the redundant free-form real-codex scenario', async () =>
 
 
 
-test('synthetic browser proof is not a GitHub live-smoke scenario', async () => {
-  const text = await source();
-  const registry = text.slice(text.indexOf('const scenarioDefinitions'), text.indexOf('const scenarioProfiles'));
-  const faults = text.slice(text.indexOf('function applyFault'), text.indexOf('function discardProofArtifacts'));
-  assert.doesNotMatch(registry, /browser-proof/u);
-  assert.doesNotMatch(faults, /browser-proof|writeBrowserProof/u);
-});
-
-
-
-
-
-
-
-
-
-
-
 test('strict cleanup retries eventually consistent observations before failing', async () => {
   const module = await import(new URL('../../scripts/live-smoke.mjs', import.meta.url).href) as {
     retryCleanupObservation: (action: () => Promise<void>, options: { attempts: number; delayMs: number }) => Promise<void>;
@@ -299,7 +270,11 @@ async function publishedFixture(context: SmokeContext, scenario: string): Promis
     issueNumber: 7, runId: 'run-7', cycle: 2, checkedChangeSha256: 'checked-1', proofId: 'proof-1',
     proofReceipt: { proofId: 'proof-1' },
     checks: [{ id: 'smoke', command: `${process.execPath} --version`, status: 'passed', bindingId: 'binding-1', candidateTreeSha: tree }],
-    directReview: { status: 'clear', targetRevision: 2, previousTarget: { targetRevision: 1 }, review: { disposition: 'clear', acceptedReportSha256: 'review-hash' } },
+    codexSession: { id: '019a1435-06c0-7860-8f62-b1faadb9662b' },
+    implementationResult: { proof: { status: 'passed' }, review: { reviewers: [
+      { role: 'spec_reviewer', sessionId: '019a1435-06c0-7860-8f62-b1faadb9662c', verdict: 'approve' },
+      { role: 'standards_reviewer', sessionId: '019a1435-06c0-7860-8f62-b1faadb9662d', verdict: 'approve' },
+    ] } },
     terminalOutcome: { status: 'review-ready' }, canonicalRepository: context.repo.toLowerCase(),
     reviewFeedback: { activeBatch: null, previousPublishedHeadSha: head, history: [], consumedSourceIds: [] },
     head,
@@ -318,7 +293,7 @@ async function wrapperFixture(t: TestContext) {
   const wrapper = join(context.root, 'live-codex');
   await writeFile(wrapper, smoke.liveCodexSource(process.execPath, context.modelAuditPath));
   await chmod(wrapper, 0o700);
-  // Return a deliberately unrelated model report. Normalizers must derive all authority from the capsule.
+  // Deliberately return unrelated bytes; an audit wrapper must preserve them exactly.
   const stub = join(context.root, 'codex');
   await writeFile(stub, `#!${process.execPath}\nimport { appendFileSync,writeFileSync } from 'node:fs';\nconst a=process.argv.slice(2);let p='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>p+=c);process.stdin.on('end',()=>{appendFileSync(${JSON.stringify(join(context.root, 'forwarded.jsonl'))},JSON.stringify({args:a,prompt:p})+'\\n');writeFileSync(a[a.indexOf('--output-last-message')+1],JSON.stringify({report:{version:1,status:'model-result',targetFingerprint:'wrong-model-target',coverage:['wrong-model-coverage']}}));});\n`);
   await chmod(stub, 0o700);
@@ -328,7 +303,7 @@ async function wrapperFixture(t: TestContext) {
     await mkdir(artifacts, { recursive: true });
     await writeFile(join(artifacts, 'transient.txt'), 'discard me');
     await writeFile(join(cwd, '.codex-orchestrator/sentinel.txt'), 'preserve me');
-    const prompt = `${operation === 'proof' ? 'Independently prove issue' : operation === 'code-review' ? '"operation":"code-review"' : 'Implement issue'}\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nRequired configured checks: ${JSON.stringify(checks)}.\nConfigured check receipts: [{"id":"smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
+    const prompt = `Implement issue\nLIVE_SMOKE_SCENARIO=${scenario}\nFrozen acceptance criteria: ${JSON.stringify([{ id: 'ac-1', order: 1, source: 'explicit', text: 'fixture criterion' }])}\nRequired configured checks: ${JSON.stringify(checks)}.\nConfigured check receipts: [{"id":"smoke"}]\nWrite evidence only below ${artifacts}.\n${extra}`;
     const result = await smoke.runCommand(wrapper, ['exec', '--output-last-message', reportPath, '-c', 'model_reasoning_effort="high"', ...(pin ? ['-c', 'model="gpt-5.6-luna"'] : [])], {
       cwd, env: { ...process.env, PATH: `${context.root}:${process.env.PATH ?? ''}` }, stdin: prompt, timeoutMs: 30_000, allowedExitCodes: [0, 1, 64],
     });
@@ -337,54 +312,6 @@ async function wrapperFixture(t: TestContext) {
     return { ...result, report, artifacts, reportPath };
   };
   return { context, invoke };
-}
-
-test('implementation smoke owner executes configured checks and reports real output hashes', async (t) => {
-  const { invoke } = await wrapperFixture(t);
-  const result = await invoke('issue-verification', 'implementation');
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.report.status, 'completed');
-  assert.deepEqual(result.report.checks.map((check: any) => [check.id, check.command, check.status]),
-    [['smoke', `${process.execPath} --version`, 'passed']]);
-  assert.match(result.report.checks[0].outputSha256, /^[a-f0-9]{64}$/u);
-});
-
-test('implementation smoke owner cannot report success for a failed configured command', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const result = await invoke('issue-verification', 'implementation', '', context.targetRoot, true,
-    { smoke: `${process.execPath} -e "process.exit(1)"` });
-  assert.notEqual(result.status, 0);
-  assert.notEqual(result.report?.status, 'completed');
-});
-
-test('authoritative smoke verifies final working bytes after its staged-source fault', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const command = '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "authoritative-candidate-publication" ]';
-  const result = await invoke('authoritative-candidate-publication', 'implementation', '', context.targetRoot, true, { smoke: command });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.report.status, 'completed');
-  assert.equal(result.report.checks[0].command, command);
-  assert.equal(result.report.checks[0].status, 'passed');
-  const staged = (await context.git(['show', ':src/live-smoke/authoritative-candidate-publication.txt'])).stdout;
-  assert.equal(staged, 'staged content must not become authoritative\n');
-});
-
-test('authoritative smoke cannot retain earlier success when final working bytes fail verification', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const result = await invoke('authoritative-candidate-publication', 'implementation', '', context.targetRoot, true,
-    { smoke: '[ "$(cat src/live-smoke/authoritative-candidate-publication.txt)" = "wrong final content" ]' });
-  assert.notEqual(result.status, 0);
-  assert.notEqual(result.report?.status, 'completed');
-});
-
-for (const profile of ['core-release', 'v2-regression']) {
-  test(`profile ${profile} selects executable scenarios without source parsing`, () => {
-    const selected = smoke.selectScenarios(smoke.parseArgs(['--profile', profile]));
-    const expected = profile === 'core-release' ? ['package-install', 'review-feedback-continuation']
-      : retainedScenarios.filter((name) => !['package-install', 'safety-negative'].includes(name));
-    assert.deepEqual(selected, expected);
-    assert.equal(new Set(selected).size, selected.length);
-  });
 }
 
 test('packed smoke extracts and runs only the public V2 CLI', async (t) => {
@@ -509,9 +436,12 @@ test('cleanup terminates an isolated run child and leaves an unrelated child ali
 });
 
 test('authoritative candidate fixture captures working tree over staged bytes and validates published tree and cleanup', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  assert.equal((await invoke('authoritative-candidate-publication', 'implementation')).status, 0);
+  const context = await fixture(t);
   const path = 'src/live-smoke/authoritative-candidate-publication.txt';
+  await mkdir(join(context.targetRoot, 'src/live-smoke'), { recursive: true });
+  await writeFile(join(context.targetRoot, path), 'staged content must not become authoritative\n');
+  await context.git(['add', '--', path]);
+  await writeFile(join(context.targetRoot, path), 'authoritative-candidate-publication\n');
   assert.equal((await context.git(['show', ':' + path])).stdout, 'staged content must not become authoritative\n');
   assert.equal(await readFile(join(context.targetRoot, path), 'utf8'), 'authoritative-candidate-publication\n');
   await context.git(['add', '-A']); await context.git(['commit', '-m', 'captured working tree']);
@@ -531,98 +461,54 @@ test('authoritative candidate fixture captures working tree over staged bytes an
   await assert.rejects(smoke.assertAuthoritativeCandidatePublication(context, { ...record, candidateBinding: { id: 'b1' } }, 'HEAD'), /durable candidate ownership/);
 });
 
-test('review wrapper normalizes full and repair capsules independently of the model report', async (t) => {
+test('audit wrapper preserves native report bytes, prompt, session argv, and product files', async (t) => {
   const { context, invoke } = await wrapperFixture(t);
-  const capsule = {
-    operation: 'code-review', reviewerSessionId: 'runner-session', reviewFocus: ['correctness', 'requirements'],
-    target: { current: { targetRevision: 3, targetFingerprint: 'a'.repeat(64) }, repairPatch: null },
-    defects: ['fixed', 'open'].map((id) => ({ id, class: 'blocker', severity: 'high', confidence: 'high', status: id, invariant: 'Maintain fixture contract.', failure: 'Fixture contract failed.', evidence: ['candidate evidence'], repair: 'Repair fixture.', affectedTargets: ['path:fixture.txt'], introducedTargetRevision: 1, statusTargetRevision: 2, supersededBy: null })), repairFindings: [{ id: 'repair-finding' }],
-  };
-  for (const repair of [false, true]) {
-    const input = structuredClone(capsule); if (repair) input.target.repairPatch = {} as any;
-    const result = await invoke('package-install', 'code-review', `Runner-provided facts: ${JSON.stringify([JSON.stringify(input)])}\nAvailable reviewer roles: ["spec","standards"]\n`);
-    assert.equal(result.status, 0, result.stderr);
-    const validated = validateCodeReviewReport(result.report, {
-      operation: 'code-review', targetRevision: 3, targetFingerprint: 'a'.repeat(64), reviewerSessionId: 'runner-session',
-      requiredCoverage: ['correctness', 'requirements'], availableReviewers: ['spec', 'standards'],
-      previousFindingIds: repair ? ['fixed', 'repair-finding'] : ['fixed', 'open', 'repair-finding'],
-      requireAllReviewers: true, requireReviewerEvidence: true,
-    });
-    assert.equal(validated.verdict, 'approved');
-    assert.deepEqual(result.report, {
-      version: 1, operation: 'code-review', targetRevision: 3, targetFingerprint: 'a'.repeat(64), verdict: 'approved',
-      coverage: ['correctness', 'requirements'], defects: [],
-      residualRisks: [], reviewerSessionId: 'runner-session',
-      reviewers: ['spec', 'standards'].map((role) => ({ role, sessionId: 'runner-session:' + role, verdict: 'approve' })),
-    });
-  }
+  const before = (await context.git(['status', '--porcelain=v1', '-z'])).stdout;
+  const result = await invoke('authoritative-candidate-publication', 'implementation');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(result.reportPath, 'utf8'), JSON.stringify({ report: {
+    version: 1, status: 'model-result', targetFingerprint: 'wrong-model-target', coverage: ['wrong-model-coverage'],
+  } }));
+  assert.equal((await context.git(['status', '--porcelain=v1', '-z'])).stdout, before);
+  assert.equal(await readFile(join(result.artifacts, 'transient.txt'), 'utf8'), 'discard me');
+  const forwarded = JSON.parse((await readFile(join(context.root, 'forwarded.jsonl'), 'utf8')).trim());
+  assert.match(forwarded.prompt, /LIVE_SMOKE_SCENARIO=authoritative-candidate-publication/u);
+  assert.ok(forwarded.args.includes('model_reasoning_effort="high"'));
+});
+
+test('audit wrapper forwards native resume identity and leaves malformed reports untouched', async (t) => {
+  const { context } = await wrapperFixture(t);
+  const raw = '{malformed model report';
+  const stub = join(context.root, 'codex');
+  await writeFile(stub, `#!${process.execPath}\nimport {writeFileSync,appendFileSync} from 'node:fs';
+    const a=process.argv.slice(2);process.stdin.resume();process.stdin.on('end',()=>{
+      appendFileSync(${JSON.stringify(join(context.root, 'resume-argv.json'))},JSON.stringify(a));
+      writeFileSync(a[a.indexOf('--output-last-message')+1],${JSON.stringify(raw)});
+      process.stdout.write('native-jsonl-output');
+    });`);
+  const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+  const reportPath = join(context.root, 'resume-report.json');
+  const args = ['exec', '--json', '--sandbox', 'read-only', '--output-last-message', reportPath,
+    '-c', 'model="gpt-5.6-luna"', 'resume', id, '-'];
+  const result = await smoke.runCommand(join(context.root, 'live-codex'), args, {
+    cwd: context.targetRoot, env: { ...process.env, PATH: `${context.root}:${process.env.PATH ?? ''}` }, stdin: 'unchanged prompt',
+  });
+  assert.equal(result.stdout, 'native-jsonl-output');
+  assert.equal(await readFile(reportPath, 'utf8'), raw);
+  assert.deepEqual(JSON.parse(await readFile(join(context.root, 'resume-argv.json'), 'utf8')), args);
+});
+
+test('audit wrapper records and returns a failed native call once without retrying it', async (t) => {
+  const { context, invoke } = await wrapperFixture(t);
+  await writeFile(join(context.root, 'codex'), `#!${process.execPath}\nprocess.stdin.resume();process.stdin.on('end',()=>{
+    process.stderr.write('stream disconnected before completion');process.exitCode=1;
+  });`);
+  const result = await invoke('package-install', 'implementation', 'Independently prove issue');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /stream disconnected before completion/u);
   const audit = (await readFile(context.modelAuditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(audit.length, 2); assert.ok(audit.every((entry) => entry.operation === 'code-review'));
-});
-
-test('initial Review fault produces a blocker once and verifies its repair on the next target', async (t) => {
-  const { invoke } = await wrapperFixture(t);
-  const prompt = (revision: number) => `Runner-provided facts: ${JSON.stringify([JSON.stringify({ operation: 'code-review', reviewerSessionId: 'review', reviewFocus: ['spec'], defects: [], repairFindings: [{ id: 'live-review-finding' }], target: { current: { targetRevision: revision, targetFingerprint: 'target-' + revision }, repairPatch: {} } })])}\nAvailable reviewer roles: ["spec"]\n`;
-  const first = await invoke('initial-review-rework', 'code-review', prompt(1));
-  assert.equal(first.report.verdict, 'needs-work'); assert.equal(first.report.defects[0].id, 'live-review-finding');
-  assert.equal('statusTargetRevision' in first.report.defects[0], false); assert.equal(first.report.reviewers[0].verdict, 'block');
-  const second = await invoke('initial-review-rework', 'code-review', prompt(2));
-  assert.equal(second.report.verdict, 'approved'); assert.equal(second.report.targetFingerprint, 'target-2');
-  assert.deepEqual(second.report.defects, []);
-});
-
-test('proof rework is one-shot across linked candidate worktrees and removes only transient evidence', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const secondWorktree = join(context.root, 'candidate-second');
-  await context.git(['worktree', 'add', '--detach', secondWorktree, 'HEAD']);
-  const first = await invoke('acceptance-proof-rework', 'proof');
-  assert.equal(first.status, 0, first.stderr); assert.equal(first.report.status, 'needs-rework');
-  assert.deepEqual(first.report.criteria.map((criterion: any) => [criterion.status, criterion.evidenceRefs]), [['failed', []]]);
-  assert.deepEqual(first.report.checks, []); assert.deepEqual(first.report.artifacts, []);
-  assert.match(first.report.findings[0], /acceptance-proof-rework-complete.txt/);
-  await assert.rejects(access(first.artifacts), /ENOENT/);
-  assert.equal(await readFile(join(context.targetRoot, '.codex-orchestrator/sentinel.txt'), 'utf8'), 'preserve me');
-  const next = await invoke('acceptance-proof-rework', 'proof', '', secondWorktree);
-  assert.equal(next.status, 0, next.stderr); assert.equal(next.report.status, 'passed');
-  assert.deepEqual(next.report.criteria[0].evidenceRefs, ['smoke']); await assert.rejects(access(next.artifacts), /ENOENT/);
-  const common = (await context.git(['rev-parse', '--git-common-dir'])).stdout.trim();
-  await access(join(context.targetRoot, common, 'v2-live-smoke-proof-rework'));
-});
-
-test('negative proof removes transient evidence and emits an exact non-resumable external blocker', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const result = await invoke('acceptance-proof-negative', 'proof');
-  assert.equal(result.status, 0, result.stderr); assert.equal(result.report.status, 'external-block');
-  assert.deepEqual(result.report.decision, { mode: 'non-visual', targets: [] });
-  assert.equal(result.report.blocker.kind, 'service'); assert.equal(result.report.blocker.resumable, false);
-  assert.deepEqual(result.report.criteria.map((criterion: any) => [criterion.status, criterion.evidenceRefs]), [['unknown', []]]);
-  assert.deepEqual(result.report.checks, []); assert.deepEqual(result.report.artifacts, []);
-  await assert.rejects(access(result.artifacts), /ENOENT/);
-  assert.equal(await readFile(join(context.targetRoot, '.codex-orchestrator/sentinel.txt'), 'utf8'), 'preserve me');
-});
-
-test('all happy proof fixtures normalize configured receipt evidence after a real child invocation', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const scenarios = ['package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics', 'authoritative-candidate-publication', 'initial-review-rework', 'publication-reconciliation', 'review-feedback-negative', 'issue-verification', 'review-feedback-continuation'];
-  for (const scenario of scenarios) {
-    const result = await invoke(scenario, 'proof');
-    assert.equal(result.status, 0, result.stderr); assert.equal(result.report.status, 'passed', scenario);
-    assert.deepEqual(result.report.criteria, [{ id: 'ac-1', status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: ['smoke'], analysis: 'Current checked change satisfies this criterion.' }]);
-    assert.deepEqual(result.report.checks, []); assert.deepEqual(result.report.artifacts, []);
-    await assert.rejects(access(result.artifacts), /ENOENT/);
-  }
-  const audit = (await readFile(context.modelAuditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(audit.length, scenarios.length); assert.ok(audit.every((entry) => entry.exitCode === 0));
-});
-
-test('incomplete implementation fails cleanly before a child launch and retries once', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const first = await invoke('incomplete-progress-rework', 'implementation');
-  assert.equal(first.status, 1); assert.match(first.stderr, /stream disconnected before completion/);
-  await assert.rejects(access(context.modelAuditPath), /ENOENT/);
-  const second = await invoke('incomplete-progress-rework', 'implementation');
-  assert.equal(second.status, 0, second.stderr); assert.equal(second.report.status, 'model-result');
-  const audit = (await readFile(context.modelAuditPath, 'utf8')).trim().split('\n'); assert.equal(audit.length, 1);
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].exitCode, 1);
 });
 
 test('model pin, reasoning effort, isolated home and workflow budgets reach the executable boundary', async (t) => {
@@ -637,7 +523,7 @@ test('model pin, reasoning effort, isolated home and workflow budgets reach the 
   assert.equal(denied.status, 64); await assert.rejects(access(join(context.root, 'forwarded.jsonl')), /ENOENT/);
   assert.equal((await invoke('package-install', 'implementation')).status, 0);
   const forwarded = JSON.parse((await readFile(join(context.root, 'forwarded.jsonl'), 'utf8')).trim());
-  assert.ok(forwarded.args.includes('model="gpt-5.6-luna"')); assert.ok(forwarded.args.includes('model_reasoning_effort="low"'));
+  assert.ok(forwarded.args.includes('model="gpt-5.6-luna"')); assert.ok(forwarded.args.includes('model_reasoning_effort="high"'));
   smoke.assertScenarioModelUsage('package-install', [{ model: 'gpt-5.6-luna' }]);
   assert.throws(() => smoke.assertScenarioModelUsage('package-install', []), /no real Codex/);
   assert.throws(() => smoke.assertScenarioModelUsage('package-install', [{ model: 'other' }]), /model audit/);
@@ -674,7 +560,7 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
   const context = await fixture(t);
   const record = await publishedFixture(context, scenario);
   const initialRecord = structuredClone(record);
-  let runs = 0; let daemons = 0; let revoked = false; let resolved = false;
+  let runs = 0; let daemons = 0; let resolved = false;
   const commands: string[][] = [];
   let comments: { body: string }[] = [];
   const envelope = (result: any) => json({ schema: 'codex-orchestrator.agent-auto-run-result', version: 1, result });
@@ -701,6 +587,7 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
           const head = (await context.git(['rev-parse', 'HEAD'])).stdout.trim(); await context.git(['checkout', 'main']);
           record.checkedChangeSha256 = fault === 'stale-proof' ? initialRecord.checkedChangeSha256 : 'checked-2';
           record.proofId = 'proof-2';
+          if (fault === 'different-owner') record.codexSession.id = '019a1435-06c0-7860-8f62-b1faadb9662e';
           record.reviewFeedback.history = [{ kind: 'published', batchId: 'batch-1', publishedHeadSha: head }];
           record.terminalOutcome = { status: 'review-ready', continuationEpoch: head };
           comments = [{ body: '<!-- codex-orchestrator:run:run-7:review-feedback:batch-1 -->\nRepaired.' }];
@@ -713,31 +600,17 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
       assert.equal(args[1], 'run'); runs += 1;
       assert.equal(options.env.CODEX_ORCHESTRATOR_HOME, context.orchestratorHome);
       if (scenario === 'publication-reconciliation' && runs === 1) return { ...envelope({ status: 'transport-failed', resumable: true }), status: 70 };
-      if (scenario === 'authorization-revoked' && runs === 1) return envelope({ status: 'repair-ready', source: 'proof' });
-      if (scenario === 'authorization-revoked') {
-        assert.equal(revoked, true); await writeFile(join(context.targetRoot, 'evidence.json'), JSON.stringify({ code: 'authorization-revoked' }));
-        return { ...envelope({ status: 'blocked', kind: 'safety', evidencePath: 'evidence.json' }), status: 20 };
-      }
-      if (scenario === 'safety-negative') {
-        await writeFile(join(context.targetRoot, 'evidence.json'), JSON.stringify({ code: fault === 'wrong-evidence' ? 'other' : 'denied-path-modified' }));
-        return { ...envelope({ status: 'blocked', kind: 'safety', evidencePath: 'evidence.json' }), status: 20 };
-      }
-      if (scenario === 'acceptance-proof-negative') return { ...envelope({ status: 'blocked', kind: 'external' }), status: 20 };
-      if (scenario === 'incomplete-progress-rework') record.transportRetries = fault === 'missing-retry' ? 0 : 1;
       if (fault === 'bad-check') record.checks[0].command = 'untrusted issue command';
       if (fault === 'bad-cycle') record.cycle = 1;
-      if (scenario === 'initial-review-rework') await writeFile(context.modelAuditPath, [ 'proof', 'proof', 'code-review', 'code-review' ].map((operation) => JSON.stringify({ scenario, operation, model: 'gpt-5.6-luna' })).join('\n') + '\n');
       if (scenario === 'publication-reconciliation' && fault === 'repeated-model') await writeFile(context.modelAuditPath, JSON.stringify({ operation: 'implementation' }) + '\n');
       await writeState(context, [record]);
       return envelope({ status: 'review-ready' });
     }
     assert.equal(command, 'gh', 'offline fixture refuses every unknown external command');
     if (args[0] === 'issue' && args[1] === 'create') return ok(`https://github.invalid/${context.repo}/issues/7\n`);
-    if (args[0] === 'issue' && args[1] === 'edit') { assert.ok(args.includes('agent:auto')); revoked = true; return ok(); }
     if (args[0] === 'issue' && args[1] === 'list') return json([{ number: 7 }]);
     if (args[0] === 'issue' && args[1] === 'view') return json({ labels: [{ name: 'agent:review' }] });
     if (args[0] === 'pr' && args[1] === 'list') {
-      if (['authorization-revoked', 'safety-negative', 'acceptance-proof-negative'].includes(scenario)) return json(fault === 'published-negative' ? [{ number: 11 }] : []);
       if (fault === 'changed-pr' && daemons > 0) return json([{ number: 12, isDraft: true }]);
       return json(fault === 'second-pr' ? [{ number: 11, isDraft: true }, { number: 12, isDraft: true }] : [{ number: 11, isDraft: true }]);
     }
@@ -755,14 +628,6 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
     throw new Error('unhandled offline command ' + [command, ...args].join(' '));
   };
   context.commandRunner = runner;
-  // Negative paths must have a genuinely unpublished branch in their control fixture.
-  if (['authorization-revoked', 'safety-negative', 'acceptance-proof-negative'].includes(scenario)) await context.git(['push', 'origin', '--delete', 'codex/issue-7']);
-  if (scenario === 'initial-review-rework') {
-    await context.git(['checkout', 'codex/issue-7']);
-    await writeFile(join(context.targetRoot, 'src/live-smoke/initial-review-rework-fixed.txt'), 'fixed\n');
-    await context.git(['add', '.']); await context.git(['commit', '--amend', '--no-edit']); await context.git(['push', '--force', 'origin', 'codex/issue-7']);
-    record.head = (await context.git(['rev-parse', 'HEAD'])).stdout.trim(); record.checks[0].candidateTreeSha = (await context.git(['rev-parse', 'HEAD^{tree}'])).stdout.trim(); await context.git(['checkout', 'main']);
-  }
   if (fault === 'retained-pin') {
     await context.git(['update-ref', `refs/codex-orchestrator/candidates/${record.runId}/${record.checks[0].bindingId}`, record.head]);
   }
@@ -770,23 +635,20 @@ async function scenarioFixture(t: TestContext, scenario: string, fault = '') {
     await context.git(['worktree', 'add', '--detach', join(context.root, '.candidate-executions/leaked'), record.head]);
   }
   await writeState(context, [record]);
-  return { context, commands, record, counts: () => ({ runs, daemons, revoked, resolved }) };
+  return { context, commands, record, counts: () => ({ runs, daemons, resolved }) };
 }
 
 for (const [scenario, entry] of [
   ['authoritative-candidate-publication', 'runReviewReadyScenario'],
-  ['initial-review-rework', 'runReviewReadyScenario'],
-  ['publication-reconciliation', 'runPublicationReconciliationScenario'], ['authorization-revoked', 'runAuthorizationRevokedScenario'],
+  ['publication-reconciliation', 'runPublicationReconciliationScenario'],
   ['review-feedback-negative', 'runReviewFeedbackNegativeScenario'], ['issue-verification', 'runIssueVerificationScenario'],
-  ['safety-negative', 'runSafetyNegativeScenario'], ['acceptance-proof-negative', 'runAcceptanceProofNegativeScenario'],
-  ['incomplete-progress-rework', 'runReviewReadyScenario'], ['package-install', 'runPackageInstallScenario'],
+  ['package-install', 'runPackageInstallScenario'],
 ]) {
   test(`offline ${scenario} executes its actual scenario assertions against local published Git`, async (t) => {
     const { context, commands, counts } = await scenarioFixture(t, scenario);
     const originalCli = context.cliPath;
     await smoke[entry](context, scenario);
     assert.equal(context.cliPath, originalCli);
-    if (scenario === 'authorization-revoked') assert.equal(counts().revoked, true);
     if (scenario === 'review-feedback-negative') { assert.equal(counts().resolved, true); assert.equal(counts().daemons, 1); }
     if (scenario === 'package-install') {
       const run = commands.find((args) => args[0] === process.execPath && args[2] === 'run')!;
@@ -802,9 +664,6 @@ for (const [scenario, entry, fault, diagnostic] of [
   ['publication-reconciliation', 'runPublicationReconciliationScenario', 'repeated-model', /repeated model work/],
   ['issue-verification', 'runIssueVerificationScenario', 'bad-check', /Issue text replaced/],
   ['review-feedback-negative', 'runReviewFeedbackNegativeScenario', 'resolved-feedback-effect', /resolved feedback produced work or durable state/],
-  ['incomplete-progress-rework', 'runReviewReadyScenario', 'missing-retry', /one durable transport retry/],
-  ['safety-negative', 'runSafetyNegativeScenario', 'wrong-evidence', /expected evidence code denied-path-modified/],
-  ['acceptance-proof-negative', 'runAcceptanceProofNegativeScenario', 'published-negative', /published a branch or PR/],
 ] as const) {
   test(`offline ${scenario} catches ${fault} at its intended assertion`, async (t) => {
     const { context } = await scenarioFixture(t, scenario, fault);
@@ -838,23 +697,12 @@ test('review feedback continuation publishes one same-PR commit, refreshes proof
   assert.equal((await context.git(['show', `${head}:src/live-smoke/review-feedback-continuation-addressed.txt`])).stdout, 'addressed review feedback\n');
 });
 
-for (const [fault, diagnostic] of [['stale-proof', /checks and proof were not refreshed/], ['changed-pr', /preserve the one existing PR/], ['replay-effect', /replay produced a persisted or remote effect/]] as const) {
+for (const [fault, diagnostic] of [['different-owner', /issue session changed/], ['stale-proof', /checks and proof were not refreshed/], ['changed-pr', /preserve the one existing PR/], ['replay-effect', /replay produced a persisted or remote effect/]] as const) {
   test(`review feedback continuation catches ${fault}`, async (t) => {
     const { context } = await scenarioFixture(t, 'review-feedback-continuation', fault);
     await assert.rejects(smoke.runReviewFeedbackContinuationScenario(context, 'review-feedback-continuation'), diagnostic);
   });
 }
-
-test('review feedback implementation wrapper reports cumulative files and adds the requested repair', async (t) => {
-  const { context, invoke } = await wrapperFixture(t);
-  const initial = await invoke('review-feedback-continuation', 'implementation');
-  assert.equal(initial.report.status, 'completed');
-  assert.deepEqual(initial.report.changedFiles, ['src/live-smoke/review-feedback-continuation.txt', 'test/live-smoke/review-feedback-continuation.txt']);
-  const repair = await invoke('review-feedback-continuation', 'implementation', 'Pull-request feedback repair round\n');
-  assert.deepEqual(repair.report.changedFiles, ['src/live-smoke/review-feedback-continuation-addressed.txt', 'src/live-smoke/review-feedback-continuation.txt', 'test/live-smoke/review-feedback-continuation.txt']);
-  assert.equal(await readFile(join(context.targetRoot, repair.report.changedFiles[0]), 'utf8'), 'addressed review feedback\n');
-});
-
 
 test('scratch label setup must complete before labels or config are adopted', async (t) => {
   const context = await fixture(t);

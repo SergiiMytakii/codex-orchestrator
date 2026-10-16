@@ -2,11 +2,11 @@
 
 Codex Orchestrator turns one explicitly authorized GitHub Issue into a controlled Codex delivery run. Planning remains external. The package implements the issue in an isolated Git worktree, validates the immutable candidate, and—only after all required gates pass—pushes a branch and opens a draft pull request.
 
-The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, independent review and publication. One implementation worker owns the code and its checks in the same worktree.
+The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, evidence admission and publication. One native Codex session owns code, checks, proof and independent Review through synchronized global skills.
 
 ## What happens to an issue
 
-Add the configured `agent:auto` label to an open executable issue, then run the orchestrator. That label authorizes only that issue. The lifecycle is `implementation with verification → independent Review → publication` (device proof remains separate when required). A product or ownership decision gap is returned as an issue-local blocker for external Plan; the package does not create a PRD, spec, or ticket graph.
+Add the configured `agent:auto` label to an open executable issue, then run the orchestrator. That label authorizes only that issue. The lifecycle is `one Codex session: implementation → checks → proof → independent Review`, followed by Runner publication. A product or ownership decision gap is returned as an issue-local blocker for external Plan; the package does not create a PRD, spec, or ticket graph.
 
 Ordinary technical choices do not stop the run. A human question is reserved for real product ambiguity.
 
@@ -27,7 +27,7 @@ package's Playwright SDK once on the Runner host:
 npx --no-install playwright-core install chromium --only-shell
 ```
 
-Implementation/proof workers can bind and reach loopback services only. Runner
+The implementation session can bind and reach loopback services only. Runner
 passes the matching SDK, browser cache and macOS sandbox launch arguments to the
 worker; Review remains read-only without network access.
 
@@ -130,39 +130,11 @@ Repeated calls do not start an unrelated second run. The Runner reads durable st
 
 An external blocker stops until renewed GitHub authorization; ordinary polling does not relaunch a worker against the same unavailable environment.
 
-Technical Acceptance Proof failures resume on the next ordinary call for the same candidate. Ambiguous legacy internal failures remain stopped. To explicitly retry an eligible legacy proof failure, supply its exact durable run ID:
+One native Codex session owns implementation, configured commands, acceptance evidence, and independent Spec and Standards Review through the synchronized global skills. Runner resumes the exact saved session UUID after process cleanup; it does not launch separate proof or Review coordinators.
 
-```sh
-npx codex-orchestrator run --target "$PWD" --issue 123 --retry-proof <run-id>
-```
+The owner returns one completed report with exact command receipts, proof, reviewer identities and source hashes. Runner validates this report against the unchanged candidate and configured policy before publishing. Malformed reports retain their bytes and receive a bounded correction in the same session with read-only permissions. Missing evidence, failed checks, changed source or ambiguous process ownership cannot authorize publication.
 
-This operation requires a trusted authorized issue, a matching existing worktree and immutable candidate pin, no open PR, and no unresolved process or effect. It preserves implementation, candidate, cycle, frozen criteria, and workflow generation; it discards failed proof context, preserves valid check receipts, and requires fresh Acceptance Proof and Review before publication. This proof-only command does not reopen other terminal outcomes. After the retry transition is saved, ordinary `run` calls resume it safely. Existing evidence remains available.
-
-Review persists its exact validation context before launch, including reviewer
-roles, required coverage, finding IDs and target identity. Recovery checks a
-retained report against that same context. Missing context is a Runner error,
-not a request for the agent to invent reviewer authority.
-
-Malformed implementation, proof and Review reports retain exact report bytes,
-validation diagnostics and the unchanged candidate. Each ordinary call makes one
-bounded report-only correction in a read-only view. Format correction does not
-repeat implementation or an app scenario. Review format corrections retain the
-independent reviewer identities, verdicts, current findings and risks without
-launching reviewers again. A report without a verifiable independent semantic
-result stops for an explicit Runner error. Malformed reports never authorize
-publication.
-
-Reviewers return the current findings and verdict for the supplied scope.
-Runner reconciles historical statuses and revisions; agents do not reproduce a
-second finding-outcome ledger. An accepted repair review clears prior findings
-absent from its reviewed scope and reopens findings that remain. Targeted Review
-preserves approval outside that scope.
-
-The implementation worker runs the configured checks and reads their output directly.
-A completed report must include successful verification for every exact configured
-command. Missing or unsuccessful verification cannot authorize Review or publication.
-For explicit tests-only issues the worker's acceptance evidence goes directly to
-independent Review. Device proof retains the separate protected runtime and leases.
+Android visual proof can request the existing Runner-owned isolated runtime after source and checks are complete. Runner prepares it against the pinned checked candidate, then resumes the same session with trusted artifact metadata. Device identity, lease, artifact freshness and cleanup checks remain mandatory.
 
 Before a new run is claimed, the Runner fetches only the configured remote base branch, pins its exact commit, and creates the issue worktree from that immutable SHA. A temporary fetch failure remains unclaimed and safely retryable; existing runs keep their already-persisted base SHA.
 
@@ -240,11 +212,10 @@ permission failures, missing resources, and invalid payloads are not retried.
 Issue-read failures retain the bounded, sanitized original error and GitHub
 stderr in local evidence.
 
-Resumable Acceptance Proof process failures retain `failure.kind`, exit code,
+Resumable owner-session process failures retain `failure.kind`, exit code,
 signal, report availability, and a bounded sanitized diagnostic in local
 evidence. An idle timeout is reported as `idle-timeout`, without claiming a
-service outage. A later ordinary invocation resumes proof for the same checked
-candidate without repeating successful checks or implementation.
+service outage. A later ordinary invocation resumes the same native Codex session after confirmed process cleanup.
 
 On an internal Acceptance Proof failure, the Runner also attempts to retain an
 `acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.

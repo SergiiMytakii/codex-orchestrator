@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, ChildProcess } from 'node:child_process';
+import { PassThrough } from 'node:stream';
 import { readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -34,6 +35,10 @@ async function fixture() {
 function worker(root: string, checkpoint?: string): { child: ChildProcess; reached: Promise<void>; result: Promise<RunIssueResult>; exited: Promise<void> } {
   const path = join(dirname(fileURLToPath(import.meta.url)), 'self-recovery-runner.js');
   const child = spawn(process.execPath, [path, '--worker', root, checkpoint ?? ''], { detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  return observeWorker(child);
+}
+
+function observeWorker(child: ChildProcess): { child: ChildProcess; reached: Promise<void>; result: Promise<RunIssueResult>; exited: Promise<void> } {
   let stderr = '';
   child.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
   let reach!: () => void;
@@ -51,7 +56,8 @@ function worker(root: string, checkpoint?: string): { child: ChildProcess; reach
     if (message.checkpoint) { receivedCheckpoint = true; reach(); }
     if (message.result) { receivedResult = true; finish(message.result); }
   });
-  const exited = new Promise<void>((resolve) => child.once('exit', (code, signal) => {
+  // Process exit can precede buffered IPC/stderr delivery; close confirms those channels drained.
+  const exited = new Promise<void>((resolve) => child.once('close', (code, signal) => {
     const error = new Error(`worker exited ${code}/${signal}: ${stderr}`);
     if (!receivedCheckpoint) rejectReach(error);
     if (!receivedResult) rejectResult(error);
@@ -61,6 +67,47 @@ function worker(root: string, checkpoint?: string): { child: ChildProcess; reach
   child.once('exit', () => clearTimeout(timeout));
   return { child, reached, result, exited };
 }
+
+test('worker observation accepts a buffered IPC result delivered after process exit', async () => {
+  const child = new ChildProcess();
+  child.stderr = new PassThrough();
+  const observed = observeWorker(child);
+  let settled = false;
+  void observed.result.then(() => { settled = true; }, () => { settled = true; });
+  child.emit('exit', 0, null);
+  await Promise.resolve();
+  try {
+    assert.equal(settled, false, 'process exit does not prove its IPC channel has drained');
+    child.emit('message', { result: { status: 'not-eligible' } });
+    child.emit('close', 0, null);
+    assert.deepEqual(await observed.result, { status: 'not-eligible' });
+    await observed.exited;
+  } finally {
+    child.emit('close', 0, null);
+    child.stderr.destroy();
+  }
+});
+
+test('worker observation rejects missing IPC only after close and retains raw stderr', async () => {
+  const child = new ChildProcess();
+  child.stderr = new PassThrough();
+  const observed = observeWorker(child);
+  let settled = false;
+  void observed.result.then(() => { settled = true; }, () => { settled = true; });
+  child.emit('exit', 0, null);
+  await Promise.resolve();
+  try {
+    assert.equal(settled, false);
+    child.stderr.emit('data', Buffer.from('worker diagnostic after process exit'));
+    child.emit('close', 0, null);
+    await assert.rejects(observed.result, /worker exited 0\/null: worker diagnostic after process exit/u);
+    await assert.rejects(observed.reached, /worker exited 0\/null: worker diagnostic after process exit/u);
+    await observed.exited;
+  } finally {
+    child.emit('close', 0, null);
+    child.stderr.destroy();
+  }
+});
 
 for (const checkpoint of ['implementation', 'checks', 'proof', 'review', 'publication', 'effect:claim-labels', 'effect:claim-comment', 'effect:commit', 'effect:push', 'effect:pr']) {
   test(`a real killed Runner resumes ${checkpoint} with durable identity and no duplicate successful work`, { timeout: 30_000 }, async () => {
@@ -87,14 +134,15 @@ for (const checkpoint of ['implementation', 'checks', 'proof', 'review', 'public
       const tree = await git(after.worktreePath, ['rev-parse', 'HEAD^{tree}']);
       const proof = JSON.parse(events.find((event) => event.startsWith('proof-target:'))!.slice('proof-target:'.length));
       assert.equal(tree, proof.binding.candidateTreeSha);
-      assert.equal(events.find((event) => event.startsWith('review-target:'))!.slice('review-target:'.length), tree);
+      assert.ok(after.implementationResult?.review?.reviewers.length === 2);
       if (before.candidateBinding) assert.deepEqual(proof.binding, before.candidateBinding);
       assert.equal(await git(root, ['rev-parse', `refs/remotes/origin/${after.branchName}`]), head);
       assert.equal(after.terminalOutcome!.status, 'review-ready');
       assert.equal(after.checks.length, 2);
       for (const check of after.checks) { assert.ok('candidateTreeSha' in check); if ('candidateTreeSha' in check) assert.equal(check.candidateTreeSha, tree); }
       assert.ok(after.proofReceipt);
-      assert.ok(after.directReview);
+      assert.ok(after.implementationResult?.review);
+      assert.equal(after.codexSession?.id, '01000000-0000-4000-8000-000000000001');
       const remote = JSON.parse(await readFile(join(root, 'github.json'), 'utf8'));
       assert.equal(remote.comments.filter((comment: { body: string }) => comment.body.includes(`:run:${after.runId}:claim -->`)).length, 1);
     } finally {
@@ -130,7 +178,7 @@ for (const checkpoint of ['effect:terminal-comment', 'effect:terminal-labels']) 
       assert.equal(after.terminalNotifications!.comment.status, 'delivered');
       assert.equal(after.terminalNotifications!.labels.status, 'delivered');
       const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'proof', 'terminal-comment', 'terminal-labels']) assert.equal(events.filter((value) => value === event).length, 1, events.join(','));
+      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'terminal-comment', 'terminal-labels']) assert.equal(events.filter((value) => value === event).length, 1, events.join(','));
       assert.equal(events.some((event) => ['review', 'commit', 'push', 'pr'].includes(event)), false);
       const remote = JSON.parse(await readFile(join(root, 'github.json'), 'utf8'));
       assert.equal(remote.comments.filter((comment: { body: string }) => comment.body.split('\n')[0]!.endsWith(':blocked -->')).length, 1);
@@ -204,57 +252,35 @@ for (const scenario of [
   });
 }
 
-for (const checkpoint of ['proof:result-adopted', 'proof:correction-persisted']) {
-  test(`a real killed Runner resumes ${checkpoint} by correcting the exact report over retained proof evidence`, { timeout: 30_000 }, async () => {
+for (const checkpoint of ['owner:result-observed', 'owner:correction-persisted']) {
+  test(`a real killed Runner resumes ${checkpoint} by correcting owner proof in the same native session`, { timeout: 30_000 }, async () => {
     const root = await fixture();
     await writeFile(join(root, 'scenario.json'), JSON.stringify({ mode: 'malformed-proof' }));
     const workers: Array<ReturnType<typeof worker>> = [];
     try {
-      const first = worker(root, checkpoint);
-      workers.push(first);
-      await first.reached;
+      const first = worker(root, checkpoint); workers.push(first); await first.reached;
       const before = (await recoveryStore(root).read()).runs[0]!;
-      assert.equal(before.activeAttempt?.stage, 'adopted');
-      assert.ok(before.candidateMaterialization);
-      assert.equal(Boolean(before.proofExecution?.reportCorrection), checkpoint === 'proof:correction-persisted');
-      first.child.kill('SIGKILL');
-      await first.exited;
-      const observe = worker(root);
-      workers.push(observe);
-      const observedResult = await observe.result;
-      await observe.exited;
-      if (checkpoint === 'proof:result-adopted') {
-        assert.equal(observedResult.status, 'transport-failed');
-        const retained = (await recoveryStore(root).read()).runs[0]!;
-        assert.equal(retained.runId, before.runId);
-        assert.deepEqual(retained.candidateBinding, before.candidateBinding);
-        assert.equal(retained.candidateMaterialization!.path, before.candidateMaterialization!.path);
-        const correction = retained.proofExecution!.reportCorrection!;
-        assert.equal((await readFile(correction.path)).toString(), '{"version":1}');
-        assert.equal(correction.diagnostic, 'missing proof fields');
-        const finish = worker(root);
-        workers.push(finish);
-        assert.equal((await finish.result).status, 'review-ready');
-        await finish.exited;
-      } else {
-        assert.equal(observedResult.status, 'review-ready');
-        assert.equal((await readFile(before.proofExecution!.reportCorrection!.path)).toString(), '{"version":1}');
-        assert.equal(before.proofExecution!.reportCorrection!.diagnostic, 'missing proof fields');
+      assert.ok(before.codexSession);
+      assert.equal(before.candidateMaterialization, undefined);
+      first.child.kill('SIGKILL'); await first.exited;
+      let final: RunIssueResult | undefined;
+      for (let count = 0; count < 3; count += 1) {
+        const resumed = worker(root); workers.push(resumed); final = await resumed.result; await resumed.exited;
+        if (final.status === 'review-ready') break;
+        assert.equal(final.status, 'transport-failed');
       }
+      assert.equal(final?.status, 'review-ready');
       const after = (await recoveryStore(root).read()).runs[0]!;
       assert.equal(after.runId, before.runId);
-      const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-      for (const event of ['implementation', 'worker-check:first', 'worker-check:second', 'proof-scenario', 'proof-correction', 'review', 'commit', 'push', 'pr']) assert.equal(events.filter((value) => value === event).length, 1, `${event}: ${events.join(',')}`);
-      assert.equal(events.filter((event) => event === 'proof-result-observation').length, checkpoint === 'proof:result-adopted' ? 1 : 0);
-      const originalPath = events.find((event) => event.startsWith('proof-materialization:'))!.slice('proof-materialization:'.length);
-      assert.equal(events.find((event) => event.startsWith('correction-materialization:'))!.slice('correction-materialization:'.length), originalPath);
-      const tree = await git(after.worktreePath, ['rev-parse', 'HEAD^{tree}']);
-      const proof = JSON.parse(events.find((event) => event.startsWith('proof-target:'))!.slice('proof-target:'.length));
-      assert.equal(tree, proof.binding.candidateTreeSha);
-      assert.equal(events.find((event) => event.startsWith('review-target:'))!.slice('review-target:'.length), tree);
+      assert.deepEqual(after.codexSession, before.codexSession);
+      assert.equal(after.implementationReportCorrection, undefined);
+      const events: string[] = (await readFile(join(root, 'events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      for (const event of ['implementation', 'owner-malformed-report', 'owner-correction', 'commit', 'push', 'pr']) assert.equal(events.filter(value => value === event).length, 1, events.join(','));
+      assert.equal(after.implementationResult?.proof?.status, 'passed');
+      assert.equal(after.implementationResult?.review?.reviewers.length, 2);
     } finally {
       for (const current of workers) current.child.kill('SIGKILL');
-      await Promise.all(workers.map((current) => current.exited));
+      await Promise.all(workers.map(current => current.exited));
       await rm(root, { recursive: true, force: true });
     }
   });

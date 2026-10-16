@@ -91,19 +91,9 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
     const criteria: FrozenCriterion[] = [{
       id: 'ac-web', order: 1, source: 'explicit', text: 'The responsive dashboard workflow reaches the ready state.',
     }];
+    const report = await captureRealBrowserReport({ entrypoint, root, proofRoot });
     const proof = new AcceptanceProof({
       checkedChangeReader: capabilities,
-      proofAgent: {
-        run: async () => ({
-          kind: 'report',
-          report: await captureRealBrowserReport({ entrypoint, root, proofRoot }),
-          proofPhaseChangedFiles: [
-            `${proofRoot}/desktop.png`, `${proofRoot}/desktop.dom.json`,
-            `${proofRoot}/narrow.png`, `${proofRoot}/narrow.dom.json`,
-            `${proofRoot}/console.json`, `${proofRoot}/network.json`,
-          ],
-        }),
-      },
       inspectFreshness: async () => ({
         headSha: payload.headSha,
         indexTreeSha: payload.indexTreeSha,
@@ -114,10 +104,10 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
       }),
       readArtifact: (relativePath) => readFile(join(root, relativePath)),
       inspectArtifact: async (relativePath) => ({ modifiedAt: (await stat(join(root, relativePath))).mtime.toISOString() }),
-      proofArtifactDir: proofRoot,
+      proofArtifactDir: 'proofs',
     });
 
-    const result = await proof.proveChange({ proofId: 'proof-browser', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange });
+    const result = await proof.admitReport({ proofId: 'proof-browser', report, changedArtifactPaths: report.artifacts.map((artifact) => artifact.relativePath), proofStartedAt: '2026-07-16T12:00:00.000Z', issue, frozenCriteria: criteria, checkedChange });
     assert.equal(result.status, 'passed');
     if (result.status !== 'passed') return;
     assert.deepEqual(result.receipt.publishableEvidence.map((evidence) => evidence.ref), [
@@ -134,7 +124,7 @@ test('actual changed localhost workflow passes through AcceptanceProof with fres
 test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and misclassified browser artifacts', async () => {
   const cases: Array<{
     name: string;
-    expected?: 'internal-error' | 'report-repair';
+    expected?: 'internal-error';
     mutate: (input: { report: ProofReportV1; bytes: Map<string, Buffer>; metadata: Map<string, string>; changedFiles: string[] }) => void;
   }> = [
     {
@@ -159,7 +149,7 @@ test('AcceptanceProof rejects stale, malformed, oversized, secret-bearing, and m
     },
     {
       name: 'local diagnostics marked publishable',
-      expected: 'report-repair',
+      expected: 'internal-error',
       mutate: ({ report }) => { report.artifacts.find((artifact) => artifact.kind === 'console-log')!.publishable = true; },
     },
     {
@@ -327,7 +317,6 @@ async function runPolicyFixture(
   for (const artifact of report.artifacts) artifact.sha256 = sha256(bytes.get(artifact.relativePath)!);
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: changedFiles }) },
     inspectFreshness: async () => ({
       headSha: payload.headSha,
       indexTreeSha: payload.indexTreeSha,
@@ -338,7 +327,7 @@ async function runPolicyFixture(
     }),
     readArtifact: async (relativePath) => bytes.get(relativePath)!,
     inspectArtifact: async (relativePath) => ({ modifiedAt: metadata.get(relativePath)! }),
-    proofArtifactDir: 'proofs/proof-browser',
+    proofArtifactDir: 'proofs',
   });
   const issue: IssueSnapshot = {
     number: 77,
@@ -348,14 +337,11 @@ async function runPolicyFixture(
     state: 'OPEN',
     labels: ['agent:auto'],
   };
-  return proof.proveChange({
+  return proof.admitReport({
     proofId: 'proof-browser',
-    attemptId: 'proof-attempt-1',
-    recoverOnly: false,
+    report,
+    changedArtifactPaths: changedFiles,
     proofStartedAt: '2026-07-16T12:00:00.000Z',
-    transportRetryCount: 0,
-    reportRepairCount: 0,
-    reportRepairFindings: [],
     issue,
     frozenCriteria: [{ id: 'ac-web', order: 1, source: 'explicit', text: 'Browser behavior works.' }],
     checkedChange: capabilities.mint(payload),

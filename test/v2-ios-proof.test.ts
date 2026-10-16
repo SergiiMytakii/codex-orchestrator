@@ -98,7 +98,6 @@ async function runAcceptanceFixture(lease?: IosLeaseVerifier) {
   for (const item of report.artifacts) item.sha256 = sha256(bytes.get(item.relativePath)!);
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: report.artifacts.map((item) => item.relativePath) }) },
     inspectFreshness: async () => ({
       headSha: payload.headSha, indexTreeSha: payload.indexTreeSha,
       trackedContentSha256: payload.trackedContentSha256, untrackedContentSha256: payload.untrackedContentSha256,
@@ -107,14 +106,14 @@ async function runAcceptanceFixture(lease?: IosLeaseVerifier) {
     readArtifact: async (path) => bytes.get(path)!,
     inspectArtifact: async () => ({ modifiedAt: '2026-07-17T00:00:01.000Z' }),
     iosLease: lease,
-    proofArtifactDir: 'proofs/proof-ios',
+    proofArtifactDir: 'proofs',
   });
   const issue: IssueSnapshot = {
     number: 89, title: 'iOS proof fixture', body: 'Prove the ready state.',
     url: 'https://example.invalid/issues/89', state: 'OPEN', labels: ['agent:auto'],
   };
   const criteria: FrozenCriterion[] = [{ id: 'ac-ios', order: 1, source: 'explicit', text: 'iOS ready state is visible.' }];
-  return proof.proveChange({ proofId: 'proof-ios', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+  return proof.admitReport({ proofId: 'proof-ios', report, changedArtifactPaths: report.artifacts.map((item) => item.relativePath), proofStartedAt: '2026-07-16T12:00:00.000Z', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 }
 
 function checkedPayload(): CheckedChangePayloadV1 {

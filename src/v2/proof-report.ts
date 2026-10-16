@@ -200,6 +200,10 @@ export function proofReportOutputSchema(): Record<string, unknown> {
   ]);
 }
 
+export function passedProofReportOutputSchema(): Record<string, unknown> {
+  return proofReportGenerationBranch(true);
+}
+
 function proofReportGenerationBranch(passed: boolean): Record<string, unknown> {
   return {
     type: 'object',

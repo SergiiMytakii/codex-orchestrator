@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flutter Android Debug"
+  short_description: "Safely validate Flutter UI on Android emulators"
+  default_prompt: "Use $flutter-android-debug and always load test-android-apps:android-emulator-qa in the same turn to preserve any live Flutter session, navigate the Android UI, and capture screenshots and logs without unauthorized relaunches."

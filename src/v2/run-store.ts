@@ -1,5 +1,5 @@
-import { validateImplementationChecks, type ImplementationCheck } from './implementation-report.js';
-import type { ProofReceipt } from './proof-report.js';
+import { validateImplementationChecks, validateImplementationReview, type ImplementationCheck, type ImplementationReviewV1 } from './implementation-report.js';
+import { validateProofReport, type ProofReceipt, type ProofReportV1 } from './proof-report.js';
 import type { SettledProveChangeResult } from './acceptance-proof.js';
 import { validateActiveAttempt, type ActiveAttempt } from './active-attempt.js';
 import { validateDirectReview, type DirectReviewV1 } from './direct-delivery.js';
@@ -160,6 +160,8 @@ export interface RunRecord {
   candidateMaterialization?: CandidateMaterializationV2;
   skillHashes: Record<string, string>;
   activeAttempt?: ActiveAttempt;
+  androidProofPreparation?: { status: 'pending' | 'prepared' | 'blocked'; checkedChangeSha256: string; runnerPreparedArtifactPaths: string[]; runnerPreparedArtifactSha256: Record<string, string>; runnerPreparationWarnings: string[] };
+  codexSession?: { id: string; startedAt: string };
   checks: Array<
     | { id: string; command: string; status: 'passed' | 'failed'; outputSha256: string }
     | CandidateCheckReceiptV2
@@ -176,7 +178,7 @@ export interface RunRecord {
     reportCorrection?: { path: string; sha256: string; diagnostic: string };
   };
   proofReceipt?: ProofReceipt;
-  implementationResult?: { summary: string; residualRisks: string[]; checks?: ImplementationCheck[] };
+  implementationResult?: { summary: string; residualRisks: string[]; checks?: ImplementationCheck[]; proof?: ProofReportV1; review?: ImplementationReviewV1 };
   implementationReportCorrection?: { path: string; sha256: string; diagnostic: string };
   terminalNotifications?: TerminalNotificationStateV1;
   pendingEffect?: PendingEffect;
@@ -443,6 +445,8 @@ function validateRuns(value: unknown): asserts value is RunRecord[] {
 function validateRunRecord(value: unknown, field: string): asserts value is RunRecord {
   const optional = [
     'activeAttempt',
+    'codexSession',
+    'androidProofPreparation',
     'checkedChangeSha256',
     'proofId',
     'proofExecution',
@@ -529,6 +533,23 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field}.proofExecution cleanup identity is invalid`);
   }
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
+  if (hasOwn(value, 'androidProofPreparation')) {
+    const prepared = value.androidProofPreparation;
+    assertExactObject(prepared, ['status', 'checkedChangeSha256', 'runnerPreparedArtifactPaths', 'runnerPreparedArtifactSha256', 'runnerPreparationWarnings'], `${field}.androidProofPreparation`);
+    if (!['pending', 'prepared', 'blocked'].includes(prepared.status as string)) throw new Error(`${field}.androidProofPreparation.status is invalid`);
+    assertSha256(prepared.checkedChangeSha256, `${field}.androidProofPreparation.checkedChangeSha256`);
+    for (const key of ['runnerPreparedArtifactPaths', 'runnerPreparationWarnings']) {
+      if (!Array.isArray(prepared[key]) || prepared[key].some((entry: unknown) => typeof entry !== 'string')) throw new Error(`${field}.androidProofPreparation.${key} is invalid`);
+    }
+    const hashes = prepared.runnerPreparedArtifactSha256;
+    if (typeof hashes !== 'object' || hashes === null || Array.isArray(hashes)) throw new Error(`${field}.androidProofPreparation.hashes is invalid`);
+    for (const hash of Object.values(hashes)) assertSha256(hash, `${field}.androidProofPreparation.hash`);
+  }
+  if (hasOwn(value, 'codexSession')) {
+    assertExactObject(value.codexSession, ['id', 'startedAt'], `${field}.codexSession`);
+    if (typeof value.codexSession.id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(value.codexSession.id)) throw new Error(`${field}.codexSession.id is invalid`);
+    assertTimestamp(value.codexSession.startedAt, `${field}.codexSession.startedAt`);
+  }
   if (hasOwn(value, 'implementationResult')) validateImplementationResult(value.implementationResult, `${field}.implementationResult`);
   if (hasOwn(value, 'implementationReportCorrection')) validateReportCorrection(value.implementationReportCorrection, `${field}.implementationReportCorrection`);
   if (hasOwn(value, 'terminalNotifications')) validateTerminalNotifications(value.terminalNotifications, `${field}.terminalNotifications`);
@@ -846,8 +867,10 @@ function validatePendingEffect(value: unknown, field: string): void {
 }
 
 function validateImplementationResult(value: unknown, field: string): void {
-  assertExactObject(value, ['summary', 'residualRisks', ...(hasOwn(value, 'checks') ? ['checks'] : [])], field);
+  assertExactObject(value, ['summary', 'residualRisks', ...['checks', 'proof', 'review'].filter(key => hasOwn(value, key))], field);
   if (hasOwn(value, 'checks')) validateImplementationChecks(value.checks);
+  if (hasOwn(value, 'proof')) validateProofReport(value.proof, (value.checks as ImplementationCheck[] | undefined)?.map(check => check.id) ?? []);
+  if (hasOwn(value, 'review')) validateImplementationReview(value.review);
   assertNonEmptyString(value.summary, `${field}.summary`);
   validateStringList(value.residualRisks, `${field}.residualRisks`);
 }

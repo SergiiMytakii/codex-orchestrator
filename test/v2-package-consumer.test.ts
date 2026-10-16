@@ -62,7 +62,8 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     const packedPaths = packed.files.map((file) => file.path).sort();
     assert.equal(packedPaths.includes('internal-workflow/manifest.json'), true);
     for (const skill of [
-      'bug-root-cause-explainer', 'code-review', 'diagnosing-bugs', 'grilling', 'implement', 'plan',
+      'acceptance-proof', 'bug-root-cause-explainer', 'code-review', 'diagnosing-bugs',
+      'flutter-android-debug', 'flutter-attach-session', 'flutter-ios-debug', 'grilling', 'implement', 'plan',
       'prototype', 'research', 'tdd', 'implement-spec', 'to-spec', 'to-tickets',
     ]) {
       assert.equal(packedPaths.includes(`internal-workflow/skills/${skill}/SKILL.md`), true, skill);
@@ -80,7 +81,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     assert.equal(packedPaths.includes('dist/src/v2/proof-report.js'), true);
     for (const module of [
       'acceptance-proof', 'atomic-store', 'candidate', 'cli', 'checked-change', 'cli-contract', 'codex-process', 'config', 'containment',
-      'code-review-report', 'contained-report-operation', 'direct-delivery', 'implementation-report', 'implementation-reviewer',
+      'code-review-report', 'direct-delivery', 'implementation-report',
       'proof-report', 'run-issue', 'run-store', 'runtime', 'runtime-assets',
       'setup', 'setup-cli', 'setup-runtime', 'setup-store', 'workflow-assets',
     ]) {
@@ -93,7 +94,7 @@ test('packed install uses one package-owned workflow with empty or conflicting c
     const compileFixture = join(consumer, 'candidate-contract.mts');
     await writeFile(compileFixture, `
 import { AcceptanceProof, createCheckedChangeCapabilities } from 'codex-orchestrator';
-import type { CandidateGitV2, CheckedChange, CheckedChangeFreshness, CheckedChangePayloadV1, ProofAgent } from 'codex-orchestrator';
+import type { CandidateGitV2, CheckedChange, CheckedChangeFreshness, CheckedChangePayloadV1 } from 'codex-orchestrator';
 
 const payload: CheckedChangePayloadV1 = {
   version: 1, canonicalRepository: 'owner/repo', runId: '00000000-0000-4000-8000-000000000001',
@@ -118,14 +119,13 @@ const exactApprovedCandidateAdapter: CandidateGitV2 = {
   createOrObserveCommit: async () => { throw new Error('fixture'); },
   releasePin: async () => { throw new Error('fixture'); },
 };
-const legacyAgent: ProofAgent = { run: async () => ({ kind: 'internal-error' }) };
 const legacyFreshness = async (legacyPayload: CheckedChangePayloadV1): Promise<CheckedChangeFreshness> => ({
   headSha: legacyPayload.headSha, indexTreeSha: legacyPayload.indexTreeSha,
   trackedContentSha256: legacyPayload.trackedContentSha256, untrackedContentSha256: legacyPayload.untrackedContentSha256,
   worktreeIdentity: legacyPayload.worktreeIdentity, checkPolicySha256: legacyPayload.checkPolicySha256,
 });
 const legacyProof = new AcceptanceProof({
-  checkedChangeReader: {} as never, proofAgent: legacyAgent,
+  checkedChangeReader: {} as never,
   inspectFreshness: legacyFreshness, readArtifact: async () => ({} as never),
   proofArtifactDir: '.proof',
 });
@@ -152,9 +152,9 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
       bootId: 'packed-consumer',
     });
     const implementation = await workflowAssets.resolveWorkflowOperation(receipt, 'implementation');
-    const codeReview = await workflowAssets.resolveWorkflowOperation(receipt, 'code-review');
+    await assert.rejects(workflowAssets.resolveWorkflowOperation(receipt, 'code-review'));
     assert.equal(implementation.workflowRoot, receipt.generationRoot);
-    for (const [operation, skill] of [[implementation, 'implement'], [codeReview, 'code-review']] as const) {
+    for (const [operation, skill] of [[implementation, 'implement']] as const) {
       assert.equal(operation.sourceSkillPath, join(receipt.generationRoot, 'skills', skill, 'SKILL.md'));
       assert.equal(await readFile(operation.sourceSkillPath!, 'utf8'),
         await readFile(join(installed, 'internal-workflow', 'skills', skill, 'SKILL.md'), 'utf8'));
@@ -162,7 +162,6 @@ void reread; void optionalAdapter; void exactApprovedCandidateAdapter; void lega
       assert.ok(contract.includes(`../../skills/${skill}/SKILL.md`));
     }
     assert.equal(JSON.parse(await readFile(implementation.schemaPath, 'utf8')).type, 'object');
-    assert.equal(JSON.parse(await readFile(codeReview.schemaPath, 'utf8')).type, 'object');
     assert.deepEqual(await snapshotFiles([...protectedBefore.keys()]), protectedBefore);
     assert.deepEqual(await snapshotUnmanagedTree(consumer), unmanagedBefore);
   } finally {
@@ -220,7 +219,7 @@ async function assertInstalledContract(installed: string): Promise<void> {
     profiles: Record<string, string>;
   };
   assert.deepEqual(Object.keys(manifest.profiles).sort(), [
-    'implementer', 'review_coordinator', 'spec_reviewer', 'standards_reviewer',
+    'implementer', 'spec_reviewer', 'standards_reviewer',
   ]);
 
   const implementation = await import(pathToFileURL(join(installed, 'dist', 'src', 'v2', 'implementation-report.js')).href) as {

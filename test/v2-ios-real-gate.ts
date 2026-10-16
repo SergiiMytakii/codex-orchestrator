@@ -59,7 +59,6 @@ const payload: CheckedChangePayloadV1 = {
 };
 const proof = new AcceptanceProof({
   checkedChangeReader: capabilities,
-  proofAgent: { run: async () => ({ kind: 'report', report, proofPhaseChangedFiles: report.artifacts.map((artifact) => artifact.relativePath) }) },
   inspectFreshness: async () => ({
     headSha: payload.headSha, indexTreeSha: payload.indexTreeSha,
     trackedContentSha256: payload.trackedContentSha256, untrackedContentSha256: payload.untrackedContentSha256,
@@ -79,7 +78,7 @@ const issue: IssueSnapshot = {
   url: 'https://example.invalid/issues/505', state: 'OPEN', labels: ['agent:auto'],
 };
 const criteria: FrozenCriterion[] = [{ id: 'ac-ios-real', order: 1, source: 'explicit', text: 'The iOS fixture visibly reaches the ready state.' }];
-const result = await proof.proveChange({ proofId, attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: startedAt, transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
+const result = await proof.admitReport({ proofId, report, changedArtifactPaths: report.artifacts.map((artifact) => artifact.relativePath), proofStartedAt: startedAt, issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload) });
 process.stdout.write(`${canonicalJson(result)}\n`);
 if (result.status !== 'passed') process.exitCode = 1;
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flutter Attach Session"
+  short_description: "Attach to and control a live Flutter runtime"
+  default_prompt: "Use $flutter-attach-session through flutter_session_ctl.py for the existing runtime; never open or automate the IDE, Command Palette, or AppleScript for reload/restart."

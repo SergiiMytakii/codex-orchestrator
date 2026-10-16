@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+
+- Use one native Codex session for implementation, exact configured checks, acceptance proof and independent Spec/Standards Review; resume its saved UUID. Runner retains durable authorization, process cleanup, candidate/evidence validation, device leases and safe publication, with no separate semantic proof/Review loops.
+
+### Fixed
+
+- Keep the same decoded report identity through completion and process recovery, before validation normalizes nullable proof fields; preserve malformed report bytes for correction.
+- Wait for child channels to close in the restart test harness before rejecting missing IPC output, preserving buffered results and stderr after process exit.
+- Retain complete command output and exit status from the first verification run, hash saved local logs and reuse passing evidence for unchanged source instead of rerunning to recover truncated tool output.
+- Run heavy implementation verification sequentially, including in delegated assignments, so build, test, lint and typecheck do not compete for existing test deadlines. Require diagnosis and correction of failed checks before rechecking instead of repeating unchanged verification for a passing result.
+
 ## [2.0.34] - 2026-10-16
 
 ### Fixed

@@ -18,40 +18,24 @@ const cleanupModes = new Set(['delete', 'close']);
 const scenarioDefinitions = new Map([
   ['package-install', runPackageInstallScenario],
   ['discovery-matrix', runDiscoveryMatrixScenario],
-  ['commit-policy', runCommitPolicyScenario],
-  ['incomplete-progress-rework', runReviewReadyScenario],
-  ['report-repair', runReviewReadyScenario],
   ['diagnostics', runDiagnosticsScenario],
   ['authoritative-candidate-publication', runReviewReadyScenario],
-  ['acceptance-proof-rework', runReviewReadyScenario],
-  ['acceptance-proof-negative', runAcceptanceProofNegativeScenario],
   ['review-feedback-continuation', runReviewFeedbackContinuationScenario],
-  ['safety-negative', runSafetyNegativeScenario],
-  ['initial-review-rework', runReviewReadyScenario],
   ['publication-reconciliation', runPublicationReconciliationScenario],
-  ['authorization-revoked', runAuthorizationRevokedScenario],
   ['review-feedback-negative', runReviewFeedbackNegativeScenario],
   ['issue-verification', runIssueVerificationScenario],
 ]);
 
 const scenarioProfiles = new Map([
-  ['core-release', [
-    'package-install', 'review-feedback-continuation',
-  ]],
-  ['v2-regression', [
-    'discovery-matrix', 'commit-policy', 'incomplete-progress-rework', 'report-repair',
-    'diagnostics', 'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'acceptance-proof-negative', 'review-feedback-continuation',
-    'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
-    'review-feedback-negative', 'issue-verification',
-  ]],
+  ['core-release', ['package-install', 'review-feedback-continuation']],
+  ['v2-regression', ['discovery-matrix', 'diagnostics', 'authoritative-candidate-publication',
+    'publication-reconciliation', 'review-feedback-negative', 'issue-verification']],
   ['full', Array.from(scenarioDefinitions.keys())],
 ]);
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { process.stdout.write(helpText()); return; }
-  if (options.selfTestFakeAgent) { await selfTestFakeAgent(); return; }
   if (options.selfTestLiveCodex) { await selfTestLiveCodex(); return; }
   const selected = selectScenarios(options);
   const runId = options.runId ?? new Date().toISOString().replace(/[-:TZ.]/gu, '').slice(0, 14);
@@ -114,7 +98,7 @@ export function parseArgs(args) {
     scenarios: [], profile: 'core-release', repo: defaultLiveSmokeRepo, cleanup: true,
     cleanupMode: 'delete', skipLocalTests: false, keepPackageTarball: false,
     timeoutMs: defaultTimeoutMs, runId: undefined, help: false,
-    selfTestFakeAgent: false, selfTestLiveCodex: false,
+    selfTestLiveCodex: false,
   };
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index]; const value = args[index + 1];
@@ -122,7 +106,6 @@ export function parseArgs(args) {
     if (flag === '--keep-artifacts') { options.cleanup = false; continue; }
     if (flag === '--skip-local-tests') { options.skipLocalTests = true; continue; }
     if (flag === '--keep-package-tarball') { options.keepPackageTarball = true; continue; }
-    if (flag === '--self-test-fake-agent') { options.selfTestFakeAgent = true; continue; }
     if (flag === '--self-test-live-codex') { options.selfTestLiveCodex = true; continue; }
     if (['--scenario', '--profile', '--repo', '--cleanup-mode', '--timeout-ms', '--run-id'].includes(flag)) {
       if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
@@ -299,12 +282,7 @@ export async function configureTarget(context, overrides = {}) {
 
 export async function runReviewReadyScenario(context, scenario) {
   await configureTarget(context, { authoritativeCandidate: scenario === 'authoritative-candidate-publication' });
-  const extraCriteria = scenario === 'initial-review-rework' ? [
-    `Create src/live-smoke/${scenario}.txt as one line containing ${scenario}, followed by one LF newline.`,
-    `Create test/live-smoke/${scenario}.txt as one line containing proof for ${scenario}, followed by one LF newline.`,
-    'Create src/live-smoke/initial-review-rework-fixed.txt as one line containing fixed, followed by one LF newline.',
-  ] : [];
-  const issue = await createIssue(context, scenario, true, extraCriteria);
+  const issue = await createIssue(context, scenario, true);
   const result = await continueRepairReady(() => runIssue(context, issue.number));
   if (result.status !== 'review-ready') {
     const failedRecord = await readRunRecord(context, issue.number);
@@ -316,27 +294,8 @@ export async function runReviewReadyScenario(context, scenario) {
   if (!record.checkedChangeSha256 || !record.proofId || record.checks.some((check) => check.status !== 'passed')) {
     throw new Error(`${scenario}: review-ready lacks passed check and proof bindings`);
   }
-  if (scenario === 'acceptance-proof-rework') await assertReworkCycle(context, issue.number);
-  if (scenario === 'incomplete-progress-rework' && record.transportRetries !== 1) {
-    throw new Error(`${scenario}: expected one durable transport retry`);
-  }
-  if (scenario === 'initial-review-rework' && record.cycle !== 2) {
-    throw new Error(`${scenario}: expected one targeted Review repair cycle`);
-  }
   const publication = await recordPublication(context, issue.number);
   await assertValidationBindings(context, record, publication.headSha, scenario);
-  if (scenario === 'initial-review-rework') {
-    const review = record.directReview;
-    const calls = (await readModelAudit(context)).filter((call) => call.scenario === scenario);
-    if (review?.status !== 'clear' || review.targetRevision !== 2 || review.previousTarget?.targetRevision !== 1
-      || review.review.disposition !== 'clear' || !review.review.acceptedReportSha256
-      || calls.filter((call) => call.operation === 'proof').length !== 2
-      || calls.filter((call) => call.operation === 'code-review').length !== 2) {
-      throw new Error(`${scenario}: targeted Review repair did not refresh exact proof and independent Review`);
-    }
-    const repaired = (await commandFor(context)('git', ['-C', context.targetRoot, 'show', `${publication.headSha}:src/live-smoke/initial-review-rework-fixed.txt`], { timeoutMs: context.options.timeoutMs })).stdout;
-    if (repaired !== 'fixed\n') throw new Error(`${scenario}: published repair delta is missing`);
-  }
   if (scenario === 'authoritative-candidate-publication') {
     await assertAuthoritativeCandidatePublication(context, record, publication.headSha);
   }
@@ -392,13 +351,6 @@ export async function assertAuthoritativeCandidatePublication(context, record, p
   }
 }
 
-async function assertReworkCycle(context, issueNumber) {
-  const config = JSON.parse(await readFile(join(context.targetRoot, '.codex-orchestrator', 'config.json'), 'utf8'));
-  const state = JSON.parse(await readFile(join(context.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), 'utf8'));
-  const run = state.runs.find((candidate) => candidate.issueNumber === issueNumber);
-  if (run?.cycle !== 2) throw new Error(`acceptance-proof-rework: expected cycle=2, received ${run?.cycle ?? 'missing'}`);
-}
-
 export async function runReviewFeedbackContinuationScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
@@ -428,6 +380,9 @@ export async function runReviewFeedbackContinuationScenario(context, scenario) {
   if (after.reviewFeedback?.activeBatch !== null || after.reviewFeedback.history.length !== 1
     || receipt?.kind !== 'published') {
     throw new Error(`${scenario}: one published review feedback receipt was not persisted`);
+  }
+  if (!initialRecord.codexSession?.id || after.codexSession?.id !== initialRecord.codexSession.id) {
+    throw new Error(`${scenario}: issue session changed during feedback continuation`);
   }
   if (after.cycle !== initialRecord.cycle) throw new Error(`${scenario}: continuation changed the implementation cycle`);
   if (after.checkedChangeSha256 === initialRecord.checkedChangeSha256 || after.proofId === initialRecord.proofId) {
@@ -515,19 +470,6 @@ async function runDiscoveryMatrixScenario(context, scenario) {
   await assertNoPublication(context, issue.number, scenario);
 }
 
-async function runCommitPolicyScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
-  assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
-  const record = await readRunRecord(context, issue.number);
-  const author = (await commandFor(context)('git', ['-C', record.worktreePath, 'show', '-s', '--format=%an', 'HEAD'], {
-    timeoutMs: context.options.timeoutMs,
-  })).stdout.trim();
-  if (author !== 'fake-agent') throw new Error(`${scenario}: blocked for a reason other than the agent-authored commit`);
-  await assertNoPublication(context, issue.number, scenario);
-}
-
 export async function runDiagnosticsScenario(context, scenario) {
   await configureTarget(context);
   const packedCliPath = context.cliPath;
@@ -577,18 +519,6 @@ export async function runPublicationReconciliationScenario(context, scenario) {
   }
 }
 
-export async function runAuthorizationRevokedScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const first = await runIssue(context, issue.number);
-  assertResult(first, { status: 'repair-ready', source: 'proof' }, scenario);
-  await commandFor(context)('gh', ['issue', 'edit', String(issue.number), '--repo', context.repo, '--remove-label', 'agent:auto'], { timeoutMs: context.options.timeoutMs });
-  const result = await runIssue(context, issue.number);
-  assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
-  await assertEvidenceCode(context, result, 'authorization-revoked');
-  await assertNoPublication(context, issue.number, scenario);
-}
-
 export async function runReviewFeedbackNegativeScenario(context, scenario) {
   await configureTarget(context);
   const issue = await createIssue(context, scenario, true);
@@ -635,27 +565,12 @@ async function assertValidationBindings(context, record, publishedHeadSha, scena
   if (checks.length === 0 || bindingIds.size !== 1 || bindingIds.has(undefined)
     || candidateTrees.size !== 1 || !candidateTrees.has(publishedTree)
     || !record.checkedChangeSha256 || !record.proofId || record.proofReceipt?.proofId !== record.proofId
-    || record.directReview?.status !== 'clear' || record.directReview.review.disposition !== 'clear'
-    || !record.directReview.review.acceptedReportSha256) {
+    || !record.codexSession?.id || record.implementationResult?.proof?.status !== 'passed'
+    || record.implementationResult?.review?.reviewers?.map((reviewer) => reviewer.role).sort().join(',') !== 'spec_reviewer,standards_reviewer'
+    || record.implementationResult.review.reviewers.some((reviewer) => reviewer.verdict !== 'approve' || reviewer.sessionId === record.codexSession.id)
+    || new Set(record.implementationResult.review.reviewers.map((reviewer) => reviewer.sessionId)).size !== 2) {
     throw new Error(`${scenario}: check, proof, Review, and published candidate bindings are incomplete`);
   }
-}
-
-export async function runAcceptanceProofNegativeScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
-  assertResult(result, { status: 'blocked', kind: 'external' }, scenario);
-  await assertNoPublication(context, issue.number, scenario);
-}
-
-export async function runSafetyNegativeScenario(context, scenario) {
-  await configureTarget(context);
-  const issue = await createIssue(context, scenario, true);
-  const result = await runIssue(context, issue.number);
-  assertResult(result, { status: 'blocked', kind: 'safety' }, scenario);
-  await assertEvidenceCode(context, result, 'denied-path-modified');
-  await assertNoPublication(context, issue.number, scenario);
 }
 
 async function createIssue(context, scenario, eligible, extraCriteria = [], markersAsCriteria = true, verification = null) {
@@ -879,14 +794,6 @@ async function recordPublication(context, issueNumber) {
   return { number: pulls[0].number, headSha };
 }
 
-async function writeFakeCodex(context) {
-  const path = join(context.root, 'fake-codex');
-  const installedVersion = (await commandFor(context)('codex', ['--version'], { timeoutMs: context.options.timeoutMs })).stdout.trim();
-  await writeFile(path, fakeCodexSource(process.execPath, installedVersion));
-  await chmod(path, 0o700);
-  return path;
-}
-
 async function writeLiveCodex(context) {
   const path = join(context.root, 'live-codex');
   await writeFile(path, liveCodexSource(process.execPath, context.modelAuditPath));
@@ -938,442 +845,36 @@ export function assertScenarioModelUsage(scenario, calls) {
 
 export function liveCodexSource(nodePath, auditPath) {
   return `#!${nodePath}
-import { createHash } from 'node:crypto';
-import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-
+import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const expectedModel = ${JSON.stringify(liveSmokeModel)};
 const auditPath = ${JSON.stringify(auditPath)};
 const administrative = args[0] === '--version' || (args[0] === 'login' && args[1] === 'status');
-if (administrative) { forward(''); }
+if (administrative) forward('');
 else {
   let prompt = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => { prompt += chunk; });
   process.stdin.on('end', () => forward(prompt));
 }
-
 function forward(prompt) {
   if (!administrative && !args.includes('model="' + expectedModel + '"')) {
     process.stderr.write('live smoke model pin is missing\\n'); process.exitCode = 64; return;
   }
-  const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const scenario = prompt.match(/LIVE_SMOKE_SCENARIO=([A-Za-z0-9-]+)/u)?.[1]
-    ?? criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1]
-    ?? 'unknown';
-  const operation = prompt.includes('Independently prove issue') ? 'proof'
-    : prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"') ? 'code-review'
-        : 'implementation';
-  if (scenario === 'incomplete-progress-rework' && operation === 'implementation') {
-    const marker = gitPath('v2-live-smoke-incomplete');
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      process.stderr.write('stream disconnected before completion\\n'); process.exitCode = 1; return;
-    }
-  }
-  launch(1);
-
-  function launch(wrapperAttempt) {
-    const smokeArgs = args.map((arg) => arg.startsWith('model_reasoning_effort=') ? 'model_reasoning_effort="low"' : arg);
-    const child = spawn('codex', smokeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stdout.pipe(process.stdout);
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk) => {
-      stderr = (stderr + chunk).slice(-4096);
-      process.stderr.write(chunk);
-    });
-    child.on('error', (error) => { stderr = (stderr + String(error)).slice(-4096); });
-    child.on('close', (code, signal) => {
-      if (!administrative) {
-        appendFileSync(auditPath, JSON.stringify({
-          model: expectedModel, scenario, operation, wrapperAttempt, exitCode: code, signal,
-          stderrTail: stderr.replaceAll(process.cwd(), '<worktree>'),
-        }) + '\\n');
-      }
-      const retryProof = operation === 'proof' && code !== 0
-        && stderr.includes('stream disconnected before completion') && wrapperAttempt < 3;
-      if (retryProof) {
-        const reportPath = args[args.indexOf('--output-last-message') + 1];
-        if (reportPath) rmSync(reportPath, { force: true });
-        launch(wrapperAttempt + 1); return;
-      }
-      if (code === 0 && !administrative) {
-        const reportPath = args[args.indexOf('--output-last-message') + 1];
-        if (operation === 'code-review') normalizeCodeReview(reportPath, prompt, scenario);
-        if (operation === 'implementation' && scenario === 'review-feedback-continuation') {
-          normalizeReviewFeedbackImplementation(reportPath, prompt);
-        }
-        applyFault(scenario, operation, prompt);
-        if (operation === 'implementation' && ['authoritative-candidate-publication', 'initial-review-rework', 'issue-verification'].includes(scenario)) {
-          normalizeImplementationReport(reportPath, scenario, prompt);
-        }
-      }
-      process.exitCode = code ?? (signal ? 1 : 0);
-    });
-    child.stdin.end(prompt);
-  }
-}
-
-function normalizeCodeReview(reportPath, prompt, scenario) {
-  const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const capsule = JSON.parse(facts[0] ?? '{}');
-  const target = capsule.target?.current ?? {};
-  const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  if (scenario === 'initial-review-rework') {
-    const marker = auditPath + '.initial-review-rework';
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'reviewed\\n');
-      const defect = {
-        id: 'live-review-finding', class: 'blocker', severity: 'high', confidence: 'high',
-        invariant: 'The reviewed candidate includes the required repair marker.',
-        failure: 'The initial candidate lacks the required repair marker.', evidence: ['immutable candidate Review'],
-        repair: 'Create src/live-smoke/initial-review-rework-fixed.txt.',
-        affectedTargets: ['path:src/live-smoke/initial-review-rework-fixed.txt'],
-      };
-      writeFileSync(reportPath, JSON.stringify({ report: {
-        version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
-        targetFingerprint: target.targetFingerprint, verdict: 'needs-work', coverage: capsule.reviewFocus ?? [],
-        defects: [defect], residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
-        reviewers: reviewerRoles.map((role) => ({ role, sessionId: capsule.reviewerSessionId + ':' + role, verdict: 'block' })),
-      } }));
-      return;
-    }
-  }
-  const report = {
-    version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
-    targetFingerprint: target.targetFingerprint, verdict: 'approved',
-    coverage: capsule.reviewFocus ?? [],
-    defects: [],
-    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
-    reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
-  };
-  writeFileSync(reportPath, JSON.stringify({ report }));
-}
-
-function normalizeReviewFeedbackImplementation(reportPath, prompt) {
-  mkdirSync('src/live-smoke', { recursive: true });
-  mkdirSync('test/live-smoke', { recursive: true });
-  writeFileSync('src/live-smoke/review-feedback-continuation.txt', 'review-feedback-continuation\\n');
-  writeFileSync('test/live-smoke/review-feedback-continuation.txt', 'proof for review-feedback-continuation\\n');
-  if (prompt.includes('Pull-request feedback repair round')) {
-    writeFileSync('src/live-smoke/review-feedback-continuation-addressed.txt', 'addressed review feedback\\n');
-  }
-  const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-    .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, status: 'completed', summary: 'Review feedback continuation fixture prepared.',
-    changedFiles, residualRisks: [], checks: verifyImplementation(prompt),
-  } }));
-}
-
-function normalizeImplementationReport(reportPath, scenario, prompt) {
-  const changedFiles = runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-    .split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeFileSync(reportPath, JSON.stringify({ report: {
-    version: 1, status: 'completed', summary: scenario + ' fixture prepared.', changedFiles, residualRisks: [], checks: verifyImplementation(prompt),
-  } }));
-}
-
-function applyFault(scenario, operation, prompt) {
-  const reportPath = args[args.indexOf('--output-last-message') + 1];
-  if (!reportPath) throw new Error('missing report path');
-  if (operation === 'implementation' && scenario === 'report-repair') {
-    const marker = auditPath + '.report-retry';
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      writeFileSync(reportPath, '{bad json');
-      return;
-    }
-  }
-  if (operation === 'implementation' && scenario === 'initial-review-rework') {
-    const marker = auditPath + '.initial-review-implementation';
-    const path = 'src/live-smoke/initial-review-rework-fixed.txt';
-    try { readFileSync(marker); mkdirSync('src/live-smoke', { recursive: true }); writeFileSync(path, 'fixed\\n'); }
-    catch { writeFileSync(marker, 'attempted\\n'); rmSync(path, { force: true }); }
-  }
-  if (operation === 'implementation' && scenario === 'issue-verification') {
-    mkdirSync('test/live-smoke', { recursive: true });
-    writeFileSync('test/live-smoke/package.json', JSON.stringify({ private: true, scripts: { test: 'node verify.mjs' } }) + '\\n');
-    writeFileSync('test/live-smoke/verify.mjs', "import { readFileSync } from 'node:fs';\\nif (readFileSync('../../src/live-smoke/issue-verification.txt', 'utf8') !== 'issue-verification\\\\n') process.exit(1);\\n");
-  }
-  if (operation === 'implementation' && scenario === 'commit-policy') {
-    runGit(['add', '-A']);
-    runGit(['-c', 'user.name=fake-agent', '-c', 'user.email=fake@example.invalid', 'commit', '-m', 'forbidden agent commit']);
-    return;
-  }
-  if (operation === 'implementation' && scenario === 'safety-negative') {
-    writeFileSync('.env', 'blocked fixture\\n'); return;
-  }
-  if (operation === 'implementation' && scenario === 'authoritative-candidate-publication') {
-    const path = 'src/live-smoke/authoritative-candidate-publication.txt';
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, 'staged content must not become authoritative\\n');
-    runGit(['add', '--', path]);
-    writeFileSync(path, 'authoritative-candidate-publication\\n');
-    return;
-  }
-  if (operation !== 'proof') return;
-  const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  if (scenario === 'acceptance-proof-negative') {
-    discardProofArtifacts(prompt);
-    writeProofReport(reportPath, {
-      version: 1, status: 'external-block', decision: { mode: 'non-visual', targets: [] },
-      criteria: criteria.map((item) => ({ id: item.id, status: 'unknown', confidence: 'low', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'External proof dependency is unavailable.' })),
-      checks: [], artifacts: [], findings: [], residualRisks: [],
-      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'], resumable: false },
-    }); return;
-  }
-  if (scenario === 'acceptance-proof-rework') {
-    const marker = gitCommonPath('v2-live-smoke-proof-rework');
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      discardProofArtifacts(prompt);
-      writeProofReport(reportPath, {
-        version: 1,
-        status: 'needs-rework',
-        decision: { mode: 'non-visual', targets: [] },
-        criteria: criteria.map((item) => ({ id: item.id, status: 'failed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'One bounded rework cycle is required.' })),
-        checks: [], artifacts: [],
-        findings: ['Create src/live-smoke/acceptance-proof-rework-complete.txt containing exactly complete followed by one LF newline.'],
-        residualRisks: [],
-      }); return;
-    }
-  }
-  if (scenario === 'authorization-revoked') {
-    const marker = gitCommonPath('v2-live-smoke-authorization-revoked');
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      discardProofArtifacts(prompt);
-      writeProofReport(reportPath, {
-        version: 1, status: 'needs-rework', decision: { mode: 'non-visual', targets: [] },
-        criteria: criteria.map((item) => ({ id: item.id, status: 'failed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'A bounded authorization checkpoint is required.' })),
-        checks: [], artifacts: [], findings: ['Create the authorization repair marker.'], residualRisks: [],
-      }); return;
-    }
-  }
-  if (scenario === 'review-feedback-continuation') {
-    discardProofArtifacts(prompt);
-    writePassingNonVisualProof(criteria, reportPath, prompt);
-    return;
-  }
-  if ([
-    'package-install', 'incomplete-progress-rework', 'report-repair', 'diagnostics',
-    'authoritative-candidate-publication', 'acceptance-proof-rework',
-    'initial-review-rework', 'publication-reconciliation', 'authorization-revoked',
-    'review-feedback-negative', 'issue-verification',
-  ].includes(scenario)) {
-    discardProofArtifacts(prompt);
-    writePassingNonVisualProof(criteria, reportPath, prompt);
-    return;
-  }
-}
-
-function discardProofArtifacts(prompt) {
-  const artifactRoot = prompt.match(/Write evidence only below (.+)\\.\\n/u)?.[1];
-  if (!artifactRoot) throw new Error('missing proof artifact root');
-  rmSync(artifactRoot, { recursive: true, force: true });
-}
-
-function writePassingNonVisualProof(criteria, reportPath, prompt) {
-  const configuredChecks = JSON.parse(prompt.match(/Configured check receipts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const evidenceRefs = configuredChecks.map((check) => check.id);
-  if (evidenceRefs.length === 0 || evidenceRefs.some((id) => typeof id !== 'string' || !id)) {
-    throw new Error('missing configured check receipt IDs');
-  }
-  writeProofReport(reportPath, {
-    version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
-    criteria: criteria.map((item) => ({
-      id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'],
-      evidenceRefs, analysis: 'Current checked change satisfies this criterion.',
-    })),
-    checks: [], artifacts: [], findings: [], residualRisks: [],
+  const scenario = prompt.match(/LIVE_SMOKE_SCENARIO=([A-Za-z0-9-]+)/u)?.[1] ?? 'unknown';
+  const child = spawn('codex', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdout.pipe(process.stdout);
+  child.stderr.pipe(process.stderr);
+  child.on('error', (error) => { process.stderr.write(String(error) + '\\n'); });
+  child.on('close', (code, signal) => {
+    if (!administrative) appendFileSync(auditPath, JSON.stringify({
+      model: expectedModel, scenario, operation: 'implementation', exitCode: code, signal,
+    }) + '\\n');
+    process.exitCode = code ?? 1;
   });
-}
-
-function writeProofReport(reportPath, report) {
-  const generated = { ...report, visualEvidence: report.visualEvidence ?? null, blocker: report.blocker ?? null };
-  mkdirSync(dirname(reportPath), { recursive: true });
-  writeFileSync(reportPath, JSON.stringify({ report: generated }));
-}
-
-function gitPath(name) { return runGit(['rev-parse', '--git-path', name]).trim(); }
-function gitCommonPath(name) { return join(runGit(['rev-parse', '--git-common-dir']).trim(), name); }
-// Smoke fixture verification runs inside the implementation owner, after its final edit.
-function verifyImplementation(prompt) {
-  const encoded = prompt.match(/configured checks: (\\{[^\\n]+\\})\\./u)?.[1];
-  if (!encoded) throw new Error('Missing implementation check policy');
-  const policy = JSON.parse(encoded);
-  return Object.entries(policy).map(([id, command]) => {
-    const output = execFileSync('/bin/sh', ['-c', command], { timeout: 30000 });
-    return { id, command, status: 'passed', outputSha256: createHash('sha256').update(output).digest('hex') };
-  });
-}
-
-function runGit(argv) { return execFileSync('git', argv, { encoding: 'utf8' }); }
-`;
-}
-
-function fakeCodexSource(nodePath, codexVersion) {
-  return `#!${nodePath}
-import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-
-if (process.argv[2] === '--version') { process.stdout.write(${JSON.stringify(`${codexVersion}\n`)}); process.exit(0); }
-const args = process.argv.slice(2);
-const reportPath = args[args.indexOf('--output-last-message') + 1];
-if (!reportPath) throw new Error('missing report path');
-let prompt = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { prompt += chunk; });
-process.stdin.on('end', () => {
-  const criteria = JSON.parse(prompt.match(/Frozen acceptance criteria: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const marker = criteria.map((item) => item.text).join('\\n').match(/LIVE_SMOKE_SCENARIO=([^\\n]+)/u)?.[1] ?? 'authoritative-candidate-publication';
-  mkdirSync(dirname(reportPath), { recursive: true });
-  if (prompt.includes('/code-review/') || prompt.includes('"operation":"code-review"')) writeReview(reportPath, prompt);
-  else if (prompt.includes('Independently prove issue')) writeProof(marker, criteria, reportPath, prompt);
-  else writeImplementation(marker, reportPath, prompt);
-});
-
-function writeReview(reportPath, prompt) {
-  const facts = JSON.parse(prompt.match(/Runner-provided facts: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  const capsule = JSON.parse(facts[0] ?? '{}');
-  const target = capsule.target?.current ?? {};
-  const reviewerRoles = JSON.parse(prompt.match(/Available reviewer roles: (\\[[^\\n]+\\])/u)?.[1] ?? '[]');
-  writeAgentReport(reportPath, {
-    version: 1, operation: capsule.operation, targetRevision: target.targetRevision,
-    targetFingerprint: target.targetFingerprint, verdict: 'approved',
-    coverage: capsule.reviewFocus ?? [],
-    defects: [],
-    residualRisks: [], reviewerSessionId: capsule.reviewerSessionId,
-    reviewers: reviewerRoles.map((role) => ({ role, sessionId: \`\${capsule.reviewerSessionId}:\${role}\`, verdict: 'approve' })),
-  });
-}
-
-// Smoke fixture verification runs inside the implementation owner, after its final edit.
-function verifyImplementation(prompt) {
-  const encoded = prompt.match(/configured checks: (\\{[^\\n]+\\})\\./u)?.[1];
-  if (!encoded) throw new Error('Missing implementation check policy');
-  const policy = JSON.parse(encoded);
-  return Object.entries(policy).map(([id, command]) => {
-    const output = execFileSync('/bin/sh', ['-c', command], { timeout: 30000 });
-    return { id, command, status: 'passed', outputSha256: createHash('sha256').update(output).digest('hex') };
-  });
-}
-
-function writeImplementation(scenario, reportPath, prompt) {
-  if (scenario === 'report-repair') {
-    const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-report-retry'], { encoding: 'utf8' }).trim();
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      writeChange(scenario);
-      writeFileSync(reportPath, '{bad json');
-      return;
-    }
-  }
-  if (scenario === 'incomplete-progress-rework') {
-    const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-incomplete'], { encoding: 'utf8' }).trim();
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      process.stderr.write('stream disconnected before completion\\n');
-      process.exitCode = 1;
-      return;
-    }
-  }
-  if (scenario === 'safety-negative') writeFileSync('.env', 'blocked fixture\\n');
-  else writeChange(scenario);
-  if (scenario === 'commit-policy') {
-    execFileSync('git', ['add', '-A']);
-    execFileSync('git', ['-c', 'user.name=fake-agent', '-c', 'user.email=fake@example.invalid', 'commit', '-m', 'forbidden agent commit']);
-  }
-  const changedFiles = scenario === 'commit-policy'
-    ? execFileSync('git', ['diff', '--name-only', 'HEAD^', 'HEAD'], { encoding: 'utf8' }).trim().split('\\n').filter(Boolean).sort()
-    : execFileSync('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { encoding: 'utf8' }).split('\\0').filter(Boolean).map((row) => row.slice(3)).sort();
-  writeAgentReport(reportPath, { version: 1, status: 'completed', summary: 'V2 live-smoke implementation complete.', changedFiles, residualRisks: [], checks: verifyImplementation(prompt) });
-}
-
-function writeProof(scenario, criteria, reportPath, prompt) {
-  if (scenario === 'acceptance-proof-negative') {
-    writeAgentReport(reportPath, {
-      version: 1, status: 'external-block', decision: { mode: 'non-visual', targets: [] },
-      criteria: criteria.map((item) => ({ id: item.id, status: 'unknown', confidence: 'low', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'External proof dependency is unavailable.' })),
-      checks: [], artifacts: [], findings: [], residualRisks: [],
-      blocker: { kind: 'service', summary: 'Synthetic proof dependency is unavailable.', attempted: ['bounded live-smoke proof'], resumable: false },
-    }); return;
-  }
-  if (scenario === 'acceptance-proof-rework') {
-    const marker = execFileSync('git', ['rev-parse', '--git-path', 'v2-live-smoke-proof-rework'], { encoding: 'utf8' }).trim();
-    try { readFileSync(marker); } catch {
-      writeFileSync(marker, 'attempted\\n');
-      writeAgentReport(reportPath, {
-        version: 1, status: 'needs-rework', decision: { mode: 'non-visual', targets: [] },
-        criteria: criteria.map((item) => ({ id: item.id, status: 'failed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [], analysis: 'One bounded rework cycle is required.' })),
-        checks: [], artifacts: [], findings: ['Add the rework completion marker.'], residualRisks: [],
-      }); return;
-    }
-  }
-  if (scenario === 'browser-proof') { writeBrowserProof(criteria, reportPath, prompt); return; }
-  const output = Buffer.from('V2 live-smoke proof passed.');
-  const check = { id: 'check-live-smoke', command: 'synthetic bounded proof', status: 'passed', summary: 'The frozen criteria were inspected.', outputSha256: createHash('sha256').update(output).digest('hex') };
-  writeAgentReport(reportPath, {
-    version: 1, status: 'passed', decision: { mode: 'non-visual', targets: [] },
-    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['non-visual'], evidenceRefs: [check.id], analysis: 'Current checked change satisfies this criterion.' })),
-    checks: [check], artifacts: [], findings: [], residualRisks: [],
-  });
-}
-
-function writeBrowserProof(criteria, reportPath, prompt) {
-  const artifactRoot = prompt.match(/Write evidence only below (.+)\\.\\n/u)?.[1];
-  if (!artifactRoot) throw new Error('missing browser artifact root');
-  const root = join(artifactRoot, 'browser-live-smoke');
-  mkdirSync(root, { recursive: true });
-  const definitions = [
-    ['shot-wide', 'screenshot', 'wide.png', true], ['dom-wide', 'dom-snapshot', 'wide.json', false],
-    ['shot-narrow', 'screenshot', 'narrow.png', true], ['dom-narrow', 'dom-snapshot', 'narrow.json', false],
-    ['console', 'console-log', 'console.json', false], ['network', 'network-log', 'network.json', false],
-  ];
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
-  const artifacts = definitions.map(([id, kind, name, publishable]) => {
-    const relativePath = join(artifactRoot, 'browser-live-smoke', name);
-    const bytes = kind === 'screenshot' ? png : Buffer.from(JSON.stringify({ scenario: 'browser-proof', id }));
-    writeFileSync(relativePath, bytes);
-    return { id, kind, relativePath, sha256: createHash('sha256').update(bytes).digest('hex'), publishable, description: 'Current V2 browser live-smoke evidence.' };
-  });
-  const ids = criteria.map((item) => item.id);
-  writeAgentReport(reportPath, {
-    version: 1, status: 'passed', decision: { mode: 'visual', targets: ['browser'] },
-    criteria: criteria.map((item) => ({ id: item.id, status: 'passed', confidence: 'high', surfaces: ['browser'], evidenceRefs: ['shot-wide', 'dom-wide', 'shot-narrow', 'dom-narrow'], analysis: 'Both current responsive captures satisfy this criterion.' })),
-    checks: [], artifacts,
-    visualEvidence: {
-      workflow: { entrypoint: 'http://127.0.0.1:4173/', steps: ['Open fixture', 'Inspect final state'], finalState: 'V2 browser proof ready' },
-      captures: [
-        { target: 'browser', name: 'wide', width: 1280, height: 720, criteriaRefs: ids, screenshotRef: 'shot-wide', stateRef: 'dom-wide' },
-        { target: 'browser', name: 'narrow', width: 390, height: 844, criteriaRefs: ids, screenshotRef: 'shot-narrow', stateRef: 'dom-narrow' },
-      ],
-      diagnostics: { consoleRef: 'console', networkRef: 'network' }, freshness: { capturedAfterFinalInteraction: true },
-      layoutReview: [{ summary: 'Spacing, clipping, overlap, and alignment are correct.', evidenceRefs: ['shot-wide', 'shot-narrow'] }],
-      copyReview: [{ summary: 'Visible copy matches the frozen criteria.', evidenceRefs: ['dom-wide', 'dom-narrow'] }],
-    },
-    findings: [], residualRisks: [],
-  });
-}
-
-function writeAgentReport(reportPath, report) {
-  const generated = report.decision
-    ? { ...report, visualEvidence: report.visualEvidence ?? null, blocker: report.blocker ?? null }
-    : report;
-  writeFileSync(reportPath, JSON.stringify({ report: generated }));
-}
-
-function writeChange(scenario) {
-  mkdirSync('src/live-smoke', { recursive: true });
-  mkdirSync('test/live-smoke', { recursive: true });
-  writeFileSync(join('src', 'live-smoke', scenario + '.txt'), scenario + '\\n');
-  writeFileSync(join('test', 'live-smoke', scenario + '.txt'), 'proof for ' + scenario + '\\n');
+  child.stdin.on('error', () => {});
+  child.stdin.end(prompt);
 }
 `;
 }
@@ -1567,105 +1068,21 @@ process.stdin.on('end', () => {
     await chmod(stubPath, 0o700);
     const reportPath = join(root, 'report.json');
     const env = { ...process.env, PATH: `${root}:${process.env.PATH ?? ''}` };
-    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=report-repair' }];
-    await runCommand(wrapperPath, ['exec', '--output-last-message', reportPath, '-c', `model="${liveSmokeModel}"`], {
-      cwd: root, env, stdin: `Implement issue.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
-    });
-    if (await readFile(reportPath, 'utf8') !== '{bad json') throw new Error('live Codex fault injection did not run after the model');
-    await runCommand(wrapperPath, ['exec', '--output-last-message', reportPath, '-c', `model="${liveSmokeModel}"`], {
-      cwd: root, env, stdin: `Implement issue.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\n`,
-    });
-    const recovered = JSON.parse(await readFile(reportPath, 'utf8')).report;
-    if (recovered.status !== 'external-block' || recovered.blocker?.kind !== 'service') {
-      throw new Error('live Codex full implementation retry did not preserve the second valid report');
-    }
+    const prompt = 'Implement issue. LIVE_SMOKE_SCENARIO=package-install';
+    const args = ['exec', '--output-last-message', reportPath, '-c', `model="${liveSmokeModel}"`];
+    await runCommand(wrapperPath, args, { cwd: root, env, stdin: prompt });
+    const firstBytes = await readFile(reportPath, 'utf8');
+    await runCommand(wrapperPath, args, { cwd: root, env, stdin: prompt });
+    if (await readFile(reportPath, 'utf8') !== firstBytes) throw new Error('wrapper changed the model report');
     const audit = (await readFile(auditPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-    if (audit.length !== 2 || audit.some((entry) => entry.model !== liveSmokeModel || entry.scenario !== 'report-repair')) {
+    if (audit.length !== 2 || audit.some((entry) => entry.model !== liveSmokeModel || entry.scenario !== 'package-install')) {
       throw new Error('live Codex model audit contract failed');
     }
     const missingPin = await runCommand(wrapperPath, ['exec', '--output-last-message', join(root, 'missing.json')], {
-      cwd: root, env, stdin: `Frozen acceptance criteria: ${JSON.stringify(criteria)}\n`, allowedExitCodes: [64],
+      cwd: root, env, stdin: prompt, allowedExitCodes: [64],
     });
     if (missingPin.status !== 64) throw new Error('live Codex wrapper accepted a missing model pin');
     process.stdout.write('V2 live Codex wrapper self-test passed.\n');
-  } finally { await rm(root, { recursive: true, force: true }); }
-}
-
-async function selfTestFakeAgent() {
-  const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-fake-agent-'));
-  try {
-    await runCommand('git', ['init', '-q', root]);
-    await writeFile(join(root, 'README.md'), 'fixture\n');
-    await runCommand('git', ['-C', root, 'add', 'README.md']);
-    await runCommand('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
-    const fakePath = join(root, 'fake-codex');
-    const installedVersion = 'codex-cli self-test';
-    await writeFile(fakePath, fakeCodexSource(process.execPath, installedVersion));
-    await chmod(fakePath, 0o700);
-    await runCommand('git', ['-C', root, 'add', 'fake-codex']);
-    await runCommand('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fake codex']);
-    const version = await runCommand(fakePath, ['--version'], { cwd: root });
-    if (version.stdout !== `${installedVersion}\n`) throw new Error('fake agent version contract failed');
-    const criteria = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=authoritative-candidate-publication' }];
-    const implementationPath = join(root, 'implementation.json');
-    await runCommand(fakePath, ['exec', '--output-last-message', implementationPath], {
-      cwd: root,
-      stdin: `Implement issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
-    });
-    const implementation = JSON.parse(await readFile(implementationPath, 'utf8')).report;
-    if (implementation.version !== 1 || implementation.status !== 'completed'
-      || !Array.isArray(implementation.changedFiles) || implementation.changedFiles.length !== 2) {
-      throw new Error(`fake implementation report contract failed: ${JSON.stringify(implementation)}`);
-    }
-    const retryCriteria = [{ id: 'ac-retry', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=report-repair' }];
-    const retryPath = join(root, 'implementation-retry.json');
-    await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
-      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
-    });
-    if (await readFile(retryPath, 'utf8') !== '{bad json') throw new Error('fake agent did not inject the first malformed report');
-    await runCommand(fakePath, ['exec', '--output-last-message', retryPath], {
-      cwd: root, stdin: `Implement issue #2.\nFrozen acceptance criteria: ${JSON.stringify(retryCriteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
-    });
-    const retriedImplementation = JSON.parse(await readFile(retryPath, 'utf8')).report;
-    if (retriedImplementation.status !== 'completed' || !retriedImplementation.changedFiles.includes('src/live-smoke/report-repair.txt')) {
-      throw new Error('fake agent full implementation retry did not produce a valid cumulative report');
-    }
-    const reviewPath = join(root, 'review.json');
-    const reviewCapsule = {
-      operation: 'code-review', reviewerSessionId: 'review-session-1',
-      target: { current: { targetRevision: 1, targetFingerprint: 'a'.repeat(64), candidateTreeSha: 'b'.repeat(40) }, previous: null, repairPatch: null },
-      reviewFocus: ['correctness'], defects: [], repairFindings: [],
-    };
-    await runCommand(fakePath, ['exec', '--output-last-message', reviewPath], {
-      cwd: root,
-      stdin: `Follow the exact operation at /code-review/SKILL.md.\nRunner-provided facts: ${JSON.stringify([JSON.stringify(reviewCapsule)])}\nAvailable reviewer roles: ["spec_reviewer","standards_reviewer"]\n`,
-    });
-    const review = JSON.parse(await readFile(reviewPath, 'utf8')).report;
-    if (review.operation !== 'code-review' || review.verdict !== 'approved'
-      || review.targetFingerprint !== reviewCapsule.target.current.targetFingerprint || review.coverage?.[0] !== 'correctness'
-      || review.reviewers?.length !== 2) {
-      throw new Error('fake code review report contract failed');
-    }
-    const proofPath = join(root, 'proof.json');
-    await runCommand(fakePath, ['exec', '--output-last-message', proofPath], {
-      cwd: root,
-      stdin: `Independently prove issue #1.\nFrozen acceptance criteria: ${JSON.stringify(criteria)}\nRequired configured checks: ${JSON.stringify({ smoke: `${process.execPath} --version` })}.\n`,
-    });
-    const proof = JSON.parse(await readFile(proofPath, 'utf8')).report;
-    if (proof.version !== 1 || proof.status !== 'passed' || proof.criteria?.[0]?.id !== 'ac-001'
-      || proof.decision?.mode !== 'non-visual') throw new Error('fake proof report contract failed');
-    const browserPath = join(root, 'browser-proof.json');
-    const browserCriteria = [{ id: 'ac-browser', order: 1, source: 'explicit', text: 'LIVE_SMOKE_SCENARIO=browser-proof' }];
-    await runCommand(fakePath, ['exec', '--output-last-message', browserPath], {
-      cwd: root,
-      stdin: `Independently prove issue #2.\nFrozen acceptance criteria: ${JSON.stringify(browserCriteria)}\nWrite evidence only below .proofs.\n`,
-    });
-    const browser = JSON.parse(await readFile(browserPath, 'utf8')).report;
-    if (browser.status !== 'passed' || browser.decision?.targets?.[0] !== 'browser'
-      || browser.artifacts?.length !== 6 || browser.visualEvidence?.captures?.length !== 2) {
-      throw new Error('fake browser proof report contract failed');
-    }
-    process.stdout.write('V2 fake agent self-test passed.\n');
   } finally { await rm(root, { recursive: true, force: true }); }
 }
 

@@ -11,7 +11,7 @@ import { GhCliIssueAdapter } from './adapters/gh-issue-adapter.js';
 import { GhCliPullRequestAdapter } from './adapters/gh-pull-request-adapter.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { renderRunResultJson, runIssueExitCode } from './cli-contract.js';
-import { createV2Runtime, hasTechnicalLegacyProofFailure, hasGitHubReauthorization } from './runtime.js';
+import { createV2Runtime, hasGitHubReauthorization } from './runtime.js';
 import { materializeWorkflowGeneration, workflowSkillHashes } from './workflow-assets.js';
 import { parseSetupArgs, renderSetupResultJson, setupOutcomeExitCode } from './setup-cli.js';
 import { createProductionSetup } from './setup-runtime.js';
@@ -20,22 +20,17 @@ import { FileRunRecordWriter, type RunRecord } from './run-store.js';
 import type { RunIssueResult } from './run-issue.js';
 import type { GitHubIssue } from './adapters/issues.js';
 
-export interface RunIntent { targetRoot: string; issueNumber: number; retryProofRunId?: string }
+export interface RunIntent { targetRoot: string; issueNumber: number }
 export interface DaemonIntent { targetRoot: string; once: boolean; issueNumber?: number }
 
 export function parseRunArgs(argv: string[]): RunIntent {
-  const retryProof = argv.length === 7 && argv[5] === '--retry-proof';
-  if ((argv.length !== 5 && !retryProof) || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
-    throw new Error('usage: cli run --target <absolute-path> --issue <positive-integer> [--retry-proof <run-id>]');
+  if (argv.length !== 5 || argv[0] !== 'run' || argv[1] !== '--target' || argv[3] !== '--issue') {
+    throw new Error('usage: cli run --target <absolute-path> --issue <positive-integer>');
   }
   const targetRoot = argv[2]!;
   const issueNumber = Number(argv[4]);
   if (!isAbsolute(targetRoot) || !Number.isSafeInteger(issueNumber) || issueNumber <= 0) throw new Error('CLI run intent is invalid');
-  const retryProofRunId = retryProof ? argv[6] : undefined;
-  if (retryProof && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(retryProofRunId!)) {
-    throw new Error('CLI proof retry run identity is invalid');
-  }
-  return { targetRoot: resolve(targetRoot), issueNumber, ...(retryProofRunId ? { retryProofRunId } : {}) };
+  return { targetRoot: resolve(targetRoot), issueNumber };
 }
 
 export function parseDaemonArgs(argv: string[]): DaemonIntent {
@@ -102,7 +97,6 @@ async function executeProductionDaemon(
       readConfigBytes: () => readConfigBytes(intent.targetRoot),
       discover: (config) => new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }).listOpenIssuesWithAnyLabel([config.github.labels.auto.name, config.github.labels.review.name]),
       inventory: async (config) => (await FileRunRecordWriter.forRepository(join(intent.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`).inventory()).runs,
-      hasTechnicalTerminalProofFailure: (run, config) => hasTechnicalLegacyProofFailure({ targetRoot: intent.targetRoot, config, record: run }),
       isReauthorized: (record, issue, config) => hasGitHubReauthorization({ targetRoot: intent.targetRoot, config, record, issue: { ...issue, labels: issue.labels.map(label => label.name) }, issues: new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }) }),
       executeRun: (runIntent, snapshot) => executeProductionRun(runIntent, snapshot, controller),
     }),
@@ -120,7 +114,6 @@ export async function discoverConfiguredDaemonTick(targetRoot: string, dependenc
   readConfigBytes(): Promise<Buffer>;
   discover(config: AgentAutoConfig): Promise<GitHubIssue[]>;
   inventory(config: AgentAutoConfig): Promise<RunRecord[]>;
-  hasTechnicalTerminalProofFailure?(run: RunRecord, config: AgentAutoConfig): Promise<boolean>;
   isReauthorized?(run: RunRecord, issue: GitHubIssue, config: AgentAutoConfig): Promise<boolean>;
   executeRun(intent: RunIntent, snapshot: { bytes: Buffer; config: AgentAutoConfig }): Promise<RunIssueResult>;
 }): Promise<DaemonTickSnapshot> {
@@ -137,7 +130,7 @@ export async function discoverConfiguredDaemonTick(targetRoot: string, dependenc
   }
   const needed = new Set<number>();
   for (const run of latest.values()) {
-    if (runNeedsDaemonTick(run) || await dependencies.hasTechnicalTerminalProofFailure?.(run, config) === true) needed.add(run.issueNumber);
+    if (runNeedsDaemonTick(run)) needed.add(run.issueNumber);
   }
   const finalStopped = new Set([...latest.values()].filter((run) => !needed.has(run.issueNumber) && run.terminalOutcome?.status !== 'review-ready').map((run) => run.issueNumber));
   const candidates: GitHubIssue[] = [];
@@ -345,7 +338,7 @@ function cliHelp(): string {
     '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels] [--dry-run]',
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
-    '  run --target <absolute-path> --issue <positive-integer> [--retry-proof <run-id>]',
+    '  run --target <absolute-path> --issue <positive-integer>',
     '  daemon --target <absolute-path> [--once [--issue <positive-integer>]]',
     '',
   ].join('\n');

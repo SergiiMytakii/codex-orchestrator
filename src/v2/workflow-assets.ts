@@ -23,10 +23,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const EXPECTED_OPERATION_BINDINGS: Record<string, {
   sourceSkill: string | null; dependencySkills: string[]; outputSchema: string;
 }> = {
-  'acceptance-proof': { sourceSkill: 'acceptance-proof', dependencySkills: [], outputSchema: 'schemas/proof-report-v1.json' },
-  'code-review': { sourceSkill: 'code-review', dependencySkills: [], outputSchema: 'schemas/code-review-v1.json' },
   implementation: {
-    sourceSkill: 'implement', dependencySkills: ['diagnosing-bugs', 'tdd'],
+    sourceSkill: 'implement', dependencySkills: ['acceptance-proof', 'diagnosing-bugs', 'tdd'],
     outputSchema: 'schemas/implementation-report-v1.json',
   },
 };
@@ -471,7 +469,8 @@ function parseManifest(value: unknown): WorkflowManifest {
     if (!same(dependencySkills, binding.dependencySkills)) {
       throw new Error(`workflow operation dependency binding is invalid: ${id}`);
     }
-    if (operation.sourceSkill !== binding.sourceSkill || operation.outputSchema !== binding.outputSchema) {
+    if (operation.sourceSkill !== binding.sourceSkill || operation.outputSchema !== binding.outputSchema
+      || operation.profile !== 'implementer' || !same(operation.reviewers, ['spec_reviewer', 'standards_reviewer'])) {
       throw new Error(`workflow operation binding is invalid: ${id}`);
     }
     const sourceSkill = operation.sourceSkill === null ? undefined : skills[operation.sourceSkill];
@@ -778,16 +777,14 @@ function validateOperationPolicy(id: string, value: Record<string, unknown>): vo
     'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
   ]);
   const networkAllowed = value.network === 'deny' && Array.isArray(value.networkHosts) && value.networkHosts.length === 0
-    || id !== 'code-review' && value.network === 'loopback' && Array.isArray(value.networkHosts)
+    || id === 'implementation' && value.network === 'loopback' && Array.isArray(value.networkHosts)
       && value.networkHosts.join(',') === '127.0.0.1,::1,localhost';
   if (!networkAllowed
     || !Array.isArray(value.mcpTools) || value.mcpTools.length !== 0 || value.approvalCeiling !== 'never'
     || value.externalWrite !== false) throw new Error(`workflow operation authority is invalid: ${id}`);
   const expected = id === 'implementation'
     ? ['workspace-write', 'worktree', 'write', 'worktree', 'change-set']
-    : id === 'acceptance-proof'
-      ? ['workspace-write', 'worktree', 'write', 'worktree', 'proof-only']
-      : ['read-only', 'worktree', 'read-only', '', 'report-only'];
+    : ['read-only', 'worktree', 'read-only', '', 'report-only'];
   const roots = Array.isArray(value.writableRootClasses) ? value.writableRootClasses.join(',') : '<invalid>';
   const actual = [value.sandboxMode, value.cwdClass, value.worktreeAccess, roots, value.runnerPostcondition];
   if (!same(actual.map(String), expected)) throw new Error(`workflow operation policy is invalid: ${id}`);

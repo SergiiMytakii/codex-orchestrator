@@ -13,11 +13,9 @@ import type { GitHubPullRequestAdapter } from './adapters/pull-requests.js';
 import { ReviewFeedbackObserver } from './review-feedback-coordinator.js';
 import { CommandProcessQuiescenceError, defaultProcessExecutor, type ProcessExecutor } from './adapters/command.js';
 import { RunnerAndroidProofController } from './android-proof-runner.js';
-import { AcceptanceProof, CandidateProofInspectionError, proofFailureSummary, type FrozenCriterion, type IssueSnapshot, type ProofAgent, type ProofProcessFailure } from './acceptance-proof.js';
+import { AcceptanceProof, CandidateProofInspectionError, proofFailureSummary, type FrozenCriterion, type IssueSnapshot, type ProofProcessFailure } from './acceptance-proof.js';
 import { createCheckedChangeCapabilities, type CheckedChangeFreshness } from './checked-change.js';
 import type { DeliveryAuthority } from './delivery-authority.js';
-import { InjectedContainedReportOperation } from './contained-report-operation.js';
-import { ContainedImplementationReviewer } from './implementation-reviewer.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import {
   canonicalJson,
@@ -48,6 +46,7 @@ import {
   candidateBindingSeed,
   candidateRef,
   type CandidateBindingV2,
+  type CandidateBoundaryV2,
   type CandidateMaterializationV2,
   type CandidateGitV2,
   type CandidateResult,
@@ -671,7 +670,7 @@ async function assertSafeArtifactRoot(root: SafeArtifactRoot): Promise<void> {
   }
 }
 
-async function readRegularFileWithoutSymlinkAncestors(rootInput: string | SafeArtifactRoot, path: string): Promise<Buffer> {
+async function readRegularFileWithoutSymlinkAncestors(rootInput: string | SafeArtifactRoot, path: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<Buffer> {
   const root = typeof rootInput === 'string' ? await inspectSafeArtifactRoot(rootInput) : rootInput;
   await assertSafeArtifactRoot(root);
   const relativePath = relative(root.path, resolve(path));
@@ -700,7 +699,7 @@ async function readRegularFileWithoutSymlinkAncestors(rootInput: string | SafeAr
   }
   try {
     const stat = await handle.stat();
-    if (!stat.isFile()) throw new CandidateArtifactConflictError('candidate artifact is not a regular file');
+    if (!stat.isFile() || stat.size > maxBytes) throw new CandidateArtifactConflictError('candidate artifact is not a bounded regular file');
     const openedPath = await realpath(path);
     const openedRelative = relative(root.realPath, canonicalFilesystemPath(openedPath));
     if (!openedRelative || openedRelative.startsWith('..') || isAbsolute(openedRelative)) {
@@ -805,6 +804,8 @@ export class ContainedImplementationAgent {
     safePath: string;
     bootId: string;
     git: RunIssueGit;
+    processExecutor?: ProcessExecutor;
+    iosXcrunPath?: string;
     process?: CodexProcess;
     createAttemptId?: () => string;
     now?: () => string;
@@ -812,6 +813,10 @@ export class ContainedImplementationAgent {
 
   async run(input: {
     operation: 'implementation';
+    proofId: string;
+    sessionId?: string;
+    androidProofPreparation?: RunRecord['androidProofPreparation'];
+    onSessionStarted?: (sessionId: string) => Promise<void>;
     attemptId: string;
     runId: string;
     worktreePath: string;
@@ -867,8 +872,13 @@ export class ContainedImplementationAgent {
         worktreePath: input.worktreePath, destination: join(dirname(attempt.tmpDir), 'read-view'),
         deniedPaths: config.deny.readPaths, correction: input.reportCorrection, schemaPath: attempt.schemaPath, signal: input.signal,
       });
+      const iosXcrunPath = this.dependencies.iosXcrunPath ?? '/usr/bin/xcrun';
+      const iosTooling = input.reportCorrection ? undefined : await discoverIosTooling(this.dependencies.processExecutor ?? defaultProcessExecutor, iosXcrunPath);
       const result = await (this.dependencies.process ?? new CodexProcess()).run({
         codexPath: config.codex.command,
+        sessionId: input.sessionId,
+        onSessionStarted: input.onSessionStarted,
+        agentProfilePaths: { ...attempt.reviewerProfiles, implementer: join(attempt.workflowRoot, 'profiles/implementer.toml') },
         cwd: correctionView ?? input.worktreePath,
         schemaPath: attempt.schemaPath,
         reportPath: attempt.reportPath,
@@ -896,11 +906,17 @@ export class ContainedImplementationAgent {
           ...(input.reviewFeedback?.some((feedback) => feedback.id.startsWith('issue-comment:')) ? [
             'For this issue-comment cycle, either make an in-scope repair, return answer-only without modifying files, or return boundary without modifying files when authority is ambiguous or exceeded.',
           ] : []),
-          `Exact delivery authority: ${canonicalJson(input.deliveryAuthority)}`,
-          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
+          `iOS lease helper: ${join(attempt.workflowRoot, 'skills/acceptance-proof/tools/ios-lease.mjs')}. Use the packaged iOS proof procedure for iOS criteria only.`,
+          `iOS lease root: ${join(resolve(this.dependencies.orchestratorHome), 'v2', sha256(canonicalRepository), 'leases')}.`,
+          `iOS lease artifact: ${resolve(input.worktreePath, config.proof.artifactDir, input.proofId, 'ios-lease.json')}.`,
+          `iOS lease proof ID: ${input.proofId}; owner PID: ${process.pid}; xcrun: ${iosXcrunPath}.`,
+          ...(iosTooling ? [`iOS runtime ID: ${iosTooling.runtimeId}; device type ID: ${iosTooling.deviceTypeId}.`] : ['iOS tooling is unavailable; return a tool blocker if iOS proof is required.']),
+          `Proof artifacts belong under ${config.proof.artifactDir}/${input.proofId}/. Use proof criterion IDs and configured check IDs exactly as supplied.`,
+          ...(input.androidProofPreparation ? [`Runner Android preparation (trusted resource result): ${canonicalJson(input.androidProofPreparation)}. Use the prepared artifacts and leased target through the synchronized Android skills. Do not change source or configured checks after preparation; report a blocker if further edits are required.`] : []),
+          `Acceptance criteria: ${canonicalJson(input.frozenCriteria.map(criterion => criterion.source === 'fallback' ? { id: criterion.id, source: criterion.source, text: 'Prove the authorized issue above.' } : criterion))}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           'In a completed report, changedFiles is the complete current candidate diff relative to the original HEAD, including files retained from earlier cycles. A verification-only repair with no new edits still returns completed with that complete current diff.',
-          `For every completed report, including verification-only repairs, run all exact configured commands on the final candidate: ${canonicalJson(config.checks)}. Include these commands in any Implement child assignment. Report a passing result for each exact command; focused tests are additional evidence.`,
+          `Required commands: ${canonicalJson(config.checks)}. Include the exact policy in any child assignment. Run heavy checks sequentially. Retain passing evidence only while source and command policy remain unchanged. Diagnose and correct failures before rechecking; otherwise return the blocker. Complete proof and independent Review through the packaged global skills before returning completed.`,
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
@@ -912,8 +928,9 @@ export class ContainedImplementationAgent {
         }),
       }, input.signal);
       if (input.reportCorrection && canonicalJson(await this.dependencies.git.snapshot(input.worktreePath)) !== canonicalJson(baseline)) return { kind: 'internal-error' };
+      if (result.sessionIdentityFailed) return { kind: 'internal-error' };
       if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (result.kind === 'transport-failed' && result.report.kind === 'missing' && result.exitCode === 0 && result.signal === null) {
+      if (result.kind === 'transport-failed' && !result.error && result.report.kind === 'missing' && result.exitCode === 0 && result.signal === null) {
         return { kind: 'completed', attemptId, report: '', reportBytes: Buffer.alloc(0) };
       }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
@@ -937,156 +954,6 @@ export class ContainedImplementationAgent {
     }
   }
 
-}
-
-export class ContainedProofAgent implements ProofAgent<import('./checked-change.js').CheckedChangePayload> {
-  constructor(private readonly dependencies: {
-    config: () => AgentAutoConfig;
-    orchestratorHome: string;
-    parentCodexHome: string;
-    safePath: string;
-    targetRoot: string;
-    bootId: string;
-    androidAdbPath: string;
-    iosXcrunPath: string;
-    processExecutor: ProcessExecutor;
-    process?: CodexProcess;
-    createAttemptId?: () => string;
-  }) {}
-
-  async run(input: Parameters<ProofAgent['run']>[0]): ReturnType<ProofAgent['run']> {
-    if (!input.workflowGeneration) throw new Error('proof workflow generation is required');
-    const config = this.dependencies.config();
-    const canonicalRepository = `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`;
-    const issueWorktreePath = resolve(this.dependencies.targetRoot, config.runner.workspaceRoot, `issue-${input.issue.number}`);
-    const worktreePath = input.worktreePath ? resolve(input.worktreePath) : issueWorktreePath;
-    const attempt = await prepareContainedAttempt({
-      orchestratorHome: this.dependencies.orchestratorHome,
-      canonicalRepository,
-      runId: input.runId,
-      attemptId: input.attemptId ?? (this.dependencies.createAttemptId ?? randomUUID)(),
-      operationId: 'acceptance-proof',
-      workflowGeneration: input.workflowGeneration,
-      bootId: this.dependencies.bootId,
-    });
-    const artifactRoot = resolve(worktreePath, config.proof.artifactDir);
-    const snapshotRoot = dirname(attempt.sourceSkillPath ?? attempt.operationPath);
-    const iosLeaseRoot = join(
-      resolve(this.dependencies.orchestratorHome),
-      'v2',
-      sha256(canonicalRepository),
-      'leases',
-    );
-    const iosLeaseArtifact = join(artifactRoot, input.proofId, 'ios-lease.json');
-    const iosTooling = input.reportCorrection ? undefined : await discoverIosTooling(this.dependencies.processExecutor, this.dependencies.iosXcrunPath);
-    const before = await artifactInventory(artifactRoot, config.proof.artifactDir);
-    let correctionView: string | undefined;
-    let unresolvedProcess = false;
-    try {
-      try {
-        const recoveredReport = await readRegularFile(attempt.reportPath);
-        const recoveredInventory = await artifactInventory(artifactRoot, config.proof.artifactDir);
-        const runnerPrepared = new Set(input.runnerPreparedArtifactPaths);
-        return {
-          kind: 'report',
-          report: decodeAgentReportForValidation(recoveredReport, ['visualEvidence', 'blocker']), reportBytes: recoveredReport,
-          proofPhaseChangedFiles: [...recoveredInventory.keys()].filter((path) => !runnerPrepared.has(path)).sort(),
-        };
-      } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) throw error;
-      }
-      if (input.recoverOnly) return { kind: 'internal-error' };
-      if (input.reportCorrection) correctionView = await prepareReportCorrectionView({
-        worktreePath, destination: join(dirname(attempt.tmpDir), 'read-view'), deniedPaths: config.deny.readPaths,
-        correction: input.reportCorrection, schemaPath: attempt.schemaPath, signal: input.signal,
-      });
-      const result = await (this.dependencies.process ?? new CodexProcess()).run({
-        codexPath: config.codex.command,
-        cwd: correctionView ?? worktreePath,
-        schemaPath: attempt.schemaPath,
-        reportPath: attempt.reportPath,
-        toolHome: attempt.toolHome,
-        tmpDir: attempt.tmpDir,
-        safePath: this.dependencies.safePath,
-        parentCodexHome: this.dependencies.parentCodexHome,
-        parentEnv: process.env,
-        prompt: input.reportCorrection ? [
-          reportCorrectionPrompt(input.reportCorrection),
-          `Use the exact structured output schema at ${attempt.schemaPath}.`,
-          `Retain the existing operation ${attempt.operationPath}; correct its report only.`,
-        ].join('\n') : [
-          `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Process authority: ${attempt.sourceSkillPath}`,
-          `Invocation contract: ${attempt.operationPath}`,
-          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          ...(input.reportCorrection ? [reportCorrectionPrompt(input.reportCorrection)] : [`Independently prove issue #${input.issue.number}.`]),
-          `Frozen acceptance criteria: ${canonicalJson(input.frozenCriteria)}`,
-          `Checked change digest: ${input.checkedChangeSha256}.`,
-          `Checked changed files: ${canonicalJson(input.changedFiles)}.`,
-          `Configured check receipts: ${canonicalJson(input.checks)}.`,
-          `Write evidence only below ${config.proof.artifactDir}/${input.proofId}/.`,
-          'When a frozen criterion has a browser surface, follow references/browser.md from the exact acceptance-proof skill snapshot.',
-          'When a frozen criterion has an Android surface, follow references/android.md from the exact acceptance-proof skill snapshot.',
-          ...(config.proof.android ? [
-            `Runner-owned Android artifact paths: ${canonicalJson(input.runnerPreparedArtifactPaths)}.`,
-            `Runner-owned Android preparation warnings: ${canonicalJson(input.runnerPreparationWarnings)}.`,
-            'The trusted Runner owns emulator, build, adb, lease, capture, and cleanup actions. Do not invoke adb, emulator, Flutter run, or an Android lease helper.',
-            'Inspect Runner artifacts when present. If preparation warnings are present, continue with all available non-visual evidence and preserve the warning as a residual risk; Android infrastructure failure alone must not block delivery.',
-          ] : [
-            'Runner-owned Android proof is not configured for this repository. Do not invoke adb, emulator, Flutter run, or an Android lease helper; return a typed tool blocker for Android criteria.',
-          ]),
-          'When a frozen criterion has an iOS surface, follow references/ios.md from the exact acceptance-proof skill snapshot.',
-          `iOS lease helper: ${join(snapshotRoot, 'tools', 'ios-lease.mjs')}.`,
-          `iOS lease root: ${iosLeaseRoot}.`,
-          `iOS lease artifact: ${iosLeaseArtifact}.`,
-          `iOS lease proof ID: ${input.proofId}.`,
-          `iOS lease owner PID: ${process.pid}.`,
-          `iOS xcrun path: ${this.dependencies.iosXcrunPath}.`,
-          ...(iosTooling ? [
-            `iOS runtime ID: ${iosTooling.runtimeId}.`,
-            `iOS device type ID: ${iosTooling.deviceTypeId}.`,
-          ] : ['iOS Simulator tooling discovery is unavailable; return a typed tool blocker for an iOS surface.']),
-          ...(input.repairOnly ? [`Proof Report repair only: ${canonicalJson(input.repairFindings)} Do not modify product or evidence files.`] : []),
-          'Do not modify product files, commit, push, publish, or print credentials or local auth paths.',
-        ].join('\n'),
-        timeoutMs: config.codex.timeoutMs,
-        idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: input.reportCorrection ? reportOnlyPolicy(attempt.policy) : attempt.policy,
-        executionProfile: attempt.profile,
-        onSpawned: async ({ pid, processGroupId }) => input.onLaunched?.({
-          pid, processGroupId, launchedAt: new Date().toISOString(),
-        }),
-      }, input.signal);
-      if (result.kind === 'cancelled') return { kind: 'cancelled' };
-      if (result.kind === 'transport-failed' && result.report.kind === 'missing' && result.exitCode === 0 && result.signal === null) {
-        const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
-        return { kind: 'report', report: '', reportBytes: Buffer.alloc(0), proofPhaseChangedFiles: changedArtifactPaths(before, after) };
-      }
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
-        const diagnostic = [result.error, result.stderr?.toString('utf8')].filter(Boolean).join('\n');
-        return { kind: 'transport-failed', resumable: true, failure: {
-          kind: result.kind as ProofProcessFailure['kind'],
-          exitCode: result.exitCode ?? null,
-          signal: result.signal ?? null,
-          reportStatus: result.report?.kind ?? 'missing',
-          detail: diagnostic ? proofFailureSummary('Proof process', new Error(diagnostic)) : 'No process diagnostic was captured.',
-        } };
-      }
-      if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
-      const after = await artifactInventory(artifactRoot, config.proof.artifactDir);
-      return {
-        kind: 'report',
-        report: decodeAgentReportForValidation(result.report.bytes, ['visualEvidence', 'blocker']), reportBytes: result.report.bytes,
-        proofPhaseChangedFiles: changedArtifactPaths(before, after),
-      };
-    } catch (error) {
-      unresolvedProcess = error instanceof ProcessQuiescenceError;
-      if (!unresolvedProcess && isTechnicalRuntimeError(error)) throw error;
-      return unresolvedProcess ? { kind: 'safe-halt' } : { kind: 'internal-error' };
-    } finally {
-      if (correctionView && !unresolvedProcess) await rm(correctionView, { recursive: true, force: true });
-    }
-  }
 }
 
 export async function observeAttemptReadViewCleanup(input: {
@@ -1170,7 +1037,6 @@ export function createV2Runtime(input: {
   implementationAgent?: {
     run(input: Parameters<NonNullable<ConstructorParameters<typeof RunIssue>[0]>['implementationAgent']['run']>[0]): Promise<ImplementationAgentResult>;
   };
-  proofAgent?: ProofAgent<import('./checked-change.js').CheckedChangePayload>;
   parentCodexHome?: string;
   safePath?: string;
   codexProcess?: CodexProcess;
@@ -1243,118 +1109,13 @@ export function createV2Runtime(input: {
     ...containedDependencies(),
     git,
     now,
-  });
-  const proofAgent = input.proofAgent ?? new ContainedProofAgent({
-    ...containedDependencies(),
-    targetRoot,
-    androidAdbPath,
-    iosXcrunPath,
-    processExecutor: commandExecutor,
+    processExecutor: commandExecutor, iosXcrunPath,
   });
   const androidProofController = new RunnerAndroidProofController({
     adbPath: androidAdbPath,
     emulatorPath: androidEmulatorPath,
     execute: commandExecutor,
     now: () => new Date(now()),
-  });
-  const reportOperation = new InjectedContainedReportOperation({
-    prepare: async ({ operation, attemptId, runId, workflowGeneration }) => ({
-      operation,
-      generationHash: workflowGeneration.generationHash,
-      ...await prepareContainedAttempt({
-        orchestratorHome,
-        canonicalRepository: requireCanonicalRepository(currentConfig),
-        runId,
-        attemptId,
-        operationId: operation,
-        workflowGeneration,
-        bootId: input.bootId,
-      }),
-    }),
-    snapshot: (worktreePath) => git.snapshot(worktreePath),
-    launch: async ({ attempt, worktreePath, promptFacts, runnerFacts, signal, onLaunched }) => {
-      const config = requireConfig(currentConfig);
-      if (!attempt.schemaPath || !attempt.reportPath || !attempt.toolHome || !attempt.tmpDir
-        || !attempt.profile || !attempt.operationPath || !attempt.sourceSkillPath || !attempt.workflowRoot) {
-        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-attempt-incomplete' };
-      }
-      try {
-        return { status: 'completed' as const, reportBytes: await readRegularFile(attempt.reportPath) };
-      } catch (error) {
-        if (!isErrorCode(error, 'ENOENT')) {
-          return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-result-read-failed' };
-        }
-      }
-      let readView: string;
-      try {
-        readView = await materializeReportReadView({
-          worktreePath,
-          destination: join(dirname(attempt.tmpDir), 'read-view'),
-          deniedPaths: config.deny.readPaths, signal,
-        });
-        if (runnerFacts) await materializeRunnerFacts(readView, runnerFacts);
-      } catch {
-        return { status: 'blocked' as const, kind: 'safety' as const, code: 'report-operation-read-view-failed' };
-      }
-      let result;
-      let cleanupAfterSafeHalt = false;
-      try {
-        result = await containedProcess.run({
-        codexPath: config.codex.command,
-        cwd: readView,
-        schemaPath: attempt.schemaPath,
-        reportPath: attempt.reportPath,
-        toolHome: attempt.toolHome,
-        tmpDir: attempt.tmpDir,
-        safePath: requireRuntimeString(input.safePath, 'safePath'),
-        parentCodexHome: requireRuntimeString(input.parentCodexHome, 'parentCodexHome'),
-        parentEnv: process.env,
-        prompt: [
-          `Package profile instructions: ${attempt.profile.developerInstructions}`,
-          `Process authority: ${attempt.sourceSkillPath}`,
-          `Invocation contract: ${attempt.operationPath}`,
-          `The operation's immutable workflow root is ${attempt.workflowRoot}.`,
-          `Runner-provided facts: ${canonicalJson(promptFacts)}`,
-          `Available reviewer roles: ${canonicalJson(attempt.reviewers ?? [])}`,
-          'This is a read-only, report-only operation. Do not edit files or external state, use network or MCP tools, or request additional authority.',
-          'Do not read .env or any .env* file. The runner has removed repository credential paths from this read view.',
-        ].join('\n'),
-        timeoutMs: config.codex.timeoutMs,
-        idleTimeoutMs: config.codex.idleTimeoutMs,
-        operationPolicy: attempt.policy,
-        executionProfile: attempt.profile,
-        agentProfilePaths: attempt.reviewerProfiles,
-        onSpawned: async ({ pid, processGroupId }) => onLaunched?.({ pid, processGroupId }),
-        }, signal);
-      } catch (error) {
-        if (error instanceof ProcessQuiescenceError) {
-          cleanupAfterSafeHalt = true;
-          return {
-            status: 'safe-halt' as const,
-            pid: error.pid,
-            processGroupId: error.processGroupId,
-            startedAt: now(),
-          };
-        }
-        throw error;
-      } finally {
-        if (!cleanupAfterSafeHalt) await rm(readView, { recursive: true, force: true });
-      }
-      if (result.kind === 'cancelled') return { status: 'cancelled' as const };
-      if (result.kind === 'launch-gate-failed') {
-        return { status: 'retryable' as const, code: 'review-operation-launch-gate-failed' };
-      }
-      if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout'].includes(result.kind)) {
-        return { status: 'retryable' as const, code: `report-operation-${result.kind}` };
-      }
-      if (result.kind !== 'completed' || result.report.kind !== 'available') {
-        return { status: 'blocked' as const, kind: 'external' as const, code: 'report-operation-report-unavailable' };
-      }
-      return { status: 'completed' as const, reportBytes: result.report.bytes };
-    },
-  });
-  const implementationReviewer = new ContainedImplementationReviewer({
-    operation: reportOperation,
   });
   const readConfig = async (requestedRoot: string) => {
     if (resolve(requestedRoot) !== targetRoot) throw new Error('runtime target root mismatch');
@@ -1420,106 +1181,112 @@ export function createV2Runtime(input: {
       }),
     };
   };
+  const inspectProofFreshness = async (
+    payload: import('./checked-change.js').CheckedChangePayload,
+    worktreePath: string,
+    config: AgentAutoConfig,
+  ): Promise<import('./checked-change.js').CheckedChangeFreshnessAny> => {
+    const checkPolicySha256 = configuredCheckPolicySha256(payload.checks, config.checks);
+    if (payload.version === 1) return { ...await git.snapshot(worktreePath), checkPolicySha256 };
+    if (!git.candidateV2) throw new CandidateProofInspectionError('candidate-git-v2-required');
+    const record = (await records.read()).runs.find(run => run.runId === payload.runId);
+    if (!record) throw new CandidateProofInspectionError('candidate-run-missing');
+    const boundary: CandidateBoundaryV2 = record.reviewFeedback?.activeBatch
+      ? { kind: 'review-feedback', batchId: record.reviewFeedback.activeBatch.batchId,
+        repairRound: record.reviewFeedback.repairRound, authoritySha256: payload.deliveryAuthoritySha256 }
+      : { kind: 'implementation-cycle', cycle: payload.cycle, authoritySha256: payload.deliveryAuthoritySha256 };
+    const source = await git.candidateV2.inspectSource({ binding: payload.binding, worktreePath,
+      runId: payload.runId, boundary, artifactDir: config.proof.artifactDir });
+    const pin = await git.candidateV2.inspectPin(payload.binding);
+    if (source.kind !== 'ok' || source.value !== 'matching' || pin.kind !== 'ok' || pin.value !== 'matching')
+      throw new CandidateProofInspectionError('candidate-source-or-pin-drift');
+    return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha, checkPolicySha256 };
+  };
   const proof = {
     cleanupMobileLeases: async (input: { canonicalRepository: string; worktreePath: string; proofId: string }) => {
       const leases = proofMobileLeases(input.canonicalRepository, input.worktreePath);
       await leases.androidLease.release(input.proofId);
       await leases.iosLease.release(input.proofId);
     },
-    proveChange: async (proofInput: Parameters<AcceptanceProof<import('./checked-change.js').CheckedChangePayload>['proveChange']>[0]) => {
+    prepareAndroid: async (preparationInput: {
+      proofId: string;
+      issue: IssueSnapshot;
+      observeOnly?: boolean;
+      checkedChange: import('./checked-change.js').CheckedChange<import('./checked-change.js').CheckedChangePayloadV2>;
+    }) => {
+      const config = requireConfig(currentConfig);
+      const checked = capabilities.verifyAndRead(preparationInput.checkedChange);
+      const payload = checked.payload;
+      const worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${payload.issueNumber}`);
+      const record = (await records.read()).runs.find(run => run.runId === payload.runId);
+      if (!record || record.proofId !== preparationInput.proofId
+        || record.issueNumber !== payload.issueNumber || record.canonicalRepository !== payload.canonicalRepository
+        || record.candidateBinding?.bindingId !== payload.binding.bindingId
+        || (record.checkedChangeSha256 && record.checkedChangeSha256 !== checked.checkedChangeSha256)
+        || preparationInput.issue.number !== payload.issueNumber || preparationInput.issue.body !== record.issueSnapshot.body) {
+        throw new CandidateProofInspectionError('android-preparation-run-binding-mismatch');
+      }
+      const assertFresh = async () => {
+        const freshness = await inspectProofFreshness(payload, worktreePath, config);
+        if (freshness.checkPolicySha256 !== payload.checkPolicySha256) {
+          throw new CandidateProofInspectionError('android-preparation-check-policy-drift');
+        }
+      };
+      await assertFresh();
+      if (!config.proof.android) return {
+        status: 'blocked' as const, runnerPreparedArtifactPaths: [], runnerPreparedArtifactSha256: {},
+        runnerPreparationWarnings: ['Required Runner-owned Android proof is not configured.'],
+      };
+      const result = await androidProofController.prepare({
+        proofId: preparationInput.proofId, worktreePath, artifactDir: config.proof.artifactDir,
+        leaseRoot: join(orchestratorHome, 'v2', sha256(payload.canonicalRepository), 'leases'),
+        config: config.proof.android, requirements: readIssueProofRequirements(preparationInput.issue.body),
+        checks: payload.checks, checkedChangeSha256: checked.checkedChangeSha256,
+        proofAgentBudgetMs: config.codex.timeoutMs, observeOnly: preparationInput.observeOnly, signal: controller.signal,
+      });
+      await assertFresh();
+      return {
+        status: result.status,
+        runnerPreparedArtifactPaths: [...result.runnerPreparedArtifactPaths],
+        runnerPreparedArtifactSha256: { ...result.runnerPreparedArtifactSha256 },
+        runnerPreparationWarnings: result.status === 'blocked'
+          ? [proofFailureSummary('Android proof preparation blocked', new Error(result.summary))] : [],
+      };
+    },
+    admitReport: async (proofInput: Parameters<AcceptanceProof<import('./checked-change.js').CheckedChangePayload>['admitReport']>[0]) => {
       const config = requireConfig(currentConfig);
       const checked = capabilities.verifyAndRead(proofInput.checkedChange);
-      const repoKey = sha256(checked.payload.canonicalRepository);
-      const issueWorktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
-      const worktreePath = proofInput.materialization?.path ?? issueWorktreePath;
-      const { androidLease, iosLease } = proofMobileLeases(checked.payload.canonicalRepository, worktreePath);
+      const worktreePath = resolve(targetRoot, config.runner.workspaceRoot, `issue-${checked.payload.issueNumber}`);
+      const leases = proofMobileLeases(checked.payload.canonicalRepository, worktreePath);
       const acceptanceProof = new AcceptanceProof<import('./checked-change.js').CheckedChangePayload>({
         checkedChangeReader: capabilities,
-        proofAgent,
-        inspectFreshness: async (payload, materialization) => {
-          const checkPolicySha256 = configuredCheckPolicySha256(
-            payload.checks,
-            config.checks,
-          );
-          if (payload.version === 1) return {
-            ...await (proofFreshnessGit.snapshotIgnoringUntrackedRoot
-              ? proofFreshnessGit.snapshotIgnoringUntrackedRoot(worktreePath, config.proof.artifactDir)
-              : git.snapshot(worktreePath)),
-            checkPolicySha256,
-          };
-          if (!materialization || !git.candidateV2) throw new CandidateProofInspectionError('candidate-git-v2-required');
-          const inspection = await git.candidateV2.inspectMaterialization({
-            binding: payload.binding,
-            materialization,
-            artifactDir: config.proof.artifactDir,
-          });
-          if (inspection.kind === 'failed') throw new CandidateProofInspectionError(inspection.code);
-          if (inspection.value !== 'matching') throw new CandidateProofInspectionError('candidate-materialization-mutated');
-          return { bindingId: payload.binding.bindingId, candidateTreeSha: payload.binding.candidateTreeSha, checkPolicySha256 };
+        inspectFreshness: payload => inspectProofFreshness(payload, worktreePath, config),
+        readArtifact: relativePath => readRegularFileWithoutSymlinkAncestors(worktreePath, resolve(worktreePath, relativePath), 5 * 1024 * 1024),
+        inspectArtifact: async relativePath => {
+          const path = resolve(worktreePath, relativePath);
+          await readRegularFileWithoutSymlinkAncestors(worktreePath, path, 5 * 1024 * 1024);
+          const metadata = await inspectRegularFile(path);
+          await readRegularFileWithoutSymlinkAncestors(worktreePath, path, 5 * 1024 * 1024);
+          return metadata;
         },
-        readArtifact: async (relativePath) => readRegularFile(resolve(worktreePath, relativePath)),
-        inspectArtifact: async (relativePath) => inspectRegularFile(resolve(worktreePath, relativePath)),
-        androidLease,
-        iosLease,
-        proofArtifactDir: config.proof.artifactDir,
-        signal: controller.signal,
+        ...leases, proofArtifactDir: config.proof.artifactDir, signal: controller.signal,
       });
-      const androidRelevant = !!config.proof.android && isAndroidProofRelevant(
-        proofInput.issue,
-        proofInput.frozenCriteria,
-        checked.payload.changedFiles,
-      );
-      const runnerPreparedArtifactPaths: string[] = [];
-      const runnerPreparedArtifactSha256: Record<string, string> = {};
-      const runnerPreparationWarnings: string[] = [];
-      let preparationAttempted = false;
-      const result = await acceptanceProof.proveChange({
-        ...proofInput,
-        runnerPreparedArtifactPaths,
-        runnerPreparedArtifactSha256,
-        runnerPreparationWarnings,
-        beforeAgentLaunch: async () => {
-          await proofInput.beforeAgentLaunch?.();
-          if (!androidRelevant || preparationAttempted) return;
-          preparationAttempted = true;
-          const prepared = await androidProofController.prepare({
-            proofId: proofInput.proofId,
-            worktreePath,
-            artifactDir: config.proof.artifactDir,
-            leaseRoot: join(orchestratorHome, 'v2', repoKey, 'leases'),
-            config: config.proof.android!,
-            requirements: readIssueProofRequirements(proofInput.issue.body),
-            checks: checked.payload.checks,
-            checkedChangeSha256: checked.checkedChangeSha256,
-            proofAgentBudgetMs: config.codex.timeoutMs * 3,
-            observeOnly: !!proofInput.reportCorrection,
-            signal: controller.signal,
-          });
-          if (prepared.status === 'prepared') {
-            runnerPreparedArtifactPaths.splice(0, runnerPreparedArtifactPaths.length, ...prepared.runnerPreparedArtifactPaths);
-            Object.assign(runnerPreparedArtifactSha256, prepared.runnerPreparedArtifactSha256);
-          } else {
-            runnerPreparationWarnings.push(`Android UI proof unfinished: ${prepared.summary}`);
-          }
-        },
-      });
-      const passed = result.status === 'passed' ? result
-        : result.status === 'cleanup-pending' && result.outcome.status === 'passed' ? result.outcome : undefined;
-      if (checked.payload.version === 2 && proofInput.materialization && git.candidateV2 && passed) {
-        const artifacts = passed.receipt.publishableEvidence.map((artifact) => ({ relativePath: artifact.ref, sha256: artifact.sha256 }));
-        const copied = await git.candidateV2.copyProofArtifacts({
-          materialization: proofInput.materialization,
-          issueWorktreePath,
-          artifactDir: config.proof.artifactDir,
-          proofId: proofInput.proofId,
-          artifacts,
-        });
-        if (copied.kind === 'failed') throw new CandidateProofInspectionError(copied.code);
-        if (copied.value.kind === 'artifact-conflict') throw new CandidateProofInspectionError('candidate-artifact-conflict');
+      const record = (await records.read()).runs.find(run => run.runId === checked.payload.runId);
+      const preparation = record?.androidProofPreparation;
+      if (preparation?.status === 'pending') throw new CandidateProofInspectionError('android-preparation-is-pending');
+      if (preparation && (preparation.status !== 'prepared' || record?.proofId !== proofInput.proofId
+        || preparation.checkedChangeSha256 !== checked.checkedChangeSha256)) {
+        throw new CandidateProofInspectionError('android-preparation-admission-binding-mismatch');
       }
-      return result;
+      return acceptanceProof.admitReport({
+        ...proofInput,
+        runnerPreparedArtifactPaths: preparation?.runnerPreparedArtifactPaths ?? [],
+        runnerPreparedArtifactSha256: preparation?.runnerPreparedArtifactSha256 ?? {},
+        runnerPreparationWarnings: preparation?.runnerPreparationWarnings ?? [],
+      });
     },
   };
+
   const runner = new RunIssue({
     readConfig,
     ownerLock: {
@@ -1586,11 +1353,9 @@ export function createV2Runtime(input: {
     reviewFeedback: new ReviewFeedbackObserver({ pullRequests: pullRequests, issues: issues, now }),
     git,
     implementationAgent,
-    implementationReviewer,
     proof,
     checkedChangeMint: capabilities,
     runRecords: records,
-    hasTechnicalTerminalProofFailure: (record) => hasTechnicalLegacyProofFailure({ targetRoot, config: requireConfig(currentConfig), record }),
     inventoryRuns: async () => {
       if (!repositoryRecords) throw new Error('inventory used before config');
       return (await repositoryRecords.inventory()).runs;
@@ -1617,7 +1382,6 @@ export function createV2Runtime(input: {
     verifyWorkflowGeneration,
     createRunId: input.createRunId ?? randomUUID,
     createProofId: input.createProofId ?? randomUUID,
-    createReviewSessionId: input.createAttemptId ?? randomUUID,
     processIdentity: {
       host: hostname(),
       bootId: input.bootId,
@@ -1962,38 +1726,6 @@ async function prepareContainedAttempt(input: {
   };
 }
 
-async function artifactInventory(root: string, logicalRoot: string): Promise<Map<string, string>> {
-  const output = new Map<string, string>();
-  let rootStat;
-  try {
-    rootStat = await lstat(root);
-  } catch (error) {
-    if (isErrorCode(error, 'ENOENT')) return output;
-    throw error;
-  }
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('proof artifact root must be a direct directory');
-  const rootIdentity = await inspectSafeArtifactRoot(root);
-  const visit = async (directory: string, relative: string): Promise<void> => {
-    await assertSafeArtifactRoot(rootIdentity);
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
-      const childPath = join(directory, entry.name);
-      if (entry.isSymbolicLink()) throw new Error('proof artifact tree contains a symlink');
-      if (entry.isDirectory()) await visit(childPath, childRelative);
-      else if (entry.isFile()) output.set(`${logicalRoot}/${childRelative}`, sha256(await readRegularFileWithoutSymlinkAncestors(rootIdentity, childPath)));
-      else throw new Error('proof artifact tree contains a special file');
-    }
-  };
-  await visit(root, '');
-  return output;
-}
-
-function changedArtifactPaths(before: Map<string, string>, after: Map<string, string>): string[] {
-  return [...new Set([...before.keys(), ...after.keys()])]
-    .filter((path) => before.get(path) !== after.get(path))
-    .sort();
-}
-
 async function fingerprintRepositoryPath(root: string, relativePath: string): Promise<unknown> {
   const segments = relativePath.split('/');
   let current = root;
@@ -2048,28 +1780,6 @@ function isTechnicalRuntimeError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   if (typeof code === 'string' && ['EIO', 'ENOENT', 'EAGAIN', 'EINTR', 'ENOSPC', 'EMFILE', 'ENFILE', 'EBUSY', 'ETIMEDOUT', 'ECONNRESET', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE'].includes(code)) return true;
   return error instanceof Error && /^(?:git failed:|report read-view inventory failed:)/u.test(error.message);
-}
-
-/** Old generic proof terminals are reopened only from bound host-written technical evidence. */
-export async function hasTechnicalLegacyProofFailure(input: { targetRoot: string; config: AgentAutoConfig; record: RunRecord }): Promise<boolean> {
-  const { record } = input;
-  if (record.terminalOutcome?.status !== 'internal-error' || record.terminalOutcome.code !== 'acceptance-proof-internal-failure'
-    || !record.candidateBinding || !/^[a-f0-9-]{36}$/u.test(record.runId)) return false;
-  let bytes: Buffer;
-  try { bytes = await readRegularFile(resolve(input.targetRoot, input.config.runner.stateDir, 'v2/evidence', `${record.runId}.json`)); }
-  catch (error) { if (isErrorCode(error, 'ENOENT')) return false; throw error; }
-  let evidence: any;
-  let diagnostic: any;
-  try { evidence = parseJsonWithoutDuplicateKeys(bytes.toString('utf8')); diagnostic = parseJsonWithoutDuplicateKeys(evidence.summary); }
-  catch { return false; }
-  if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
-  return evidence.version === 1 && evidence.runId === record.runId && evidence.code === 'acceptance-proof-diagnostic'
-    && diagnostic.packageVersion === record.packageVersion
-    && diagnostic.workflowGenerationHash === record.workflowGeneration.generationHash
-    && diagnostic.workflowManifestSha256 === record.workflowGeneration.manifestSha256
-    && diagnostic.candidateCommitSha === record.candidateBinding.candidateCommitSha
-    && typeof diagnostic.summary === 'string'
-    && /^Proof agent failed: (?:EIO|EAGAIN|EINTR|ENOSPC|EMFILE|ENFILE|EBUSY|ETIMEDOUT|ECONNRESET|ENETUNREACH|ECONNREFUSED|EPIPE)\b/u.test(diagnostic.summary);
 }
 
 function reportOnlyPolicy(policy: WorkflowOperationPolicy): WorkflowOperationPolicy {

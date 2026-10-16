@@ -4,21 +4,28 @@
     "bug-root-cause-explainer",
     "code-review",
     "diagnosing-bugs",
+    "flutter-android-debug",
+    "flutter-attach-session",
+    "flutter-ios-debug",
     "grilling",
     "implement",
+    "implement-spec",
     "plan",
     "plan-review",
     "prototype",
     "research",
     "tdd",
-    "implement-spec",
     "to-spec",
     "to-tickets",
     "ui-evidence-proof"
   ],
-  "repositorySkills": ["acceptance-proof"],
+  "repositorySkills": [
+    "acceptance-proof"
+  ],
   "skillDependencies": {
-    "bug-root-cause-explainer": ["diagnosing-bugs"]
+    "bug-root-cause-explainer": [
+      "diagnosing-bugs"
+    ]
   },
   "sharedDocs": [
     "bug-workflow-routing.md",
@@ -30,66 +37,51 @@
   "sharedEvals": [],
   "profiles": {
     "implementer": "./scripts/runtime-workflow-overlays/profiles/implementer.toml",
-    "review_coordinator": "./scripts/runtime-workflow-overlays/profiles/review_coordinator.toml",
     "spec_reviewer": "spec-reviewer.toml",
     "standards_reviewer": "standards-reviewer.toml"
   },
   "overlayRoot": "scripts/runtime-workflow-overlays",
   "adaptations": [
-    { "id": "resolved-codex-home", "from": "<resolved-codex-home>", "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT" },
-    { "id": "default-codex-home", "from": "<default-codex-home>", "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT" },
-    { "id": "default-codex-skills", "from": "${CODEX_HOME:-$HOME/.codex}/skills", "to": "../../skills" },
-    { "id": "codex-home-skills", "from": "$CODEX_HOME/skills", "to": "../../skills" },
-    { "id": "default-codex-docs", "from": "${CODEX_HOME:-$HOME/.codex}/docs/agents/", "to": "../../docs/agents/" },
-    { "id": "codex-home-docs", "from": "$CODEX_HOME/docs/agents/", "to": "../../docs/agents/" }
+    {
+      "id": "resolved-codex-home",
+      "from": "<resolved-codex-home>",
+      "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT"
+    },
+    {
+      "id": "default-codex-home",
+      "from": "<default-codex-home>",
+      "to": "$CODEX_ORCHESTRATOR_WORKFLOW_ROOT"
+    },
+    {
+      "id": "default-codex-skills",
+      "from": "${CODEX_HOME:-$HOME/.codex}/skills",
+      "to": "../../skills"
+    },
+    {
+      "id": "codex-home-skills",
+      "from": "$CODEX_HOME/skills",
+      "to": "../../skills"
+    },
+    {
+      "id": "default-codex-docs",
+      "from": "${CODEX_HOME:-$HOME/.codex}/docs/agents/",
+      "to": "../../docs/agents/"
+    },
+    {
+      "id": "codex-home-docs",
+      "from": "$CODEX_HOME/docs/agents/",
+      "to": "../../docs/agents/"
+    }
   ],
   "operations": {
-    "acceptance-proof": {
-      "entry": "operations/acceptance-proof/SKILL.md",
-      "sourceSkill": "acceptance-proof",
-      "dependencySkills": [],
-      "resources": [],
-      "outputSchema": "schemas/proof-report-v1.json",
-      "profile": "implementer",
-      "reviewers": [],
-      "policy": {
-        "sandboxMode": "workspace-write",
-        "cwdClass": "worktree",
-        "worktreeAccess": "write",
-        "writableRootClasses": ["worktree"],
-        "runnerPostcondition": "proof-only",
-        "network": "loopback",
-        "networkHosts": ["127.0.0.1", "::1", "localhost"],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
-    "code-review": {
-      "entry": "operations/code-review/SKILL.md",
-      "sourceSkill": "code-review",
-      "dependencySkills": [],
-      "resources": ["docs/agents/confidence-rubric.md"],
-      "outputSchema": "schemas/code-review-v1.json",
-      "profile": "review_coordinator",
-      "reviewers": ["spec_reviewer", "standards_reviewer"],
-      "policy": {
-        "sandboxMode": "read-only",
-        "cwdClass": "worktree",
-        "worktreeAccess": "read-only",
-        "writableRootClasses": [],
-        "runnerPostcondition": "report-only",
-        "network": "deny",
-        "networkHosts": [],
-        "mcpTools": [],
-        "approvalCeiling": "never",
-        "externalWrite": false
-      }
-    },
     "implementation": {
       "entry": "operations/implementation/SKILL.md",
       "sourceSkill": "implement",
-      "dependencySkills": ["diagnosing-bugs", "tdd"],
+      "dependencySkills": [
+        "acceptance-proof",
+        "diagnosing-bugs",
+        "tdd"
+      ],
       "resources": [
         "docs/agents/bug-workflow-routing.md",
         "docs/agents/coding-skill-routing.md",
@@ -97,15 +89,24 @@
       ],
       "outputSchema": "schemas/implementation-report-v1.json",
       "profile": "implementer",
-      "reviewers": [],
+      "reviewers": [
+        "spec_reviewer",
+        "standards_reviewer"
+      ],
       "policy": {
         "sandboxMode": "workspace-write",
         "cwdClass": "worktree",
         "worktreeAccess": "write",
-        "writableRootClasses": ["worktree"],
+        "writableRootClasses": [
+          "worktree"
+        ],
         "runnerPostcondition": "change-set",
         "network": "loopback",
-        "networkHosts": ["127.0.0.1", "::1", "localhost"],
+        "networkHosts": [
+          "127.0.0.1",
+          "::1",
+          "localhost"
+        ],
         "mcpTools": [],
         "approvalCeiling": "never",
         "externalWrite": false

@@ -161,7 +161,7 @@ test('discovery picks interrupted local runs without auto and omits final safety
 });
 
 
-test('daemon resumes only legacy proof terminals with proven technical evidence', async () => {
+test('daemon leaves retired standalone proof terminals stopped without renewed authority', async () => {
   const bytes = await readFile('.codex-orchestrator/config.json');
   const stopped = (number: number): RunRecord => ({ issueNumber: number, createdAt: '2026-10-12T00:00:00Z',
     issueSnapshot: { ...issue(number), labels: ['agent:blocked'] },
@@ -169,10 +169,9 @@ test('daemon resumes only legacy proof terminals with proven technical evidence'
   const snapshot = await discoverConfiguredDaemonTick('/tmp/target', {
     readConfigBytes: async () => bytes, discover: async () => [issue(1), issue(2)],
     inventory: async () => [stopped(1), stopped(2)],
-    hasTechnicalTerminalProofFailure: async (run) => run.issueNumber === 2,
     executeRun: async () => ({ status: 'state-schema-unsupported' }),
   });
-  assert.deepEqual([...new Set(snapshot.candidates.map((candidate) => candidate.number))], [2]);
+  assert.deepEqual([...new Set(snapshot.candidates.map((candidate) => candidate.number))], []);
 });
 
 

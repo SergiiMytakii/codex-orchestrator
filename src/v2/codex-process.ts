@@ -21,6 +21,7 @@ export interface SpawnSpec {
   stdin: string;
   deadline?: number;
   signal?: AbortSignal;
+  onStdout?: (chunk: Buffer) => void;
 }
 
 export interface SupervisedChild {
@@ -39,6 +40,8 @@ export interface SupervisedChild {
 export type SpawnSupervisedProcess = (spec: SpawnSpec) => Promise<SupervisedChild>;
 
 export interface CodexProcessInput {
+  sessionId?: string;
+  onSessionStarted?: (sessionId: string) => Promise<void>;
   codexPath: string;
   cwd: string;
   schemaPath: string;
@@ -78,6 +81,8 @@ export interface CodexProcessResult {
     | 'cancelled'
     | 'output-truncated'
     | 'report-failed';
+  sessionId?: string;
+  sessionIdentityFailed?: boolean;
   pid?: number;
   processGroupId?: number;
   exitCode: number | null;
@@ -112,9 +117,63 @@ export class CodexProcess {
     if (liveSmokeModel !== undefined && !/^[a-z0-9._-]+$/u.test(liveSmokeModel)) {
       throw new Error('live smoke model must be one canonical model slug');
     }
+    let sessionId = input.sessionId;
+    let observedSessionId: string | undefined;
+    let sessionError: unknown;
+    let sessionWrites = Promise.resolve();
+    let failSession!: (error: unknown) => void;
+    const sessionFailed = new Promise<{ kind: 'session-failed'; error: unknown }>((resolveFailure) => {
+      failSession = (error) => {
+        sessionError ??= error instanceof Error ? error : new Error(String(error));
+        resolveFailure({ kind: 'session-failed', error: sessionError });
+      };
+    });
+    let pendingLine = '';
+    let discardingLine = false;
+    const consumeLine = (line: string) => {
+      if (sessionError) return;
+      let event: unknown;
+      try { event = JSON.parse(line); } catch { return; }
+      if (!event || typeof event !== 'object' || (event as { type?: unknown }).type !== 'thread.started') return;
+      const id = (event as { thread_id?: unknown }).thread_id;
+      if (typeof id !== 'string' || !isSessionId(id)) {
+        failSession(new Error('thread.started session identity must be a canonical UUID'));
+        return;
+      }
+      if ((input.sessionId !== undefined && id !== input.sessionId)
+        || (observedSessionId !== undefined && id !== observedSessionId)) {
+        failSession(new Error('thread.started session identity conflicts with the issue session'));
+        return;
+      }
+      if (observedSessionId === id) return;
+      observedSessionId = id;
+      sessionWrites = sessionWrites.then(async () => {
+        await input.onSessionStarted?.(id);
+        sessionId = id;
+      }).catch((error: unknown) => { failSession(error); });
+    };
+    const onStdout = (chunk: Buffer) => {
+      // Identity events are ASCII. Keep parser memory bounded independently of
+      // the diagnostic capture, and continue observing after capture truncation.
+      for (const part of chunk.toString('utf8').split(/(?<=\n)/u)) {
+        if (!discardingLine) {
+          pendingLine += part;
+          if (Buffer.byteLength(pendingLine) > MAX_STREAM_BYTES) { pendingLine = ''; discardingLine = true; }
+        }
+        if (part.endsWith('\n')) {
+          if (!discardingLine) consumeLine(pendingLine);
+          pendingLine = '';
+          discardingLine = false;
+        }
+      }
+    };
+    const finalizeResult = (...args: Parameters<typeof finalizeProcessResult>): CodexProcessResult => ({
+      ...finalizeProcessResult(...args), ...(sessionId ? { sessionId } : {}), ...(sessionError ? { sessionIdentityFailed: true } : {}),
+    });
     const spec: SpawnSpec = {
       file: input.codexPath,
       args: buildContainmentCodexArgs({
+        sessionId: input.sessionId,
         schemaPath: input.schemaPath,
         reportPath: input.reportPath,
         toolHome: input.toolHome,
@@ -135,7 +194,7 @@ export class CodexProcess {
         safePath: input.safePath,
       }),
       stdin: input.prompt,
-      deadline, signal,
+      deadline, signal, onStdout,
     };
 
     let child: SupervisedChild;
@@ -168,25 +227,34 @@ export class CodexProcess {
 
     let stdinError: unknown;
     try {
-      await withinDeadline(child.writeStdinAndClose(spec.stdin), deadline, signal);
+      await withinDeadline(Promise.race([
+        child.writeStdinAndClose(spec.stdin),
+        sessionFailed.then(({ error }) => { throw error; }),
+      ]), deadline, signal);
     } catch (error) {
       stdinError = error;
     }
     const exitPromise = child.waitForExit();
-    if (stdinError) {
-      const settled = await terminateAndSettle(child, exitPromise);
-      return finalizeResult(stdinError instanceof DeadlineError ? stdinError.kind : 'transport-failed', child, settled, await readReportAtomic(input.reportPath), errorMessage(stdinError));
-    }
-
-    const terminal = await monitorTerminal(child, exitPromise, signal, Math.max(1, deadline - Date.now()), input.idleTimeoutMs);
+    const terminal = stdinError ? { kind: 'stdin-failed' as const, error: stdinError } : await Promise.race([
+      monitorTerminal(child, exitPromise, signal, Math.max(1, deadline - Date.now()), input.idleTimeoutMs),
+      sessionFailed,
+    ]);
     let settled: SettledChild;
     if (terminal.kind === 'exit') {
       settled = await settleNormalExit(child, terminal.exit);
     } else {
       settled = await terminateAndSettle(child, exitPromise);
     }
+    if (pendingLine && !discardingLine) consumeLine(pendingLine);
+    try { await withinDeadline(sessionWrites, deadline, signal); }
+    catch (error) { failSession(error); }
     const report = await readReportAtomic(input.reportPath);
+    if (sessionError) return finalizeResult(sessionError instanceof DeadlineError ? sessionError.kind : 'transport-failed', child, settled, report, errorMessage(sessionError));
 
+    if (terminal.kind === 'stdin-failed') {
+      return finalizeResult(terminal.error instanceof DeadlineError ? terminal.error.kind : 'transport-failed', child, settled, report, errorMessage(terminal.error));
+    }
+    if (terminal.kind === 'session-failed') return finalizeResult('transport-failed', child, settled, report, errorMessage(terminal.error));
     if (terminal.kind === 'wait-failed') {
       return finalizeResult('transport-failed', child, settled, report, errorMessage(terminal.error));
     }
@@ -343,7 +411,7 @@ async function requireStreamsClosed(child: SupervisedChild): Promise<SettledChil
   }
 }
 
-function finalizeResult(
+function finalizeProcessResult(
   kind: CodexProcessResult['kind'],
   child: SupervisedChild,
   settled: SettledChild,
@@ -426,7 +494,7 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
   if (!child.stdin || !child.stdout || !child.stderr) throw new Error('spawned Codex process lacks required stdio');
 
   let lastActivity = Date.now();
-  const stdout = collectBoundedStream(child.stdout, () => { lastActivity = Date.now(); });
+  const stdout = collectBoundedStream(child.stdout, () => { lastActivity = Date.now(); }, spec.onStdout);
   const stderr = collectBoundedStream(child.stderr, () => { lastActivity = Date.now(); });
   const exit = new Promise<{ exitCode: number | null; signal: string | null }>((resolveExit, rejectExit) => {
     child.once('exit', (exitCode, exitSignal) => resolveExit({ exitCode, signal: exitSignal }));
@@ -490,6 +558,7 @@ export async function spawnNodeSupervisedProcess(spec: SpawnSpec): Promise<Super
 function collectBoundedStream(
   stream: NodeJS.ReadableStream,
   onActivity: () => void,
+  onChunk?: (chunk: Buffer) => void,
 ): { done: Promise<{ bytes: Buffer; truncated: boolean }> } {
   const chunks: Buffer[] = [];
   let captured = 0;
@@ -498,6 +567,7 @@ function collectBoundedStream(
     stream.on('data', (value: Buffer | string) => {
       onActivity();
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      onChunk?.(chunk);
       const remaining = MAX_STREAM_BYTES - captured;
       if (remaining > 0) {
         const accepted = chunk.subarray(0, remaining);
@@ -556,7 +626,13 @@ function validateInput(input: CodexProcessInput): void {
   }
   if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs <= 0) throw new Error('timeoutMs must be a positive safe integer');
   if (!Number.isSafeInteger(input.idleTimeoutMs) || input.idleTimeoutMs <= 0) throw new Error('idleTimeoutMs must be a positive safe integer');
+  if (input.sessionId !== undefined && !isSessionId(input.sessionId)) throw new Error('sessionId must be a canonical UUID');
+  if (input.onSessionStarted !== undefined && typeof input.onSessionStarted !== 'function') throw new Error('onSessionStarted must be a function');
   if (typeof input.onSpawned !== 'function') throw new Error('onSpawned launch persistence callback is required');
+}
+
+function isSessionId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value);
 }
 
 function delay(timeoutMs: number): Promise<void> {

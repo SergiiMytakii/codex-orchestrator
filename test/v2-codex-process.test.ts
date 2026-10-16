@@ -700,3 +700,221 @@ test('real oversized service output preserves the atomic report and bounded diag
     assert.equal(result.report.kind, 'available');
   });
 });
+
+
+test('native session capture persists split JSONL before resuming the exact identity', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    const seen: string[] = [];
+    const specs: SpawnSpec[] = [];
+    const runner = new CodexProcess((spec) => {
+      specs.push(spec);
+      const event = JSON.stringify({ type: 'thread.started', thread_id: id });
+      return spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+        args: ['-e', `process.stdout.write(${JSON.stringify(event.slice(0, 20))}); setTimeout(() => {
+          process.stdout.write(${JSON.stringify(event.slice(20) + '\n')});
+          require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '{}');
+        }, 30);`],
+      });
+    });
+    const first = await runner.run({ ...fixture.input(),
+      onSessionStarted: async (sessionId: string) => { seen.push(sessionId); },
+    }, new AbortController().signal);
+    assert.equal(first.kind, 'completed');
+    assert.deepEqual(seen, [id]);
+    assert.equal(first.sessionId, id);
+    const second = await runner.run({ ...fixture.input(), sessionId: id,
+      onSessionStarted: async (sessionId: string) => { seen.push(sessionId); },
+    }, new AbortController().signal);
+    assert.equal(second.kind, 'completed');
+    assert.equal(second.sessionId, id);
+    assert.deepEqual(specs[1].args.slice(-3), ['resume', id, '-']);
+    assert.ok(specs[1].args.indexOf('--sandbox') < specs[1].args.indexOf('resume'));
+    assert.ok(specs[1].args.includes('--json'));
+    assert.ok(specs[1].args.includes('--output-schema'));
+    assert.equal(specs[1].args.includes('--last'), false);
+  });
+});
+
+
+test('session persistence rejection terminates the owned process while it is still running', { timeout: 5_000 }, async () => {
+  await withRunFixture(async (fixture) => {
+    let callbackCalls = 0;
+    const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
+    const runner = new CodexProcess(async (spec) => {
+      child.writeStdinAndClose = async () => {
+        spec.onStdout?.(Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: '019a1435-06c0-7860-8f62-b1faadb9662b' }) + '\n'));
+      };
+      return child;
+    });
+    const result = await runner.run({ ...fixture.input(),
+      onSessionStarted: async () => { callbackCalls++; throw new Error('session CAS rejected'); },
+    }, new AbortController().signal);
+    assert.equal(callbackCalls, 1);
+    assert.equal(result.kind, 'transport-failed');
+    assert.equal(result.sessionIdentityFailed, true);
+    assert.match(result.error ?? '', /session CAS rejected/u);
+    assert.equal(result.sessionId, undefined);
+    assert.deepEqual(child.terminations, ['SIGTERM']);
+    assert.ok(child.events.includes('wait-streams'));
+  });
+});
+
+test('malformed or conflicting native identity fails closed and settles the owned group', { timeout: 5_000 }, async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    const otherId = '019a1435-06c0-7860-8f62-b1faadb9662c';
+    for (const scenario of [
+      { ids: ['thread-name'], resume: undefined },
+      { ids: [null], resume: undefined },
+      { ids: [otherId], resume: id },
+      { ids: [id, otherId], resume: undefined },
+    ]) {
+      const seen: string[] = [];
+      const events = scenario.ids.map((thread_id) => JSON.stringify({ type: 'thread.started', thread_id })).join('\n') + '\n';
+      const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
+      const runner = new CodexProcess(async (spec) => {
+        child.writeStdinAndClose = async () => { spec.onStdout?.(Buffer.from(events)); };
+        return child;
+      });
+      const result = await runner.run({ ...fixture.input(), sessionId: scenario.resume,
+        onSessionStarted: async (sessionId) => { seen.push(sessionId); },
+      }, new AbortController().signal);
+      assert.equal(result.kind, 'transport-failed');
+      assert.equal(result.sessionIdentityFailed, true);
+      assert.match(result.error ?? '', /session identity/u);
+      assert.deepEqual(seen, scenario.ids.length > 1 ? [id] : []);
+      assert.deepEqual(child.terminations, ['SIGTERM']);
+      assert.ok(child.events.includes('wait-streams'));
+    }
+  });
+});
+
+test('session persistence is awaited after exit and identical events persist only once', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    const seen: string[] = [];
+    const event = JSON.stringify({ type: 'thread.started', thread_id: id });
+    const runner = new CodexProcess((spec) => spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+      args: ['-e', `process.stdout.write(${JSON.stringify(event + '\n' + event)}); require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '{}');`],
+    }));
+    const result = await runner.run({ ...fixture.input(), onSessionStarted: async (sessionId) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      seen.push(sessionId);
+    } }, new AbortController().signal);
+    assert.equal(result.kind, 'completed');
+    assert.equal(result.sessionId, id);
+    assert.deepEqual(seen, [id]);
+  });
+});
+
+test('resume identity rejects names or CLI selectors before spawning', async () => {
+  await withRunFixture(async (fixture) => {
+    let spawned = false;
+    const runner = new CodexProcess(async () => { spawned = true; throw new Error('unexpected spawn'); });
+    for (const sessionId of ['--last', 'some-name', '', '019a1435-06c0-7860-8f62-b1faadb9662b extra']) {
+      await assert.rejects(runner.run({ ...fixture.input(), sessionId }, new AbortController().signal), /canonical UUID/u);
+      assert.throws(() => buildContainmentCodexArgs({ ...fixture.input(), sessionId }), /canonical UUID/u);
+    }
+    assert.equal(spawned, false);
+  });
+});
+
+
+test('identity capture continues after diagnostic truncation without growing the captured output', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    const seen: string[] = [];
+    const event = JSON.stringify({ type: 'thread.started', thread_id: id }) + '\n';
+    const runner = new CodexProcess((spec) => spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+      args: ['-e', `process.stdout.write(Buffer.alloc(1024 * 1024 + 1, 120)); process.stdout.write('\\n');
+        process.stdout.write(${JSON.stringify(event)}); require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '{}');`],
+    }));
+    const result = await runner.run({ ...fixture.input(),
+      onSessionStarted: async (sessionId) => { seen.push(sessionId); },
+    }, new AbortController().signal);
+    assert.equal(result.kind, 'completed');
+    assert.equal(result.outputTruncated, true);
+    assert.equal(result.stdout.length, 1024 * 1024);
+    assert.equal(result.sessionId, id);
+    assert.deepEqual(seen, [id]);
+  });
+});
+
+test('hung session persistence cannot complete a successful report past the wall deadline', async () => {
+  await withRunFixture(async (fixture) => {
+    const child = new FakeChild({ reportPath: fixture.reportPath });
+    const runner = new CodexProcess(async (spec) => {
+      child.writeStdinAndClose = async () => {
+        spec.onStdout?.(Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: '019a1435-06c0-7860-8f62-b1faadb9662b' }) + '\n'));
+      };
+      return child;
+    });
+    const result = await runner.run({ ...fixture.input({ timeoutMs: 30 }),
+      onSessionStarted: () => new Promise(() => undefined),
+    }, new AbortController().signal);
+    assert.equal(result.kind, 'timeout');
+    assert.equal(result.sessionId, undefined);
+    assert.ok(child.events.includes('wait-streams'));
+  });
+});
+
+test('stdin failure cannot return a resumable result while session persistence is pending', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    let releasePersistence!: () => void;
+    let persistenceStarted!: () => void;
+    const started = new Promise<void>((resolve) => { persistenceStarted = resolve; });
+    const persistence = new Promise<void>((resolve) => { releasePersistence = resolve; });
+    const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
+    const runner = new CodexProcess(async (spec) => {
+      child.writeStdinAndClose = async () => {
+        spec.onStdout?.(Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: id }) + '\n'));
+        throw Object.assign(new Error('stdin EPIPE'), { code: 'EPIPE' });
+      };
+      return child;
+    });
+    const run = runner.run({ ...fixture.input({ timeoutMs: 80 }), onSessionStarted: async () => {
+      persistenceStarted();
+      await persistence;
+    } }, new AbortController().signal);
+    try {
+      await started;
+      const result = await run;
+      assert.equal(result.kind, 'timeout');
+      assert.equal(result.sessionIdentityFailed, true, 'Unknown in-flight session persistence must fail closed');
+      assert.equal(result.sessionId, undefined);
+      assert.deepEqual(child.terminations, ['SIGTERM']);
+      assert.ok(child.events.includes('wait-streams'));
+    } finally { releasePersistence(); }
+  });
+});
+
+
+test('stdin failure flushes a trailing session event and awaits accepted or rejected persistence', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    for (const rejectPersistence of [false, true]) {
+      let callbackCalls = 0;
+      const child = new FakeChild({ reportPath: fixture.reportPath, pendingExit: true, resolveExitOn: 'SIGTERM' });
+      const runner = new CodexProcess(async (spec) => {
+        child.writeStdinAndClose = async () => {
+          spec.onStdout?.(Buffer.from(JSON.stringify({ type: 'thread.started', thread_id: id })));
+          throw Object.assign(new Error('stdin EPIPE'), { code: 'EPIPE' });
+        };
+        return child;
+      });
+      const result = await runner.run({ ...fixture.input(), onSessionStarted: async () => {
+        callbackCalls++;
+        if (rejectPersistence) throw new Error('session CAS rejected');
+      } }, new AbortController().signal);
+      assert.equal(callbackCalls, 1);
+      assert.equal(result.kind, 'transport-failed');
+      assert.equal(result.sessionIdentityFailed, rejectPersistence ? true : undefined);
+      assert.equal(result.sessionId, rejectPersistence ? undefined : id);
+      assert.match(result.error ?? '', rejectPersistence ? /session CAS rejected/u : /stdin EPIPE/u);
+      assert.deepEqual(child.terminations, ['SIGTERM']);
+      assert.ok(child.events.includes('wait-streams'));
+    }
+  });
+});

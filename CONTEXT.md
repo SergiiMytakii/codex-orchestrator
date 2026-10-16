@@ -6,7 +6,7 @@ Codex Orchestrator is a controlled GitHub Issue runner. It is not a general proj
 
 **Runner** — trusted process that owns authorization, worktrees, process ownership, durable state, evidence admission, GitHub state, and publication.
 
-**Agent** — contained Codex process that implements and verifies one authorized issue in its worktree and returns a structured report with check results. It is not a publisher.
+**Agent** — contained Codex session that implements and verifies one authorized issue, gathers acceptance evidence, obtains independent Review, and returns its completion report. It is not a publisher.
 
 **Issue Work Queue** — open issues carrying the configured `auto` label.
 
@@ -31,7 +31,7 @@ targeted Review of their delta and direct impact cone while untouched approval i
 
 **Checked Change** — nominal capability binding exact repository, Git, content, worktree, check, package, and proof-schema state after checks pass.
 
-**Acceptance Proof** — evidence for frozen criteria. Explicit tests-only issues use implementation verification inspected by independent Review; device proof retains a separate contained phase and leases.
+**Acceptance Proof** — evidence for frozen criteria gathered by the Agent and admitted by the Runner. Device proof requires protected runtime resources and leases.
 
 **Proof Artifact** — proof-owned evidence file. Local evidence is never published; publishable evidence obeys the stricter public contract.
 
@@ -46,7 +46,7 @@ targeted Review of their delta and direct impact cone while untouched approval i
 ## Relationships
 
 - The Runner chooses an Eligible Issue and owns its Run.
-- The Agent implements and runs checks; the Runner admits evidence, coordinates independent Review and publishes.
+- The Agent owns implementation, checks, Acceptance Proof and independent Review; the Runner admits the unchanged result and publishes.
 - Checks create a Checked Change; Acceptance Proof can accept only that unchanged binding.
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.
@@ -55,5 +55,5 @@ targeted Review of their delta and direct impact cone while untouched approval i
   may carry those same records, but obsolete execution fields and missing authority
   cannot authorize continuation. Unsupported state remains unchanged and blocks progression.
 - Plan, specification composition, ticket slicing, and graph coordination remain external owners.
-- Trusted PR feedback is frozen as Run data with an update epoch and uses the same targeted repair progression; it does not own a second lifecycle or round budget.
+- Trusted PR feedback is frozen as Run data with an update epoch and resumes the same Agent; it does not own a second lifecycle or round budget.
 - Transport, timeout, report-format, launch, observation, and tooling failures return resumable issue-local outcomes and do not consume semantic repair authority.

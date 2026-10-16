@@ -13,13 +13,11 @@ import type { CandidateMaterializationV2 } from './candidate.js';
 import { canonicalJson, containsCredentialEvidence, containsHostIdentityEvidence, sha256 } from './containment.js';
 import {
   createProofReceipt,
-  proofReportRepairDiagnostic,
   validateProofReport,
   type ProofReceipt,
   type ProofReportV1,
 } from './proof-report.js';
 import type { AndroidLeaseVerifier, IosLeaseVerifier } from './mobile-lease.js';
-import type { WorkflowGenerationReceipt } from './workflow-assets.js';
 
 export interface IssueSnapshot {
   number: number;
@@ -53,45 +51,8 @@ export interface ProofProcessFailure {
   detail: string;
 }
 
-export type ProofAgentResult =
-  | { kind: 'report'; report: unknown; reportBytes?: Buffer; proofPhaseChangedFiles: string[] }
-  | { kind: 'safe-halt' }
-  | { kind: 'transport-failed'; resumable: boolean; failure?: ProofProcessFailure }
-  | { kind: 'cancelled' }
-  | { kind: 'internal-error' };
-
-export interface ProofAgent<TPayload extends CheckedChangePayload = CheckedChangePayloadV1> {
-  run(input: {
-    attemptId: string;
-    recoverOnly?: boolean;
-    proofId: string;
-    runId: string;
-    issue: IssueSnapshot;
-    frozenCriteria: FrozenCriterion[];
-    checkedChangeSha256: string;
-    changedFiles: string[];
-    checks: TPayload['checks'];
-    worktreePath?: string;
-    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
-    runnerPreparedArtifactPaths: string[];
-    runnerPreparedArtifactSha256: Record<string, string>;
-    runnerPreparationWarnings: string[];
-    repairOnly: boolean;
-    repairFindings: string[];
-    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
-    workflowGeneration?: WorkflowGenerationReceipt;
-    signal: AbortSignal;
-  }): Promise<ProofAgentResult>;
-}
-
 export class CandidateProofInspectionError extends Error {
   constructor(readonly code: string) { super(code); }
-}
-
-export class ProofLaunchAuthorizationError extends Error {
-  constructor(readonly outcome: unknown) {
-    super('proof launch authorization failed');
-  }
 }
 
 export type SettledProveChangeResult =
@@ -115,7 +76,6 @@ export type ProveChangeResult =
 export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChangePayloadV1> {
   constructor(private readonly dependencies: {
     checkedChangeReader: CheckedChangeReadCapability;
-    proofAgent: ProofAgent<TPayload>;
     inspectFreshness: (payload: TPayload, materialization?: CandidateMaterializationV2) => Promise<CheckedChangeFreshnessAny>;
     readArtifact: (relativePath: string) => Promise<Buffer>;
     inspectArtifact?: (relativePath: string) => Promise<{ modifiedAt: string }>;
@@ -133,23 +93,16 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     await this.dependencies.iosLease?.release(proofId);
   }
 
-  async proveChange(input: {
+  /** Admit the implementation owner's evidence without launching or retrying an agent. */
+  async admitReport(input: {
     proofId: string;
-    attemptId: string;
-    recoverOnly: boolean;
     proofStartedAt: string;
-    transportRetryCount: number;
-    reportRepairCount: number;
-    reportRepairFindings: string[];
-    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
-    passedReceipt?: ProofReceipt;
     issue: IssueSnapshot;
     frozenCriteria: FrozenCriterion[];
     checkedChange: CheckedChange<TPayload>;
     materialization?: CandidateMaterializationV2;
-    workflowGeneration?: WorkflowGenerationReceipt;
-    beforeAgentLaunch?: () => Promise<void>;
-    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
+    report: ProofReportV1;
+    changedArtifactPaths?: string[];
     runnerPreparedArtifactPaths?: string[];
     runnerPreparedArtifactSha256?: Record<string, string>;
     runnerPreparationWarnings?: string[];
@@ -158,162 +111,44 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     let stage = 'input';
     try {
       assertNonEmptyString(input.proofId, 'proofId');
-      assertNonEmptyString(input.attemptId, 'attemptId');
-      assertBoolean(input.recoverOnly, 'recoverOnly');
+      assertRelativePath(input.proofId, 'proofId');
+      if (input.proofId.includes('/')) throw new Error('proofId must be one path segment');
       assertIsoTimestamp(input.proofStartedAt, 'proofStartedAt');
-      validateSemanticState(input);
       validateIssue(input.issue);
-      readIssueProofRequirements(input.issue.body);
+      const requirements = readIssueProofRequirements(input.issue.body);
       validateCriteria(input.frozenCriteria);
       stage = 'binding';
       const checked = this.dependencies.checkedChangeReader.verifyAndRead(input.checkedChange);
       if (checked.payload.issueNumber !== input.issue.number) throw new Error('CheckedChange issue does not match proof issue');
-      if (checked.payload.version === 2 && (!input.materialization
-        || input.materialization.bindingId !== checked.payload.binding.bindingId
-        || input.materialization.candidateCommitSha !== checked.payload.binding.candidateCommitSha)) {
+      if (checked.payload.version === 2 && input.materialization
+        && (input.materialization.bindingId !== checked.payload.binding.bindingId
+          || input.materialization.candidateCommitSha !== checked.payload.binding.candidateCommitSha)) {
         throw new Error('CheckedChange candidate execution lease does not match proof binding');
       }
-      bindingSha256 = createBindingSha256({
-        proofId: input.proofId,
-        issue: input.issue,
-        frozenCriteria: input.frozenCriteria,
-        payload: checked.payload,
+      bindingSha256 = createBindingSha256({ ...input, payload: checked.payload,
         checkedChangeSha256: checked.checkedChangeSha256,
-        runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths ?? [],
-      });
-      stage = 'execution';
-      if (input.passedReceipt) {
-        validateProofReceipt(input.passedReceipt);
-        if (input.passedReceipt.proofId !== input.proofId || input.passedReceipt.bindingSha256 !== bindingSha256) {
-          throw new Error('Passed proof receipt does not match proof binding');
-        }
-        if (!await this.isFresh(checked.payload, input.materialization)) {
-          return this.settle(input.proofId, {
-            status: 'internal-error',
-            receipt: emptyReceipt(input.proofId, bindingSha256, 'Checked change is stale.'),
-          });
-        }
-        return this.settle(input.proofId, { status: 'passed', receipt: structuredClone(input.passedReceipt) });
+        runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths ?? [] });
+      stage = 'freshness';
+      if (!await this.isFresh(checked.payload, input.materialization)) {
+        return this.settle(input.proofId, { status: 'internal-error',
+          receipt: emptyReceipt(input.proofId, bindingSha256, 'Checked change is stale.') });
       }
-      return await this.execute({ ...input, ...checked, bindingSha256 });
-    } catch (error) {
-      if (error instanceof CandidateProofInspectionError || error instanceof ProofLaunchAuthorizationError) throw error;
-      return { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256,
-        proofFailureSummary(`Acceptance proof ${stage} failed`, error)) };
-    }
-  }
-
-  private async execute(input: {
-    proofId: string;
-    attemptId: string;
-    recoverOnly: boolean;
-    proofStartedAt: string;
-    transportRetryCount: number;
-    reportRepairCount: number;
-    reportRepairFindings: string[];
-    reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
-    issue: IssueSnapshot;
-    frozenCriteria: FrozenCriterion[];
-    checkedChange: CheckedChange<TPayload>;
-    payload: TPayload;
-    materialization?: CandidateMaterializationV2;
-    checkedChangeSha256: string;
-    bindingSha256: string;
-    workflowGeneration?: WorkflowGenerationReceipt;
-    beforeAgentLaunch?: () => Promise<void>;
-    onLaunched?: (input: { pid: number; processGroupId: number; launchedAt: string }) => Promise<void>;
-    runnerPreparedArtifactPaths?: string[];
-    runnerPreparedArtifactSha256?: Record<string, string>;
-    runnerPreparationWarnings?: string[];
-  }): Promise<ProveChangeResult> {
-    if (!await this.isFresh(input.payload, input.materialization)) {
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Checked change is stale.'),
-      });
-    }
-    if (this.dependencies.signal?.aborted) {
-      return this.settle(input.proofId, {
-        status: 'cancelled',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof was cancelled.'),
-      });
-    }
-
-    let report: ProofReportV1;
-    let agentResult: ProofAgentResult;
-    try {
-      await input.beforeAgentLaunch?.();
-      const requirements = readIssueProofRequirements(input.issue.body);
+      if (this.dependencies.signal?.aborted) {
+        return this.settle(input.proofId, { status: 'cancelled',
+          receipt: emptyReceipt(input.proofId, bindingSha256, 'Proof was cancelled.') });
+      }
       if (requirements?.level === 'android-live' && (!(input.runnerPreparedArtifactPaths?.length)
         || input.runnerPreparationWarnings?.length)) {
         return this.settle(input.proofId, {
           status: 'external-block',
           blocker: { kind: 'tool', summary: 'Required live Android proof could not be prepared.',
-            attempted: [...(input.runnerPreparationWarnings ?? ['No Runner-owned Android evidence was prepared.'])], resumable: true },
-          receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Required live Android proof is unavailable.'),
+            attempted: ['Required Runner-owned Android evidence is unavailable.'], resumable: true },
+          receipt: emptyReceipt(input.proofId, bindingSha256, 'Required live Android proof is unavailable.'),
         });
       }
-      agentResult = await this.dependencies.proofAgent.run({
-        attemptId: input.attemptId,
-        recoverOnly: input.recoverOnly,
-        proofId: input.proofId,
-        runId: input.payload.runId,
-        issue: structuredClone(input.issue),
-        frozenCriteria: structuredClone(input.frozenCriteria),
-        checkedChangeSha256: input.checkedChangeSha256,
-        changedFiles: [...input.payload.changedFiles],
-        checks: structuredClone(input.payload.checks),
-        worktreePath: input.materialization?.path,
-        onLaunched: input.onLaunched,
-        runnerPreparedArtifactPaths: [...(input.runnerPreparedArtifactPaths ?? [])],
-        runnerPreparedArtifactSha256: { ...(input.runnerPreparedArtifactSha256 ?? {}) },
-        runnerPreparationWarnings: [...(input.runnerPreparationWarnings ?? [])],
-        repairOnly: input.reportRepairCount > 0,
-        repairFindings: [...input.reportRepairFindings],
-        ...(input.reportCorrection ? { reportCorrection: input.reportCorrection } : {}),
-        workflowGeneration: input.workflowGeneration ? structuredClone(input.workflowGeneration) : undefined,
-        signal: this.dependencies.signal ?? new AbortController().signal,
-      });
-    } catch (error) {
-      if (error instanceof CandidateProofInspectionError || error instanceof ProofLaunchAuthorizationError) throw error;
-      return { status: 'transport-failed', resumable: true, failure: {
-        kind: 'launch-gate-failed', exitCode: null, signal: null, reportStatus: 'missing',
-        detail: proofFailureSummary('Proof agent failed', error),
-      } };
-    }
-
-    if (this.dependencies.signal?.aborted) {
-      return this.settle(input.proofId, {
-        status: 'cancelled',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof was cancelled.'),
-      });
-    }
-    if (agentResult.kind === 'safe-halt') return { status: 'safe-halt' };
-    if (agentResult.kind === 'transport-failed') {
-      if (agentResult.resumable && await this.isFresh(input.payload, input.materialization)) {
-        return { status: 'transport-failed', resumable: true,
-          ...(agentResult.failure ? { failure: agentResult.failure } : {}) };
-      }
-      return this.settle(input.proofId, {
-        status: 'transport-failed',
-        resumable: false,
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof transport failed.'),
-      });
-    }
-    if (agentResult.kind === 'cancelled') {
-      return this.settle(input.proofId, {
-        status: 'cancelled',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof was cancelled.'),
-      });
-    }
-    if (agentResult.kind === 'internal-error') return this.settle(input.proofId, {
-      status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof agent failed internally.'),
-    });
-
-    try {
-      report = validateProofReport(agentResult.report, input.payload.checks.map((check) => check.id));
+      stage = 'report';
+      const report = validateProofReport(input.report, checked.payload.checks.map((check) => check.id));
       validateReportAgainstFrozenCriteria(report, input.frozenCriteria);
-      const requirements = readIssueProofRequirements(input.issue.body);
       if (report.status === 'passed' && requirements) {
         const requiredMode = requirements.level === 'tests-only' ? 'non-visual' : 'visual';
         if (report.decision.mode !== requiredMode
@@ -322,95 +157,72 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         }
       }
       for (const warning of input.runnerPreparationWarnings ?? []) {
+        assertNonEmptyString(warning, 'Runner preparation warning');
+        if (containsCredentialEvidence(warning) || containsHostIdentityEvidence(warning)) throw new Error('Runner preparation warning is unsafe');
         if (!report.residualRisks.includes(warning) && report.residualRisks.length < 256) report.residualRisks.push(warning);
       }
-    } catch (error) {
-      if (await this.isFresh(input.payload, input.materialization)) {
-        const diagnostic = proofReportRepairDiagnostic(error);
-        const bytes = agentResult.reportBytes ?? Buffer.from(canonicalJson(agentResult.report));
-        if (bytes.length > 1024 * 1024 || !Buffer.from(bytes.toString('utf8')).equals(bytes)
-          || containsCredentialEvidence(bytes.toString('utf8'))) return this.settle(input.proofId, {
-            status: 'internal-error', receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Proof report correction bytes are unsafe.'),
-          });
-        return { status: 'report-repair', reportRepairCount: input.reportRepairCount + 1, findings: [diagnostic],
-          reportCorrection: { bytes, sha256: sha256(bytes), diagnostic } };
-
+      stage = 'artifacts';
+      await this.validateArtifactsAndDiff(input.proofId, report, input.changedArtifactPaths,
+        input.proofStartedAt, input.runnerPreparedArtifactPaths ?? [], input.runnerPreparedArtifactSha256 ?? {},
+        checked.checkedChangeSha256, checked.payload.checks.map((check) => check.id), requirements);
+      stage = 'freshness';
+      if (!await this.isFresh(checked.payload, input.materialization)) {
+        return this.settle(input.proofId, { status: 'internal-error',
+          receipt: emptyReceipt(input.proofId, bindingSha256, 'Checked change became stale during proof.') });
       }
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof report is invalid and checked change is stale', error)),
-      });
-    }
-    try {
-      await this.validateArtifactsAndDiff(
-        input.proofId,
+      if (this.dependencies.signal?.aborted) {
+        return this.settle(input.proofId, { status: 'cancelled',
+          receipt: emptyReceipt(input.proofId, bindingSha256, 'Proof was cancelled.') });
+      }
+      const receipt = createProofReceipt({
+        proofId: input.proofId,
+        bindingSha256,
+        summary: report.status === 'passed'
+          ? input.runnerPreparationWarnings?.length
+            ? `Acceptance proof passed with warning: ${input.runnerPreparationWarnings.join(' ')}`
+            : 'Acceptance proof passed.'
+          : report.status === 'needs-rework'
+            ? 'Acceptance proof needs rework.'
+            : 'Acceptance proof is externally blocked.',
+        localEvidenceId: `proof:${input.proofId}`,
         report,
-        agentResult.proofPhaseChangedFiles,
-        input.proofStartedAt,
-        input.reportRepairCount === 0,
-        input.runnerPreparedArtifactPaths ?? [],
-        input.runnerPreparedArtifactSha256 ?? {},
-        input.checkedChangeSha256,
-        input.payload.checks.map((check) => check.id),
-        readIssueProofRequirements(input.issue.body),
-      );
+        trustedCheckIds: checked.payload.checks.map((check) => check.id),
+      });
+      if (report.status === 'passed') return this.settle(input.proofId, { status: 'passed', receipt });
+      if (report.status === 'needs-rework') {
+        return this.settle(input.proofId, { status: 'needs-rework', findings: [...report.findings], receipt });
+      }
+      return this.settle(input.proofId, { status: 'external-block', blocker: structuredClone(report.blocker!), receipt });
     } catch (error) {
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, proofFailureSummary('Proof artifacts are invalid', error)),
-      });
+      if (error instanceof CandidateProofInspectionError) throw error;
+      return this.settle(input.proofId, { status: 'internal-error', receipt: emptyReceipt(input.proofId, bindingSha256,
+        proofFailureSummary(`Acceptance proof ${stage} failed`, error)) });
     }
-    if (!await this.isFresh(input.payload, input.materialization)) {
-      return this.settle(input.proofId, {
-        status: 'internal-error',
-        receipt: emptyReceipt(input.proofId, input.bindingSha256, 'Checked change became stale during proof.'),
-      });
-    }
-
-    const receipt = createProofReceipt({
-      proofId: input.proofId,
-      bindingSha256: input.bindingSha256,
-      summary: report.status === 'passed'
-        ? input.runnerPreparationWarnings?.length
-          ? `Acceptance proof passed with warning: ${input.runnerPreparationWarnings.join(' ')}`
-          : 'Acceptance proof passed.'
-        : report.status === 'needs-rework'
-          ? 'Acceptance proof needs rework.'
-          : 'Acceptance proof is externally blocked.',
-      localEvidenceId: `proof:${input.proofId}`,
-      report,
-      trustedCheckIds: input.payload.checks.map((check) => check.id),
-    });
-    if (report.status === 'passed') return this.settle(input.proofId, { status: 'passed', receipt });
-    if (report.status === 'needs-rework') {
-      return this.settle(input.proofId, { status: 'needs-rework', findings: [...report.findings], receipt });
-    }
-    return this.settle(input.proofId, { status: 'external-block', blocker: structuredClone(report.blocker!), receipt });
   }
 
   private async validateArtifactsAndDiff(
     proofId: string,
     report: ProofReportV1,
-    changedFiles: string[],
+    changedFiles: string[] | undefined,
     proofStartedAt: string,
-    requireCurrentVisualWrites: boolean,
     runnerPreparedArtifactPaths: string[],
     runnerPreparedArtifactSha256: Record<string, string>,
     checkedChangeSha256: string,
     configuredCheckIds: string[],
     requirements?: IssueProofRequirements,
   ): Promise<void> {
-    if (!Array.isArray(changedFiles) || changedFiles.length > 256) throw new Error('proof phase diff is invalid');
+    if (changedFiles !== undefined && (!Array.isArray(changedFiles) || changedFiles.length > 256)) throw new Error('proof phase diff is invalid');
     if (!Array.isArray(runnerPreparedArtifactPaths) || runnerPreparedArtifactPaths.length > 256) {
       throw new Error('Runner-prepared proof artifact set is invalid');
     }
     for (const path of runnerPreparedArtifactPaths) {
       assertRelativePath(path, 'Runner-prepared proof artifact');
-      if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, path)) {
+      if (!isInsideRelativeRoot(`${this.dependencies.proofArtifactDir}/${proofId}`, path)) {
         throw new Error('Runner-prepared proof artifact escapes proof-owned directory');
       }
     }
-    if (Object.keys(runnerPreparedArtifactSha256).length !== runnerPreparedArtifactPaths.length
+    if (new Set(runnerPreparedArtifactPaths).size !== runnerPreparedArtifactPaths.length
+      || Object.keys(runnerPreparedArtifactSha256).length !== runnerPreparedArtifactPaths.length
       || runnerPreparedArtifactPaths.some((path) => !/^[0-9a-f]{64}$/u.test(runnerPreparedArtifactSha256[path] ?? ''))) {
       throw new Error('Runner-prepared proof artifact digest set is invalid');
     }
@@ -429,7 +241,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
     if (androidReceiptPaths.length > 1) throw new Error('Android Runner receipt set is ambiguous');
     const expectedAndroidReceiptPath = androidReceiptPaths[0];
     for (const artifact of report.artifacts) {
-      if (!isInsideRelativeRoot(this.dependencies.proofArtifactDir, artifact.relativePath)) {
+      if (!isInsideRelativeRoot(`${this.dependencies.proofArtifactDir}/${proofId}`, artifact.relativePath)) {
         throw new Error('proof artifact escapes proof-owned directory');
       }
       const bytes = await this.dependencies.readArtifact(artifact.relativePath);
@@ -439,7 +251,7 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
       }
       if (sha256(bytes) !== artifact.sha256) throw new Error('proof artifact hash mismatch');
       validateArtifactBytes(artifact, bytes);
-      if (report.decision.mode === 'visual') {
+      {
         if (!this.dependencies.inspectArtifact) throw new Error('visual artifact metadata inspection is unavailable');
         const metadata = await this.dependencies.inspectArtifact(artifact.relativePath);
         if (Number.isNaN(Date.parse(metadata.modifiedAt)) || new Date(metadata.modifiedAt).toISOString() !== metadata.modifiedAt) {
@@ -454,11 +266,11 @@ export class AcceptanceProof<TPayload extends CheckedChangePayload = CheckedChan
         androidRunnerReceiptArtifact = { relativePath: artifact.relativePath, bytes };
       }
     }
-    for (const path of changedFiles) {
+    for (const path of changedFiles ?? []) {
       assertRelativePath(path, 'proof phase changed file');
       if (!artifactPaths.has(path)) throw new Error('proof phase changed a non-artifact path');
     }
-    if (report.decision.mode === 'visual' && requireCurrentVisualWrites) {
+    if (report.decision.mode === 'visual' && changedFiles !== undefined) {
       const changed = new Set([...changedFiles, ...runnerPreparedArtifactPaths]);
       if (report.artifacts.some((artifact) => !changed.has(artifact.relativePath))) {
         throw new Error('visual proof reused an unchanged artifact');
@@ -642,44 +454,6 @@ function validateCriteria(value: unknown): asserts value is FrozenCriterion[] {
     ids.push(criterion.id);
   }
   if (new Set(ids).size !== ids.length) throw new Error('criterion IDs must be unique');
-}
-
-function validateSemanticState(value: {
-  transportRetryCount: number;
-  reportRepairCount: number;
-  reportRepairFindings: string[];
-}): void {
-  if (!Number.isSafeInteger(value.transportRetryCount) || value.transportRetryCount < 0) {
-    throw new Error('transportRetryCount is invalid');
-  }
-  if (!Number.isSafeInteger(value.reportRepairCount) || value.reportRepairCount < 0) {
-    throw new Error('reportRepairCount is invalid');
-  }
-  if (!Array.isArray(value.reportRepairFindings) || value.reportRepairFindings.length > 256) {
-    throw new Error('reportRepairFindings are invalid');
-  }
-  for (const finding of value.reportRepairFindings) assertNonEmptyString(finding, 'reportRepairFindings[]');
-  if ((value.reportRepairCount === 0) !== (value.reportRepairFindings.length === 0)) {
-    throw new Error('report repair counter and findings do not match');
-  }
-}
-
-function validateProofReceipt(value: unknown): asserts value is ProofReceipt {
-  assertExactObject(value, ['proofId', 'bindingSha256', 'summary', 'publishableEvidence', 'localEvidenceId'], 'proof receipt');
-  assertNonEmptyString(value.proofId, 'proof receipt.proofId');
-  assertSha256(value.bindingSha256, 'proof receipt.bindingSha256');
-  assertNonEmptyString(value.summary, 'proof receipt.summary');
-  assertNonEmptyString(value.localEvidenceId, 'proof receipt.localEvidenceId');
-  if (!Array.isArray(value.publishableEvidence) || value.publishableEvidence.length > 256) {
-    throw new Error('proof receipt publishableEvidence is invalid');
-  }
-  for (const evidence of value.publishableEvidence) {
-    assertExactObject(evidence, ['ref', 'kind', 'sha256', 'description'], 'proof receipt evidence');
-    assertNonEmptyString(evidence.ref, 'proof receipt evidence.ref');
-    if (evidence.kind !== 'screenshot' && evidence.kind !== 'summary') throw new Error('proof receipt evidence.kind is invalid');
-    assertSha256(evidence.sha256, 'proof receipt evidence.sha256');
-    assertNonEmptyString(evidence.description, 'proof receipt evidence.description');
-  }
 }
 
 /** Removes sensitive evidence before bounding a proof failure diagnostic. */

@@ -26,6 +26,7 @@ const DENIED_TOOL_ENV_KEYS = [
 ] as const;
 
 export function buildContainmentCodexArgs(input: {
+  sessionId?: string;
   schemaPath: string;
   reportPath: string;
   toolHome: string;
@@ -35,6 +36,9 @@ export function buildContainmentCodexArgs(input: {
   executionProfile?: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
   agentProfilePaths?: Record<string, string>;
 }): string[] {
+  if (input.sessionId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(input.sessionId)) {
+    throw new Error('sessionId must be a canonical UUID');
+  }
   const operationPolicy = input.operationPolicy ?? defaultContainmentOperationPolicy();
   validateContainmentOperationPolicy(operationPolicy);
   for (const [id, path] of Object.entries(input.agentProfilePaths ?? {})) {
@@ -42,6 +46,7 @@ export function buildContainmentCodexArgs(input: {
   }
   return [
     'exec',
+    '--json',
     '--strict-config',
     '--ignore-user-config',
     '--ignore-rules',
@@ -97,6 +102,7 @@ export function buildContainmentCodexArgs(input: {
       '-c',
       `shell_environment_policy.set.${key}=""`,
     ]),
+    ...(input.sessionId ? ['resume', input.sessionId] : []),
     '-',
   ];
 }

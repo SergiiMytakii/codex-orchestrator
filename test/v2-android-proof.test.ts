@@ -45,7 +45,7 @@ test('AcceptanceProof verifies and releases Android ownership while returning on
   }
 });
 
-test('AcceptanceProof accepts current Runner-prepared Android artifacts without requiring the contained worker to rewrite them', async () => {
+test('AcceptanceProof accepts current Runner-prepared Android artifacts without requiring the implementation owner to rewrite them', async () => {
   const lease: AndroidLeaseVerifier = { verify: async () => {}, release: async () => {} };
   const prepared = [
     'proofs/proof-android/final.png',
@@ -107,7 +107,7 @@ test('AcceptanceProof rejects secret-bearing Android device logs before lease ac
   assert.deepEqual(calls, ['release']);
 });
 
-test('AcceptanceProof rejects stale Android state and retains custody for caller-owned report repair', async () => {
+test('AcceptanceProof rejects stale Android state and releases custody after invalid admission', async () => {
   const lease: AndroidLeaseVerifier = { verify: async () => {}, release: async () => {} };
   assert.equal((await runAcceptanceFixture({
     lease,
@@ -115,12 +115,12 @@ test('AcceptanceProof rejects stale Android state and retains custody for caller
   })).status, 'internal-error');
 
   const calls: string[] = [];
-  const repairLease: AndroidLeaseVerifier = {
+  const invalidReportLease: AndroidLeaseVerifier = {
     verify: async () => { calls.push('verify'); },
     release: async () => { calls.push('release'); },
   };
-  assert.equal((await runAcceptanceFixture({ lease: repairLease, malformedFirstReport: true })).status, 'report-repair');
-  assert.deepEqual(calls, []);
+  assert.equal((await runAcceptanceFixture({ lease: invalidReportLease, malformedReport: true })).status, 'internal-error');
+  assert.deepEqual(calls, ['release']);
 });
 
 function androidReport(): unknown {
@@ -179,7 +179,7 @@ async function runAcceptanceFixture(input: {
   mutateBytes?: (bytes: Map<string, Buffer>) => void;
   mutateBytesAfterDigest?: (bytes: Map<string, Buffer>) => void;
   mutateMetadata?: (metadata: Map<string, string>) => void;
-  malformedFirstReport?: boolean;
+  malformedReport?: boolean;
   runnerPreparedArtifactPaths?: string[];
   omitRunnerReceiptFromReport?: boolean;
   runnerPreparationWarnings?: string[];
@@ -231,26 +231,9 @@ async function runAcceptanceFixture(input: {
   const metadata = new Map(report.artifacts.map((artifact) => [artifact.relativePath, '2026-07-16T12:00:01.000Z']));
   input.mutateMetadata?.(metadata);
   for (const reportArtifact of report.artifacts) reportArtifact.sha256 = sha256(bytes.get(reportArtifact.relativePath)!);
-  let agentCalls = 0;
+  if (input.malformedReport) delete report.visualEvidence;
   const proof = new AcceptanceProof({
     checkedChangeReader: capabilities,
-    proofAgent: {
-      run: async () => {
-        agentCalls += 1;
-        if (input.malformedFirstReport && agentCalls === 1) {
-          const malformed = structuredClone(report) as unknown as Record<string, unknown>;
-          delete malformed.visualEvidence;
-          return { kind: 'report' as const, report: malformed, proofPhaseChangedFiles: report.artifacts.map((item) => item.relativePath) };
-        }
-        return {
-          kind: 'report' as const,
-          report,
-          proofPhaseChangedFiles: input.runnerPreparedArtifactPaths
-            ? []
-            : input.malformedFirstReport ? [] : report.artifacts.map((item) => item.relativePath),
-        };
-      },
-    },
     inspectFreshness: async () => ({
       headSha: payload.headSha,
       indexTreeSha: payload.indexTreeSha,
@@ -262,15 +245,15 @@ async function runAcceptanceFixture(input: {
     readArtifact: async (relativePath) => bytes.get(relativePath)!,
     inspectArtifact: async (relativePath) => ({ modifiedAt: metadata.get(relativePath)! }),
     androidLease: input.lease,
-    proofArtifactDir: 'proofs/proof-android',
+    proofArtifactDir: 'proofs',
   });
   const issue: IssueSnapshot = {
     number: 88, title: 'Android proof fixture', body: 'Prove the ready state.',
     url: 'https://example.invalid/issues/88', state: 'OPEN', labels: ['agent:auto'],
   };
   const criteria: FrozenCriterion[] = [{ id: 'ac-android', order: 1, source: 'explicit', text: 'Android ready state is visible.' }];
-  return proof.proveChange({
-    proofId: 'proof-android', attemptId: 'proof-attempt-1', recoverOnly: false, proofStartedAt: '2026-07-16T12:00:00.000Z', transportRetryCount: 0, reportRepairCount: 0, reportRepairFindings: [], issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload),
+  return proof.admitReport({
+    proofId: 'proof-android', report, changedArtifactPaths: input.runnerPreparedArtifactPaths ? [] : report.artifacts.map((item) => item.relativePath), proofStartedAt: '2026-07-16T12:00:00.000Z', issue, frozenCriteria: criteria, checkedChange: capabilities.mint(payload),
     runnerPreparedArtifactPaths: input.runnerPreparedArtifactPaths,
     runnerPreparedArtifactSha256,
     runnerPreparationWarnings: input.runnerPreparationWarnings,

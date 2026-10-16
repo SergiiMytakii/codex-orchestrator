@@ -1,59 +1,47 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-
-import {
-  AcceptanceProof,
-  type FrozenCriterion,
-  type IssueSnapshot,
-  type ProofAgentResult,
-} from '../src/v2/acceptance-proof.js';
-import {
-  checkedChangeFreshnessMatches,
-  createCheckedChangeCapabilities,
-  type CheckedChange,
-  type CheckedChangeFreshness,
-  type CheckedChangePayloadV1,
-  type CheckedChangePayloadV2,
-} from '../src/v2/checked-change.js';
+import { AcceptanceProof, CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot } from '../src/v2/acceptance-proof.js';
+import { checkedChangeFreshnessMatches, createCheckedChangeCapabilities, type CheckedChange, type CheckedChangeFreshness, type CheckedChangePayloadV1, type CheckedChangePayloadV2 } from '../src/v2/checked-change.js';
 import type { CandidateBindingV2 } from '../src/v2/candidate.js';
-import { canonicalJson, sha256 } from '../src/v2/containment.js';
-import type { ProofReceipt, ProofReportV1 } from '../src/v2/proof-report.js';
+import { sha256 } from '../src/v2/containment.js';
+import type { ProofReportV1 } from '../src/v2/proof-report.js';
 import type { AndroidLeaseVerifier } from '../src/v2/mobile-lease.js';
 
 const artifactBytes = Buffer.from('proof evidence\n');
+const startedAt = '2026-07-16T12:00:00.000Z';
 
-test('proof failure receipts retain the bounded cause for input, inspection, agent, and artifact failures', async () => {
-  const invalid = proofFixture();
-  const malformed = await invalid.proof.proveChange(invalid.input({ proofStartedAt: 'invalid' }));
-  assert.equal(malformed.status, 'internal-error');
-  if (malformed.status === 'internal-error') assert.match(malformed.receipt.summary, /input.*proofStartedAt/iu);
-  assert.equal(invalid.agentCalls.length, 0);
-
-  const inspection = proofFixture({ inspectFreshness: async () => { throw new Error('inspection unavailable'); } });
-  const failed = await inspection.proof.proveChange(inspection.input());
-  assert.equal(failed.status, 'internal-error');
-  if (failed.status === 'internal-error') assert.match(failed.receipt.summary, /inspection unavailable/u);
-
-  const agent = proofFixture();
-  const launch = await agent.proof.proveChange(agent.input({ beforeAgentLaunch: async () => { throw new Error('agent unavailable'); } }));
-  assert.equal(launch.status, 'transport-failed');
-  if (launch.status === 'transport-failed' && launch.resumable) assert.match(launch.failure?.detail ?? '', /agent unavailable/u);
-
-  const artifact = proofFixture({ artifactContent: Buffer.from('changed bytes') });
-  const mismatch = await artifact.proof.proveChange(artifact.input());
-  assert.equal(mismatch.status, 'internal-error');
-  if (mismatch.status === 'internal-error') assert.match(mismatch.receipt.summary, /artifact hash mismatch/u);
+test('owner report admission is stateless and returns only a sanitized receipt', async () => {
+  const fixture = proofFixture();
+  const result = await fixture.proof.admitReport(fixture.input());
+  assert.equal(result.status, 'passed');
+  if (result.status !== 'passed') return;
+  assert.deepEqual(Object.keys(result.receipt).sort(), ['bindingSha256', 'localEvidenceId', 'proofId', 'publishableEvidence', 'summary']);
+  assert.equal(result.receipt.publishableEvidence[0]?.ref, 'artifact:evidence');
+  assert.deepEqual(await fixture.proof.admitReport(fixture.input()), result);
+  assert.equal(fixture.freshnessCalls.length, 4);
 });
 
-test('proof failure detail is bounded and sensitive text is redacted before truncation', async () => {
-  for (const message of [
-    'access_token=credential-material-12345',
-    'token=credential-material-12345',
-    'ENOENT /Users/example/private/evidence.json',
-    'x'.repeat(2000) + ' password=credential-material-12345',
-  ]) {
+test('input, inspection, report and artifact failures retain a bounded diagnostic', async () => {
+  const invalid = proofFixture();
+  const input = await invalid.proof.admitReport(invalid.input({ proofStartedAt: 'invalid' }));
+  assert.equal(input.status, 'internal-error');
+  if (input.status === 'internal-error') assert.match(input.receipt.summary, /input.*proofStartedAt/u);
+  for (const [fixture, expected] of [
+    [proofFixture({ inspectFreshness: async () => { throw new Error('inspection unavailable'); } }), /inspection unavailable/u],
+    [proofFixture({ report: { status: 'passed' } as ProofReportV1 }), /report/u],
+    [proofFixture({ artifactContent: Buffer.from('different') }), /artifact hash mismatch/u],
+  ] as const) {
+    const result = await fixture.proof.admitReport(fixture.input());
+    assert.equal(result.status, 'internal-error');
+    if (result.status === 'internal-error') assert.match(result.receipt.summary, expected);
+  }
+});
+
+test('failure detail redacts sensitive text before truncation', async () => {
+  for (const message of ['access_token=credential-material-12345', 'token=credential-material-12345',
+    'ENOENT /Users/example/private/evidence.json', 'x'.repeat(2000) + ' password=credential-material-12345']) {
     const fixture = proofFixture({ inspectFreshness: async () => { throw new Error(message); } });
-    const result = await fixture.proof.proveChange(fixture.input());
+    const result = await fixture.proof.admitReport(fixture.input());
     assert.equal(result.status, 'internal-error');
     if (result.status !== 'internal-error') continue;
     assert.match(result.receipt.summary, /\[redacted\]/u);
@@ -61,13 +49,140 @@ test('proof failure detail is bounded and sensitive text is redacted before trun
     assert.equal(result.receipt.summary.includes('credential-material'), false);
     assert.equal(result.receipt.summary.includes('/Users/'), false);
   }
-  const bounded = proofFixture({ inspectFreshness: async () => { throw new Error('unavailable\n' + 'x'.repeat(2000)); } });
-  const result = await bounded.proof.proveChange(bounded.input());
-  if (result.status !== 'internal-error') assert.fail('must fail closed');
-  assert.equal(result.receipt.summary.length, 1024);
-  assert.equal(result.receipt.summary.includes('\n'), false);
+  const fixture = proofFixture({ inspectFreshness: async () => { throw new Error('unavailable\n' + 'x'.repeat(2000)); } });
+  const result = await fixture.proof.admitReport(fixture.input());
+  assert.equal(result.status, 'internal-error');
+  if (result.status === 'internal-error') {
+    assert.equal(result.receipt.summary.length, 1024);
+    assert.equal(result.receipt.summary.includes('\n'), false);
+  }
 });
 
+test('every stale checked field is rejected before reading evidence', async () => {
+  for (const field of ['headSha', 'indexTreeSha', 'trackedContentSha256', 'untrackedContentSha256', 'worktreeIdentity', 'checkPolicySha256'] as const) {
+    const fixture = proofFixture({ inspectFreshness: async (payload) => ({ ...freshness(payload), [field]: `stale-${field}` }) });
+    assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'internal-error', field);
+    assert.equal(fixture.artifactReads.length, 0, field);
+  }
+});
+
+test('candidate freshness is checked again after evidence reads', async () => {
+  let calls = 0;
+  const fixture = proofFixture({ inspectFreshness: async (payload) => ++calls === 1 ? freshness(payload) : { ...freshness(payload), headSha: 'f'.repeat(40) } });
+  const result = await fixture.proof.admitReport(fixture.input());
+  assert.equal(result.status, 'internal-error');
+  assert.equal(fixture.artifactReads.length, 1);
+});
+
+test('missing reports, criterion drift and unsafe paths fail closed', async () => {
+  for (const report of [undefined, { version: 1 }, passingReport({ criterionId: 'rewritten-id' }), passingReport({ artifactRelativePath: '../outside.txt' }), passingReport({ artifactRelativePath: 'proofs/other/evidence.txt' })]) {
+    const fixture = proofFixture();
+    assert.equal((await fixture.proof.admitReport(fixture.input({ report: report as ProofReportV1 }))).status, 'internal-error');
+  }
+  const fixture = proofFixture();
+  assert.equal((await fixture.proof.admitReport(fixture.input({ changedArtifactPaths: [artifactPath(), 'src/product.ts'] }))).status, 'internal-error');
+  assert.equal((await fixture.proof.admitReport(fixture.input({ proofId: '../outside' }))).status, 'internal-error');
+});
+
+test('declared artifact hashes, capture times, bytes and publication classes are enforced', async () => {
+  for (const options of [
+    { modifiedAt: '2026-07-16T11:59:59.999Z' },
+    { modifiedAt: 'invalid' },
+    { metadataUnavailable: true },
+    { artifactContent: Buffer.alloc(0), report: passingReport({ artifactContent: Buffer.alloc(0) }) },
+    { artifactContent: Buffer.from([0xff]), report: passingReport({ artifactContent: Buffer.from([0xff]) }) },
+    { artifactContent: Buffer.from('password=credential-material-12345'), report: passingReport({ artifactContent: Buffer.from('password=credential-material-12345') }) },
+    { report: passingReport({ artifactKind: 'command-output', publishable: true }) },
+    { report: passingReport({ artifactKind: 'screenshot' }) },
+  ]) {
+    const fixture = proofFixture(options);
+    assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'internal-error', JSON.stringify(options));
+  }
+  const fixture = proofFixture();
+  for (const overrides of [
+    { runnerPreparedArtifactPaths: [artifactPath()], runnerPreparedArtifactSha256: {} },
+    { runnerPreparedArtifactPaths: [artifactPath()], runnerPreparedArtifactSha256: { [artifactPath()]: '0'.repeat(64) } },
+    { runnerPreparedArtifactPaths: ['proofs/other/evidence.txt'], runnerPreparedArtifactSha256: { 'proofs/other/evidence.txt': sha256(artifactBytes) } },
+  ]) assert.equal((await fixture.proof.admitReport(fixture.input(overrides))).status, 'internal-error');
+});
+
+test('host identity is allowed only in local diagnostic artifacts', async () => {
+  const content = Buffer.from('Configured command: /Users/example/bin/node --version\n');
+  const local = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content, artifactKind: 'static-inspection', publishable: false }) });
+  assert.equal((await local.proof.admitReport(local.input())).status, 'passed');
+  const published = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content }) });
+  assert.equal((await published.proof.admitReport(published.input())).status, 'internal-error');
+});
+
+test('lease cleanup pending preserves the already admitted outcome', async () => {
+  let calls = 0;
+  const fixture = proofFixture({ androidLease: { verify: async () => {}, release: async () => { if (++calls === 1) throw new Error('pending'); } } });
+  const result = await fixture.proof.admitReport(fixture.input());
+  assert.equal(result.status, 'cleanup-pending');
+  if (result.status !== 'cleanup-pending') return;
+  assert.equal(result.outcome.status, 'passed');
+  await fixture.proof.cleanupMobileLeases('proof-1');
+  assert.equal(calls, 2);
+});
+
+test('invalid admission also retains pending lease cleanup', async () => {
+  const fixture = proofFixture({ androidLease: { verify: async () => {}, release: async () => { throw new Error('pending'); } } });
+  const result = await fixture.proof.admitReport(fixture.input({ report: undefined as unknown as ProofReportV1 }));
+  assert.equal(result.status, 'cleanup-pending');
+  if (result.status === 'cleanup-pending') assert.equal(result.outcome.status, 'internal-error');
+});
+
+test('candidate inspection errors preserve their typed boundary', async () => {
+  const fixture = proofFixture({ inspectFreshness: async () => { throw new CandidateProofInspectionError('source-stale'); } });
+  await assert.rejects(fixture.proof.admitReport(fixture.input()), CandidateProofInspectionError);
+});
+
+test('external block and rework reports remain evidence-admitted terminal outcomes', async () => {
+  for (const status of ['needs-rework', 'external-block'] as const) {
+    const report: ProofReportV1 = { ...passingReport(), status, criteria: [{ ...passingReport().criteria[0]!, status: 'failed', confidence: 'medium' }], findings: ['Behavior is incomplete.'],
+      ...(status === 'external-block' ? { blocker: { kind: 'service' as const, summary: 'Fixture unavailable.', attempted: ['retry fixture'], resumable: false } } : {}) };
+    const fixture = proofFixture({ report });
+    assert.equal((await fixture.proof.admitReport(fixture.input())).status, status);
+  }
+});
+
+test('cancellation fails closed without reading evidence', async () => {
+  const controller = new AbortController(); controller.abort();
+  const fixture = proofFixture({ signal: controller.signal });
+  assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'cancelled');
+  assert.deepEqual(fixture.artifactReads, []);
+});
+
+test('mandatory Android live proof cannot pass through nonvisual evidence', async () => {
+  const fixture = proofFixture();
+  const input = fixture.input();
+  input.issue.body = '## Proof requirements\n```json\n' + JSON.stringify({ version: 1, level: 'android-live', reason: 'Verify the real interaction.', authentication: 'dev-account', steps: [{ action: 'expect', text: 'Top Picks' }] }) + '\n```';
+  assert.equal((await fixture.proof.admitReport(input)).status, 'external-block');
+  const result = await fixture.proof.admitReport({ ...input, runnerPreparedArtifactPaths: [artifactPath()], runnerPreparedArtifactSha256: { [artifactPath()]: sha256(artifactBytes) } });
+  assert.equal(result.status, 'internal-error');
+  if (result.status === 'internal-error') assert.match(result.receipt.summary, /issue proof level/u);
+});
+
+function proofFixture(options: {
+  report?: ProofReportV1; artifactContent?: Buffer; modifiedAt?: string; metadataUnavailable?: boolean;
+  inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
+  androidLease?: AndroidLeaseVerifier; signal?: AbortSignal;
+} = {}) {
+  const capabilities = createCheckedChangeCapabilities();
+  const payload = checkedPayload();
+  const checkedChange = capabilities.mint(payload);
+  const freshnessCalls: CheckedChangePayloadV1[] = [];
+  const artifactReads: string[] = [];
+  const criteria: FrozenCriterion[] = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'The behavior works.' }];
+  const issue: IssueSnapshot = { number: 42, title: 'Implement behavior', body: '## Acceptance Criteria\n- The behavior works.', url: 'https://example.invalid/issues/42', state: 'OPEN', labels: ['agent:auto'] };
+  const proof = new AcceptanceProof({ checkedChangeReader: capabilities,
+    inspectFreshness: async (value) => { if (value.version !== 1) throw new Error('legacy fixture received V2 payload'); freshnessCalls.push(value); return options.inspectFreshness?.(value) ?? freshness(value); },
+    readArtifact: async (path) => { artifactReads.push(path); if (path !== artifactPath()) throw new Error('artifact missing'); return options.artifactContent ?? artifactBytes; },
+    inspectArtifact: options.metadataUnavailable ? undefined : async () => ({ modifiedAt: options.modifiedAt ?? '2026-07-16T12:00:01.000Z' }),
+    proofArtifactDir: 'proofs', androidLease: options.androidLease, signal: options.signal,
+  });
+  return { proof, freshnessCalls, artifactReads, input: (overrides: Partial<Parameters<typeof proof.admitReport>[0]> = {}) => ({ proofId: 'proof-1', proofStartedAt: startedAt, issue: structuredClone(issue), frozenCriteria: criteria, checkedChange, report: options.report ?? passingReport(), changedArtifactPaths: [artifactPath()], ...overrides }) };
+}
 test('CheckedChange is nominal at compile time and rejects forged runtime objects', () => {
   // @ts-expect-error CheckedChange has a module-private nominal brand.
   const compileTimeForgery: CheckedChange = {};
@@ -140,342 +255,6 @@ test('CheckedChange V2 binds every receipt and changed path to one candidate whi
   assert.equal(checkedChangeFreshnessMatches(legacy, { ...freshness(legacy), indexTreeSha: 'f'.repeat(40) }), false);
 });
 
-test('caller-owned passed receipt prevents a duplicate attempt while binding mismatch fails before launch', async () => {
-  const fixture = proofFixture();
-  const first = await fixture.proof.proveChange(fixture.input());
-  assert.equal(first.status, 'passed');
-  if (first.status !== 'passed') return;
-  const repeated = await fixture.proof.proveChange(fixture.input({ passedReceipt: first.receipt }));
-  const mismatched = await fixture.proof.proveChange(fixture.input({
-    frozenCriteria: [{ ...fixture.criteria[0]!, text: 'Changed criterion text.' }],
-    passedReceipt: first.receipt,
-  }));
-
-  assert.deepEqual(repeated, first);
-  assert.equal(mismatched.status, 'internal-error');
-  assert.equal(fixture.agentCalls.length, 1);
-  assert.equal(fixture.freshnessCalls.length, 3);
-});
-
-test('stale HEAD/index/tracked/untracked/worktree/check-policy fails before proof effects', async () => {
-  for (const field of [
-    'headSha',
-    'indexTreeSha',
-    'trackedContentSha256',
-    'untrackedContentSha256',
-    'worktreeIdentity',
-    'checkPolicySha256',
-  ] as const) {
-    const fixture = proofFixture({
-      inspectFreshness: async (payload) => ({ ...freshness(payload), [field]: `stale-${field}` }),
-    });
-    const result = await fixture.proof.proveChange(fixture.input());
-    assert.equal(result.status, 'internal-error', field);
-    assert.equal(fixture.agentCalls.length, 0, field);
-  }
-});
-
-test('freshness is rechecked after proof and stale checked input cannot be accepted as passed', async () => {
-  let calls = 0;
-  const fixture = proofFixture({
-    inspectFreshness: async (payload) => {
-      calls += 1;
-      return calls === 1 ? freshness(payload) : { ...freshness(payload), headSha: 'f'.repeat(40) };
-    },
-  });
-  const result = await fixture.proof.proveChange(fixture.input());
-  assert.equal(result.status, 'internal-error');
-  assert.equal(fixture.agentCalls.length, 1);
-});
-
-test('malformed report, rewritten criteria, and unsafe report paths request one explicit caller-owned report repair', async () => {
-  const cases: Array<{ name: string; agentResult: ProofAgentResult }> = [
-    { name: 'malformed', agentResult: { kind: 'report', report: { status: 'passed' }, proofPhaseChangedFiles: [] } },
-    {
-      name: 'criterion coverage',
-      agentResult: { kind: 'report', report: passingReport({ criterionId: 'rewritten-id' }), proofPhaseChangedFiles: [artifactPath()] },
-    },
-    {
-      name: 'raw path',
-      agentResult: {
-        kind: 'report',
-        report: passingReport({ artifactRelativePath: '../outside.txt' }),
-        proofPhaseChangedFiles: ['../outside.txt'],
-      },
-    },
-  ];
-  for (const entry of cases) {
-    const fixture = proofFixture({ agentResult: entry.agentResult });
-    const result = await fixture.proof.proveChange(fixture.input());
-    assert.equal(result.status, 'report-repair', entry.name);
-    if (result.status !== 'report-repair') continue;
-    assert.equal(result.reportRepairCount, 1, entry.name);
-    assert.equal(result.findings.length, 1, entry.name);
-    assert.equal(fixture.agentCalls.length, 1, entry.name);
-  }
-});
-
-test('forbidden proof diff fails closed without format repair', async () => {
-  const cases: Array<{ name: string; agentResult: ProofAgentResult }> = [
-    {
-      name: 'forbidden diff',
-      agentResult: { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath(), 'src/product.ts'] },
-    },
-  ];
-  for (const entry of cases) {
-    const fixture = proofFixture({ agentResult: entry.agentResult });
-    assert.equal((await fixture.proof.proveChange(fixture.input())).status, 'internal-error', entry.name);
-  }
-});
-
-test('host identity filtering applies only to publishable artifacts', async () => {
-  const localBytes = Buffer.from('Configured command: /Users/example/bin/node --version\n');
-  const localReport = passingReport({
-    artifactContent: localBytes,
-    artifactKind: 'static-inspection',
-    publishable: false,
-  });
-  const local = proofFixture({
-    artifactContent: localBytes,
-    agentResult: { kind: 'report', report: localReport, proofPhaseChangedFiles: [artifactPath()] },
-  });
-  assert.equal((await local.proof.proveChange(local.input())).status, 'passed');
-
-  const publishableReport = passingReport({ artifactContent: localBytes });
-  const publishable = proofFixture({
-    artifactContent: localBytes,
-    agentResult: { kind: 'report', report: publishableReport, proofPhaseChangedFiles: [artifactPath()] },
-  });
-  assert.equal((await publishable.proof.proveChange(publishable.input())).status, 'internal-error');
-});
-
-test('report repair and transport retry remain resumable without semantic exhaustion', async () => {
-  const malformed = proofFixture({
-    agentResult: {
-      kind: 'report',
-      report: {
-        ...passingReport(),
-        artifacts: passingReport().artifacts.map((artifact) => ({ ...artifact, kind: 'command-output' as const })),
-      },
-      proofPhaseChangedFiles: [artifactPath()],
-    },
-  });
-  const invalid = await malformed.proof.proveChange(malformed.input());
-  assert.equal(invalid.status, 'report-repair');
-  if (invalid.status !== 'report-repair') return;
-  const repaired = proofFixture();
-  assert.equal((await repaired.proof.proveChange(repaired.input({
-    attemptId: 'attempt-report-repair',
-    reportRepairCount: invalid.reportRepairCount,
-    reportRepairFindings: invalid.findings,
-  }))).status, 'passed');
-  assert.equal(repaired.agentCalls.length, 1);
-  const repairCall = repaired.agentCalls[0] as { repairOnly: boolean; repairFindings: string[] };
-  assert.equal(repairCall.repairOnly, true);
-  assert.match(repairCall.repairFindings[0] ?? '', /only screenshots or sanitized generated summaries may be publishable/u);
-
-  const invalidRepair = proofFixture({ agentResult: {
-    kind: 'report', report: { version: 1 }, proofPhaseChangedFiles: [],
-  } });
-  const continuedRepair = await invalidRepair.proof.proveChange(invalidRepair.input({
-    attemptId: 'attempt-invalid-report-repair',
-    reportRepairCount: 1,
-    reportRepairFindings: invalid.findings,
-  }));
-  assert.equal(continuedRepair.status, 'report-repair');
-  if (continuedRepair.status === 'report-repair') assert.equal(continuedRepair.reportRepairCount, 2);
-  assert.equal(invalidRepair.agentCalls.length, 1);
-
-  const transport = proofFixture({
-    agentResult: { kind: 'transport-failed', resumable: true },
-  });
-  let launchAuthorizations = 0;
-  const retryable = await transport.proof.proveChange(transport.input({
-    beforeAgentLaunch: async () => { launchAuthorizations += 1; },
-  }));
-  assert.deepEqual(retryable, { status: 'transport-failed', resumable: true });
-  assert.equal(transport.agentCalls.length, 1);
-  assert.equal(launchAuthorizations, 1);
-
-  const laterRetry = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true } });
-  const continued = await laterRetry.proof.proveChange(laterRetry.input({ transportRetryCount: 6 }));
-  assert.deepEqual(continued, { status: 'transport-failed', resumable: true });
-});
-
-test('resumable proof retains the exact process cause alongside the checked candidate', async () => {
-  const failure = { kind: 'idle-timeout' as const, exitCode: null, signal: 'SIGTERM', reportStatus: 'missing' as const, detail: 'No process diagnostic was captured.' };
-  const fixture = proofFixture({ agentResult: { kind: 'transport-failed', resumable: true, failure } });
-  assert.deepEqual(await fixture.proof.proveChange(fixture.input()), { status: 'transport-failed', resumable: true, failure });
-});
-
-test('passed proof returns only a sanitized receipt and has no hidden lifecycle dependency', async () => {
-  const fixture = proofFixture();
-  const result = await fixture.proof.proveChange(fixture.input());
-  assert.equal(result.status, 'passed');
-  if (result.status !== 'passed') return;
-  assert.deepEqual(Object.keys(result.receipt).sort(), [
-    'bindingSha256',
-    'localEvidenceId',
-    'proofId',
-    'publishableEvidence',
-    'summary',
-  ]);
-  assert.equal(JSON.stringify(result.receipt).includes('.codex-orchestrator'), false);
-  assert.equal(result.receipt.publishableEvidence[0]?.ref, 'artifact:evidence');
-  assert.equal(fixture.agentCalls.length, 1);
-});
-
-test('passed receipt remains monotonic when mobile lease cleanup must be retried', async () => {
-  let releaseCalls = 0;
-  const fixture = proofFixture({
-    androidLease: {
-      verify: async () => {},
-      release: async () => {
-        releaseCalls += 1;
-        if (releaseCalls === 1) throw new Error('cleanup pending');
-      },
-    },
-  });
-  const result = await fixture.proof.proveChange(fixture.input());
-  assert.equal(result.status, 'cleanup-pending');
-  if (result.status !== 'cleanup-pending') return;
-  assert.equal(result.outcome.status, 'passed');
-  await fixture.proof.cleanupMobileLeases('proof-1');
-  assert.equal(releaseCalls, 2);
-  assert.equal(result.outcome.receipt.summary, 'Acceptance proof passed.');
-});
-
-test('caller-owned passed receipt is strictly validated before reuse', async () => {
-  const fixture = proofFixture();
-  const forged: ProofReceipt = {
-    proofId: 'proof-1', bindingSha256: '0'.repeat(64), summary: 'Passed.',
-    publishableEvidence: [], localEvidenceId: 'proof:proof-1',
-  };
-  const result = await fixture.proof.proveChange(fixture.input({ passedReceipt: forged }));
-  assert.equal(result.status, 'internal-error');
-  assert.equal(fixture.agentCalls.length, 0);
-});
-
-test('needs-rework, external-block, transport, cancellation, and internal agent outcomes remain typed', async () => {
-  const cases: Array<{ result: ProofAgentResult; expected: string }> = [
-    {
-      result: {
-        kind: 'report',
-        report: {
-          ...passingReport(),
-          status: 'needs-rework',
-          criteria: [{ ...passingReport().criteria[0]!, status: 'failed', confidence: 'medium' }],
-          findings: ['Behavior is incomplete.'],
-        },
-        proofPhaseChangedFiles: [artifactPath()],
-      },
-      expected: 'needs-rework',
-    },
-    {
-      result: {
-        kind: 'report',
-        report: {
-          ...passingReport(),
-          status: 'external-block',
-          criteria: [{ ...passingReport().criteria[0]!, status: 'unknown', confidence: 'low', evidenceRefs: [] }],
-          blocker: { kind: 'service', summary: 'Fixture unavailable.', attempted: ['retry fixture'], resumable: false },
-        },
-        proofPhaseChangedFiles: [artifactPath()],
-      },
-      expected: 'external-block',
-    },
-    { result: { kind: 'transport-failed', resumable: true }, expected: 'transport-failed' },
-    { result: { kind: 'cancelled' }, expected: 'cancelled' },
-    { result: { kind: 'internal-error' }, expected: 'internal-error' },
-  ];
-  for (const entry of cases) {
-    const fixture = proofFixture({ agentResult: entry.result });
-    const outcome = await fixture.proof.proveChange(fixture.input());
-    assert.equal(outcome.status, entry.expected);
-    if (entry.expected === 'transport-failed') {
-      assert.equal(outcome.status === 'transport-failed' && outcome.resumable, true);
-    } else {
-      assert.deepEqual(Object.keys(outcome).includes('receipt'), true);
-    }
-  }
-});
-
-function proofFixture(options: {
-  agentResult?: ProofAgentResult;
-  artifactContent?: Buffer;
-  inspectFreshness?: (payload: CheckedChangePayloadV1) => Promise<CheckedChangeFreshness>;
-  androidLease?: AndroidLeaseVerifier;
-} = {}) {
-  const capabilities = createCheckedChangeCapabilities();
-  const payload = checkedPayload();
-  const checkedChange = capabilities.mint(payload);
-  const agentCalls: unknown[] = [];
-  const freshnessCalls: CheckedChangePayloadV1[] = [];
-  const criteria: FrozenCriterion[] = [{ id: 'ac-001', order: 1, source: 'explicit', text: 'The behavior works.' }];
-  const issue: IssueSnapshot = {
-    number: 42,
-    title: 'Implement behavior',
-    body: '## Acceptance Criteria\n- The behavior works.',
-    url: 'https://example.invalid/issues/42',
-    state: 'OPEN',
-    labels: ['agent:auto'],
-  };
-  const inspectFreshness = options.inspectFreshness ?? (async (value: CheckedChangePayloadV1) => freshness(value));
-  const proof = new AcceptanceProof({
-    checkedChangeReader: capabilities,
-    proofAgent: {
-      run: async (input) => {
-        agentCalls.push(input);
-        return options.agentResult ?? { kind: 'report', report: passingReport(), proofPhaseChangedFiles: [artifactPath()] };
-      },
-    },
-    inspectFreshness: async (value) => {
-      if (value.version !== 1) throw new Error('legacy fixture received V2 payload');
-      freshnessCalls.push(value);
-      return inspectFreshness(value);
-    },
-    readArtifact: async (relativePath) => {
-      if (relativePath !== artifactPath()) throw new Error('artifact missing');
-      return options.artifactContent ?? artifactBytes;
-    },
-    proofArtifactDir: 'proofs/proof-1',
-    androidLease: options.androidLease,
-  });
-  return {
-    proof,
-    agentCalls,
-    freshnessCalls,
-    criteria,
-    input: (overrides: Partial<{
-      proofId: string;
-      issue: IssueSnapshot;
-      frozenCriteria: FrozenCriterion[];
-      checkedChange: CheckedChange;
-      beforeAgentLaunch: () => Promise<void>;
-      attemptId: string;
-      recoverOnly: boolean;
-      proofStartedAt: string;
-      transportRetryCount: number;
-      reportRepairCount: number;
-      reportRepairFindings: string[];
-      passedReceipt: ProofReceipt;
-      runnerPreparedArtifactPaths: string[];
-      runnerPreparedArtifactSha256: Record<string, string>;
-    }> = {}) => ({
-      proofId: 'proof-1',
-      attemptId: 'attempt-proof',
-      recoverOnly: false,
-      proofStartedAt: '2026-07-16T12:00:00.000Z',
-      transportRetryCount: 0,
-      reportRepairCount: 0,
-      reportRepairFindings: [],
-      issue,
-      frozenCriteria: criteria,
-      checkedChange,
-      ...overrides,
-    }),
-  };
-}
 
 function checkedPayload(): CheckedChangePayloadV1 {
   return {
@@ -548,37 +327,45 @@ function passingReport(overrides: {
   };
 }
 
-const _canonicalProofFixture = canonicalJson(passingReport());
-void _canonicalProofFixture;
 
-/** An issue's mandatory device proof cannot be satisfied by a passing unit-test report. */
-test('explicit live Android proof rejects non-visual acceptance', async () => {
+test('criterion IDs retain exact frozen order and complete coverage', async () => {
   const fixture = proofFixture();
-  const issue: IssueSnapshot = {
-    number: 42, title: 'Implement behavior', state: 'OPEN', labels: ['agent:auto'],
-    url: 'https://example.invalid/issues/42',
-    body: '## Proof requirements\n```json\n' + JSON.stringify({
-      version: 1, level: 'android-live', reason: 'Verify the real authenticated interaction.',
-      authentication: 'dev-account', steps: [{ action: 'expect', text: 'Top Picks' }],
-    }) + '\n```',
-  };
-  const missingPreparation = await fixture.proof.proveChange(fixture.input({ issue }));
-  assert.equal(missingPreparation.status, 'external-block');
-  if (missingPreparation.status === 'external-block') {
-    assert.equal(missingPreparation.blocker.summary, 'Required live Android proof could not be prepared.');
-  }
-  assert.deepEqual(fixture.agentCalls, []);
+  const input = fixture.input();
+  input.frozenCriteria = [input.frozenCriteria[0]!, { id: 'ac-002', order: 2, source: 'explicit', text: 'Second behavior works.' }];
+  const second = { ...input.report.criteria[0]!, id: 'ac-002' };
+  input.report.criteria.push(second);
+  assert.equal((await fixture.proof.admitReport(input)).status, 'passed');
+  input.report.criteria.reverse();
+  assert.equal((await fixture.proof.admitReport(input)).status, 'internal-error');
+  input.report.criteria = [second];
+  assert.equal((await fixture.proof.admitReport(input)).status, 'internal-error');
+});
 
-  const prepared = proofFixture();
-  const result = await prepared.proof.proveChange(prepared.input({
-    issue,
-    runnerPreparedArtifactPaths: [artifactPath()],
-    runnerPreparedArtifactSha256: { [artifactPath()]: sha256(artifactBytes) },
-  }));
-  assert.equal(prepared.agentCalls.length, 1);
-  assert.equal(result.status, 'report-repair');
-  if (result.status === 'report-repair') {
-    assert.equal(result.reportRepairCount, 1);
-    assert.match(result.findings.join(' '), /Proof report does not satisfy the issue proof level/u);
-  }
+test('V2 original candidate can be admitted without materialization but supplied custody must match', async () => {
+  const capabilities = createCheckedChangeCapabilities();
+  const binding: CandidateBindingV2 = {
+    version: 2, bindingId: '1'.repeat(64), expectedHeadSha: 'a'.repeat(40),
+    candidateRef: `refs/codex-orchestrator/candidates/00000000-0000-4000-8000-000000000001/${'1'.repeat(64)}`,
+    candidateCommitSha: 'b'.repeat(40), candidateTreeSha: 'c'.repeat(40), canonicalChangedFiles: ['src/a.ts'], sourceWorktreeIdentity: '2'.repeat(64),
+  };
+  const payload: CheckedChangePayloadV2 = {
+    version: 2, canonicalRepository: 'owner/repo', runId: '00000000-0000-4000-8000-000000000001', issueNumber: 42,
+    cycle: 1, baseSha: 'a'.repeat(40), deliveryAuthoritySha256: 'd'.repeat(64), binding,
+    changedFiles: ['src/a.ts'], checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: '3'.repeat(64), bindingId: binding.bindingId, candidateTreeSha: binding.candidateTreeSha, checkPolicySha256: '4'.repeat(64) }],
+    checkPolicySha256: '4'.repeat(64), packageVersion: '2.0.34', proofSchemaVersion: 1,
+  };
+  const inspections: unknown[] = [];
+  const proof = new AcceptanceProof<CheckedChangePayloadV2>({
+    checkedChangeReader: capabilities,
+    inspectFreshness: async (_payload, materialization) => { inspections.push(materialization); return { bindingId: binding.bindingId, candidateTreeSha: binding.candidateTreeSha, checkPolicySha256: payload.checkPolicySha256 }; },
+    readArtifact: async () => artifactBytes,
+    inspectArtifact: async () => ({ modifiedAt: '2026-07-16T12:00:01.000Z' }), proofArtifactDir: 'proofs',
+  });
+  const input = { ...proofFixture().input(), checkedChange: capabilities.mint(payload) };
+  assert.equal((await proof.admitReport(input)).status, 'passed');
+  assert.deepEqual(inspections, [undefined, undefined]);
+  const materialization = { version: 2 as const, bindingId: '9'.repeat(64), candidateCommitSha: binding.candidateCommitSha, path: '/tmp/candidate' };
+  const result = await proof.admitReport({ ...input, materialization });
+  assert.equal(result.status, 'internal-error');
+  assert.equal(inspections.length, 2);
 });

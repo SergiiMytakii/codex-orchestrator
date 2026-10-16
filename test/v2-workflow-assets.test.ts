@@ -74,10 +74,10 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.equal(loaded.manifest.version, 2);
   if (loaded.manifest.version !== 2) return;
   assert.deepEqual(Object.keys(loaded.manifest.operations).sort(), [
-    'acceptance-proof', 'code-review', 'implementation',
+    'implementation',
   ]);
   assert.deepEqual(loaded.manifest.operations.implementation.dependencySkills, [
-    'diagnosing-bugs', 'tdd',
+    'acceptance-proof', 'diagnosing-bugs', 'tdd',
   ]);
   assert.equal(loaded.manifest.operations.implementation.sourceSkill, 'implement');
   for (const path of [
@@ -86,14 +86,17 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
     'docs/agents/confidence-rubric.md',
   ]) assert.equal(loaded.manifest.operations.implementation.files.includes(path), true, path);
   assert.deepEqual(loaded.manifest.skills['bug-root-cause-explainer'].dependencySkills, ['diagnosing-bugs']);
-  assert.equal(loaded.manifest.operations['code-review'].sourceSkill, 'code-review');
-  assert.deepEqual(loaded.manifest.operations['code-review'].reviewers, ['spec_reviewer', 'standards_reviewer']);
-  assert.equal(loaded.manifest.operations['code-review'].profile, 'review_coordinator');
+  assert.deepEqual(loaded.manifest.operations.implementation.reviewers, ['spec_reviewer', 'standards_reviewer']);
+  assert.equal(loaded.manifest.operations.implementation.profile, 'implementer');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/ui-evidence-proof/SKILL.md'), true);
+  for (const path of ['skills/acceptance-proof/tools/ios-lease.mjs',
+    'skills/flutter-android-debug/SKILL.md', 'skills/flutter-attach-session/SKILL.md', 'skills/flutter-ios-debug/SKILL.md']) {
+    assert.equal(loaded.manifest.operations.implementation.files.includes(path), true, path);
+  }
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
-    'implementer', 'review_coordinator', 'spec_reviewer', 'standards_reviewer',
+    'implementer', 'spec_reviewer', 'standards_reviewer',
   ]);
 });
 
@@ -108,6 +111,7 @@ test('workflow loader accepts all skill and resource binding reference forms', a
     '# Implementation operation fixture',
     '',
     'Use `$implement`.',
+    'Use `$acceptance-proof`.',
     'Use [TDD](<../../skills/tdd/SKILL.md#fit> "TDD title").',
     'Use `../../skills/diagnosing-bugs/SKILL.md#workflow`.',
     'Use `$ui-evidence-proof`.',
@@ -158,7 +162,7 @@ test('workflow loader and generation verifier fail closed on tamper and invalid 
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-negative-'));
   const runtimeRoot = join(root, 'runtime');
   const receipt = await materializeWorkflowGeneration({ packageRoot, runtimeRoot, packageVersion: '2.0.1', bootId: 'boot-a' });
-  const path = join(receipt.generationRoot, 'operations', 'code-review', 'SKILL.md');
+  const path = join(receipt.generationRoot, 'operations', 'implementation', 'SKILL.md');
   await chmod(path, 0o644);
   await writeFile(path, '# tampered\n');
   await chmod(path, 0o444);
@@ -229,7 +233,7 @@ test('workflow loader rejects canonically rehashed production closures missing b
   }
 });
 
-test('workflow loader accepts workflow-owned profiles and rejects non-canonical manifest bytes', async () => {
+test('workflow loader rejects owner profile rebinding and non-canonical manifest bytes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'workflow-assets-binding-'));
   const copiedPackage = join(root, 'package');
   await cp(join(packageRoot, 'internal-workflow'), join(copiedPackage, 'internal-workflow'), { recursive: true });
@@ -244,11 +248,25 @@ test('workflow loader accepts workflow-owned profiles and rejects non-canonical 
     .sort();
   rehashV2Manifest(rebound);
   await writeFile(path, `${canonicalJson(rebound)}\n`);
-  const loaded = await loadPackageWorkflow(copiedPackage);
-  assert.equal(loaded.manifest.operations.implementation.profile, 'standards_reviewer');
+  await assert.rejects(loadPackageWorkflow(copiedPackage), /operation binding/iu);
 
   await writeFile(path, `${JSON.stringify(original, null, 2)}\n`);
   await assert.rejects(loadPackageWorkflow(copiedPackage), /canonical/iu);
+});
+
+test('workflow loader requires both independent reviewer profiles on the implementation owner', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'workflow-assets-reviewer-binding-'));
+  const copiedPackage = join(root, 'package');
+  await cp(join(packageRoot, 'internal-workflow'), join(copiedPackage, 'internal-workflow'), { recursive: true });
+  const path = join(copiedPackage, 'internal-workflow', 'manifest.json');
+  const original = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+  for (const reviewers of [[], ['spec_reviewer'], ['implementer', 'spec_reviewer']]) {
+    const rebound = structuredClone(original);
+    rebound.operations.implementation.reviewers = reviewers;
+    rehashV2Manifest(rebound);
+    await writeFile(path, `${canonicalJson(rebound)}\n`);
+    await assert.rejects(loadPackageWorkflow(copiedPackage), /operation binding/iu);
+  }
 });
 
 test('workflow generation converges after publisher process death at every ready boundary', { timeout: 180_000 }, async () => {

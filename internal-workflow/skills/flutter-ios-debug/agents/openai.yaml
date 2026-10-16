@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flutter iOS Debug"
+  short_description: "Safely validate Flutter UI on iOS Simulator"
+  default_prompt: "Use $flutter-ios-debug to preserve any existing iOS Flutter session, verify its environment and owner, navigate the exact UI flow, and capture visual evidence without an unauthorized relaunch."

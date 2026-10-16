@@ -14,7 +14,7 @@ import {
   type ProofReportV1,
 } from '../src/v2/proof-report.js';
 import { decodeAgentReportForValidation, unwrapAgentReportEnvelope } from '../src/v2/report-envelope.js';
-import { codeReviewReportOutputSchema } from '../src/v2/code-review-report.js';
+import { COMPLETE_REVIEW_COVERAGE } from '../src/v2/code-review-report.js';
 
 const implementationBase = {
   version: 1 as const,
@@ -23,21 +23,6 @@ const implementationBase = {
   changedFiles: ['src/feature.ts'],
   residualRisks: [],
 };
-
-const completedImplementation: ImplementationReportV1 = {
-  ...implementationBase,
-  checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: 'a'.repeat(64) }],
-};
-
-test('package-owned and generated code-review schemas equal the runtime schema owner', async () => {
-  const expected = codeReviewReportOutputSchema();
-  for (const path of [
-    'scripts/runtime-workflow-overlays/schemas/code-review-v1.json',
-    'internal-workflow/schemas/code-review-v1.json',
-  ]) {
-    assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), expected, path);
-  }
-});
 
 const passedProof: ProofReportV1 = {
   version: 1,
@@ -72,6 +57,17 @@ const passedProof: ProofReportV1 = {
   ],
   findings: [],
   residualRisks: [],
+};
+
+const completedImplementation: ImplementationReportV1 = {
+  ...implementationBase,
+  proof: passedProof,
+  review: { summary: 'Spec and Standards approved.', trackedContentSha256: 'a'.repeat(64), untrackedContentSha256: 'b'.repeat(64),
+    coverage: [...COMPLETE_REVIEW_COVERAGE], reviewers: [
+      { role: 'spec_reviewer', sessionId: '019a0000-0000-7000-8000-000000000002', verdict: 'approve' },
+      { role: 'standards_reviewer', sessionId: '019a0000-0000-7000-8000-000000000003', verdict: 'approve' },
+    ] },
+  checks: [{ id: 'typecheck', command: 'npm run typecheck', status: 'passed', outputSha256: 'a'.repeat(64) }],
 };
 
 const visualProof: ProofReportV1 = {
@@ -255,11 +251,11 @@ test('completed implementation requires exact passing worker verification eviden
     { ...completedImplementation, checks: [{ ...check, command: '' }] },
     { ...completedImplementation, checks: [{ ...check, output: 'raw logs must remain worker-owned' }] },
   ]) {
-    assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: invalid }), false);
+    assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: generatedImplementationReport(invalid) }), false);
     assert.throws(() => validateImplementationReport(invalid));
   }
   const duplicated = { ...completedImplementation, checks: [check, { ...check }] };
-  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: duplicated }), true);
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: generatedImplementationReport(duplicated) }), true);
   assert.throws(() => validateImplementationReport(duplicated), /unique/u);
   assert.deepEqual(validateImplementationReport(completedImplementation), completedImplementation);
 });
@@ -312,11 +308,6 @@ test('agent output schemas use a Structured Outputs compatible root envelope', (
   assert.throws(() => unwrapAgentReportEnvelope({ report: completedImplementation, extra: true }), /report envelope/u);
 });
 
-test('checked-in proof workflow schema matches its TypeScript owner', async () => {
-  const checkedIn = JSON.parse(await readFile('scripts/runtime-workflow-overlays/schemas/proof-report-v1.json', 'utf8'));
-  assert.deepEqual(checkedIn, proofReportOutputSchema());
-});
-
 test('proof generation schema stays compact while runtime owns platform combinations', () => {
   const schema = proofReportOutputSchema();
   assert.ok(Buffer.byteLength(JSON.stringify(schema), 'utf8') < 25_000);
@@ -346,7 +337,7 @@ test('contained adapters preserve malformed report bytes for owner-level validat
 
 test('runtime validators enforce uniqueness omitted from the supported generation schema', () => {
   const duplicateImplementation = { ...completedImplementation, changedFiles: ['src/feature.ts', 'src/feature.ts'] };
-  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: duplicateImplementation }), true);
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: generatedImplementationReport(duplicateImplementation) }), true);
   assert.throws(() => validateImplementationReport(duplicateImplementation), /unique/u);
 
   const duplicateProof = {
@@ -359,7 +350,7 @@ test('runtime validators enforce uniqueness omitted from the supported generatio
 
 test('runtime validators enforce repository paths omitted from the supported generation regex subset', () => {
   const unsafeImplementation = { ...completedImplementation, changedFiles: ['../escape.ts'] };
-  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: unsafeImplementation }), true);
+  assert.equal(schemaAccepts(implementationReportOutputSchema(), { report: generatedImplementationReport(unsafeImplementation) }), true);
   assert.throws(() => validateImplementationReport(unsafeImplementation), /relative POSIX paths|dot-dot segments/u);
 
   const unsafeProof = {
@@ -373,7 +364,7 @@ test('runtime validators enforce repository paths omitted from the supported gen
 test('generation schemas reject absolute, backslash, and trailing-slash paths without lookaround', () => {
   for (const changedFile of ['/tmp/feature.ts', 'src\\feature.ts', 'src/feature/']) {
     assert.equal(schemaAccepts(implementationReportOutputSchema(), {
-      report: { ...completedImplementation, changedFiles: [changedFile] },
+      report: generatedImplementationReport({ ...completedImplementation, changedFiles: [changedFile] }),
     }), false);
   }
 });
@@ -527,7 +518,7 @@ function assertParity(
   validate: (value: unknown) => unknown,
 ): void {
   for (const fixture of fixtures) {
-    assert.equal(schemaAccepts(schema, { report: fixture.value }), fixture.accepted, `schema parity failed for ${JSON.stringify(fixture.value)}`);
+    assert.equal(schemaAccepts(schema, { report: generatedImplementationReport(fixture.value) }), fixture.accepted, `schema parity failed for ${JSON.stringify(fixture.value)}`);
     assert.equal(runtimeAccepts(validate, fixture.value), fixture.accepted, `runtime parity failed for ${JSON.stringify(fixture.value)}`);
   }
 }
@@ -544,6 +535,12 @@ function assertRuntimeContract(
     }
     assert.equal(runtimeAccepts(validate, fixture.value), fixture.accepted, `runtime contract failed for ${JSON.stringify(fixture.value)}`);
   }
+}
+
+function generatedImplementationReport(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const report = value as Record<string, unknown>;
+  return report.proof ? { ...report, proof: generatedProofReport(report.proof) } : report;
 }
 
 function generatedProofReport(value: unknown): unknown {

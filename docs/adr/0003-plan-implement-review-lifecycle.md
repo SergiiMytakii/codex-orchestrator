@@ -58,3 +58,21 @@ current findings and verdicts; Runner owns historical transitions. Report-format
 correction preserves completed independent review evidence. This replaces the
 separate-check ownership described above without adding a second lifecycle or
 cross-version execution compatibility path.
+
+## Single native owner amendment (2026-10-16)
+
+The user authorized completing the single-owner simplification. One native Codex
+session executes synchronized Implement, exact configured commands, acceptance
+evidence and independent Spec/Standards Review. Runner resumes its persisted UUID
+and admits one completion report; it no longer launches separate proof or Review
+coordinators or owns semantic finding/repair progression. The Agent retains those
+procedures through synchronized global skills, which this change does not edit.
+
+Runner retains authorization, process ownership and cleanup, candidate pins, exact
+command receipts, source/reviewer/evidence validation, device leases and durable
+fast-forward publication. Android preparation is a finite resource request against
+the checked candidate, followed by the same native session. Format correction is
+read-only; missing authority, failed checks, invalid evidence and candidate drift
+cannot authorize publication. Incompatible older operation generations stop for
+fresh trusted authorization before adopting the current generation. No prior
+review or proof is converted into new approval.

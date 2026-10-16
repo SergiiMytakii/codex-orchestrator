@@ -1,6 +1,8 @@
 import { posix } from 'node:path';
 
 import { agentReportEnvelopeSchema } from './report-envelope.js';
+import { COMPLETE_REVIEW_COVERAGE } from './code-review-report.js';
+import { passedProofReportOutputSchema, validateProofReport, type ProofReportV1 } from './proof-report.js';
 
 const MAX_STRING_LENGTH = 16 * 1024;
 const MAX_SUMMARY_LENGTH = 4 * 1024;
@@ -14,6 +16,17 @@ export interface ExternalBlocker {
   reviewerRejectionDetail?: string;
 }
 
+const SESSION_ID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const REVIEWER_ROLES = ['spec_reviewer', 'standards_reviewer'] as const;
+
+export interface ImplementationReviewV1 {
+  summary: string;
+  trackedContentSha256: string;
+  untrackedContentSha256: string;
+  coverage: string[];
+  reviewers: Array<{ role: typeof REVIEWER_ROLES[number]; sessionId: string; verdict: 'approve' }>;
+}
+
 export interface ImplementationCheck {
   id: string;
   command: string;
@@ -24,11 +37,13 @@ export interface ImplementationCheck {
 /** Verification belongs to the same worker that owns the source change. */
 export interface ImplementationReportV1 {
   version: 1;
-  status: 'completed' | 'external-block' | 'answer-only' | 'boundary';
+  status: 'completed' | 'android-proof-request' | 'external-block' | 'answer-only' | 'boundary';
   summary: string;
   changedFiles: string[];
   residualRisks: string[];
   checks?: ImplementationCheck[];
+  proof?: ProofReportV1;
+  review?: ImplementationReviewV1;
   blocker?: ExternalBlocker;
   response?: string;
   boundary?: { kind: 'decision-delta' | 'out-of-scope' | 'authority-boundary' };
@@ -36,10 +51,13 @@ export interface ImplementationReportV1 {
 
 export function validateImplementationReport(
   value: unknown,
-  context: { issueFeedbackActive?: boolean } = {},
+  context: { issueFeedbackActive?: boolean; ownerSessionId?: string } = {},
 ): ImplementationReportV1 {
   assertRecord(value, 'implementation report');
+  let normalizedProof: ProofReportV1 | undefined;
   if (value.status === 'completed') {
+    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks', 'proof', 'review'], 'implementation report');
+  } else if (value.status === 'android-proof-request') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'], 'implementation report');
   } else if (value.status === 'external-block') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'blocker'], 'implementation report');
@@ -56,7 +74,17 @@ export function validateImplementationReport(
   for (const file of value.changedFiles) assertRelativePath(file, 'implementation report.changedFiles');
   assertUnique(value.changedFiles, 'implementation report.changedFiles');
   assertStringArray(value.residualRisks, 'implementation report.residualRisks');
-  if (value.status === 'completed') validateImplementationChecks(value.checks);
+  if (value.status === 'android-proof-request') validateImplementationChecks(value.checks);
+  if (value.status === 'completed') {
+    validateImplementationChecks(value.checks);
+    assertRecord(value.proof, 'implementation report.proof');
+    const proof = { ...value.proof };
+    // Native Structured Outputs requires these optional proof fields as nullable keys.
+    for (const key of ['visualEvidence', 'blocker']) if (proof[key] === null) delete proof[key];
+    if (proof.status !== 'passed') throw new Error('completed implementation requires passed proof');
+    normalizedProof = validateProofReport(proof, value.checks.map((check) => check.id));
+    validateImplementationReview(value.review, context.ownerSessionId);
+  }
   if (value.status === 'completed' && value.changedFiles.length === 0) {
     throw new Error('completed implementation report requires changedFiles');
   }
@@ -77,7 +105,7 @@ export function validateImplementationReport(
   if ((value.status === 'answer-only' || value.status === 'boundary') && context.issueFeedbackActive !== true) {
     throw new Error(`${value.status} implementation report requires active issue feedback`);
   }
-  return value as unknown as ImplementationReportV1;
+  return structuredClone({ ...value, ...(normalizedProof ? { proof: normalizedProof } : {}) }) as unknown as ImplementationReportV1;
 }
 
 export function implementationReportOutputSchema(): Record<string, unknown> {
@@ -95,16 +123,29 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
       {
         type: 'object',
         additionalProperties: false,
-        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'],
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks', 'proof', 'review'],
         properties: {
           ...commonProperties,
           status: { type: 'string', const: 'completed' },
+          proof: passedProofReportOutputSchema(),
+          review: implementationReviewSchema(),
           checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: {
             type: 'object', additionalProperties: false, required: ['id', 'command', 'status', 'outputSha256'],
             properties: { id: boundedStringSchema(MAX_STRING_LENGTH), command: boundedStringSchema(MAX_STRING_LENGTH),
               status: { type: 'string', const: 'passed' }, outputSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' } },
           } },
           changedFiles: { ...commonProperties.changedFiles, minItems: 1 },
+        },
+      },
+      {
+        type: 'object', additionalProperties: false,
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'],
+        properties: { ...commonProperties, status: { type: 'string', const: 'android-proof-request' },
+          checks: { type: 'array', maxItems: MAX_ARRAY_LENGTH, items: {
+            type: 'object', additionalProperties: false, required: ['id', 'command', 'status', 'outputSha256'],
+            properties: { id: boundedStringSchema(MAX_STRING_LENGTH), command: boundedStringSchema(MAX_STRING_LENGTH),
+              status: { type: 'string', const: 'passed' }, outputSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' } },
+          } },
         },
       },
       {
@@ -283,4 +324,55 @@ export function validateImplementationChecks(value: unknown): asserts value is I
     if (ids.has(check.id)) throw new Error('implementation check ids must be unique');
     ids.add(check.id);
   }
+}
+
+export function validateImplementationReview(value: unknown, ownerSessionId?: string): asserts value is ImplementationReviewV1 {
+  const field = 'implementation report.review';
+  assertExactObject(value, ['summary', 'trackedContentSha256', 'untrackedContentSha256', 'coverage', 'reviewers'], field);
+  assertBoundedString(value.summary, `${field}.summary`, MAX_SUMMARY_LENGTH, true);
+  for (const key of ['trackedContentSha256', 'untrackedContentSha256']) {
+    if (typeof value[key] !== 'string' || !/^[0-9a-f]{64}$/u.test(value[key])) throw new Error(`${field}.${key} must be lowercase SHA-256`);
+  }
+  assertStringArray(value.coverage, `${field}.coverage`);
+  assertUnique(value.coverage, `${field}.coverage`);
+  if (value.coverage.length !== COMPLETE_REVIEW_COVERAGE.length
+    || value.coverage.some((category) => !(COMPLETE_REVIEW_COVERAGE as readonly string[]).includes(category))) {
+    throw new Error(`${field}.coverage requires every complete review category`);
+  }
+  if (!Array.isArray(value.reviewers) || value.reviewers.length !== 2) throw new Error(`${field} requires both independent reviewers`);
+  const roles: string[] = [];
+  const sessions: string[] = [];
+  for (const reviewer of value.reviewers) {
+    assertExactObject(reviewer, ['role', 'sessionId', 'verdict'], `${field}.reviewer`);
+    if (!REVIEWER_ROLES.includes(reviewer.role as typeof REVIEWER_ROLES[number]) || reviewer.verdict !== 'approve') {
+      throw new Error(`${field} requires approving Spec and Standards reviewers`);
+    }
+    if (typeof reviewer.sessionId !== 'string' || !new RegExp(SESSION_ID_PATTERN, 'u').test(reviewer.sessionId)) {
+      throw new Error(`${field}.reviewer.sessionId must be a canonical UUID`);
+    }
+    if (reviewer.sessionId === ownerSessionId) throw new Error(`${field} forbids owner self-review`);
+    roles.push(reviewer.role as string);
+    sessions.push(reviewer.sessionId);
+  }
+  assertUnique(roles, `${field} reviewer roles`);
+  assertUnique(sessions, `${field} reviewer sessions`);
+}
+
+function implementationReviewSchema(): Record<string, unknown> {
+  return {
+    type: 'object', additionalProperties: false,
+    required: ['summary', 'trackedContentSha256', 'untrackedContentSha256', 'coverage', 'reviewers'],
+    properties: {
+      summary: boundedStringSchema(MAX_SUMMARY_LENGTH),
+      trackedContentSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+      untrackedContentSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },
+      coverage: { type: 'array', minItems: COMPLETE_REVIEW_COVERAGE.length, maxItems: COMPLETE_REVIEW_COVERAGE.length,
+        items: { type: 'string', enum: [...COMPLETE_REVIEW_COVERAGE] } },
+      reviewers: { type: 'array', minItems: 2, maxItems: 2, items: {
+        type: 'object', additionalProperties: false, required: ['role', 'sessionId', 'verdict'],
+        properties: { role: { type: 'string', enum: [...REVIEWER_ROLES] },
+          sessionId: { type: 'string', pattern: SESSION_ID_PATTERN }, verdict: { type: 'string', const: 'approve' } },
+      } },
+    },
+  };
 }
