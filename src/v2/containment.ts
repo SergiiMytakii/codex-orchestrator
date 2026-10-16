@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
@@ -45,8 +46,20 @@ export function buildContainmentCodexArgs(input: {
     '--ignore-user-config',
     '--ignore-rules',
     '--skip-git-repo-check',
-    '--sandbox',
-    operationPolicy.sandboxMode,
+    ...(operationPolicy.network === 'loopback' ? [
+      '-c', 'default_permissions="orchestrator-worktree"',
+      '-c', 'permissions.orchestrator-worktree.extends=":workspace"',
+      '-c', `permissions.orchestrator-worktree.workspace_roots={${tomlString(input.toolHome)}=true,${tomlString(input.tmpDir)}=true}`,
+      '-c', 'features.network_proxy=true',
+      '-c', 'permissions.orchestrator-worktree.network.enabled=true',
+      '-c', 'permissions.orchestrator-worktree.network.allow_local_binding=true',
+      '-c', 'permissions.orchestrator-worktree.network.domains={"127.0.0.1"="allow","::1"="allow","localhost"="allow"}',
+      '-c', 'permissions.orchestrator-worktree.network.proxy_url="http://127.0.0.1:0"',
+      '-c', 'permissions.orchestrator-worktree.network.socks_url="http://127.0.0.1:0"',
+      '-c', `shell_environment_policy.set.PLAYWRIGHT_MODULE_PATH=${tomlString(createRequire(import.meta.url).resolve('playwright-core'))}`,
+      '-c', `shell_environment_policy.set.PLAYWRIGHT_BROWSERS_PATH=${tomlString(join(homedir(), process.platform === 'darwin' ? 'Library/Caches/ms-playwright' : process.platform === 'win32' ? 'AppData/Local/ms-playwright' : '.cache/ms-playwright'))}`,
+      '-c', `shell_environment_policy.set.PLAYWRIGHT_CHROMIUM_ARGS=${tomlString(JSON.stringify(process.platform === 'darwin' ? ['--single-process', '--no-zygote', '--in-process-gpu', '--disable-gpu'] : []))}`,
+    ] : ['--sandbox', operationPolicy.sandboxMode, '-c', 'sandbox_workspace_write.network_access=false']),
     '--output-schema',
     input.schemaPath,
     '--output-last-message',
@@ -59,8 +72,6 @@ export function buildContainmentCodexArgs(input: {
     'web_search="disabled"',
     '-c',
     'features.apps=false',
-    '-c',
-    'sandbox_workspace_write.network_access=false',
     ...(input.executionProfile ? [
       '-c', `model=${tomlString(input.executionProfile.model)}`,
       '-c', `model_reasoning_effort=${tomlString(input.executionProfile.reasoningEffort)}`,
@@ -91,10 +102,13 @@ export function buildContainmentCodexArgs(input: {
 }
 
 export function validateContainmentOperationPolicy(policy: WorkflowOperationPolicy): void {
+  const networkAllowed = policy.network === 'deny' && policy.networkHosts.length === 0
+    || policy.network === 'loopback' && policy.sandboxMode === 'workspace-write'
+      && policy.networkHosts.join(',') === '127.0.0.1,::1,localhost';
   if (!['read-only', 'workspace-write'].includes(policy.sandboxMode)
     || policy.cwdClass !== 'worktree'
     || !['read-only', 'write'].includes(policy.worktreeAccess)
-    || policy.network !== 'deny' || policy.networkHosts.length !== 0 || policy.mcpTools.length !== 0
+    || !networkAllowed || policy.mcpTools.length !== 0
     || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) {
     throw new Error('operation policy exceeds containment authority');
   }

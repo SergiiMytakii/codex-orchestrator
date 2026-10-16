@@ -746,9 +746,12 @@ function validateClosure(files, physical, field) {
 
 function validateGeneratedPolicy(policy, id) {
   assertExactKeys(policy, ['sandboxMode', 'cwdClass', 'worktreeAccess', 'writableRootClasses', 'runnerPostcondition', 'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite']);
+  const networkAllowed = policy.network === 'deny' && Array.isArray(policy.networkHosts) && policy.networkHosts.length === 0
+    || id !== 'code-review' && policy.network === 'loopback' && Array.isArray(policy.networkHosts)
+      && policy.networkHosts.join(',') === '127.0.0.1,::1,localhost';
   if (!['read-only', 'workspace-write'].includes(policy.sandboxMode) || policy.cwdClass !== 'worktree'
     || !['read-only', 'write'].includes(policy.worktreeAccess) || !Array.isArray(policy.writableRootClasses)
-    || policy.network !== 'deny' || !Array.isArray(policy.networkHosts) || policy.networkHosts.length !== 0
+    || !networkAllowed
     || !Array.isArray(policy.mcpTools) || policy.mcpTools.length !== 0 || policy.approvalCeiling !== 'never' || policy.externalWrite !== false) {
     throw new Error(`Workflow operation authority is invalid: ${id}`);
   }

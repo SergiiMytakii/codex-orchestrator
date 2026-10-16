@@ -13,7 +13,8 @@
     "tdd",
     "implement-spec",
     "to-spec",
-    "to-tickets"
+    "to-tickets",
+    "ui-evidence-proof"
   ],
   "repositorySkills": ["acceptance-proof"],
   "skillDependencies": {
@@ -57,8 +58,8 @@
         "worktreeAccess": "write",
         "writableRootClasses": ["worktree"],
         "runnerPostcondition": "proof-only",
-        "network": "deny",
-        "networkHosts": [],
+        "network": "loopback",
+        "networkHosts": ["127.0.0.1", "::1", "localhost"],
         "mcpTools": [],
         "approvalCeiling": "never",
         "externalWrite": false
@@ -103,8 +104,8 @@
         "worktreeAccess": "write",
         "writableRootClasses": ["worktree"],
         "runnerPostcondition": "change-set",
-        "network": "deny",
-        "networkHosts": [],
+        "network": "loopback",
+        "networkHosts": ["127.0.0.1", "::1", "localhost"],
         "mcpTools": [],
         "approvalCeiling": "never",
         "externalWrite": false

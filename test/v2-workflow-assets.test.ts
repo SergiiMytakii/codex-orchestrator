@@ -90,6 +90,7 @@ test('workflow V2 binds the minimal coding flow and keeps static scenarios out o
   assert.deepEqual(loaded.manifest.operations['code-review'].reviewers, ['spec_reviewer', 'standards_reviewer']);
   assert.equal(loaded.manifest.operations['code-review'].profile, 'review_coordinator');
   assert.equal(loaded.manifest.operations.implementation.files.includes('skills/tdd/SKILL.md'), true);
+  assert.equal(loaded.manifest.operations.implementation.files.includes('skills/ui-evidence-proof/SKILL.md'), true);
   assert.equal(loaded.manifest.operations.implementation.files.some((path) => path.includes('/evals/')), false);
   assert.deepEqual(Object.keys(loaded.manifest.profiles).sort(), [
     'implementer', 'review_coordinator', 'spec_reviewer', 'standards_reviewer',
@@ -109,6 +110,7 @@ test('workflow loader accepts all skill and resource binding reference forms', a
     'Use `$implement`.',
     'Use [TDD](<../../skills/tdd/SKILL.md#fit> "TDD title").',
     'Use `../../skills/diagnosing-bugs/SKILL.md#workflow`.',
+    'Use `$ui-evidence-proof`.',
     'Apply `$CODEX_ORCHESTRATOR_WORKFLOW_ROOT/docs/agents/bug-workflow-routing.md#fixes`.',
     'Apply [coding routing](<../../docs/agents/coding-skill-routing.md#flow> "Routing title").',
     'Apply `../../docs/agents/tool-usage.md#tools`.',

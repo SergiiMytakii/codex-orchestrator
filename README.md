@@ -20,6 +20,17 @@ Ordinary technical choices do not stop the run. A human question is reserved for
 
 The target path passed to every command must be absolute.
 
+For browser verification, install the headless Chromium version required by the
+package's Playwright SDK once on the Runner host:
+
+```sh
+npx --no-install playwright-core install chromium --only-shell
+```
+
+Implementation/proof workers can bind and reach loopback services only. Runner
+passes the matching SDK, browser cache and macOS sandbox launch arguments to the
+worker; Review remains read-only without network access.
+
 ## Quick start
 
 Install the package in the repository you want to automate:
@@ -116,6 +127,8 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 ```
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
+
+An external blocker stops until renewed GitHub authorization; ordinary polling does not relaunch a worker against the same unavailable environment.
 
 Technical Acceptance Proof failures resume on the next ordinary call for the same candidate. Ambiguous legacy internal failures remain stopped. To explicitly retry an eligible legacy proof failure, supply its exact durable run ID:
 

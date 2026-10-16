@@ -44,7 +44,7 @@ export interface WorkflowOperationPolicy {
   worktreeAccess: 'read-only' | 'write';
   writableRootClasses: Array<'worktree'>;
   runnerPostcondition: 'report-only' | 'change-set' | 'proof-only';
-  network: 'deny';
+  network: 'deny' | 'loopback';
   networkHosts: string[];
   mcpTools: string[];
   approvalCeiling: 'never';
@@ -105,7 +105,8 @@ export function parseWorkflowExecutionProfile(text: string, policy: WorkflowOper
   const name = scalar('name');
   const model = scalar('model');
   const reasoningEffort = scalar('model_reasoning_effort');
-  const sandboxMode = scalar('sandbox_mode');
+  const sandboxMode = scalar('sandbox_mode')
+    ?? (scalar('default_permissions') === 'orchestrator-worktree' && policy.network === 'loopback' ? 'workspace-write' : undefined);
   if (!name || !model || !/^[a-z0-9._-]+$/u.test(model)
     || !['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(reasoningEffort ?? '')
     || !['read-only', 'workspace-write'].includes(sandboxMode ?? '') || !instructions) {
@@ -776,7 +777,10 @@ function validateOperationPolicy(id: string, value: Record<string, unknown>): vo
     'sandboxMode', 'cwdClass', 'worktreeAccess', 'writableRootClasses', 'runnerPostcondition',
     'network', 'networkHosts', 'mcpTools', 'approvalCeiling', 'externalWrite',
   ]);
-  if (value.network !== 'deny' || !Array.isArray(value.networkHosts) || value.networkHosts.length !== 0
+  const networkAllowed = value.network === 'deny' && Array.isArray(value.networkHosts) && value.networkHosts.length === 0
+    || id !== 'code-review' && value.network === 'loopback' && Array.isArray(value.networkHosts)
+      && value.networkHosts.join(',') === '127.0.0.1,::1,localhost';
+  if (!networkAllowed
     || !Array.isArray(value.mcpTools) || value.mcpTools.length !== 0 || value.approvalCeiling !== 'never'
     || value.externalWrite !== false) throw new Error(`workflow operation authority is invalid: ${id}`);
   const expected = id === 'implementation'

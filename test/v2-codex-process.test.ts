@@ -58,6 +58,24 @@ test('builds the exact contained argv and allowlisted process environment withou
   });
 });
 
+test('local verification uses native workspace permissions with only loopback destinations', () => {
+  const args = buildContainmentCodexArgs({
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    operationPolicy: { ...defaultContainmentOperationPolicy(), network: 'loopback', networkHosts: ['127.0.0.1', '::1', 'localhost'] },
+  });
+  assert.equal(args.includes('--sandbox'), false);
+  assert.ok(args.includes('features.network_proxy=true'));
+  assert.ok(args.includes('permissions.orchestrator-worktree.extends=":workspace"'));
+  assert.ok(args.includes('permissions.orchestrator-worktree.network.allow_local_binding=true'));
+  assert.ok(args.includes('permissions.orchestrator-worktree.network.domains={"127.0.0.1"="allow","::1"="allow","localhost"="allow"}'));
+  assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes('shell_environment_policy.set.GITHUB_TOKEN=""'));
+  assert.throws(() => buildContainmentCodexArgs({
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    operationPolicy: { ...defaultContainmentOperationPolicy(), network: 'loopback', networkHosts: ['example.com'] },
+  }), /containment authority/u);
+});
+
 test('live smoke default-model mode leaves model selection to Codex', async () => {
   await withRunFixture(async (fixture) => {
     let captured: SpawnSpec | undefined;

@@ -6,6 +6,13 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Permit isolated local build and browser verification through native loopback-only
+  permissions; supply the packaged Playwright SDK and macOS sandbox launch settings.
+- Synchronize the global UI proof skill into implementation attempts.
+- Stop polling retries for external implementation/proof blockers. Retain transport
+  recovery and require renewed authorization after environment repair.
+
 ## [2.0.30] - 2026-10-16
 
 ### Fixed

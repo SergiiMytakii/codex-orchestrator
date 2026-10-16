@@ -23,6 +23,7 @@ import {
   canonicalJson,
   parseJsonWithoutDuplicateKeys,
   sha256,
+  validateContainmentOperationPolicy,
 } from './containment.js';
 import { acquireOwnerControlLock, OwnerControlLockBlockedError, inspectProcessIdentity, readProcessStartIdentity, type OwnerControlLockHandle } from './owner-control-lock.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
@@ -1924,6 +1925,7 @@ async function prepareContainedAttempt(input: {
     bootId: input.bootId,
   });
   const reportOnly = input.operationId === 'code-review';
+  validateContainmentOperationPolicy(snapshot.policy);
   if ((reportOnly
     ? snapshot.policy.sandboxMode !== 'read-only'
       || snapshot.policy.worktreeAccess !== 'read-only'
@@ -1931,8 +1933,6 @@ async function prepareContainedAttempt(input: {
       || snapshot.policy.writableRootClasses.length !== 0
     : snapshot.policy.sandboxMode !== 'workspace-write')
     || snapshot.policy.approvalCeiling !== 'never'
-    || snapshot.policy.network !== 'deny'
-    || snapshot.policy.networkHosts.length !== 0
     || snapshot.policy.mcpTools.length !== 0
     || snapshot.policy.externalWrite !== false) {
     throw new Error(`workflow operation policy exceeds containment: ${input.operationId}`);
@@ -2073,7 +2073,7 @@ export async function hasTechnicalLegacyProofFailure(input: { targetRoot: string
 }
 
 function reportOnlyPolicy(policy: WorkflowOperationPolicy): WorkflowOperationPolicy {
-  return { ...policy, sandboxMode: 'read-only', worktreeAccess: 'read-only', writableRootClasses: [], runnerPostcondition: 'report-only' };
+  return { ...policy, sandboxMode: 'read-only', worktreeAccess: 'read-only', writableRootClasses: [], runnerPostcondition: 'report-only', network: 'deny', networkHosts: [] };
 }
 
 function reportCorrectionPrompt(correction: { sha256: string; diagnostic: string }): string {

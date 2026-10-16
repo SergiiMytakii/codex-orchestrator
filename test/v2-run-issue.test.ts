@@ -108,6 +108,26 @@ for (const invalid of ['missing', 'failed', 'duplicate', 'wrong-command', 'missi
   });
 }
 
+test('resumable external proof blockers stop until reauthorization instead of relaunching the owner', async () => {
+  const blocker = {
+    kind: 'tool' as const, summary: 'Local browser proof is unavailable.',
+    attempted: ['Start the isolated local browser'], resumable: true,
+  };
+  const fixture = await runFixture({ implementationResult: { kind: 'completed', report: {
+    version: 1, status: 'external-block', summary: blocker.summary, changedFiles: [], residualRisks: [], blocker,
+  } } });
+  const stopped = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(pick(stopped, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'external', resumable: true });
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.equal(calls, 1);
+  const replay = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.deepEqual(replay, stopped);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+  assert.equal((await fixture.store.read()).runs[0]!.transportRetries, 0);
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal(fixture.events.includes('effect:pr'), false);
+});
+
 test('worker failed verification remains a typed blocker without false success', async () => {
   const blocker = {
     kind: 'tool' as const, summary: 'Configured typecheck failed after the implementation repair.',
@@ -2974,7 +2994,7 @@ test('authority blocker outcome evidence replays exact detail after the terminal
   }
 });
 
-test('temporary proof service unavailability resumes the same Run without duplicate implementation or publication', async () => {
+test('external proof service blocker waits for renewed authority and resumes the same Run without duplicate implementation or publication', async () => {
   let proofCalls = 0;
   const fixture = await runFixture({
     proof: async () => {
@@ -2987,17 +3007,30 @@ test('temporary proof service unavailability resumes the same Run without duplic
     },
   });
   const deferred = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
-  assert.deepEqual(pick(deferred, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.deepEqual(pick(deferred, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'external', resumable: true });
   const paused = (await fixture.store.read()).runs[0]!;
-  assert.equal(paused.terminalOutcome, undefined);
-  assert.equal(paused.lifecycle, 'proving');
+  assert.equal(paused.terminalOutcome?.status, 'blocked');
+  assert.equal(paused.lifecycle, 'blocked');
   assert.equal(fixture.events.at(-1), 'owner-release');
+
+  assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'blocked');
+  assert.equal(proofCalls, 1);
+  fixture.dependencies.issues.isReauthorized = async () => true;
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
 
   const resumed = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
   assert.equal(resumed.status, 'review-ready', JSON.stringify({ resumed, state: await fixture.store.read(), events: fixture.events }));
   assert.equal(fixture.events.filter((event) => event === 'agent').length, 1);
   assert.equal(fixture.events.filter((event) => event === 'proof').length, 2);
   assert.equal(fixture.events.filter((event) => event === 'git:push').length, 1);
+  const final = (await fixture.store.read()).runs;
+  assert.equal(final.length, 1);
+  assert.equal(final[0]!.runId, paused.runId);
+  for (const payload of fixture.checkedChangePayloads) {
+    assert.equal(payload.version, 2);
+    if (payload.version !== 2) throw new Error('Expected immutable candidate proof');
+    assert.deepEqual(payload.binding, paused.candidateBinding);
+  }
 });
 
 test('mobile cleanup failure retains the proof materialization and resumes cleanup before Review', async () => {

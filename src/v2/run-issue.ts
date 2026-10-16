@@ -1697,15 +1697,6 @@ export class RunIssue {
           error instanceof Error ? error.message : 'Implementation report is invalid.');
       }
       if (report.status === 'external-block') {
-        if (report.blocker!.resumable) {
-          if (isAdoptableAttempt(active.record.activeAttempt)) {
-            active = await this.adoptAttempt(active, sha256(canonicalJson(report)), {
-              transportRetries: active.record.transportRetries + 1,
-            });
-          }
-          active = await this.clearAttempt(active);
-          return this.invokedFailure(active, 'implementation-external-block-retryable', report.blocker!.summary);
-        }
         return await this.terminal(active, implementationBlockerOutcome(report.blocker!));
       }
       if (report.status === 'answer-only' || report.status === 'boundary') {
@@ -3462,14 +3453,6 @@ export class RunIssue {
   private async mapProofFailure(active: ActiveRun, proof: Exclude<ProveChangeResult, { status: 'passed' }>): Promise<RunIssueResult> {
     if (proof.status === 'needs-rework') return this.terminal(active, { status: 'internal-error', code: 'proof-rework-loop-not-yet-implemented' });
     if (proof.status === 'external-block') {
-      if (proof.blocker.resumable) {
-        const proofExecution = active.record.proofExecution;
-        if (proofExecution) active = await this.persist(active, { proofExecution: {
-          ...proofExecution,
-          transportRetryCount: proofExecution.transportRetryCount + 1,
-        } });
-        return this.invokedFailure(active, 'acceptance-proof-external-block-retryable', proof.blocker.summary);
-      }
       return this.terminal(active, implementationBlockerOutcome(proof.blocker));
     }
     if (proof.status === 'transport-failed') return this.terminal(active, { status: 'transport-failed', resumable: proof.resumable });
