@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.31] - 2026-10-16
+
 ### Fixed
 - Permit isolated local build and browser verification through native loopback-only
   permissions; supply the packaged Playwright SDK and macOS sandbox launch settings.
