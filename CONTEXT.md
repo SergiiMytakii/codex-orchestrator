@@ -46,7 +46,7 @@ targeted Review of their delta and direct impact cone while untouched approval i
 ## Relationships
 
 - The Runner chooses an Eligible Issue and owns its Run.
-- The Agent owns implementation, checks, Acceptance Proof and independent Review; the Runner admits the unchanged result and publishes.
+- The Agent owns implementation, verification decisions, Acceptance Proof and independent Review. With explicit `runner.checkExecution: "host"`, Runner executes configured checks and resumes that same Agent before proof and Review; otherwise the Agent executes them in its sandbox. Runner admits the unchanged result and publishes.
 - Checks create a Checked Change; Acceptance Proof can accept only that unchanged binding.
 - Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
   shared Codex auth and same-user local reads remain an accepted local risk.

@@ -1,7 +1,7 @@
-import { lstat, realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { access, lstat, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 
-import { canonicalJson } from './containment.js';
 import { parseAgentAutoConfig, type AgentAutoConfig } from './config.js';
 import { SetupStore } from './setup-store.js';
 
@@ -11,6 +11,7 @@ export interface SetupIntent {
   targetRoot: string;
   operation: SetupOperation;
   dryRun: boolean;
+  flutterSdk?: string;
   repository?: { owner: string; repo: string };
 }
 
@@ -58,6 +59,7 @@ export interface SetupDependencies {
     acquire(repository: { owner: string; repo: string }): Promise<{ release(): Promise<void> }>;
     inspectOwner(repository: { owner: string; repo: string }): Promise<{ status: 'absent' | 'inactive' | 'active' | 'ambiguous'; reason?: string }>;
   };
+  flutterSdk?: { verifyVersion(executable: string): Promise<void> };
   now?: () => string;
 }
 
@@ -97,7 +99,8 @@ export class Setup {
         return await this.inspect(targetRoot, observed.repository);
       }
       return { status: 'unsupported-schema', reason: 'Setup operation is unsupported.' };
-    } catch {
+    } catch (error) {
+      if (error instanceof FlutterSdkError) return { status: 'io-failed', detail: failure('flutter-sdk', error.message) };
       return { status: 'io-failed', detail: failure('setup-operation', 'Setup operation could not complete safely.') };
     }
   }
@@ -121,7 +124,7 @@ export class Setup {
       }
       return { status: 'unchanged' };
     }
-    const config = await defaultConfig(targetRoot, repository, baseBranch, this.store);
+    const config = await defaultConfig(targetRoot, repository, baseBranch, this.store, await this.flutterExecutable(intent));
     const currentIgnore = await this.store.readOptional(resolve(targetRoot, IGNORE_PATH));
     const nextIgnore = renderIgnore(currentIgnore?.toString('utf8') ?? '', config);
     const actions: SetupAction[] = [];
@@ -142,13 +145,35 @@ export class Setup {
         }
       }
       if (nextIgnore.changed) await this.store.writeAtomic(resolve(targetRoot, IGNORE_PATH), nextIgnore.bytes, 0o644);
-      await this.store.writeAtomic(resolve(targetRoot, CONFIG_PATH), `${canonicalJson(config)}\n`, 0o644);
+      await this.store.writeAtomic(resolve(targetRoot, CONFIG_PATH), `${JSON.stringify(config)}\n`, 0o644);
       return { status: 'created' };
     } catch {
       return { status: 'io-failed', detail: failure('configure-write', 'Setup could not durably commit target configuration.') };
     } finally {
       await lock.release();
     }
+  }
+
+  private async flutterExecutable(intent: SetupIntent): Promise<string | undefined> {
+    if (!intent.flutterSdk) return undefined;
+    if (!isAbsolute(intent.flutterSdk)) throw new FlutterSdkError('Flutter SDK root must be an absolute path.');
+    const executable = resolve(intent.flutterSdk, 'bin', 'flutter');
+    try {
+      if (!(await stat(executable)).isFile()) throw new Error('not a file');
+      await access(executable, constants.X_OK);
+    } catch {
+      throw new FlutterSdkError('Flutter SDK root must contain an executable bin/flutter.');
+    }
+    // Flutter --version can update SDK caches, so dry-run checks only the executable.
+    if (!intent.dryRun) {
+      try {
+        if (!this.dependencies.flutterSdk) throw new Error('SDK validation is unavailable');
+        await this.dependencies.flutterSdk.verifyVersion(executable);
+      } catch {
+        throw new FlutterSdkError('Flutter SDK validation failed: bin/flutter --version must succeed.');
+      }
+    }
+    return executable;
   }
 
   private async prepareLabels(
@@ -168,8 +193,11 @@ export class Setup {
         return { status: 'repository-mismatch', reason: 'Persisted repository does not match target origin.' };
       }
     } else {
-      try { config = await defaultConfig(targetRoot, repository, baseBranch, this.store); }
-      catch { return { status: 'io-failed', detail: failure('config-plan', 'Setup could not derive deterministic configuration.') }; }
+      try { config = await defaultConfig(targetRoot, repository, baseBranch, this.store, await this.flutterExecutable(intent)); }
+      catch (error) {
+        if (error instanceof FlutterSdkError) return { status: 'io-failed', detail: failure('flutter-sdk', error.message) };
+        return { status: 'io-failed', detail: failure('config-plan', 'Setup could not derive deterministic configuration.') };
+      }
       nextIgnore = renderIgnore((await this.store.readOptional(resolve(targetRoot, IGNORE_PATH)))?.toString('utf8') ?? '', config);
       if (nextIgnore.changed) localActions.push({ kind: 'write-ignore', path: IGNORE_PATH });
       localActions.push({ kind: 'write-config', path: CONFIG_PATH });
@@ -196,7 +224,7 @@ export class Setup {
           } catch { return unsupportedConfig(); }
         } else {
           if (nextIgnore?.changed) await this.store.writeAtomic(resolve(targetRoot, IGNORE_PATH), nextIgnore.bytes, 0o644);
-          await this.store.writeAtomic(resolve(targetRoot, CONFIG_PATH), `${canonicalJson(config)}\n`, 0o644);
+          await this.store.writeAtomic(resolve(targetRoot, CONFIG_PATH), `${JSON.stringify(config)}\n`, 0o644);
         }
       }
       for (const [index, label] of missing.entries()) {
@@ -301,6 +329,7 @@ async function defaultConfig(
   repository: { owner: string; repo: string },
   baseBranch: string,
   store: SetupStore,
+  flutterExecutable?: string,
 ): Promise<AgentAutoConfig> {
   const packageJson = await store.readOptional(resolve(targetRoot, 'package.json'));
   let scripts: Record<string, unknown> = {};
@@ -315,6 +344,12 @@ async function defaultConfig(
   const checks: Record<string, string> = {};
   if (typeof scripts.test === 'string') checks.test = 'npm test';
   if (typeof scripts.typecheck === 'string') checks.typecheck = 'npm run typecheck';
+  if (flutterExecutable) {
+    const flutter = `'${flutterExecutable.replaceAll("'", "'\"'\"'")}'`;
+    checks['flutter-pub-get'] = `${flutter} pub get --enforce-lockfile`;
+    checks['flutter-analyze'] = `${flutter} analyze --no-pub --no-fatal-infos`;
+    checks['flutter-test'] = `${flutter} test --no-pub`;
+  }
   return parseAgentAutoConfig({
     schema: 'codex-orchestrator.agent-auto',
     version: 2,
@@ -334,6 +369,7 @@ async function defaultConfig(
       stateDir: '.codex-orchestrator/v2/state',
       branchTemplate: 'codex/issue-${issueNumber}',
       pollIntervalSeconds: 60,
+      ...(flutterExecutable ? { checkExecution: 'host' } : {}),
     },
     codex: {
       command: 'codex', timeoutMs: 900_000, idleTimeoutMs: 300_000, toolNetwork: 'deny',
@@ -358,6 +394,8 @@ function renderIgnore(current: string, config: AgentAutoConfig): { changed: bool
   return { changed: true, bytes: `${prefix}${IGNORE_START}\n${entries.join('\n')}\n${IGNORE_END}\n` };
 }
 
+class FlutterSdkError extends Error {}
+
 function unsupportedConfig(): SetupOutcome {
   return { status: 'unsupported-schema', reason: 'Configuration schema is unsupported or unreadable.' };
 }
@@ -372,6 +410,8 @@ function isIntent(value: SetupIntent): boolean {
   return typeof value?.targetRoot === 'string' && value.targetRoot.length > 0
     && ['configure', 'prepare-labels', 'doctor', 'status'].includes(value.operation)
     && typeof value.dryRun === 'boolean'
+    && (value.flutterSdk === undefined || (typeof value.flutterSdk === 'string' && value.flutterSdk.length > 0
+      && (value.operation === 'configure' || value.operation === 'prepare-labels')))
     && (value.repository === undefined || (typeof value.repository.owner === 'string' && value.repository.owner.length > 0
       && typeof value.repository.repo === 'string' && value.repository.repo.length > 0));
 }

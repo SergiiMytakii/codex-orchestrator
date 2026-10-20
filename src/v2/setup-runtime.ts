@@ -7,11 +7,13 @@ import { hostname } from 'node:os';
 
 import { acquireOwnerControlLock, inspectOwnerControlLock } from './owner-control-lock.js';
 import { Setup, type SetupDependencies } from './setup.js';
+import { buildHostCheckEnvironment } from './runner-checks.js';
 
 const githubCommand = githubExecutor(defaultGhExecutor);
 
 export function createProductionSetup(input: { orchestratorHome: string; bootId: string }): Setup {
   const dependencies: SetupDependencies = {
+    flutterSdk: { verifyVersion: async (executable) => { await command(executable, ['--version'], buildHostCheckEnvironment(process.env)); } },
     repository: {
       inspect: inspectRepository,
     },
@@ -80,8 +82,8 @@ function parseLabel(value: unknown): { name: string } {
   return { name: (value as { name: string }).name };
 }
 
-async function command(file: string, args: string[]): Promise<string> {
-  const result = await defaultProcessExecutor(file, args, { timeoutMs: 30_000, maxOutputBytes: 8 * 1024 * 1024 });
+async function command(file: string, args: string[], env?: Record<string, string>): Promise<string> {
+  const result = await defaultProcessExecutor(file, args, { timeoutMs: 30_000, maxOutputBytes: 8 * 1024 * 1024, ...(env ? { env } : {}) });
   if (result.exitCode !== 0) throw new Error(`${file} command failed: ${result.stderr.trim()}`);
   return result.stdout;
 }

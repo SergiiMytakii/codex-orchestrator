@@ -1,3 +1,4 @@
+import { runConfiguredChecks } from '../src/v2/runner-checks.js';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
@@ -37,6 +38,97 @@ import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinat
 import { mkdtemp } from './mission-test-temp.js';
 
 const execFileAsync = promisify(execFile);
+
+test('host checks run before proof and resume the same owner with trusted receipts', async () => {
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf host-passed' },
+    implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request',
+      summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+  const requested = (await fixture.store.read()).runs[0]!;
+  assert.equal(requested.runnerChecks?.status, 'complete');
+  assert.equal(requested.runnerChecks?.results[0]?.exitCode, 0);
+  assert.equal(await readFile(requested.runnerChecks!.results[0]!.logPath, 'utf8'), 'host-passed');
+  assert.equal(fixture.events.includes('proof:admission'), false);
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+  assert.deepEqual((await fixture.store.read()).runs[0]!.codexSession, requested.codexSession);
+});
+
+test('host mode rejects worker-only receipts without trusted command execution', async () => {
+  const fixture = await runFixture({ hostChecks: true });
+  const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });
+  assert.equal(result.status, 'blocked');
+  assert.ok('evidencePath' in result);
+  assert.match(await readFile(resolve(fixture.targetRoot, result.evidencePath!), 'utf8'), /runner-checks-evidence-mismatch/);
+  assert.equal(fixture.events.includes('git:push'), false);
+});
+
+for (const failure of ['failed-command', 'source-drift', 'policy-drift', 'forged-output', 'interrupted'] as const) {
+  test(`host evidence rejects ${failure} before publication`, async () => {
+    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: failure === 'failed-command' ? 'exit 9' : 'printf host-passed' },
+      implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+    if (failure === 'source-drift') {
+      fixture.options.agentWrites = false;
+      await writeFile(join(fixture.worktreePath, 'feature.txt'), 'source changed after host checks');
+    }
+    if (failure === 'policy-drift') (await fixture.dependencies.readConfig(fixture.targetRoot)).config.checks.test = 'printf different-policy';
+    if (failure === 'forged-output') {
+      const implement = fixture.dependencies.implementationAgent.run;
+      fixture.dependencies.implementationAgent.run = async request => {
+        const r = await implement(request);
+        if (r.kind === 'completed') (r.report as any).checks[0].outputSha256 = sha256('invented output');
+        return r;
+      };
+    }
+    if (failure === 'interrupted') {
+      const state = await fixture.store.read();
+      state.runs[0]!.runnerChecks = { ...state.runs[0]!.runnerChecks!, status: 'pending', results: [] };
+      await fixture.store.compareAndSwap(state.generation, { schema: state.schema, runs: state.runs });
+      fixture.dependencies.configuredChecks!.run = async () => { throw new Error('must never replay interrupted host action'); };
+    }
+    assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+    assert.equal(fixture.events.includes('proof:admission'), false);
+    assert.equal(fixture.events.includes('git:push'), false);
+  });
+}
+
+test('explicit host check request can retry unchanged source after environment repair', async () => {
+  const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Check source', changedFiles: ['feature.txt'], residualRisks: [] } };
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'test -f ../environment-ready' },
+    implementationResults: [structuredClone(request), structuredClone(request)] });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  const first = (await fixture.store.read()).runs[0]!.runnerChecks!;
+  assert.equal(first.results[0]!.exitCode, 1);
+  await writeFile(join(dirname(fixture.worktreePath), 'environment-ready'), 'ready');
+  await fixture.runner.runIssue(input);
+  const second = (await fixture.store.read()).runs[0]!.runnerChecks!;
+  assert.equal(second.sourceSha256, first.sourceSha256);
+  assert.equal(second.results[0]!.exitCode, 0);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+});
+
+test('corrected host request clears report-only recovery before proof and Review', async () => {
+  const request = { kind: 'completed' as const, report: { version: 1, status: 'checks-request', summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } };
+  const malformed = structuredClone(request) as any;
+  delete malformed.report.residualRisks;
+  const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'printf passed' },
+    implementationResults: [malformed, request] });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  await fixture.runner.runIssue(input);
+  assert.ok((await fixture.store.read()).runs[0]!.implementationReportCorrection);
+  await fixture.runner.runIssue(input);
+  assert.equal((await fixture.store.read()).runs[0]!.implementationReportCorrection, undefined);
+  const implement = fixture.dependencies.implementationAgent.run;
+  fixture.dependencies.implementationAgent.run = async request => {
+    assert.equal(request.reportCorrection, undefined);
+    return implement(request);
+  };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+});
 
 test('one Codex owner supplies checks, proof and independent Review before Runner publishes', async () => {
   const fixture = await runFixture();
@@ -2741,6 +2833,7 @@ test('new authorization refreshes current issue criteria authority and workflow 
 });
 
 interface FixtureOptions {
+  hostChecks?: boolean;
   fileBackedStore?: boolean;
   rawRunStateBytes?: Buffer;
   stateInspections?: RunStateInspection[];
@@ -2828,6 +2921,7 @@ async function runFixture(options: FixtureOptions = {}) {
   const events: string[] = [];
   const evidence: Array<{ runId: string; code: string; summary: string }> = [];
   const config = configFixture();
+  if (options.hostChecks) config.runner.checkExecution = 'host';
   if (options.configuredChecks) config.checks = structuredClone(options.configuredChecks);
   if (options.denyReadPaths) config.deny.readPaths = [...options.denyReadPaths];
   if (options.agentWritesDeniedIgnoredPath) config.deny.readPaths = ['.env'];
@@ -2982,8 +3076,10 @@ async function runFixture(options: FixtureOptions = {}) {
       },
     },
     git,
+    configuredChecks: { run: async input => runConfiguredChecks({ ...input,
+      logRoot: join(targetRoot, '.host-check-logs', String(Date.now())), timeoutMs: 5000, env: process.env }) },
     implementationAgent: {
-      run: async ({ attemptId, worktreePath: path, deliveryAuthority, cycle, reworkFindings, onPrepared, onLaunched, onSessionStarted, sessionId, frozenCriteria }) => {
+      run: async ({ runnerChecks, attemptId, worktreePath: path, deliveryAuthority, cycle, reworkFindings, onPrepared, onLaunched, onSessionStarted, sessionId, frozenCriteria }) => {
         implementationAttemptIds.push(attemptId);
         implementationAuthorities.push(structuredClone(deliveryAuthority));
         events.push('agent');
@@ -3025,7 +3121,7 @@ async function runFixture(options: FixtureOptions = {}) {
         }
         const changedFiles = ['feature.txt'];
         const checks = Object.entries(config.checks).map(([id, command]) => ({
-          id, command, status: 'passed' as const, outputSha256: sha256(`worker check output: ${id}`),
+          id, command, status: 'passed' as const, outputSha256: runnerChecks?.results.find(r => r.id === id)?.outputSha256 ?? sha256(`worker check output: ${id}`),
         }));
         events.push('worker:verification');
         events.push('owner:independent-review');

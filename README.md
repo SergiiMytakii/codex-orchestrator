@@ -2,7 +2,7 @@
 
 Codex Orchestrator turns one explicitly authorized GitHub Issue into a controlled Codex delivery run. Planning remains external. The package implements the issue in an isolated Git worktree, validates the immutable candidate, and—only after all required gates pass—pushes a branch and opens a draft pull request.
 
-The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, evidence admission and publication. One native Codex session owns code, checks, proof and independent Review through synchronized global skills.
+The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, evidence admission and publication. One native Codex session owns source changes, verification decisions, proof and independent Review through synchronized global skills. Explicit host checks are finite Runner actions requested by that session.
 
 ## What happens to an issue
 
@@ -55,6 +55,21 @@ npx codex-orchestrator setup \
   --github-owner your-org \
   --github-repo your-repo
 ```
+
+For a trusted Flutter project, select its ordinary installed SDK explicitly:
+
+```sh
+npx codex-orchestrator setup --target "$PWD" --flutter-sdk "/absolute/path/to/flutter"
+```
+
+Setup validates `bin/flutter` and runs `--version`, then records quoted absolute
+commands for `pub get --enforce-lockfile`, analyze, and tests in `checks`. It enables
+`runner.checkExecution: "host"`: these commands execute repository code with the
+Runner user's normal SDK, package cache and network, without publication tokens.
+SDK paths containing spaces and shell metacharacters are supported on the existing
+POSIX host runtime. Setup does not install or copy SDKs. A dry run checks the
+executable but skips `--version` to avoid SDK cache writes. Repeated setup preserves
+an existing configuration; SDK changes require editing its check commands.
 
 It writes `.codex-orchestrator/config.json` and adds the generated workspace, state, and proof directories to `.gitignore`. If the repository has `test` or `typecheck` npm scripts, setup adds them as default checks. Review the generated config before the first run.
 
@@ -236,6 +251,14 @@ implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
 after the final source edit before required device proof, Review, and publication.
 
+In explicit host-check mode the implementation session returns `checks-request`
+after final edits. Runner runs configured commands in insertion order, stops on
+failure, and resumes the same session with complete local logs and trusted results.
+Proof and independent Review follow passing host checks. Source changes, command
+changes or substituted output hashes invalidate the results. A crash during host
+execution leaves an unfinished action rather than rerunning commands automatically.
+The existing owned-command fence protects unresolved process groups.
+
 Checks run in the implementation worktree, after the final source edit. The worker
 keeps full logs locally and reads failures itself; Runner never relays a truncated
 log or rewrites Jest commands. Generated logs belong in ignored artifact paths;
@@ -247,8 +270,8 @@ publication divergence still prevent delivery. A report is worker evidence, not
 an independent execution attestation; Review must evaluate its adequacy.
 
 A failed mandatory check stays with the implementation owner for an in-scope
-repair or a concrete blocker. Runner has no separate check process, check-result
-recovery loop, output parser, affected-Jest selector or no-progress counter.
+repair or a concrete blocker. Explicit host checks are finite Runner actions;
+source ownership, proof and Review remain in the same Codex session.
 
 Android
 startup failure may remain an unfinished-UI-proof warning. Synthetic fixtures
@@ -306,8 +329,11 @@ Starting a new journal requires preserving the old file and checking ownership/r
 
 - `github.baseBranch` and `github.labels`: where completed branches target and which labels control the workflow.
 - `runner.pollIntervalSeconds`: daemon polling interval.
-- `checks`: mandatory commands executed by the implementation worker after its
-  final source edit, including after Review repairs. Issue descriptions cannot
+- `runner.checkExecution`: optional `"host"` opts trusted projects into ordinary
+  local checks with installed tools; omission retains sandboxed worker execution.
+- `checks`: mandatory commands executed in configured order after the final source edit.
+  In host mode Runner executes them; otherwise the implementation worker does.
+  Source edits after Review require fresh checks. Issue descriptions cannot
   waive them. Runner requires exact successful results before publication.
 - File lists in issues are starting points, not exhaustive allowlists. The
   authorized outcome owns scope: implementation may update directly affected
@@ -341,7 +367,7 @@ Flutter self-improvement issues may carry one `## Proof requirements` JSON block
 
 Android cleanup stops only the leased emulator with its recorded process identity, removes its temporary device data, install snapshot, prepared state and host lease, and retains proof evidence. Cleanup failure retains the settled proof outcome and candidate worktree for a later invocation to retry cleanup before Review or publication; it does not rerun the app scenario. Terminal cancellation or revoked issue authority also requires releasing retained mobile resources.
 
-Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. The implementation Agent runs these exact commands in its worktree and returns successful results for its final source revision. The Runner admits the receipts against the configured policy and immutable candidate; it does not execute another Flutter check phase. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
+Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. Use setup `--flutter-sdk` to opt into ordinary host execution. Runner executes these exact commands after a `checks-request`, then resumes the same Agent for proof and independent Review. Other configurations retain sandboxed worker checks. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
 
 Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 

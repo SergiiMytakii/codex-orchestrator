@@ -1,3 +1,4 @@
+import { validateRunnerChecks, type RunnerChecks } from './runner-checks.js';
 import { validateImplementationChecks, validateImplementationReview, type ImplementationCheck, type ImplementationReviewV1 } from './implementation-report.js';
 import { validateProofReport, type ProofReceipt, type ProofReportV1 } from './proof-report.js';
 import type { SettledProveChangeResult } from './acceptance-proof.js';
@@ -160,6 +161,7 @@ export interface RunRecord {
   candidateMaterialization?: CandidateMaterializationV2;
   skillHashes: Record<string, string>;
   activeAttempt?: ActiveAttempt;
+  runnerChecks?: RunnerChecks;
   androidProofPreparation?: { status: 'pending' | 'prepared' | 'blocked'; checkedChangeSha256: string; runnerPreparedArtifactPaths: string[]; runnerPreparedArtifactSha256: Record<string, string>; runnerPreparationWarnings: string[] };
   codexSession?: { id: string; startedAt: string };
   checks: Array<
@@ -447,6 +449,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     'activeAttempt',
     'codexSession',
     'androidProofPreparation',
+    'runnerChecks',
     'checkedChangeSha256',
     'proofId',
     'proofExecution',
@@ -533,6 +536,7 @@ function validateRunRecord(value: unknown, field: string): asserts value is RunR
     throw new Error(`${field}.proofExecution cleanup identity is invalid`);
   }
   if (hasOwn(value, 'proofReceipt')) validateReceipt(value.proofReceipt, `${field}.proofReceipt`);
+  if (hasOwn(value, 'runnerChecks')) validateRunnerChecks(value.runnerChecks);
   if (hasOwn(value, 'androidProofPreparation')) {
     const prepared = value.androidProofPreparation;
     assertExactObject(prepared, ['status', 'checkedChangeSha256', 'runnerPreparedArtifactPaths', 'runnerPreparedArtifactSha256', 'runnerPreparationWarnings'], `${field}.androidProofPreparation`);

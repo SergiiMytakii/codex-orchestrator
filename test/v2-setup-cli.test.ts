@@ -46,3 +46,21 @@ test('setup JSON and exit mapping are total over typed outcomes', () => {
     });
   }
 });
+
+
+test('setup accepts an absolute Flutter SDK root before or after the target flag', () => {
+  for (const args of [
+    ['--flutter-sdk', '/SDKs/flutter stable', '--target', '/repo'],
+    ['--target', '/repo', '--flutter-sdk', '/SDKs/flutter stable'],
+  ]) {
+    assert.deepEqual(parseSetupArgs(['setup', ...args]), {
+      targetRoot: '/repo', operation: 'configure', dryRun: false, flutterSdk: '/SDKs/flutter stable',
+    });
+  }
+  for (const args of [
+    ['setup', '--target', '/repo', '--flutter-sdk', 'relative/flutter'],
+    ['setup', '--target', '/repo', '--flutter-sdk'],
+    ['doctor', '--target', '/repo', '--flutter-sdk', '/flutter'],
+    ['status', '--target', '/repo', '--flutter-sdk', '/flutter'],
+  ]) assert.throws(() => parseSetupArgs(args));
+});

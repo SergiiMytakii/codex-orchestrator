@@ -335,7 +335,7 @@ async function readPackageVersion(): Promise<string> {
 function cliHelp(): string {
   return [
     'codex-orchestrator',
-    '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels] [--dry-run]',
+    '  setup --target <absolute-path> [--github-owner <owner> --github-repo <repo>] [--prepare-labels] [--flutter-sdk <absolute-sdk-root>] [--dry-run]',
     '  doctor --target <absolute-path>',
     '  status --target <absolute-path>',
     '  run --target <absolute-path> --issue <positive-integer>',

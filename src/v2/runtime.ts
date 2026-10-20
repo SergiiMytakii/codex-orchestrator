@@ -1,3 +1,4 @@
+import { runConfiguredChecks } from './runner-checks.js';
 import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -816,6 +817,7 @@ export class ContainedImplementationAgent {
     proofId: string;
     sessionId?: string;
     androidProofPreparation?: RunRecord['androidProofPreparation'];
+    runnerChecks?: RunRecord['runnerChecks'];
     onSessionStarted?: (sessionId: string) => Promise<void>;
     attemptId: string;
     runId: string;
@@ -916,7 +918,10 @@ export class ContainedImplementationAgent {
           `Acceptance criteria: ${canonicalJson(input.frozenCriteria.map(criterion => criterion.source === 'fallback' ? { id: criterion.id, source: criterion.source, text: 'Prove the authorized issue above.' } : criterion))}`,
           ...(input.reworkFindings.length > 0 ? [`Repair these verified findings: ${canonicalJson(input.reworkFindings)}`] : []),
           'In a completed report, changedFiles is the complete current candidate diff relative to the original HEAD, including files retained from earlier cycles. A verification-only repair with no new edits still returns completed with that complete current diff.',
-          `Required commands: ${canonicalJson(config.checks)}. Include the exact policy in any child assignment. Run heavy checks sequentially. Retain passing evidence only while source and command policy remain unchanged. Diagnose and correct failures before rechecking; otherwise return the blocker. Complete proof and independent Review through the packaged global skills before returning completed.`,
+          ...(config.runner.checkExecution === 'host' ? [
+            `Required host commands: ${canonicalJson(config.checks)}. Runner executes these ordinary local processes; do not run them inside the sandbox. After final source edits return checks-request before proof and Review.`,
+            ...(input.runnerChecks ? [`Trusted Runner check results: ${canonicalJson(input.runnerChecks)}. Results match current source: ${input.runnerChecks.sourceSha256 === sha256(canonicalJson(baseline))}. If false, request fresh checks before proof or Review. Read complete logs at logPath. Use only passing exact Runner receipts for the unchanged source. After an in-scope source repair request checks again; otherwise report the concrete blocker. Complete proof and independent Review only after all required host checks passed.`] : []),
+          ] : [`Required commands: ${canonicalJson(config.checks)}. Include the exact policy in any child assignment. Run heavy checks sequentially. Retain passing evidence only while source and command policy remain unchanged. Diagnose and correct failures before rechecking; otherwise return the blocker. Complete proof and independent Review through the packaged global skills before returning completed.`]),
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,
@@ -1289,6 +1294,13 @@ export function createV2Runtime(input: {
 
   const runner = new RunIssue({
     readConfig,
+    configuredChecks: { run: async checkInput => {
+      const config = requireConfig(currentConfig);
+      return runConfiguredChecks({ ...checkInput, logRoot: join(orchestratorHome, 'v2', 'runner-checks',
+        sha256(canonicalJson({ repository: `${config.github.owner}/${config.github.repo}`,
+          proofId: checkInput.proofId, nonce: randomUUID() }))),
+        timeoutMs: config.codex.timeoutMs, env: process.env, executor: commandExecutor });
+    } },
     ownerLock: {
       acquire: async ({ canonicalRepository }) => {
         const lock = await acquireOwnerLock({

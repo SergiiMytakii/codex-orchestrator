@@ -76,3 +76,18 @@ read-only; missing authority, failed checks, invalid evidence and candidate drif
 cannot authorize publication. Incompatible older operation generations stop for
 fresh trusted authorization before adopting the current generation. No prior
 review or proof is converted into new approval.
+
+
+## Installed SDK host-check amendment (2026-10-20)
+
+For explicitly trusted projects, `runner.checkExecution: "host"` authorizes Runner
+to execute configured commands in the issue worktree using ordinary installed
+SDKs. The Agent requests this finite action with `checks-request`; Runner retains
+complete local output, exit codes and source/policy-bound receipts, then resumes
+the same Codex session before Acceptance Proof and independent Review. It uses
+existing owned-command fencing, cancellation, timeouts and process cleanup.
+An interrupted host action is never automatically replayed. Failures remain
+with the same implementation owner for scoped repair or a concrete blocker.
+Existing configurations retain worker-side verification. Setup opts into host
+checks only with `--flutter-sdk`; it records executable paths in existing check
+commands without adding SDK discovery, installation, cloning or cache ownership.

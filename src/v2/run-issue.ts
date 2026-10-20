@@ -1,3 +1,4 @@
+import { runnerCheckPolicySha256, type RunnerCheckResult } from './runner-checks.js';
 import { dirname, resolve } from 'node:path';
 
 import {
@@ -194,12 +195,14 @@ export interface RunIssueDependencies {
   };
   reviewFeedback?: ReviewFeedbackObserver;
   git: RunIssueGit;
+  configuredChecks?: { run(input: { checks: Record<string, string>; worktreePath: string; proofId: string; signal: AbortSignal }): Promise<RunnerCheckResult[]> };
   implementationAgent: {
     run(input: {
       operation: 'implementation';
       proofId: string;
       sessionId?: string;
       androidProofPreparation?: RunRecord['androidProofPreparation'];
+      runnerChecks?: RunRecord['runnerChecks'];
       onSessionStarted?: (sessionId: string) => Promise<void>;
       reportCorrection?: { bytes: Buffer; sha256: string; diagnostic: string };
       attemptId: string;
@@ -1442,6 +1445,9 @@ export class RunIssue {
       if (this.signal.aborted) return await this.terminal(active, { status: 'cancelled' });
       if (!active.record.proofId) active = await this.persist(active, { proofId: this.dependencies.createProofId() });
 
+      if (config.runner.checkExecution === 'host' && active.record.runnerChecks?.status === 'pending')
+        return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'runner-checks-interrupted');
+
       const recoveringAndroidPreparation = active.record.androidProofPreparation?.status === 'pending';
       let androidProofRequested = recoveringAndroidPreparation;
       // One Codex session owns implementation, all verification and independent Review.
@@ -1473,6 +1479,7 @@ export class RunIssue {
           reworkFindings: active.record.reworkFindings, workflowGeneration: active.record.workflowGeneration,
           proofId: active.record.proofId!, sessionId: active.record.codexSession?.id,
           androidProofPreparation: active.record.androidProofPreparation,
+          runnerChecks: active.record.runnerChecks,
           ...(reportCorrection ? { reportCorrection } : {}),
           ...(feedbackBatch ? { reviewFeedbackRound: active.record.reviewFeedback!.repairRound,
             reviewFeedback: feedbackProjection!.workerFeedback, reviewFeedbackPullRequest: {
@@ -1527,6 +1534,27 @@ export class RunIssue {
         if (!active.record.codexSession) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'codex-session-identity-missing');
         if (await this.dependencies.git.getHead(worktreePath) !== expectedImplementationHead(active.record))
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'implementation-head-drift');
+        if (report.status === 'checks-request') {
+          if (config.runner.checkExecution !== 'host' || !this.dependencies.configuredChecks)
+            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'runner-checks-unavailable');
+          active = isAdoptableAttempt(active.record.activeAttempt)
+            ? await this.adoptAttempt(active, sha256(canonicalJson(implementation.report)), {}) : active;
+          active = await this.clearAttempt(active);
+          const sourceSha256 = sha256(canonicalJson(await this.dependencies.git.snapshot(worktreePath)));
+          const policySha256 = runnerCheckPolicySha256(config.checks);
+          active = await this.persist(active, { lifecycle: 'checking', implementationResult: undefined,
+            implementationReportCorrection: undefined, reportRepairs: 0,
+            runnerChecks: { status: 'pending', sourceSha256, policySha256, results: [] } });
+          if (!await this.authorized(active, config)) return await this.revoked(active);
+          const protectedBefore = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
+          const results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath,
+            proofId: active.record.proofId!, signal: this.signal });
+          if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== protectedBefore)
+            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
+          active = await this.persist(active, { lifecycle: 'implementing',
+            runnerChecks: { status: 'complete', sourceSha256, policySha256, results } });
+          return await this.invokedFailure(active, 'runner-checks-ready', 'The next invocation resumes the same Codex session with complete host-check logs and results before proof and independent Review.');
+        }
         const changedFiles = await this.dependencies.git.listChangedFiles(worktreePath);
         if (changedFiles.length === 0) return await this.terminal(active, { status: 'internal-error', code: 'implementation-change-set-invalid' });
         if (!sameStrings(changedFiles, report.changedFiles)) return await this.retainImplementationReportCorrection(active, implementation,
@@ -1551,6 +1579,17 @@ export class RunIssue {
       if (!androidProofRequested && (!ownerResult.proof || !ownerResult.review || source.trackedContentSha256 !== ownerResult.review.trackedContentSha256
         || source.untrackedContentSha256 !== ownerResult.review.untrackedContentSha256))
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'owner-review-source-drift');
+      if (config.runner.checkExecution === 'host') {
+        const trusted = active.record.runnerChecks;
+        if (!trusted || trusted.status !== 'complete'
+          || trusted.sourceSha256 !== sha256(canonicalJson(source))
+          || trusted.policySha256 !== runnerCheckPolicySha256(config.checks)
+          || Object.entries(config.checks).some(([id, command]) => !trusted.results.some(result =>
+            result.id === id && result.command === command && result.exitCode === 0
+            && ownerResult.checks?.some(check => check.id === id && check.command === command
+              && check.status === 'passed' && check.outputSha256 === result.outputSha256))))
+          return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'runner-checks-evidence-mismatch');
+      }
       const ownerChecks = ownerResult.checks;
       if (!ownerChecks || Object.entries(config.checks).some(([id, command]) =>
         !ownerChecks.some(check => check.id === id && check.command === command && check.status === 'passed')))
@@ -1706,7 +1745,7 @@ export class RunIssue {
       terminalNotifications: undefined, issueSnapshot, frozenCriteria, deliveryAuthority,
       ...(refreshedWorkflow ? { workflowGeneration: refreshedWorkflow.receipt,
         skillHashes: refreshedWorkflow.skillHashes, packageVersion: this.dependencies.packageVersion } : {}),
-      directReview: undefined, reworkFindings: [], androidProofPreparation: undefined, checks: [], implementationResult: undefined, checkedChangeSha256: undefined,
+      directReview: undefined, reworkFindings: [], androidProofPreparation: undefined, runnerChecks: undefined, checks: [], implementationResult: undefined, checkedChangeSha256: undefined,
       proofReceipt: undefined, proofExecution: undefined, proofId: this.dependencies.createProofId(),
       implementationReportCorrection: undefined, reportRepairs: 0,
       pendingEffect: undefined });
@@ -1886,7 +1925,7 @@ export class RunIssue {
       delete record.terminalAuthorizationGrantId;
       if (!Object.hasOwn(changes, 'terminalNotifications')) delete record.terminalNotifications;
     }
-    for (const key of ['terminalAuthorizationGrantId', 'checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications', 'failedCheckRepair', 'implementationReportCorrection', 'directReview', 'implementationResult', 'codexSession', 'androidProofPreparation'] as const) {
+    for (const key of ['terminalAuthorizationGrantId', 'checkedChangeSha256', 'proofId', 'proofExecution', 'proofReceipt', 'terminalOutcome', 'outcomeEvidenceId', 'reviewFeedback', 'changeBindingVersion', 'candidateBinding', 'candidateMaterialization', 'activeAttempt', 'terminalNotifications', 'failedCheckRepair', 'implementationReportCorrection', 'directReview', 'implementationResult', 'codexSession', 'androidProofPreparation', 'runnerChecks'] as const) {
       if (Object.hasOwn(changes, key) && changes[key] === undefined) delete record[key];
     }
     const runs = active.state.runs.map((candidate) => candidate.runId === record.runId ? record : candidate);

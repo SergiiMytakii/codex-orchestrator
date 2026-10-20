@@ -34,10 +34,10 @@ export interface ImplementationCheck {
   outputSha256: string;
 }
 
-/** Verification belongs to the same worker that owns the source change. */
+/** One source owner coordinates verification; explicit host checks belong to Runner. */
 export interface ImplementationReportV1 {
   version: 1;
-  status: 'completed' | 'android-proof-request' | 'external-block' | 'answer-only' | 'boundary';
+  status: 'completed' | 'checks-request' | 'android-proof-request' | 'external-block' | 'answer-only' | 'boundary';
   summary: string;
   changedFiles: string[];
   residualRisks: string[];
@@ -57,6 +57,8 @@ export function validateImplementationReport(
   let normalizedProof: ProofReportV1 | undefined;
   if (value.status === 'completed') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks', 'proof', 'review'], 'implementation report');
+  } else if (value.status === 'checks-request') {
+    assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks'], 'implementation report');
   } else if (value.status === 'android-proof-request') {
     assertExactObject(value, ['version', 'status', 'summary', 'changedFiles', 'residualRisks', 'checks'], 'implementation report');
   } else if (value.status === 'external-block') {
@@ -120,6 +122,11 @@ export function implementationReportOutputSchema(): Record<string, unknown> {
     residualRisks: stringArraySchema(),
   };
   return agentReportEnvelopeSchema([
+      {
+        type: 'object', additionalProperties: false,
+        required: ['version', 'status', 'summary', 'changedFiles', 'residualRisks'],
+        properties: { ...commonProperties, status: { type: 'string', const: 'checks-request' } },
+      },
       {
         type: 'object',
         additionalProperties: false,

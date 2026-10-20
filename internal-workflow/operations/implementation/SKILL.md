@@ -21,6 +21,18 @@ device leases. This invocation may edit its assigned worktree, run checks and
 coordinate the supplied reviewer profiles; it has no publication credentials or
 authority.
 
+When invocation declares host checks, finish source edits and return
+`checks-request` with `version: 1`, `summary`, the complete `changedFiles`, and
+`residualRisks`. Runner executes only its configured commands as ordinary local
+processes, then resumes this same session with trusted `runnerChecks` results.
+Read the full local logs, repair in-scope failures, and request fresh checks after
+source changes. An unchanged failed check requires a concrete blocker. Complete
+acceptance proof and independent Review only after every configured host check
+passed on the current source. Copy exact ids, commands and output hashes from
+Runner results into completion receipts. Source or command drift invalidates
+those results. In worker-check mode, execute configured commands in the sandbox
+as before. Report correction never executes checks.
+
 Return one report matching the supplied implementation output schema. For
 `completed`:
 
@@ -84,7 +96,8 @@ and only the proof-bound lease, artifact, proof id, bundle, owner PID, xcrun,
 runtime and device-type inputs supplied by Runner. Follow its iOS procedure
 within this session; preserve every user-owned device and runtime.
 
-Local verification has loopback access only; external destinations remain denied.
+Agent-side verification has loopback access only; external destinations remain denied.
+Explicit host checks use the installed local tools and ordinary host network.
 For browser proof, `PLAYWRIGHT_MODULE_PATH` resolves the installed Playwright API
 and `PLAYWRIGHT_BROWSERS_PATH` its prepared browser cache. Launch its Chromium
 headless with `args: JSON.parse(process.env.PLAYWRIGHT_CHROMIUM_ARGS || '[]')`;

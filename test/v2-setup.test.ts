@@ -22,6 +22,7 @@ test('Setup.execute creates minimal config last and repeat configure is byte-sta
   assert.equal(config.github.baseBranch, 'main');
   assert.equal(config.runner.workspaceRoot, '.codex-orchestrator/workspaces-v2');
   assert.equal(config.runner.stateDir, '.codex-orchestrator/v2/state');
+  assert.equal('checkExecution' in config.runner, false);
   assert.deepEqual(config.checks, { test: 'npm test', typecheck: 'npm run typecheck' });
   const ignoreBytes = await readFile(join(root, '.gitignore'));
   assert.match(ignoreBytes.toString('utf8'), /# codex-orchestrator v2 runtime start[\s\S]*workspaces-v2\/[\s\S]*# codex-orchestrator v2 runtime end\n$/u);

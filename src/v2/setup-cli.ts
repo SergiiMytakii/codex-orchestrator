@@ -5,7 +5,7 @@ export function parseSetupArgs(argv: string[]): SetupIntent {
   const [command, ...args] = argv;
   if (command !== 'setup' && command !== 'doctor' && command !== 'status') throw new Error('operational command is invalid');
   const values = new Map<string, string | true>();
-  const valueFlags = new Set(['--target', '--github-owner', '--github-repo']);
+  const valueFlags = new Set(['--target', '--github-owner', '--github-repo', '--flutter-sdk']);
   const booleanFlags = new Set(['--dry-run', '--prepare-labels']);
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index]!;
@@ -18,6 +18,8 @@ export function parseSetupArgs(argv: string[]): SetupIntent {
   }
   const targetRoot = values.get('--target');
   if (typeof targetRoot !== 'string' || !targetRoot.startsWith('/')) throw new Error('absolute target is required');
+  const flutterSdk = values.get('--flutter-sdk');
+  if (flutterSdk !== undefined && (typeof flutterSdk !== 'string' || !flutterSdk.startsWith('/'))) throw new Error('absolute Flutter SDK root is required');
   const owner = values.get('--github-owner');
   const repo = values.get('--github-repo');
   if ((owner === undefined) !== (repo === undefined)) throw new Error('repository override must be complete');
@@ -33,6 +35,7 @@ export function parseSetupArgs(argv: string[]): SetupIntent {
     targetRoot,
     operation,
     dryRun: values.has('--dry-run'),
+    ...(typeof flutterSdk === 'string' ? { flutterSdk } : {}),
     ...(typeof owner === 'string' && typeof repo === 'string' ? { repository: { owner, repo } } : {}),
   };
 }

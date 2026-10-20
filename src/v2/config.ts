@@ -43,6 +43,7 @@ export interface AgentAutoConfig {
     stateDir: string;
     branchTemplate: 'codex/issue-${issueNumber}';
     pollIntervalSeconds: number;
+    checkExecution?: 'host';
   };
   codex: {
     command: string;
@@ -78,7 +79,9 @@ export function parseAgentAutoConfig(value: unknown): AgentAutoConfig {
     'stateDir',
     'branchTemplate',
     'pollIntervalSeconds',
+    ...(value.runner && typeof value.runner === 'object' && 'checkExecution' in value.runner ? ['checkExecution'] : []),
   ], 'config.runner');
+  if ('checkExecution' in value.runner && value.runner.checkExecution !== 'host') throw new Error('config.runner.checkExecution must be host');
   assertRepositoryRelativePath(value.runner.workspaceRoot, 'config.runner.workspaceRoot');
   assertRepositoryRelativePath(value.runner.stateDir, 'config.runner.stateDir');
   if (value.runner.branchTemplate !== 'codex/issue-${issueNumber}') throw new Error('config.runner.branchTemplate is invalid');
