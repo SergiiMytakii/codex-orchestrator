@@ -2,7 +2,7 @@ import { runConfiguredChecks } from './runner-checks.js';
 import { readIssueProofRequirements } from './issue-proof-policy.js';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
+import { access, copyFile, link, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -516,27 +516,35 @@ export class LocalGitRunIssueAdapter implements RunIssueGit {
     worktreePath: string,
     ignoredRoot?: string,
   ): Promise<Omit<CheckedChangeFreshness, 'checkPolicySha256'>> {
-    const [headSha, indexTreeSha, trackedDiff, untrackedPaths, canonicalPath, gitDirectory] = await Promise.all([
+    const [headSha, canonicalPath, gitDirectoryRaw] = await Promise.all([
       this.getHead(worktreePath),
-      this.getTreeSha(worktreePath),
-      // Snapshot readers must not refresh the index beside write-tree.
-      this.git(['--no-optional-locks', '-C', worktreePath, 'diff', '--binary', 'HEAD']),
-      this.git(['-C', worktreePath, 'ls-files', '--others', '--exclude-standard', '-z']),
       realpath(worktreePath),
-      this.git(['-C', worktreePath, 'rev-parse', '--git-dir']),
+      this.git(['-C', worktreePath, 'rev-parse', '--absolute-git-dir']),
     ]);
-    const untracked: Array<{ path: string; sha256: string }> = [];
-    for (const path of untrackedPaths.split('\0').filter(Boolean).sort()) {
-      if (ignoredRoot && (path === ignoredRoot || path.startsWith(`${ignoredRoot}/`))) continue;
-      untracked.push({ path, sha256: sha256(await readFile(join(canonicalPath, path))) });
+    const gitDirectory = gitDirectoryRaw.trim();
+    const temporaryRoot = await mkdtemp(join(gitDirectory, 'snapshot-index-'));
+    const indexPath = join(temporaryRoot, 'index');
+    const options = { envOverlay: { GIT_INDEX_FILE: indexPath } };
+    try {
+      await copyFile(join(gitDirectory, 'index'), indexPath);
+      const indexTreeSha = await this.git(['-C', worktreePath, 'write-tree'], options);
+      const trackedDiff = await this.git(['-C', worktreePath, 'diff', '--binary', 'HEAD'], options);
+      const untrackedPaths = await this.git(['-C', worktreePath, 'ls-files', '--others', '--exclude-standard', '-z'], options);
+      const untracked: Array<{ path: string; sha256: string }> = [];
+      for (const path of untrackedPaths.split('\0').filter(Boolean).sort()) {
+        if (ignoredRoot && (path === ignoredRoot || path.startsWith(`${ignoredRoot}/`))) continue;
+        untracked.push({ path, sha256: sha256(await readFile(join(canonicalPath, path))) });
+      }
+      return {
+        headSha,
+        indexTreeSha: indexTreeSha.trim(),
+        trackedContentSha256: sha256(trackedDiff),
+        untrackedContentSha256: sha256(canonicalJson(untracked)),
+        worktreeIdentity: sha256(canonicalJson({ canonicalPath, gitDirectory })),
+      };
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
     }
-    return {
-      headSha,
-      indexTreeSha,
-      trackedContentSha256: sha256(trackedDiff),
-      untrackedContentSha256: sha256(canonicalJson(untracked)),
-      worktreeIdentity: sha256(canonicalJson({ canonicalPath, gitDirectory: gitDirectory.trim() })),
-    };
   }
 
   listChangedFiles(worktreePath: string): Promise<string[]> {

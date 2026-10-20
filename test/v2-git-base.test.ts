@@ -65,7 +65,7 @@ test('issue worktrees are created from the pinned base SHA instead of a moving b
 });
 
 for (const reader of ['diff', 'status', 'proof-status'] as const) {
-  test(`Git snapshot survives concurrent ${reader} index refresh without losing change evidence`, { timeout: 15_000 }, async () => {
+  test(`Git snapshot isolates ${reader} from the shared index lock without losing change evidence`, { timeout: 15_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'codex-orchestrator-v2-snapshot-lock-'));
     await execFileAsync('git', ['init', '-q', '-b', 'main', root]);
     await writeFile(join(root, 'tracked.txt'), 'base\n');
@@ -79,39 +79,22 @@ for (const reader of ['diff', 'status', 'proof-status'] as const) {
     await writeFile(join(root, 'proofs', 'artifact.txt'), 'proof\n');
     const patch = (await execFileAsync('git', ['--no-optional-locks', '-C', root, 'diff', '--binary', 'HEAD'])).stdout;
     const lockPath = join(root, '.git', 'index.lock');
-    let readerReady!: () => void;
-    const ready = { promise: new Promise<void>((resolve) => { readerReady = resolve; }), resolve: () => readerReady() };
-    let writerDone!: () => void;
-    const written = { promise: new Promise<void>((resolve) => { writerDone = resolve; }), resolve: () => writerDone() };
-    const pending: Array<Promise<unknown>> = [];
-    let scheduled = false;
+    const lock = await open(lockPath, 'wx');
+    let isolatedIndexCommands = 0;
     const adapter = new LocalGitRunIssueAdapter((file, args, options) => {
-      const operation = (async () => {
-        const isReader = args.includes(reader === 'diff' ? 'diff' : 'status');
-        if (isReader && !scheduled) {
-          scheduled = true;
-          // Model Git's optional index refresh holding its real lock while
-          // another snapshot command starts. Ordinary scheduler timing hid
-          // this collision in isolated lifecycle test reruns.
-          const optionalLocks = !args.includes('--no-optional-locks')
-            && options?.envOverlay?.GIT_OPTIONAL_LOCKS !== '0'
-            && options?.env?.GIT_OPTIONAL_LOCKS !== '0';
-          const lock = optionalLocks ? await open(lockPath, 'wx') : undefined;
-          ready.resolve();
-          if (lock) {
-            try { await written.promise; }
-            finally { await lock.close(); await unlink(lockPath); }
-          }
+      if (args.includes('write-tree') || args.includes('diff') || args.includes('ls-files')) {
+        const isolatedIndex = options?.envOverlay?.GIT_INDEX_FILE;
+        if (typeof isolatedIndex !== 'string' || isolatedIndex === join(root, '.git', 'index')) {
+          throw new Error(`snapshot command uses shared index: ${args.join(' ')}`);
         }
-        if (args.includes('write-tree')) {
-          await ready.promise;
+        return (async () => {
+          isolatedIndexCommands += 1;
+          if (isolatedIndexCommands !== 1) throw new Error(`snapshot commands share one temporary index concurrently: ${args.join(' ')}`);
           try { return await defaultProcessExecutor(file, args, options); }
-          finally { written.resolve(); }
-        }
-        return defaultProcessExecutor(file, args, options);
-      })();
-      pending.push(operation);
-      return operation;
+          finally { isolatedIndexCommands -= 1; }
+        })();
+      }
+      return defaultProcessExecutor(file, args, options);
     });
     try {
       const proof = reader === 'proof-status';
@@ -120,7 +103,6 @@ for (const reader of ['diff', 'status', 'proof-status'] as const) {
         reader === 'diff' ? Promise.resolve(undefined)
           : proof ? adapter.listChangedFilesIgnoringUntrackedRoot(root, 'proofs') : adapter.listChangedFiles(root),
       ]);
-      assert.equal(scheduled, true);
       assert.equal(snapshot.headSha, headSha);
       assert.equal(snapshot.indexTreeSha, indexTreeSha);
       assert.equal(snapshot.trackedContentSha256, sha256(patch));
@@ -130,11 +112,10 @@ for (const reader of ['diff', 'status', 'proof-status'] as const) {
       ])));
       if (changedFiles) assert.deepEqual(changedFiles, proof
         ? ['tracked.txt', 'untracked.txt'] : ['tracked.txt', 'proofs/artifact.txt', 'untracked.txt']);
-      await assert.rejects(access(lockPath), { code: 'ENOENT' });
+      await access(lockPath);
     } finally {
-      ready.resolve();
-      written.resolve();
-      await Promise.allSettled(pending);
+      await lock.close();
+      await unlink(lockPath);
     }
   });
 }

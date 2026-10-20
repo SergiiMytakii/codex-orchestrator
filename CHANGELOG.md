@@ -12,6 +12,7 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ### Fixed
 
+- Isolate Git freshness snapshots from the shared worktree index and serialize temporary-index reads, preventing `diff` and `write-tree` lock races from turning valid runs into transport failures.
 - Keep the same decoded report identity through completion and process recovery, before validation normalizes nullable proof fields; preserve malformed report bytes for correction.
 - Wait for child channels to close in the restart test harness before rejecting missing IPC output, preserving buffered results and stderr after process exit.
 - Retain complete command output and exit status from the first verification run, hash saved local logs and reuse passing evidence for unchanged source instead of rerunning to recover truncated tool output.
