@@ -21,34 +21,21 @@ async function fixture() {
   return { targetRoot, config, record, issue: { state: 'OPEN', labels: [config.github.labels.auto.name] } };
 }
 
-test('GitHub reauthorization compares a new grant with immutable outcome evidence, not journal updatedAt or comments', async () => {
+test('GitHub current auto label authorizes stopped work without a new label event', async () => {
   const input = await fixture();
-  input.record.updatedAt = '2026-10-13T12:00:00.000Z'; // A later notification write must not invalidate the grant.
-  assert.equal(await hasGitHubReauthorization({ ...input, issues: {
-    getLatestAuthorizationGrant: async () => ({ id: '20', createdAt: '2026-10-12T13:27:17.000Z' }),
-  } }), true);
-  assert.equal(await hasGitHubReauthorization({ ...input, issues: {
-    getLatestAuthorizationGrant: async () => ({ id: '10', createdAt: '2026-10-05T12:00:00.000Z' }),
-  } }), false);
-});
-
-test('GitHub event identity distinguishes a new grant within the same timestamp second', async () => {
-  const input = await fixture();
-  input.record.terminalAuthorizationGrantId = '10';
-  for (const [id, expected] of [['10', false], ['11', true]] as const) assert.equal(
-    await hasGitHubReauthorization({ ...input, issues: {
-      getLatestAuthorizationGrant: async () => ({ id, createdAt: '2026-10-06T12:00:00.000Z' }),
-    } }), expected);
+  input.record.updatedAt = '2026-10-13T12:00:00.000Z';
+  assert.equal(await hasGitHubReauthorization(input), true);
+  input.record.terminalAuthorizationGrantId = '10'; // Historical state does not override current GitHub labels.
+  assert.equal(await hasGitHubReauthorization(input), true);
 });
 
 test('GitHub closure, revoked/conflicting labels and absent evidence cannot authorize execution', async () => {
   const input = await fixture();
-  const issues = { getLatestAuthorizationGrant: async () => ({ id: '20', createdAt: '2026-10-12T13:27:17.000Z' }) };
   for (const issue of [{ state: 'CLOSED', labels: input.issue.labels }, { state: 'OPEN', labels: [] },
     ...['blocked', 'running', 'review'].map(kind => ({ state: 'OPEN', labels: [...input.issue.labels,
       input.config.github.labels[kind as 'blocked' | 'running' | 'review'].name] }))]) {
-    assert.equal(await hasGitHubReauthorization({ ...input, issue, issues }), false);
+    assert.equal(await hasGitHubReauthorization({ ...input, issue }), false);
   }
   input.record.terminalOutcome!.evidencePath = `${input.config.runner.stateDir}/v2/evidence/missing.json`;
-  assert.equal(await hasGitHubReauthorization({ ...input, issues }), false);
+  assert.equal(await hasGitHubReauthorization(input), false);
 });

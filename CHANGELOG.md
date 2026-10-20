@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+
+- Resume stopped issues from current GitHub labels: an open issue with `auto` and no running/blocked/review label can continue without a new `auto` label event. Removing `blocked` is sufficient; retained Run identity, evidence and ownership checks still apply.
+
+### Fixed
+
+- Refresh the pinned workflow and response schema when a stopped Run is authorized again, including Runs with an existing native session, so package upgrades do not leave host-check handoffs blocked by an obsolete schema.
+
 ## [2.0.35] - 2026-10-20
 
 ### Changed

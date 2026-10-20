@@ -292,13 +292,14 @@ divergence or missing migrated records blocks execution. Unknown candidate refs
 and materializations are preserved, including when another stateDir may own them.
 
 GitHub owns execution permission; the local journal retains progress and history.
-To authorize a stopped issue again, remove conflicting running/blocked/review labels
-and remove then re-add the configured `auto` label. The Runner verifies a new
-GitHub label event after the previous stop, using event identity when retained
-and immutable outcome evidence for legacy runs. Deleting comments or rewriting
-journal timestamps does not grant execution. A new grant resumes the same Run,
-branch and checked candidate after ownership, worktree and pending-effect checks;
-stale terminal notifications cannot undo it. Existing open PRs continue through
+An open stopped issue is authorized again while it carries the configured `auto`
+label and has no conflicting running/blocked/review labels. Removing `blocked`
+is sufficient; the `auto` label does not need to be removed and re-added, and no
+new label event is required. The Runner still validates immutable outcome evidence
+and resumes the same Run, branch and checked candidate after ownership, worktree
+and pending-effect checks. Each newly authorized cycle uses the current package
+workflow and response schema while preserving the native session. Stale terminal
+notifications cannot undo it. Existing open PRs continue through
 the Review feedback path rather than a replacement delivery.
 
 The daemon combines complete GitHub discovery with local runs requiring

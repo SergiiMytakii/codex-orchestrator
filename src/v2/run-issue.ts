@@ -1722,7 +1722,7 @@ export class RunIssue {
       || (active.record.pendingEffect && !['terminal-comment', 'terminal-labels'].includes(active.record.pendingEffect.kind))) return unchanged();
     const issue = await this.readIssue(active.record.issueNumber);
     if (!issue || await this.dependencies.issues.isReauthorized?.(active.record, issue) !== true) return unchanged();
-    // A new grant does not authorize replacing an existing PR or accepting drifted local work.
+    // Current authorization does not permit replacing an existing PR or accepting drifted local work.
     if (await this.ineligibilityReason(issue, config)) return unchanged();
     if (active.record.codexSession) await this.dependencies.verifyWorkflowGeneration(active.record.workflowGeneration);
     if (await this.dependencies.git.inspectWorktree({ worktreePath: active.record.worktreePath,
@@ -1733,7 +1733,7 @@ export class RunIssue {
     }
     const refreshed = await this.readIssue(active.record.issueNumber);
     if (!refreshed || await this.dependencies.issues.isReauthorized?.(active.record, refreshed) !== true) return unchanged();
-    const refreshedWorkflow = active.record.codexSession ? undefined : await this.dependencies.createWorkflowGeneration();
+    const refreshedWorkflow = await this.dependencies.createWorkflowGeneration();
     const issueSnapshot = snapshotIssue(refreshed);
     const frozenCriteria = freezeCriteria(issueSnapshot);
     const deliveryAuthority = createIssueDeliveryAuthority({ issueNumber: issueSnapshot.number,
@@ -1743,8 +1743,8 @@ export class RunIssue {
       summary: canonicalJson({ previousOutcome: stopped, lifecycle: 'implementing', refreshedTask: true }) });
     active = await this.persist(active, { lifecycle: 'implementing', terminalOutcome: undefined, outcomeEvidenceId: undefined,
       terminalNotifications: undefined, issueSnapshot, frozenCriteria, deliveryAuthority,
-      ...(refreshedWorkflow ? { workflowGeneration: refreshedWorkflow.receipt,
-        skillHashes: refreshedWorkflow.skillHashes, packageVersion: this.dependencies.packageVersion } : {}),
+      workflowGeneration: refreshedWorkflow.receipt,
+      skillHashes: refreshedWorkflow.skillHashes, packageVersion: this.dependencies.packageVersion,
       directReview: undefined, reworkFindings: [], androidProofPreparation: undefined, runnerChecks: undefined, checks: [], implementationResult: undefined, checkedChangeSha256: undefined,
       proofReceipt: undefined, proofExecution: undefined, proofId: this.dependencies.createProofId(),
       implementationReportCorrection: undefined, reportRepairs: 0,

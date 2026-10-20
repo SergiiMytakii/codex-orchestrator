@@ -31,7 +31,7 @@ import {
   type RunRecordWriter,
   type RunStateInspection,
 } from '../src/v2/run-store.js';
-import { LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
+import { hasGitHubReauthorization, LocalGitRunIssueAdapter } from '../src/v2/runtime.js';
 import { decodeAgentReportForValidation } from '../src/v2/report-envelope.js';
 import { createFrozenReviewFeedbackBatch, createReviewFeedbackRunData, hashReviewFeedbackSnapshot, hashReviewFeedbackText } from '../src/v2/review-feedback.js';
 import type { ReviewFeedbackObserver } from '../src/v2/review-feedback-coordinator.js';
@@ -279,6 +279,36 @@ test('resumable external proof blockers stop until reauthorization instead of re
   assert.equal((await fixture.store.read()).runs[0]!.transportRetries, 0);
   assert.equal(fixture.events.includes('git:push'), false);
   assert.equal(fixture.events.includes('effect:pr'), false);
+});
+
+test('removing blocked while keeping auto resumes the same Run and session without a new label event', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, implementationResult: { kind: 'completed', report: {
+    version: 1, status: 'external-block', summary: 'Local tool unavailable.', changedFiles: [], residualRisks: [],
+    blocker: { kind: 'tool', summary: 'Local tool unavailable.', attempted: ['Start the tool'], resumable: true },
+  } } });
+  const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+  fixture.dependencies.outcomeEvidencePath = (runId, code, summarySha256) =>
+    `${config.runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`;
+  fixture.dependencies.issues.isReauthorized = (record, issue) => hasGitHubReauthorization({
+    targetRoot: fixture.targetRoot, config, record, issue,
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  const before = (await fixture.store.read()).runs[0]!;
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  for (let tick = 0; tick < 2; tick++) assert.equal((await fixture.runner.runIssue(input)).status, 'blocked');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  fixture.options.implementationResult = undefined;
+  const result = await fixture.runner.runIssue(input);
+  assert.equal(result.status, 'review-ready', JSON.stringify({ result, evidence: fixture.evidence }));
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.codexSession?.id, before.codexSession?.id);
+  assert.equal(after.cycle, before.cycle + 1);
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls + 1);
 });
 
 test('unknown candidate ownership reports reconciliation failure before claim and preserves the candidate', async () => {
@@ -2798,17 +2828,18 @@ test('tests-only acceptance remains inside the owner completion with no separate
   assert.equal(Object.hasOwn(fixture.dependencies, 'implementationReviewer'), false);
 });
 
-test('new authorization refreshes current issue criteria authority and workflow when no native session began', async () => {
+for (const sessionStarted of [false, true]) test(`new authorization refreshes current issue criteria authority and workflow with sessionStarted=${sessionStarted}`, async () => {
   const fixture = await runFixture({ fileBackedStore: true });
   const implement = fixture.dependencies.implementationAgent.run;
   fixture.dependencies.implementationAgent.run = async input => {
     await input.onPrepared?.({ attemptId: input.attemptId, reportPath: fixture.dependencies.attemptResultPath({ canonicalRepository: 'owner/repo', runId: input.runId, attemptId: input.attemptId }), preparedAt: '2026-07-16T12:00:00.000Z', baseline: await fixture.dependencies.git.snapshot(input.worktreePath) });
     await input.onLaunched?.({ attemptId: input.attemptId, pid: 6060, processGroupId: 6060, launchedAt: '2026-07-16T12:00:00.000Z' });
+    if (sessionStarted) await input.onSessionStarted?.('00000000-0000-4000-8000-000000000099');
     return { kind: 'cancelled' };
   };
   assert.equal((await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'cancelled');
   const before = (await fixture.store.read()).runs[0]!;
-  assert.equal(before.codexSession, undefined);
+  assert.equal(!!before.codexSession, sessionStarted);
   const readIssue = fixture.dependencies.issues.read;
   const body = '## Acceptance Criteria\n- The newly authorized behavior is current.';
   fixture.dependencies.issues.read = async number => { const issue = await readIssue(number); return issue ? { ...issue, body } : issue; };
@@ -2820,7 +2851,7 @@ test('new authorization refreshes current issue criteria authority and workflow 
     assert.equal(input.issue.body, body);
     assert.equal(input.frozenCriteria[0]?.text, 'The newly authorized behavior is current.');
     assert.equal(input.workflowGeneration.generationHash, '2'.repeat(64));
-    assert.equal(input.sessionId, undefined);
+    assert.equal(input.sessionId, before.codexSession?.id);
     return implement(input);
   };
   assert.equal((await new RunIssue(fixture.dependencies).runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 })).status, 'review-ready');
@@ -2830,6 +2861,9 @@ test('new authorization refreshes current issue criteria authority and workflow 
   assert.notEqual(after.deliveryAuthority?.authoritySha256, before.deliveryAuthority?.authoritySha256);
   assert.equal(after.workflowGeneration.generationHash, '2'.repeat(64));
   assert.ok(after.codexSession);
+  if (sessionStarted) assert.deepEqual(after.codexSession, before.codexSession);
+  assert.equal(after.packageVersion, '0.1.52');
+  assert.equal(after.skillHashes['agent-auto'], 'c'.repeat(64));
 });
 
 interface FixtureOptions {

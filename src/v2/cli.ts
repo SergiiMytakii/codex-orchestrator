@@ -97,7 +97,7 @@ async function executeProductionDaemon(
       readConfigBytes: () => readConfigBytes(intent.targetRoot),
       discover: (config) => new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }).listOpenIssuesWithAnyLabel([config.github.labels.auto.name, config.github.labels.review.name]),
       inventory: async (config) => (await FileRunRecordWriter.forRepository(join(intent.targetRoot, config.runner.stateDir, 'v2', 'run-state.json'), `${config.github.owner.toLowerCase()}/${config.github.repo.toLowerCase()}`).inventory()).runs,
-      isReauthorized: (record, issue, config) => hasGitHubReauthorization({ targetRoot: intent.targetRoot, config, record, issue: { ...issue, labels: issue.labels.map(label => label.name) }, issues: new GhCliIssueAdapter(config.github.owner, config.github.repo, defaultGhExecutor, undefined, { signal: controller.signal }) }),
+      isReauthorized: (record, issue, config) => hasGitHubReauthorization({ targetRoot: intent.targetRoot, config, record, issue: { ...issue, labels: issue.labels.map(label => label.name) } }),
       executeRun: (runIntent, snapshot) => executeProductionRun(runIntent, snapshot, controller),
     }),
     delay: (milliseconds) => new Promise((resolveDelay) => {
@@ -138,7 +138,7 @@ export async function discoverConfiguredDaemonTick(targetRoot: string, dependenc
     if (!finalStopped.has(issue.number)) { candidates.push(issue); continue; }
     try {
       if (await dependencies.isReauthorized?.(latest.get(issue.number)!, issue, config)) candidates.push(issue);
-    } catch { /* A failed timeline read leaves this issue stopped; other issues remain runnable. */ }
+    } catch { /* A failed authorization read leaves this issue stopped; other issues remain runnable. */ }
   }
   for (const run of latest.values()) {
     if (needed.has(run.issueNumber)) candidates.push({ ...run.issueSnapshot, labels: run.issueSnapshot.labels.map((name) => ({ name })), comments: [], closedByPullRequestsReferences: [] });

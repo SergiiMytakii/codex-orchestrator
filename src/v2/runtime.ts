@@ -1324,8 +1324,7 @@ export function createV2Runtime(input: {
     },
     issues: {
       read: (issueNumber) => readRuntimeIssue(issues, issueNumber),
-      isReauthorized: (record, issue) => hasGitHubReauthorization({ targetRoot, config: requireConfig(currentConfig), record, issue, issues }),
-      getAuthorizationGrantId: async (number, label) => (await issues.getLatestAuthorizationGrant?.(number, label))?.id,
+      isReauthorized: (record, issue) => hasGitHubReauthorization({ targetRoot, config: requireConfig(currentConfig), record, issue }),
       setLabels: async (issueNumber, labels) => {
         const current = await issues.getLabels(issueNumber);
         const policy = requireConfig(currentConfig).github.labels;
@@ -1987,7 +1986,7 @@ function validateRelativeRoot(value: string): void {
 /** GitHub grants execution; the journal supplies only the stopped operation's boundary. */
 export async function hasGitHubReauthorization(input: {
   targetRoot: string; config: AgentAutoConfig; record: RunRecord;
-  issue: { state: string; labels: string[] }; issues: Pick<GitHubIssueAdapter, 'getLatestAuthorizationGrant'>;
+  issue: { state: string; labels: string[] };
 }): Promise<boolean> {
   const { record, issue, config } = input;
   const outcome = record.terminalOutcome;
@@ -2004,8 +2003,5 @@ export async function hasGitHubReauthorization(input: {
   const { evidencePath: _path, ...seed } = outcome;
   if (evidence.runId !== record.runId || evidence.summary !== canonicalJson(seed)
     || typeof evidence.recordedAt !== 'string' || !Number.isFinite(Date.parse(evidence.recordedAt))) return false;
-  const grant = await input.issues.getLatestAuthorizationGrant?.(record.issueNumber, config.github.labels.auto.name);
-  return !!grant && (record.terminalAuthorizationGrantId
-    ? BigInt(grant.id) > BigInt(record.terminalAuthorizationGrantId)
-    : Date.parse(grant.createdAt) > Date.parse(evidence.recordedAt));
+  return true;
 }
