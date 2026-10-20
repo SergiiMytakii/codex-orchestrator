@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.35] - 2026-10-20
+
 ### Changed
 
 - Use one native Codex session for implementation, exact configured checks, acceptance proof and independent Spec/Standards Review; resume its saved UUID. Runner retains durable authorization, process cleanup, candidate/evidence validation, device leases and safe publication, with no separate semantic proof/Review loops.
