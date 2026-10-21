@@ -9,6 +9,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ### Fixed
 - Restore native related Jest selection inside the implementation owner, retaining
   full checks for uncertain scope and blocking related failures or empty selections.
+- Require focused/baseline investigation before scope escalation; preserve the first
+  failure and permit evidence-based recovery without a separate retry lifecycle.
 
 ### Changed
 

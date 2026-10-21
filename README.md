@@ -270,7 +270,10 @@ publication divergence still prevent delivery. A report is worker evidence, not
 an independent execution attestation; Review must evaluate its adequacy.
 
 A failed mandatory check stays with the implementation owner for an in-scope
-repair or a concrete blocker. Explicit host checks are finite Runner actions;
+repair or a concrete blocker. Before declaring an unexplained failure outside
+scope, the owner uses focused and baseline reproductions. It retains the first
+failed log and repeats the exact policy only when diagnostic evidence justifies
+a transient/environment recovery or an in-scope repair. Explicit host checks are finite Runner actions;
 source ownership, proof and Review remain in the same Codex session.
 
 Android
