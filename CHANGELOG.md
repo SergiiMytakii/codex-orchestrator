@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+- Restore native related Jest selection inside the implementation owner, retaining
+  full checks for uncertain scope and blocking related failures or empty selections.
+
 ### Changed
 
 - Resume stopped issues from current GitHub labels: an open issue with `auto` and no running/blocked/review label can continue without a new `auto` label event. Removing `blocked` is sufficient; retained Run identity, evidence and ownership checks still apply.

@@ -31,7 +31,11 @@ acceptance proof and independent Review only after every configured host check
 passed on the current source. Copy exact ids, commands and output hashes from
 Runner results into completion receipts. Source or command drift invalidates
 those results. In worker-check mode, execute configured commands in the sandbox
-as before. Report correction never executes checks.
+through the supplied owner check executable. It selects native related Jest
+tests from the complete candidate when safe; unsupported commands and uncertain
+scope run in full. Retain its actual invocation in the complete log, with the
+original configured id and command in the receipt. A related failure or empty
+selection cannot pass. Report correction never executes checks.
 
 Return one report matching the supplied implementation output schema. For
 `completed`:

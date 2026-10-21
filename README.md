@@ -261,7 +261,7 @@ The existing owned-command fence protects unresolved process groups.
 
 Checks run in the implementation worktree, after the final source edit. The worker
 keeps full logs locally and reads failures itself; Runner never relays a truncated
-log or rewrites Jest commands. Generated logs belong in ignored artifact paths;
+log or launches a separate worker verification phase. Generated logs belong in ignored artifact paths;
 the completed report identifies the complete source diff. Runner captures and pins
 that exact source tree, binds the worker's check results to it, and supplies those
 results to independent Review. Later source drift, changed required commands,
@@ -371,6 +371,22 @@ Android cleanup stops only the leased emulator with its recorded process identit
 Configure Flutter checks with absolute commands for the pinned SDK, such as `/opt/sdk/bin/flutter analyze --no-pub --no-fatal-infos` and `/opt/sdk/bin/flutter test --no-pub test/..._test.dart`. Include dependency preparation in the configured commands when required. Use setup `--flutter-sdk` to opt into ordinary host execution. Runner executes these exact commands after a `checks-request`, then resumes the same Agent for proof and independent Review. Other configurations retain sandboxed worker checks. Receipts are admitted only for the unchanged source and configured policy. Levantem uses `--no-fatal-infos`: errors and warnings block delivery while info diagnostics remain visible in local check output.
 
 Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
+
+### Related Jest checks
+
+In worker-check mode the implementation owner invokes the supplied package check
+executable for each configured command. Recognized plain npm/Jest scripts use
+Jest's native `--findRelatedTests` over the complete diff from the run's base,
+including untracked source files and changed tests. Related failures and empty
+selections block completion. Configuration, deleted or unsupported files,
+executable Jest configuration, npm lifecycle hooks and local global Jest modules
+retain the full configured command. Build and typecheck stay complete. Host-check
+mode retains its exact full commands.
+
+The helper runs inside the same owner process tree; Runner gains no separate
+check/repair phase. Logs record the original policy and actual invocation; receipts
+remain bound to the unchanged source and exact configured policy. Independent
+Review must inspect the selected scope and results.
 
 ## Development and release checks
 

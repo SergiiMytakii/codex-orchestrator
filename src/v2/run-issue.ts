@@ -200,6 +200,7 @@ export interface RunIssueDependencies {
     run(input: {
       operation: 'implementation';
       proofId: string;
+      baseSha?: string;
       sessionId?: string;
       androidProofPreparation?: RunRecord['androidProofPreparation'];
       runnerChecks?: RunRecord['runnerChecks'];
@@ -1473,7 +1474,7 @@ export class RunIssue {
         const attempt = active.record.activeAttempt!;
         let launchFailure: RunIssueResult | undefined;
         const implementation = await this.dependencies.implementationAgent.run({
-          operation: 'implementation', attemptId: attempt.attemptId, runId, worktreePath,
+          operation: 'implementation', attemptId: attempt.attemptId, runId, worktreePath, baseSha: active.record.baseSha,
           issue: publicIssueSnapshot(issueSnapshot), frozenCriteria,
           deliveryAuthority: active.record.deliveryAuthority!, cycle: active.record.cycle,
           reworkFindings: active.record.reworkFindings, workflowGeneration: active.record.workflowGeneration,

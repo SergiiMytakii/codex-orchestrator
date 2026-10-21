@@ -823,6 +823,7 @@ export class ContainedImplementationAgent {
   async run(input: {
     operation: 'implementation';
     proofId: string;
+    baseSha?: string;
     sessionId?: string;
     androidProofPreparation?: RunRecord['androidProofPreparation'];
     runnerChecks?: RunRecord['runnerChecks'];
@@ -930,6 +931,9 @@ export class ContainedImplementationAgent {
             `Required host commands: ${canonicalJson(config.checks)}. Runner executes these ordinary local processes; do not run them inside the sandbox. After final source edits return checks-request before proof and Review.`,
             ...(input.runnerChecks ? [`Trusted Runner check results: ${canonicalJson(input.runnerChecks)}. Results match current source: ${input.runnerChecks.sourceSha256 === sha256(canonicalJson(baseline))}. If false, request fresh checks before proof or Review. Read complete logs at logPath. Use only passing exact Runner receipts for the unchanged source. After an in-scope source repair request checks again; otherwise report the concrete blocker. Complete proof and independent Review only after all required host checks passed.`] : []),
           ] : [`Required commands: ${canonicalJson(config.checks)}. Include the exact policy in any child assignment. Run heavy checks sequentially. Retain passing evidence only while source and command policy remain unchanged. Diagnose and correct failures before rechecking; otherwise return the blocker. Complete proof and independent Review through the packaged global skills before returning completed.`]),
+          ...(config.runner.checkExecution !== 'host' ? [
+            `Owner check executable: ${fileURLToPath(new URL('./candidate-check.js', import.meta.url))}. For each configured check invoke it with Node and two separate literal arguments: base ${input.baseSha ?? 'HEAD'} and the exact configured command. This computes the complete Git candidate, selects native related Jest tests when safe, and otherwise executes the full command. Keep each receipt id and command equal to the configured policy; hash the helper's complete stdout/stderr including the actual invocation. Never replace failures or empty selections with success.`,
+          ] : []),
           'Do not commit, push, publish, or print credentials or local auth paths.',
         ].join('\n'),
         timeoutMs: config.codex.timeoutMs,

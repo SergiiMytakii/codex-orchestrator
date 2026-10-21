@@ -312,6 +312,8 @@ test('contained owner maps settled infrastructure failures to resumable outcomes
   assert.match(implementationPrompt, /return boundary/u);
   assert.match(implementationPrompt, /complete current candidate diff relative to the original HEAD/u);
   assert.match(implementationPrompt, /verification-only repair with no new edits still returns completed/u);
+  assert.match(implementationPrompt, /Owner check executable: .*candidate-check\.js/u);
+  assert.match(implementationPrompt, /complete Git candidate/u);
 
   for (const kind of ['idle-timeout', 'timeout', 'transport-failed', 'spawn-failed']) {
     processResult = { kind, exitCode: 1, signal: 'SIGTERM', stderr: Buffer.from('stream disconnected before completion'), report: { kind: 'missing' } };

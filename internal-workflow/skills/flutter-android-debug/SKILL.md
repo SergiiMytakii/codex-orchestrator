@@ -23,6 +23,20 @@ it with guessed coordinates or an unrelated shell workflow. Its quick-start
 build/install/launch sequence is a `cold-start` recipe only, not a default for a live
 Flutter session.
 
+## Reuse existing Android emulators
+
+Before choosing a device, inspect `adb devices -l` and `emulator -list-avds`.
+Reuse a suitable running emulator; otherwise select an existing AVD and start it
+only when the task authorizes a launch. If several stopped AVDs fit, prefer the
+newest installed Android version unless the task requires another version.
+Do not create, clone, or provision an AVD, download a system image, or use
+`avdmanager create avd`, `flutter emulators --create`, or equivalent tooling
+unless the user explicitly requests creation of a new emulator. Task-specific
+names, isolation, a clean installation, and QA requirements do not authorize a
+new AVD. If existing devices cannot meet the requirement, report the concrete
+mismatch and ask before provisioning. Preserve existing app/runtime ownership.
+
+
 ## Preserve the live session by default
 
 Before any state-changing command:

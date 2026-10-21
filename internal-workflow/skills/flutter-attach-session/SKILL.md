@@ -26,6 +26,20 @@ Do not start a new `flutter run` unless the user explicitly asks for that. The d
 3. pin the selected runtime PID
 4. attach only to safely attachable standalone sessions and send `r`/`R` as needed
 
+## Reuse existing Android emulators
+
+Before choosing a device, inspect `adb devices -l` and `emulator -list-avds`.
+Reuse a suitable running emulator; otherwise select an existing AVD and start it
+only when the task authorizes a launch. If several stopped AVDs fit, prefer the
+newest installed Android version unless the task requires another version.
+Do not create, clone, or provision an AVD, download a system image, or use
+`avdmanager create avd`, `flutter emulators --create`, or equivalent tooling
+unless the user explicitly requests creation of a new emulator. Task-specific
+names, isolation, a clean installation, and QA requirements do not authorize a
+new AVD. If existing devices cannot meet the requirement, report the concrete
+mismatch and ask before provisioning. Preserve existing app/runtime ownership.
+
+
 ## Runtime ownership gate
 
 Before `attach`, `reload`, or `restart`, inspect the discovery result and classify the
