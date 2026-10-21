@@ -7,6 +7,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Fixed
+- Accept actual canonical reviewer identities exposed by native collaboration tools,
+  preserving distinct roles, owner exclusion and candidate-bound approvals.
 - Restore native related Jest selection inside the implementation owner, retaining
   full checks for uncertain scope and blocking related failures or empty selections.
 - Require focused/baseline investigation before scope escalation; preserve the first

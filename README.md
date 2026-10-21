@@ -375,6 +375,11 @@ Configure Flutter checks with absolute commands for the pinned SDK, such as `/op
 
 Delivery remains implementation with checks → required runtime proof → independent Review → draft PR. The run completes as `review-ready`; the issue closes through the PR's `Closes` reference when it merges.
 
+Reviewer receipts retain the actual child identity exposed by native collaboration
+(UUID or canonical task path). They never require a fabricated UUID mapping.
+Distinct reviewer roles/identities, owner exclusion, final source binding and both
+approving verdicts remain mandatory.
+
 ### Related Jest checks
 
 In worker-check mode the implementation owner invokes the supplied package check

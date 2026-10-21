@@ -16,7 +16,7 @@ export interface ExternalBlocker {
   reviewerRejectionDetail?: string;
 }
 
-const SESSION_ID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+const REVIEWER_ID_PATTERN = '^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|/root(/[a-z0-9_]+)+)$';
 const REVIEWER_ROLES = ['spec_reviewer', 'standards_reviewer'] as const;
 
 export interface ImplementationReviewV1 {
@@ -354,8 +354,8 @@ export function validateImplementationReview(value: unknown, ownerSessionId?: st
     if (!REVIEWER_ROLES.includes(reviewer.role as typeof REVIEWER_ROLES[number]) || reviewer.verdict !== 'approve') {
       throw new Error(`${field} requires approving Spec and Standards reviewers`);
     }
-    if (typeof reviewer.sessionId !== 'string' || !new RegExp(SESSION_ID_PATTERN, 'u').test(reviewer.sessionId)) {
-      throw new Error(`${field}.reviewer.sessionId must be a canonical UUID`);
+    if (typeof reviewer.sessionId !== 'string' || reviewer.sessionId.length > MAX_STRING_LENGTH || !new RegExp(REVIEWER_ID_PATTERN, 'u').test(reviewer.sessionId)) {
+      throw new Error(`${field}.reviewer.sessionId must be a UUID or canonical collaboration task path`);
     }
     if (reviewer.sessionId === ownerSessionId) throw new Error(`${field} forbids owner self-review`);
     roles.push(reviewer.role as string);
@@ -378,7 +378,7 @@ function implementationReviewSchema(): Record<string, unknown> {
       reviewers: { type: 'array', minItems: 2, maxItems: 2, items: {
         type: 'object', additionalProperties: false, required: ['role', 'sessionId', 'verdict'],
         properties: { role: { type: 'string', enum: [...REVIEWER_ROLES] },
-          sessionId: { type: 'string', pattern: SESSION_ID_PATTERN }, verdict: { type: 'string', const: 'approve' } },
+          sessionId: { type: 'string', maxLength: MAX_STRING_LENGTH, pattern: REVIEWER_ID_PATTERN }, verdict: { type: 'string', const: 'approve' } },
       } },
     },
   };

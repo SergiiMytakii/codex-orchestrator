@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { COMPLETE_REVIEW_COVERAGE } from '../src/v2/code-review-report.js';
 import { implementationReportOutputSchema, validateImplementationReport } from '../src/v2/implementation-report.js';
@@ -92,4 +93,28 @@ test('native completion schema requires full passed proof and independent review
   assert.equal(schema.properties.review.properties.reviewers.minItems, 2);
   assert.equal(schema.properties.review.properties.reviewers.maxItems, 2);
   assert.deepEqual(schema.properties.review.properties.coverage.items.enum, [...COMPLETE_REVIEW_COVERAGE]);
+});
+
+test('owner completion accepts actual canonical collaboration identities without weakening independent review', () => {
+  const report = completedReport();
+  report.review.reviewers[0]!.sessionId = '/root/spec_467_final';
+  report.review.reviewers[1]!.sessionId = '/root/standards_467_final';
+  assert.equal(validateImplementationReport(report, { ownerSessionId }).status, 'completed');
+  const envelope = implementationReportOutputSchema() as any;
+  const schema = envelope.properties.report.anyOf.find((branch: any) => branch.properties.status.const === 'completed');
+  const identity = schema.properties.review.properties.reviewers.items.properties.sessionId;
+  assert.match(report.review.reviewers[0]!.sessionId, new RegExp(identity.pattern, 'u'));
+  const packaged = JSON.parse(readFileSync(new URL('../../internal-workflow/schemas/implementation-report-v1.json', import.meta.url), 'utf8'));
+  const packagedIdentity = packaged.properties.report.anyOf.find((branch: any) => branch.properties.status.const === 'completed').properties.review.properties.reviewers.items.properties.sessionId;
+  assert.deepEqual(packagedIdentity, identity);
+  const mixed = structuredClone(report); mixed.review.reviewers[1]!.sessionId = '019a0000-0000-7000-8000-000000000003';
+  assert.equal(validateImplementationReport(mixed, { ownerSessionId }).status, 'completed');
+  assert.throws(() => validateImplementationReport(report, { ownerSessionId: '/root/spec_467_final' }), /self-review/u);
+  for (const invalid of ['/root', '/root/../owner', '/root//spec', 'spec_467_final', '/root/spec;echo', '/root/' + 'x'.repeat(16 * 1024 + 1)]) {
+    const bad = structuredClone(report); bad.review.reviewers[0]!.sessionId = invalid;
+    assert.throws(() => validateImplementationReport(bad, { ownerSessionId }), invalid);
+  }
+  const duplicate = structuredClone(report);
+  duplicate.review.reviewers[1]!.sessionId = duplicate.review.reviewers[0]!.sessionId;
+  assert.throws(() => validateImplementationReport(duplicate, { ownerSessionId }), /unique/u);
 });

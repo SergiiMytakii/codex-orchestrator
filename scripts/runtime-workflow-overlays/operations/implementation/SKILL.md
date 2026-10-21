@@ -61,9 +61,10 @@ Return one report matching the supplied implementation output schema. For
   them. Never substitute uninspected screenshots or fabricate evidence.
 - `review` describes the final source and proof approved by both fresh,
   independent `spec_reviewer` and `standards_reviewer` children. Include their
-  distinct actual Codex UUID session ids, approving verdicts, a concise summary,
+  distinct actual child identities returned by collaboration tools (UUIDs or
+  canonical task paths), approving verdicts, a concise summary,
   all supplied coverage categories and the two final source hashes below.
-  The owner session cannot review itself. Finish repairs and applicable renewed
+  Never invent an id or a UUID mapping. The owner session cannot review itself. Finish repairs and applicable renewed
   review before claiming approval; reviewers must approve the exact final source.
 
 Compute `review.trackedContentSha256` as SHA-256 of the exact UTF-8 stdout of
