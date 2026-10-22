@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.36] - 2026-10-22
+
 ### Fixed
 - Retain successful review handoff when its identity-bound pull request has merged,
   including a merge during feedback observation, without reopening implementation.
