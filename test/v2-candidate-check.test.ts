@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
+import { runConfiguredChecks } from '../src/v2/runner-checks.js';
+
 const exec = promisify(execFile);
 const helper = join(import.meta.dirname, '../../dist/src/v2/candidate-check.js');
 
-test('owner check selects the complete candidate and keeps related failures blocking', async () => {
+for (const mode of ['worker', 'host']) test(`${mode} check selects the complete candidate and keeps related failures blocking`, async () => {
   const root = await mkdtemp(join(tmpdir(), 'owner check '));
+  let sequence = 0;
   const run = async () => {
+    if (mode === 'host') {
+      const baseSha = (await exec('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim();
+      const results = await runConfiguredChecks({ checks: { test: 'npm test' }, baseSha, worktreePath: root,
+        logRoot: join(root, 'node_modules', '.check-logs', String(sequence++)), timeoutMs: 10000,
+        env: process.env, signal: new AbortController().signal });
+      return { code: results[0]!.exitCode, stdout: await readFile(results[0]!.logPath, 'utf8'), stderr: '' };
+    }
     try { return { code: 0, ...(await exec(process.execPath, [helper, 'HEAD', 'npm test'], { cwd: root })) }; }
     catch (e) { return e as { code: number; stdout: string; stderr: string }; }
   };

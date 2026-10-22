@@ -58,3 +58,21 @@ test('output-limit failure retains diagnostic output and produces no passing rec
   assert.match(log.slice(-400), /check did not complete; retained output may be incomplete/);
   assert.equal(results[0]!.outputSha256, sha256(log));
 });
+
+test('durable baseline evidence rejects malformed or affected failure exceptions', async () => {
+  const { validateRunnerChecks } = await import('../src/v2/runner-checks.js');
+  const baseline = { baseSha: 'a'.repeat(40), logPath: '/private/base.log', outputSha256: sha256('base'),
+    affectedTests: ['test/feature_test.dart'], failures: [{ test: 'test/other_test.dart :: old failure', errorSha256: sha256('failure') }] };
+  const result = { id: 'test', command: 'flutter test --no-pub', exitCode: 1, outputSha256: sha256('candidate'), logPath: '/private/candidate.log', baseline };
+  const state = { status: 'complete', sourceSha256: sha256('source'), policySha256: sha256('policy'), results: [result] };
+  assert.doesNotThrow(() => validateRunnerChecks(state));
+  for (const change of [
+    { affectedTests: [] }, { baseSha: 'not-a-commit' }, { outputSha256: 'bad' },
+    { affectedTests: ['test/../feature_test.dart'] }, { logPath: result.logPath },
+    { failures: [{ test: 'test/feature_test.dart :: related failure', errorSha256: sha256('failure') }] },
+    { unknown: true },
+  ]) {
+    assert.throws(() => validateRunnerChecks({ ...state, results: [{ ...result, baseline: { ...baseline, ...change } }] }), /baseline/);
+  }
+  assert.throws(() => validateRunnerChecks({ ...state, results: [{ ...result, command: 'npm test' }] }), /baseline/);
+});

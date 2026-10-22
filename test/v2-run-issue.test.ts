@@ -55,6 +55,23 @@ test('host checks run before proof and resume the same owner with trusted receip
   assert.deepEqual((await fixture.store.read()).runs[0]!.codexSession, requested.codexSession);
 });
 
+for (const wrongBase of [false, true]) {
+  test(`host completion ${wrongBase ? 'rejects stale' : 'admits confirmed unrelated'} Flutter baseline evidence`, async () => {
+    const fixture = await runFixture({ hostChecks: true, configuredChecks: { test: 'flutter test --no-pub' },
+      implementationResults: [{ kind: 'completed', report: { version: 1, status: 'checks-request',
+        summary: 'Source ready', changedFiles: ['feature.txt'], residualRisks: [] } }] });
+    fixture.dependencies.configuredChecks!.run = async input => [{ id: 'test', command: input.checks.test!,
+      exitCode: 1, outputSha256: sha256('candidate failure'), logPath: '/private/candidate.log',
+      baseline: { baseSha: wrongBase ? 'a'.repeat(40) : input.baseSha, logPath: '/private/base.log',
+        outputSha256: sha256('baseline failure'), affectedTests: ['test/changed_test.dart'],
+        failures: [{ test: 'test/unrelated_test.dart :: old failure', errorSha256: sha256('same failure') }] } }];
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    assert.equal((await fixture.runner.runIssue(input)).status, 'transport-failed');
+    assert.equal((await fixture.runner.runIssue(input)).status, wrongBase ? 'blocked' : 'review-ready');
+    assert.equal(fixture.events.includes('git:push'), !wrongBase);
+  });
+}
+
 test('host mode rejects worker-only receipts without trusted command execution', async () => {
   const fixture = await runFixture({ hostChecks: true });
   const result = await fixture.runner.runIssue({ targetRoot: fixture.targetRoot, issueNumber: 42 });

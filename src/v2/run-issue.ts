@@ -1,4 +1,4 @@
-import { runnerCheckPolicySha256, type RunnerCheckResult } from './runner-checks.js';
+import { runnerCheckAccepted, runnerCheckPolicySha256, type RunnerCheckResult } from './runner-checks.js';
 import { dirname, resolve } from 'node:path';
 
 import {
@@ -199,7 +199,7 @@ export interface RunIssueDependencies {
   };
   reviewFeedback?: ReviewFeedbackObserver;
   git: RunIssueGit;
-  configuredChecks?: { run(input: { checks: Record<string, string>; worktreePath: string; proofId: string; signal: AbortSignal }): Promise<RunnerCheckResult[]> };
+  configuredChecks?: { run(input: { checks: Record<string, string>; worktreePath: string; baseSha: string; proofId: string; signal: AbortSignal }): Promise<RunnerCheckResult[]> };
   implementationAgent: {
     run(input: {
       operation: 'implementation';
@@ -1571,7 +1571,7 @@ export class RunIssue {
             runnerChecks: { status: 'pending', sourceSha256, policySha256, results: [] } });
           if (!await this.authorized(active, config)) return await this.revoked(active);
           const protectedBefore = await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths);
-          const results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath,
+          const results = await this.dependencies.configuredChecks.run({ checks: config.checks, worktreePath, baseSha: active.record.baseSha,
             proofId: active.record.proofId!, signal: this.signal });
           if (await this.dependencies.git.fingerprintDeniedPaths(worktreePath, config.deny.readPaths) !== protectedBefore)
             return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'denied-path-modified');
@@ -1605,11 +1605,12 @@ export class RunIssue {
         return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'owner-review-source-drift');
       if (config.runner.checkExecution === 'host') {
         const trusted = active.record.runnerChecks;
+        const baseSha = active.record.baseSha;
         if (!trusted || trusted.status !== 'complete'
           || trusted.sourceSha256 !== sha256(canonicalJson(source))
           || trusted.policySha256 !== runnerCheckPolicySha256(config.checks)
           || Object.entries(config.checks).some(([id, command]) => !trusted.results.some(result =>
-            result.id === id && result.command === command && result.exitCode === 0
+            result.id === id && result.command === command && runnerCheckAccepted(result, baseSha)
             && ownerResult.checks?.some(check => check.id === id && check.command === command
               && check.status === 'passed' && check.outputSha256 === result.outputSha256))))
           return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'runner-checks-evidence-mismatch');

@@ -249,6 +249,27 @@ test('one contained owner receives proof, independent Review, session identity, 
   assert.equal(processRuns, 1);
 });
 
+test('host owner receives the same trusted baseline exception enforced by completion', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-host-prompt-'));
+  const worktree = join(root, 'worktree'); await mkdir(worktree);
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot, runtimeRoot: root, packageVersion: '2.0.1', bootId: 'boot-a',
+  });
+  const config = androidConfigFixture(); config.runner.checkExecution = 'host';
+  let prompt = '';
+  const agent = new ContainedImplementationAgent({ config: () => config, orchestratorHome: root,
+    parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', bootId: 'boot-a',
+    process: { run: async (invocation: any) => { prompt = invocation.prompt; return { kind: 'cancelled' }; } } as never,
+    git: { snapshot: async () => runtimeFreshness() } as never });
+  await agent.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'host-baseline',
+    runnerChecks: { status: 'complete', sourceSha256: 'a'.repeat(64), policySha256: 'b'.repeat(64), results: [] } });
+  assert.match(prompt, /Runner baseline evidence is the only exception/u);
+  assert.match(prompt, /identical failures in unchanged tests on the immutable base/u);
+  assert.match(prompt, /reporting all baseline failures as residual risks/u);
+  assert.match(prompt, /each required host check passed or has trusted baseline evidence/u);
+  assert.doesNotMatch(prompt, /only after all required host checks passed/u);
+});
+
 test('contained owner maps settled infrastructure failures to resumable outcomes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-launch-gate-resume-'));
   const orchestratorHome = join(root, 'orchestrator');

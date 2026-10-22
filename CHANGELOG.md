@@ -7,6 +7,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 ## [Unreleased]
 
 ### Fixed
+- Retain successful review handoff when its identity-bound pull request has merged,
+  including a merge during feedback observation, without reopening implementation.
+- Admit only trusted baseline-confirmed unrelated Flutter host-test failures,
+  retaining real outcomes, complete logs and passing affected-test evidence.
+  Apply existing native related Jest selection to host checks as well as worker
+  checks; keep scope uncertainty, new failures and interrupted execution blocking.
 - Accept actual canonical reviewer identities exposed by native collaboration tools,
   preserving distinct roles, owner exclusion and candidate-bound approvals.
 - Restore native related Jest selection inside the implementation owner, retaining

@@ -26,11 +26,18 @@ When invocation declares host checks, finish source edits and return
 `residualRisks`. Runner executes only its configured commands as ordinary local
 processes, then resumes this same session with trusted `runnerChecks` results.
 Read the full local logs, repair in-scope failures, and request fresh checks after
-source changes. An unchanged failed check requires a concrete blocker. Complete
-acceptance proof and independent Review only after every configured host check
-passed on the current source. Copy exact ids, commands and output hashes from
+source changes. Runner may attach `baseline` evidence to a nonzero Flutter result:
+it confirms identical failures in unchanged tests on the immutable base, with
+all edited tests passing and passing affected-test coverage for every changed
+Dart file. Only this trusted evidence
+makes those failures nonblocking. Report them as residual risks and retain their
+real exit codes and logs; use the candidate output hash in passed completion
+receipts. New failures, failures in edited tests, unknown or unconfirmed failures still require repair or
+a concrete blocker. Complete acceptance proof and independent Review only after
+every configured host check passed or carries that trusted exception on the
+current source. Copy exact ids, commands and output hashes from
 Runner results into completion receipts. Source or command drift invalidates
-those results. In worker-check mode, execute configured commands in the sandbox
+those results. Host npm checks also use safe native related Jest selection. In worker-check mode, execute configured commands in the sandbox
 through the supplied owner check executable. It selects native related Jest
 tests from the complete candidate when safe; unsupported commands and uncertain
 scope run in full. Retain its actual invocation in the complete log, with the
@@ -49,7 +56,7 @@ Return one report matching the supplied implementation output schema. For
   Hash the complete saved logs, not the tool display, which may truncate output.
   Reuse successful saved evidence while the candidate and check policy remain
   unchanged; do not rerun a command solely to recover displayed output.
-  A failed or unavailable mandatory check cannot authorize completion. Keep
+  A failed or unavailable mandatory check without trusted Runner baseline evidence cannot authorize completion. Keep
   command logs local.
 - `proof` is the passed acceptance proof for every supplied frozen criterion,
   with high confidence, concrete evidence references and local artifacts.

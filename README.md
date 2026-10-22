@@ -254,15 +254,33 @@ title and body. The repository configuration is the only source of mandatory
 executable checks. An Issue's `Verification` text describes expectations for
 implementation and Acceptance Proof; Markdown, wording, and command examples
 never select, replace, or add executable checks. Every configured check must pass
-after the final source edit before required device proof, Review, and publication.
+or carry the trusted Flutter baseline exception below after the final source edit before required device proof, Review, and publication.
 
 In explicit host-check mode the implementation session returns `checks-request`
 after final edits. Runner runs configured commands in insertion order, stops on
-failure, and resumes the same session with complete local logs and trusted results.
-Proof and independent Review follow passing host checks. Source changes, command
+an unaccepted failure, and resumes the same session with complete local logs and trusted results.
+Proof and independent Review follow accepted host checks. Source changes, command
 changes or substituted output hashes invalidate the results. A crash during host
 execution leaves an unfinished action rather than rerunning commands automatically.
 The existing owned-command fence protects unresolved process groups.
+
+Host npm checks use the same conservative related Jest selection as worker checks.
+For ordinary full `flutter test` / `flutter test --no-pub` commands, Runner adds
+`--machine` to retain structured outcomes. When only Dart files under `lib/` and
+`test/` changed, a failed suite may be nonblocking only after Runner reproduces
+its identical test identities and error messages on an archived immutable base,
+with the same lockfile and installed SDK. The base and candidate import/export/part
+graphs identify passing affected-test coverage for every changed Dart file.
+Every edited test file must pass; failures in unchanged tests must match the
+immutable base exactly. Broad shared imports alone do not classify an unchanged
+baseline failure as a regression. Logs, real exit codes, base SHA, error hashes
+and affected test paths remain in trusted `runnerChecks` evidence. Completion
+receipts use the candidate log hash; the owner discloses baseline failures as
+residual risks. New failures or failures in edited tests, unknown scope, unsupported command
+flags, missing tests, incomplete output, failed baseline preparation, timeouts
+and cancellation remain blocking. Baseline commands use the same sanitized host
+environment and owned process fence; they never edit the candidate or register
+a Git worktree. Other frameworks retain their full configured checks.
 
 Checks run in the implementation worktree, after the final source edit. The worker
 keeps full logs locally and reads failures itself; Runner never relays a truncated
