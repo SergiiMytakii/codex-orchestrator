@@ -1348,6 +1348,12 @@ export function createV2Runtime(input: {
       postComment: async (issueNumber, body) => { await issues.postComment(issueNumber, body); },
     },
     pullRequests: {
+      findMerged: async ({ headBranch, baseBranch }) => {
+        const matches = (await pullRequests.listAllByHeadBranch(headBranch))
+          .filter(pullRequest => pullRequest.state === 'MERGED' && pullRequest.baseRefName === baseBranch);
+        if (matches.length > 1) throw new Error('multiple merged pull requests match review handoff');
+        return matches[0];
+      },
       findOpen: async ({ headBranch, baseBranch }) => {
         const matches = (await pullRequests.listAllByHeadBranch(headBranch))
           .filter((pullRequest) => pullRequest.state === 'OPEN' && pullRequest.baseRefName === baseBranch);

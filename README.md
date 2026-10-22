@@ -182,6 +182,11 @@ root or a non-empty `CHANGES_REQUESTED` review from a current repository writer
 or admin, the Runner freezes that exact feedback batch and resumes the existing
 run through the same targeted repair lifecycle.
 
+If that published PR has merged with the same run marker, base/head branches,
+and published head commit, the Runner retains its successful delivery result
+without observing feedback or reopening implementation. Closed unmerged PRs and
+identity mismatches still fail closed.
+
 The frozen batch enters the same implementation with verification → required device proof →
 targeted independent review loop used by in-scope repair. The reviewer receives
 the previous revision, repair delta, blocker IDs, direct impact cone, and affected

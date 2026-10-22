@@ -3564,3 +3564,48 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
   throw new Error('condition was not reached');
 }
+
+
+test('merged published PR retains successful handoff without reopening review or implementation', async () => {
+  const fixture = await runFixture();
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const initial = await fixture.runner.runIssue(input);
+  assert.equal(initial.status, 'review-ready', JSON.stringify({ initial, evidence: fixture.evidence }));
+  enableFeedbackPublication(fixture);
+  const record = (await fixture.store.read()).runs[0]!;
+  const published = await fixture.dependencies.pullRequests.findOpen({ headBranch: record.branchName, baseBranch: 'main' });
+  const events = [...fixture.events];
+  fixture.dependencies.pullRequests.findOpen = async () => undefined;
+  Object.assign(fixture.dependencies.pullRequests, { findMerged: async () => published });
+  fixture.dependencies.reviewFeedback = {
+    observeAndFreeze: async () => { throw new Error('merged PR must not enter review feedback'); },
+  } as unknown as ReviewFeedbackObserver;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(await new RunIssue(fixture.dependencies).runIssue(input), initial);
+    assert.equal((await fixture.store.read()).runs[0]!.terminalOutcome!.status, 'review-ready');
+  }
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length,
+    events.filter(event => event === 'agent:implementation').length);
+});
+
+
+test('merge during feedback observation retains handoff and mismatched merged PR fails closed', async (t) => {
+  for (const mismatch of [false, true]) await t.test(mismatch ? 'foreign handoff' : 'merge race', async () => {
+    const fixture = await runFixture();
+    const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+    const initial = await fixture.runner.runIssue(input);
+    assert.equal(initial.status, 'review-ready');
+    enableFeedbackPublication(fixture);
+    let merged = false;
+    const published = await fixture.dependencies.pullRequests.findOpen({ headBranch: 'codex/issue-42', baseBranch: 'main' });
+    Object.assign(fixture.dependencies.pullRequests, {
+      findMerged: async () => merged ? { ...published, ...(mismatch ? { headSha: 'f'.repeat(40) } : {}) } : undefined,
+    });
+    fixture.dependencies.reviewFeedback = {
+      observeAndFreeze: async () => { merged = true; return { status: 'blocked', reason: 'PR is no longer open' }; },
+    } as unknown as ReviewFeedbackObserver;
+    const result = await new RunIssue(fixture.dependencies).runIssue(input);
+    if (mismatch) assert.deepEqual(pick(result, ['status', 'kind', 'resumable']), { status: 'blocked', kind: 'safety', resumable: false });
+    else assert.deepEqual(result, initial);
+  });
+});

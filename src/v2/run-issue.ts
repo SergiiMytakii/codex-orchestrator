@@ -185,6 +185,10 @@ export interface RunIssueDependencies {
     getRepositoryPermission?(login: string, expectedUserId: string): Promise<{ permission: 'none' | 'read' | 'write' | 'admin'; checkedAt: string; userId: string }>;
   };
   pullRequests: {
+    findMerged?(input: { headBranch: string; baseBranch: string }): Promise<{
+      url: string; body: string; number: number; nodeId: string; headSha?: string;
+      headRefName: string; baseRefName: string;
+    } | undefined>;
     findOpen(input: { headBranch: string; baseBranch: string }): Promise<{
       url: string; body: string; number?: number; nodeId?: string; headSha?: string;
       headRefName?: string; baseRefName?: string;
@@ -987,11 +991,28 @@ export class RunIssue {
       || !starting.record.implementationResult?.review) {
       return { result: publicOutcome(terminal!) };
     }
+    const mergedOutcome = async (): Promise<RunIssueResult | undefined> => {
+      const merged = await this.dependencies.pullRequests.findMerged?.({
+        headBranch: starting.record.branchName,
+        baseBranch: config.github.baseBranch,
+      });
+      if (!merged) return undefined;
+      if (merged.url !== terminal.pullRequestUrl
+        || merged.headRefName !== starting.record.branchName
+        || merged.baseRefName !== config.github.baseBranch
+        || merged.headSha !== feedback.previousPublishedHeadSha
+        || !merged.body.includes(`<!-- codex-orchestrator:run:${starting.record.runId}:pr -->`)) {
+        return await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-merged-pr-identity-mismatch');
+      }
+      return publicOutcome(terminal);
+    };
     const pullRequest = await this.dependencies.pullRequests.findOpen({
       headBranch: starting.record.branchName,
       baseBranch: config.github.baseBranch,
     });
     if (!pullRequest?.number || !pullRequest.nodeId || !pullRequest.headSha) {
+      const completed = await mergedOutcome();
+      if (completed) return { result: completed };
       return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-pr-identity-missing') };
     }
     if (pullRequest.url !== terminal.pullRequestUrl) {
@@ -1027,6 +1048,8 @@ export class RunIssue {
     });
     if (observed.status === 'retryable') return { result: await this.invokedFailure(starting, 'review-feedback-observation-retryable') };
     if (observed.status === 'blocked') {
+      const completed = await mergedOutcome();
+      if (completed) return { result: completed };
       return { result: await this.terminal(starting, { status: 'blocked', kind: 'safety', resumable: false }, 'review-feedback-observation-blocked') };
     }
     let ready = starting;
