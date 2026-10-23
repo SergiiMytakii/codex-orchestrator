@@ -6,6 +6,16 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Permit evidence-backed minimal repairs to related tests, mocks and fixtures
+  without widening the authorized outcome; retain explicit exclusions, hard
+  allowlists, assertions, and refreshed checks, acceptance proof and Review.
+- Explain proof artifact admission limits and sanitized summary requirements to
+  the implementation owner while preserving complete private diagnostic logs.
+- Require fresh trusted host-check receipts after reauthorization instead of
+  reusing earlier session results when current Runner receipts are absent.
+
 ## [2.0.36] - 2026-10-22
 
 ### Fixed
