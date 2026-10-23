@@ -270,6 +270,32 @@ test('host owner receives the same trusted baseline exception enforced by comple
   assert.doesNotMatch(prompt, /only after all required host checks passed/u);
 });
 
+test('resumed host owner without receipts requests fresh checks and receives artifact admission limits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runtime-host-recovery-prompt-'));
+  const worktree = join(root, 'worktree'); await mkdir(worktree);
+  const workflowGeneration = await materializeWorkflowGeneration({
+    packageRoot, runtimeRoot: root, packageVersion: '2.0.1', bootId: 'boot-a',
+  });
+  const config = androidConfigFixture(); config.runner.checkExecution = 'host';
+  config.checks = { 'flutter-test': 'flutter test --no-pub' };
+  let prompt = '';
+  const agent = new ContainedImplementationAgent({ config: () => config, orchestratorHome: root,
+    parentCodexHome: join(root, 'codex-home'), safePath: '/usr/bin:/bin', bootId: 'boot-a',
+    process: { run: async (invocation: any) => { prompt = invocation.prompt; return { kind: 'cancelled' }; } } as never,
+    git: { snapshot: async () => runtimeFreshness() } as never });
+  await agent.run({ ...ownerInput(worktree, workflowGeneration), attemptId: 'host-recovery',
+    sessionId: '019a1435-06c0-7860-8f62-b1faadb9662b', cycle: 4 });
+  assert.match(prompt, /No current trusted Runner check results/u);
+  assert.match(prompt, /return checks-request before proof or Review/u);
+  assert.match(prompt, /Earlier session receipts cannot replace current Runner results/u);
+  assert.match(prompt, /nonempty UTF-8 text of at most 1 MiB/u);
+  assert.match(prompt, /no credential material/u);
+  assert.match(prompt, /publishable text.*64 KiB.*host identity/u);
+  assert.match(prompt, /compact sanitized summaries.*actual exit codes.*SHA-256/u);
+  assert.match(prompt, /Host identity is allowed only in private command-output or static-inspection artifacts/u);
+  assert.match(prompt, /Keep complete raw logs unchanged in private local diagnostics/u);
+});
+
 test('contained owner maps settled infrastructure failures to resumable outcomes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-launch-gate-resume-'));
   const orchestratorHome = join(root, 'orchestrator');
