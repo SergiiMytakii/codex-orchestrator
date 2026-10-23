@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.37] - 2026-10-23
+
 ### Fixed
 
 - Permit evidence-backed minimal repairs to related tests, mocks and fixtures
