@@ -127,7 +127,7 @@ test('operation snapshot copies one pinned generation closure and concurrent pub
   await verifyRuntimeAssetSnapshot(left);
 });
 
-test('implementation snapshot carries the bug workflow documents', async () => {
+test('implementation snapshot carries repair authority, exclusions, proof gates, and bug workflow documents', async () => {
   const root = await mkdtemp(join(tmpdir(), 'runtime-assets-implementation-closure-'));
   const workflowGeneration = await materializeWorkflowGeneration({
     packageRoot,
@@ -148,6 +148,15 @@ test('implementation snapshot carries the bug workflow documents', async () => {
     'docs/agents/bugfix-quality-gate.md',
     'docs/agents/confidence-rubric.md',
   ]) assert.equal(snapshot.referencedDocumentPaths.includes(path), true, path);
+  const instructions = await readFile(join(snapshot.snapshotRoot, 'operations/implementation/SKILL.md'), 'utf8');
+  assert.match(instructions, /Candidate file lists describe initial implementation focus/u);
+  assert.match(instructions, /related tests, mocks, and fixtures/u);
+  assert.match(instructions, /caused by the current change/u);
+  assert.match(instructions, /preserves the same assertions and authorized outcome/u);
+  assert.match(instructions, /Explicit file exclusions and hard allowlists remain binding/u);
+  assert.match(instructions, /Do not skip tests, weaken assertions, or change unrelated behavior/u);
+  assert.match(instructions, /changes the authorized outcome, report an authority boundary before editing/u);
+  assert.match(instructions, /After a repair, refresh affected checks, acceptance proof, and applicable independent Review/u);
   await verifyRuntimeAssetSnapshot(snapshot);
 });
 

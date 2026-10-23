@@ -21,6 +21,15 @@ device leases. This invocation may edit its assigned worktree, run checks and
 coordinate the supplied reviewer profiles; it has no publication credentials or
 authority.
 
+Candidate file lists describe initial implementation focus. Apply Implement's
+repair gate to related tests, mocks, and fixtures: establish that the failure is
+caused by the current change and the minimal repair preserves the same assertions and authorized outcome.
+Record that evidence before editing; a necessary repair within this authority
+continues without asking for confirmation. Explicit file exclusions and hard allowlists remain binding.
+Do not skip tests, weaken assertions, or change unrelated behavior. If the repair
+crosses an explicit exclusion or changes the authorized outcome, report an authority boundary before editing.
+After a repair, refresh affected checks, acceptance proof, and applicable independent Review.
+
 When invocation declares host checks, finish source edits and return
 `checks-request` with `version: 1`, `summary`, the complete `changedFiles`, and
 `residualRisks`. Runner executes only its configured commands as ordinary local
