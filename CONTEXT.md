@@ -35,7 +35,7 @@ targeted Review of their delta and direct impact cone while untouched approval i
 
 **Proof Artifact** — proof-owned evidence file. Local evidence is never published; publishable evidence obeys the stricter public contract.
 
-**Runner-owned action** — finite operation such as publication, issue mutation, durable ownership, or device leasing that an Agent cannot perform with inherited credentials.
+**Runner-owned action** — finite operation such as publication, issue mutation, durable ownership, or device leasing reserved for the Runner. Inherited credentials do not transfer that authority to an Agent.
 
 **Resumable intent** — durable record written before an effect and reconciled against its postcondition after restart.
 
@@ -48,8 +48,8 @@ targeted Review of their delta and direct impact cone while untouched approval i
 - The Runner chooses an Eligible Issue and owns its Run.
 - The Agent owns implementation, verification decisions, Acceptance Proof and independent Review. With explicit `runner.checkExecution: "host"`, Runner executes configured checks and resumes that same Agent before proof and Review; otherwise the Agent executes them in its sandbox. Runner admits the unchanged result and publishes.
 - Checks create a Checked Change; Acceptance Proof can accept only that unchanged binding.
-- Agent tool environments have no GitHub/npm/SSH/cloud publication authority;
-  shared Codex auth and same-user local reads remain an accepted local risk.
+- Agents and host checks inherit the full Runner environment, including
+  credentials; publication authority remains with the Runner.
 - A Run may resume a durable intent but may not invent or repeat an ambiguous external effect.
 - Durable Run records must satisfy the current execution contract. Legacy envelopes
   may carry those same records, but obsolete execution fields and missing authority

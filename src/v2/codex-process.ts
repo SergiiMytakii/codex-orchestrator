@@ -188,7 +188,6 @@ export class CodexProcess {
         reportPath: input.reportPath,
         toolHome: input.toolHome,
         tmpDir: input.tmpDir,
-        safePath: input.safePath,
         operationPolicy: input.operationPolicy,
         agentProfilePaths: input.agentProfilePaths,
         executionProfile: liveSmokeModel

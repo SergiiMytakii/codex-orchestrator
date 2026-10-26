@@ -6,22 +6,24 @@ import { test } from 'node:test';
 import { runConfiguredChecks, buildHostCheckEnvironment } from '../src/v2/runner-checks.js';
 import { sha256 } from '../src/v2/containment.js';
 
-test('trusted checks use ordinary SDK cache and never receive publication credentials', async t => {
+test('trusted checks inherit the full runtime environment including database and credential variables', async t => {
   const root = await mkdtemp(join(tmpdir(), 'runner-checks-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, 'worktree');
   const home = join(root, 'ordinary-user-home');
   await mkdir(workspace); await mkdir(home);
-  const command = `printf cache > "$HOME/engine.stamp"; test -z "$GITHUB_TOKEN" && test -z "$SSH_AUTH_SOCK" && pwd`;
+  const command = `printf cache > "$HOME/engine.stamp"; test "$GITHUB_TOKEN" = fixture-token && test "$SSH_AUTH_SOCK" = /fixture/socket && test "$MONGODB_URI" = mongodb://fixture.invalid/test && test "$DB_NAME" = test_fixture && test "$CUSTOM_FLAG" = enabled && pwd`;
   const results = await runConfiguredChecks({ checks: { sdk: command }, worktreePath: workspace,
     logRoot: join(root, 'logs'), timeoutMs: 5000, signal: new AbortController().signal,
-    env: { ...process.env, HOME: home, GITHUB_TOKEN: 'must-not-be-inherited', SSH_AUTH_SOCK: '/private/socket' } });
+    env: { ...process.env, HOME: home, GITHUB_TOKEN: 'fixture-token', SSH_AUTH_SOCK: '/fixture/socket',
+      MONGODB_URI: 'mongodb://fixture.invalid/test', DB_NAME: 'test_fixture', CUSTOM_FLAG: 'enabled' } });
   assert.equal(results[0]!.exitCode, 0);
   assert.equal(await readFile(join(home, 'engine.stamp'), 'utf8'), 'cache');
   const log = await readFile(results[0]!.logPath, 'utf8');
   assert.equal(log.trim(), workspace.replace('/var/', '/private/var/'));
   assert.equal(results[0]!.outputSha256, sha256(log));
-  assert.equal(buildHostCheckEnvironment({ HOME: home, GH_TOKEN: 'secret' }).GH_TOKEN, undefined);
+  assert.deepEqual(buildHostCheckEnvironment({ HOME: home, GH_TOKEN: 'fixture-token', UNSET: undefined }),
+    { HOME: home, GH_TOKEN: 'fixture-token' });
 });
 
 test('failed configured check retains stdout and stderr and prevents dependent commands', async t => {

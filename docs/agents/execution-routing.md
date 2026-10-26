@@ -17,7 +17,7 @@ context unless the user explicitly asks to edit or audit that file.
 - Use TDD where possible when the change has a natural public seam and can produce a meaningful pre-change failure; otherwise use affected regression validation.
 - Import, export, package, or script changes: run typecheck, focused contract tests, and `npm pack --dry-run --json`.
 - Proof changes: run the relevant proof tests and preserve credential, path, freshness, diff, and lease checks.
-- Process or authorization changes: prove the environment allowlist, process-group quiescence, and finite Runner action boundary.
+- Process or authorization changes: prove full parent-environment inheritance, process-group quiescence, and finite Runner action boundaries.
 - Docs-only changes: inspect authoritative-doc terminology and `git diff --check`.
 
 The build must clean `dist` before compilation. Stale compiled modules are a package-boundary failure even when current source is correct.
@@ -25,9 +25,9 @@ The build must clean `dist` before compilation. Stale compiled modules are a pac
 ## Ownership rules
 
 - Agent processes may change only their assigned worktree and structured report/artifact paths.
-- Tool environments do not inherit GitHub, SSH, npm, or cloud publication
-  credentials. Shared user-owned Codex auth and same-user host-file reads are an
-  explicit accepted local risk and must never be copied into output.
+- Agent and host-check processes inherit the full Runner environment, including
+  credentials. Inheritance does not authorize publication or unrelated external
+  changes. Credential values must never be copied into output or proof artifacts.
 - Only Runner adapters may perform GitHub writes, publication, durable ownership, or device lease actions.
 - All direct and daemon work must enter the same `runIssue` lifecycle.
 - Target policy belongs under `.codex-orchestrator/`; reusable behavior belongs under `src/v2/`.

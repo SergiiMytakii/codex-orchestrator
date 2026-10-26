@@ -91,3 +91,17 @@ with the same implementation owner for scoped repair or a concrete blocker.
 Existing configurations retain worker-side verification. Setup opts into host
 checks only with `--flutter-sdk`; it records executable paths in existing check
 commands without adding SDK discovery, installation, cloning or cache ownership.
+
+## Full environment inheritance amendment (2026-10-26)
+
+The owner explicitly authorized the full Runner environment for agents and local
+checks, including database settings and credentials. Environment keys are no
+longer allowlisted or blanked; native shell commands inherit them as well. This
+removes environment stripping as a recovery obstacle. Publication authority,
+worktree and network policy, process cleanup, required checks, proof and Review
+remain enforced independently. Credentials remain forbidden in reports and
+published evidence.
+
+Resumable tool/service blockers continue the existing session on the next
+bounded invocation rather than requiring manual reauthorization. Credential,
+scope and safety boundaries retain their blocking behavior.

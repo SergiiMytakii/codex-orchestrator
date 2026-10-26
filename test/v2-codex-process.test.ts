@@ -18,7 +18,7 @@ import {
   defaultContainmentOperationPolicy,
 } from '../src/v2/containment.js';
 
-test('builds the exact contained argv and allowlisted process environment without suppressing native subagents', async () => {
+test('inherits the complete parent environment without suppressing native subagents', async () => {
   await withRunFixture(async (fixture) => {
     let captured: SpawnSpec | undefined;
     const child = new FakeChild({ reportPath: fixture.reportPath });
@@ -34,7 +34,6 @@ test('builds the exact contained argv and allowlisted process environment withou
       reportPath: fixture.reportPath,
       toolHome: fixture.toolHome,
       tmpDir: fixture.attemptTmp,
-      safePath: fixture.safePath,
       operationPolicy: defaultContainmentOperationPolicy(),
       executionProfile: { model: 'gpt-5.6-sol', reasoningEffort: 'medium' },
     }));
@@ -53,14 +52,16 @@ test('builds the exact contained argv and allowlisted process environment withou
       `shell_environment_policy.set.CODEX_ORCHESTRATOR_WORKFLOW_ROOT=${JSON.stringify(dirname(dirname(fixture.schemaPath)))}`,
     ), true);
     assert.equal(captured?.args.some((arg) => /collab|spawn_agent|multi_agent/iu.test(arg)), false);
-    assert.deepEqual(Object.keys(captured?.env ?? {}).sort(), ['CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'TMPDIR']);
-    assert.equal(Object.values(captured?.env ?? {}).includes('ambient-secret'), false);
+    for (const [key, value] of Object.entries(fixture.parentEnv)) assert.equal(captured?.env[key], value);
+    assert.ok(captured?.args.includes('shell_environment_policy.inherit="all"'));
+    assert.ok(captured?.args.includes('shell_environment_policy.ignore_default_excludes=true'));
+    assert.equal(captured?.args.some(arg => /shell_environment_policy\.set\.(?:HOME|PATH|TMPDIR|LANG|LC_ALL|GH_TOKEN|GITHUB_TOKEN)=/u.test(arg)), false);
   });
 });
 
 test('local verification uses native workspace permissions with only loopback destinations', () => {
   const args = buildContainmentCodexArgs({
-    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp',
     operationPolicy: { ...defaultContainmentOperationPolicy(), network: 'loopback', networkHosts: ['127.0.0.1', '::1', 'localhost'] },
   });
   assert.equal(args.includes('--sandbox'), false);
@@ -69,11 +70,26 @@ test('local verification uses native workspace permissions with only loopback de
   assert.ok(args.includes('permissions.orchestrator-worktree.network.allow_local_binding=true'));
   assert.ok(args.includes('permissions.orchestrator-worktree.network.domains={"127.0.0.1"="allow","::1"="allow","localhost"="allow"}'));
   assert.ok(args.includes('approval_policy="never"'));
-  assert.ok(args.includes('shell_environment_policy.set.GITHUB_TOKEN=""'));
+  assert.ok(args.includes('shell_environment_policy.inherit="all"'));
   assert.throws(() => buildContainmentCodexArgs({
-    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp',
     operationPolicy: { ...defaultContainmentOperationPolicy(), network: 'loopback', networkHosts: ['example.com'] },
   }), /containment authority/u);
+});
+
+test('a real agent subprocess receives database, custom and credential variables unchanged', async () => {
+  await withRunFixture(async fixture => {
+    const expected = { MONGODB_URI: 'mongodb://fixture.invalid/test', DB_NAME: 'test_fixture',
+      CUSTOM_RUNTIME_FLAG: 'enabled', GITHUB_TOKEN: 'fixture-token', AWS_SECRET_ACCESS_KEY: 'fixture-secret' };
+    const runner = new CodexProcess(spec => spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+      args: ['-e', `const ok = Object.entries(${JSON.stringify(expected)}).every(([key, value]) => process.env[key] === value);
+        require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, JSON.stringify({ ok }));`],
+    }));
+    const result = await runner.run(fixture.input({ parentEnv: { ...fixture.parentEnv, ...expected } }), new AbortController().signal);
+    assert.equal(result.kind, 'completed');
+    assert.equal(result.report.kind, 'available');
+    if (result.report.kind === 'available') assert.deepEqual(JSON.parse(result.report.bytes.toString('utf8')), { ok: true });
+  });
 });
 
 test('live smoke default-model mode leaves model selection to Codex', async () => {
@@ -118,7 +134,6 @@ test('live smoke explicit model overrides every packaged workflow role', async (
       reportPath: fixture.reportPath,
       toolHome: fixture.toolHome,
       tmpDir: fixture.attemptTmp,
-      safePath: fixture.safePath,
       operationPolicy: defaultContainmentOperationPolicy(),
       executionProfile: { model: 'gpt-5.6-luna', reasoningEffort: 'medium' },
     }));
@@ -127,7 +142,7 @@ test('live smoke explicit model overrides every packaged workflow role', async (
 
 test('contained argv rejects operation policy widening and honors a declared read-only sandbox', () => {
   const base = {
-    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp',
   };
   const readOnly = {
     ...defaultContainmentOperationPolicy(),
@@ -154,7 +169,7 @@ test('contained argv rejects operation policy widening and honors a declared rea
 
 test('contained argv binds packaged reviewer profiles as executable named agents', () => {
   const base = {
-    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp', safePath: '/usr/bin:/bin',
+    schemaPath: '/tmp/schema.json', reportPath: '/tmp/report.json', toolHome: '/tmp/home', tmpDir: '/tmp/tmp',
     agentProfilePaths: {
       spec_reviewer: '/sealed/profiles/spec_reviewer.toml',
       standards_reviewer: '/sealed/profiles/standards_reviewer.toml',
@@ -627,6 +642,7 @@ async function withRunFixture(
     ]);
     await writeFile(schemaPath, '{}\n');
     const parentEnv: NodeJS.ProcessEnv = {
+      PATH: '/fixture/bin:/usr/bin:/bin',
       HOME: join(root, 'parent-home'),
       LANG: 'C.UTF-8',
       LC_ALL: 'C.UTF-8',

@@ -21,7 +21,7 @@ import {
   type AttemptProcessIdentity,
   type ProcessStartIdentity,
 } from './active-attempt.js';
-import { validateImplementationReport, type ImplementationReportV1 } from './implementation-report.js';
+import { validateImplementationReport, type ExternalBlocker, type ImplementationReportV1 } from './implementation-report.js';
 import { decodeAgentReportForValidation } from './report-envelope.js';
 import { projectTerminalDirectReview } from './direct-delivery.js';
 import { CandidateProofInspectionError, type FrozenCriterion, type IssueSnapshot, type ProveChangeResult, type ProofProcessFailure } from './acceptance-proof.js';
@@ -1554,7 +1554,9 @@ export class RunIssue {
           return await this.retainImplementationReportCorrection(active, implementation,
             error instanceof Error ? error.message : 'Owner completion report is invalid.');
         }
-        if (report.status === 'external-block') return await this.terminal(active, implementationBlockerOutcome(report.blocker!));
+        if (report.status === 'external-block') {
+          return await this.handleExternalBlock(active, report.blocker!, sha256(canonicalJson(implementation.report)));
+        }
         if (report.status === 'answer-only' || report.status === 'boundary') return await this.completeIssueFeedbackResponse(active,
           report as ImplementationReportV1 & { status: 'answer-only' | 'boundary'; response: string }, config);
         if (!active.record.codexSession) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true }, 'codex-session-identity-missing');
@@ -2494,17 +2496,18 @@ export class RunIssue {
     return this.settleCandidateMaterialization(active, config);
   }
 
-  private async clearAndReleaseCandidate(active: ActiveRun): Promise<{ active: ActiveRun } | RunIssueResult> {
+  private async clearAndReleaseCandidate(active: ActiveRun, changes: Partial<RunRecord> = {}): Promise<{ active: ActiveRun } | RunIssueResult> {
     const candidate = this.dependencies.git.candidateV2;
     const binding = active.record.candidateBinding;
-    if (!candidate || !binding) return { active };
+    if (!candidate || !binding) return { active: Object.keys(changes).length ? await this.persist(active, changes) : active };
     if (active.record.candidateMaterialization) return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: false }, 'candidate-materialization-not-cleared');
     const normalized = await candidate.normalizeSharedIndex({
       worktreePath: active.record.worktreePath,
       expectedHeadSha: expectedImplementationHead(active.record),
     });
     if (normalized.kind === 'failed') return this.mapCandidateFailure(active, normalized.code);
-    const retained = await this.persist(active, { pendingEffect: { kind: 'candidate-pin-release', bindingId: binding.bindingId, expectedPinnedCommitSha: binding.candidateCommitSha } });
+    const retained = await this.persist(active, { ...changes,
+      pendingEffect: { kind: 'candidate-pin-release', bindingId: binding.bindingId, expectedPinnedCommitSha: binding.candidateCommitSha } });
     return this.finishRepairCandidateRelease(retained);
   }
 
@@ -2658,7 +2661,7 @@ export class RunIssue {
   private async mapProofFailure(active: ActiveRun, proof: Exclude<ProveChangeResult, { status: 'passed' }>): Promise<RunIssueResult> {
     if (proof.status === 'needs-rework') return await this.terminal(active, { status: 'internal-error', code: 'owner-proof-admission-rejected' });
     if (proof.status === 'external-block') {
-      return await this.terminal(active, implementationBlockerOutcome(proof.blocker));
+      return await this.handleExternalBlock(active, proof.blocker);
     }
     if (proof.status === 'transport-failed') return await this.terminal(active, { status: 'transport-failed', resumable: proof.resumable });
     if (proof.status === 'cancelled') return await this.terminal(active, { status: 'cancelled' });
@@ -2680,6 +2683,37 @@ export class RunIssue {
       }
     }
     return await this.terminal(active, { status: 'internal-error', code: 'acceptance-proof-internal-failure' });
+  }
+
+  private async handleExternalBlock(
+    active: ActiveRun,
+    blocker: ExternalBlocker,
+    reportSha256?: string,
+  ): Promise<RunIssueResult> {
+    if (blocker.resumable && ['tool', 'service'].includes(blocker.kind)) {
+      if (reportSha256) {
+        const changes = { implementationReportCorrection: undefined, reportRepairs: 0 };
+        active = isAdoptableAttempt(active.record.activeAttempt)
+          ? await this.adoptAttempt(active, reportSha256, changes) : await this.persist(active, changes);
+      }
+      active = await this.clearAttempt(active);
+      if (active.record.lifecycle === 'checking') {
+        if (this.dependencies.proof.cleanupMobileLeases)
+          await this.dependencies.proof.cleanupMobileLeases({ canonicalRepository: active.record.canonicalRepository,
+            worktreePath: active.record.worktreePath, proofId: active.record.proofId! });
+        const released = await this.clearAndReleaseCandidate(active, {
+          lifecycle: 'implementing', implementationResult: undefined, checkedChangeSha256: undefined,
+          proofReceipt: undefined, proofExecution: undefined, androidProofPreparation: undefined,
+          proofId: this.dependencies.createProofId(), checks: [],
+          reworkFindings: [`Recover the prerequisite and prepare fresh proof: ${blocker.summary}`],
+        });
+        if ('status' in released) return released;
+        active = released.active;
+      }
+      return this.invokedFailure(active, 'implementation-environment-retryable',
+        `Continue the same session: diagnose and recover the unavailable tool or service before completing checks, proof and Review. ${canonicalJson(blocker)}`);
+    }
+    return this.terminal(active, implementationBlockerOutcome(blocker));
   }
 
   private async revoked(active: ActiveRun): Promise<RunIssueResult> {

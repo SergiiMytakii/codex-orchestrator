@@ -25,12 +25,9 @@ export interface RunnerChecks {
   results: RunnerCheckResult[];
 }
 
-/** Preserve ordinary local SDK/cache locations without publication credentials. */
+/** Trusted local checks inherit the Runner environment without filtering keys. */
 export function buildHostCheckEnvironment(parent: NodeJS.ProcessEnv): Record<string, string> {
-  const allowed = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'CI',
-    'PUB_CACHE', 'FLUTTER_ROOT', 'ANDROID_HOME', 'ANDROID_SDK_ROOT', 'JAVA_HOME',
-    'DEVELOPER_DIR', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'SystemRoot', 'ComSpec', 'PATHEXT'];
-  return Object.fromEntries(allowed.flatMap(key => parent[key] === undefined ? [] : [[key, parent[key]!]]));
+  return Object.fromEntries(Object.entries(parent).filter((entry): entry is [string, string] => entry[1] !== undefined));
 }
 
 /** Execution order is part of the configured host-check policy. */

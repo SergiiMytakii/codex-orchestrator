@@ -2,7 +2,7 @@
 
 Codex Orchestrator turns one explicitly authorized GitHub Issue into a controlled Codex delivery run. Planning remains external. The package implements the issue in an isolated Git worktree, validates the immutable candidate, and—only after all required gates pass—pushes a branch and opens a draft pull request.
 
-The package is designed for unattended local execution without giving the Codex worker your GitHub, SSH, npm, or cloud publication credentials. The trusted Runner owns authorization, process ownership, recovery, evidence admission and publication. One native Codex session owns source changes, verification decisions, proof and independent Review through synchronized global skills. Explicit host checks are finite Runner actions requested by that session.
+The package is designed for unattended local execution with the full parent environment available to Codex workers and host checks, including database settings and credentials. The trusted Runner owns authorization, process ownership, recovery, evidence admission and publication. One native Codex session owns source changes, verification decisions, proof and independent Review through synchronized global skills. Explicit host checks are finite Runner actions requested by that session.
 
 ## What happens to an issue
 
@@ -65,7 +65,7 @@ npx codex-orchestrator setup --target "$PWD" --flutter-sdk "/absolute/path/to/fl
 Setup validates `bin/flutter` and runs `--version`, then records quoted absolute
 commands for `pub get --enforce-lockfile`, analyze, and tests in `checks`. It enables
 `runner.checkExecution: "host"`: these commands execute repository code with the
-Runner user's normal SDK, package cache and network, without publication tokens.
+Runner user's normal SDK, package cache, network and inherited environment.
 SDK paths containing spaces and shell metacharacters are supported on the existing
 POSIX host runtime. Setup does not install or copy SDKs. A dry run checks the
 executable but skips `--version` to avoid SDK cache writes. Repeated setup preserves
@@ -143,7 +143,7 @@ npx codex-orchestrator run --target "$PWD" --issue 123
 
 Repeated calls do not start an unrelated second run. The Runner reads durable state, reconciles unfinished effects, revalidates issue authorization, and continues only when ownership and process state are safe.
 
-An external blocker stops until renewed GitHub authorization; ordinary polling does not relaunch a worker against the same unavailable environment.
+Resumable tool/service blockers continue on the next ordinary invocation or daemon tick. Nonresumable external failures and credential or authority blockers require resolution and renewed GitHub authorization.
 
 One native Codex session owns implementation, configured commands, acceptance evidence, and independent Spec and Standards Review through the synchronized global skills. Runner resumes the exact saved session UUID after process cleanup; it does not launch separate proof or Review coordinators.
 
@@ -242,6 +242,15 @@ process's stderr return resumable `transport-failed` with local evidence code
 `codex-model-capacity`. A leftover output report cannot turn that refusal into
 success. The Runner retains the same session and worktree without switching models.
 
+Owner-reported tool or service blockers with `resumable: true` retain local
+diagnostics and return a resumable continuation instead of setting `agent:blocked`.
+The next CLI invocation or ordinary daemon tick continues the same Run, session
+and worktree without consuming a semantic cycle. The owner diagnoses and recovers
+the prerequisite or changes approach using retained session context. Recoverable
+proof-admission failures return to the same owner for fresh proof and Review,
+releasing the previous candidate through existing cleanup. Nonresumable failures, missing credential authority,
+scope boundaries and safety failures retain their existing blocking behavior.
+
 On an internal Acceptance Proof failure, the Runner also attempts to retain an
 `acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.
 It contains a bounded, filtered cause, candidate commit, package version, and
@@ -283,7 +292,7 @@ and affected test paths remain in trusted `runnerChecks` evidence. Completion
 receipts use the candidate log hash; the owner discloses baseline failures as
 residual risks. New failures or failures in edited tests, unknown scope, unsupported command
 flags, missing tests, incomplete output, failed baseline preparation, timeouts
-and cancellation remain blocking. Baseline commands use the same sanitized host
+and cancellation remain blocking. Baseline commands use the same inherited host
 environment and owned process fence; they never edit the candidate or register
 a Git worktree. Other frameworks retain their full configured checks.
 
@@ -383,9 +392,9 @@ The branch template and containment settings are fixed policy in the current sch
 The package separates two roles:
 
 - The **Runner** is trusted. It owns GitHub reads and writes, labels, comments, worktrees, configured checks, process lifecycle, commits, pushes, draft PRs, proof validation, and recovery state.
-- Codex **workers** are bounded. They receive operation-specific instructions and a contained environment. They can inspect and change the assigned worktree or create proof-owned artifacts, but they do not receive publication credentials or permission to publish.
+- Codex **workers** are bounded by issue authority. They receive operation-specific instructions and the full inherited environment. They can inspect and change the assigned worktree or create proof-owned artifacts; inherited credentials do not grant permission to publish.
 
-Codex and native Codex subagents still run as your local OS user and may use your existing Codex authentication. This is containment of authority, not an OS-level secrecy boundary. Credentials are scrubbed from worker environments and rejected in reports and proof artifacts.
+Codex and native Codex subagents run as your local OS user and may use your existing Codex authentication. Parent environment keys are not filtered or blanked; supplied HOME, PATH and TMPDIR are preserved, while CODEX_HOME remains bound to the selected Codex installation. This is containment of authority, not an OS-level secrecy boundary. Credentials remain forbidden in published output, reports and proof artifacts.
 
 ## Explicit Flutter proof
 

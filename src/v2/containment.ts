@@ -5,33 +5,12 @@ import { dirname, join } from 'node:path';
 
 import type { WorkflowExecutionProfile, WorkflowOperationPolicy } from './workflow-assets.js';
 
-const DENIED_TOOL_ENV_KEYS = [
-  'GH_TOKEN',
-  'GITHUB_TOKEN',
-  'GH_CONFIG_DIR',
-  'GIT_ASKPASS',
-  'SSH_ASKPASS',
-  'SSH_AUTH_SOCK',
-  'NPM_TOKEN',
-  'NODE_AUTH_TOKEN',
-  'NPM_CONFIG_USERCONFIG',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-  'AWS_PROFILE',
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'CLOUDSDK_CONFIG',
-  'AZURE_CONFIG_DIR',
-  'AZURE_CLIENT_SECRET',
-] as const;
-
 export function buildContainmentCodexArgs(input: {
   sessionId?: string;
   schemaPath: string;
   reportPath: string;
   toolHome: string;
   tmpDir: string;
-  safePath: string;
   operationPolicy?: WorkflowOperationPolicy;
   executionProfile?: Pick<WorkflowExecutionProfile, 'model' | 'reasoningEffort'>;
   agentProfilePaths?: Record<string, string>;
@@ -85,23 +64,15 @@ export function buildContainmentCodexArgs(input: {
       '-c', `agents.${id}.config_file=${tomlString(path)}`,
     ]),
     '-c',
-    'shell_environment_policy.inherit="none"',
+    'shell_environment_policy.inherit="all"',
     '-c',
-    `shell_environment_policy.set.HOME=${tomlString(input.toolHome)}`,
+    'shell_environment_policy.ignore_default_excludes=true',
     '-c',
-    `shell_environment_policy.set.PATH=${tomlString(input.safePath)}`,
+    'shell_environment_policy.exclude=[]',
     '-c',
-    `shell_environment_policy.set.TMPDIR=${tomlString(input.tmpDir)}`,
+    'shell_environment_policy.include_only=[]',
     '-c',
     `shell_environment_policy.set.CODEX_ORCHESTRATOR_WORKFLOW_ROOT=${tomlString(dirname(dirname(input.schemaPath)))}`,
-    '-c',
-    'shell_environment_policy.set.LANG="C.UTF-8"',
-    '-c',
-    'shell_environment_policy.set.LC_ALL="C.UTF-8"',
-    ...DENIED_TOOL_ENV_KEYS.flatMap((key) => [
-      '-c',
-      `shell_environment_policy.set.${key}=""`,
-    ]),
     ...(input.sessionId ? ['resume', input.sessionId] : []),
     '-',
   ];
@@ -144,7 +115,8 @@ export function buildContainmentCodexEnvironment(input: {
   safePath: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
-    PATH: input.safePath,
+    ...Object.fromEntries(Object.entries(input.parentEnv).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    PATH: input.parentEnv.PATH ?? input.safePath,
     CODEX_HOME: input.parentCodexHome,
     HOME: input.parentEnv.HOME ?? homedir(),
     LANG: input.parentEnv.LANG ?? 'C.UTF-8',

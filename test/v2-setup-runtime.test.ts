@@ -48,13 +48,13 @@ test('production setup validates the installed Flutter SDK and creates executabl
   const flutterSdk = join(root, "Flutter SDK's stable $dir");
   const executable = join(flutterSdk, 'bin', 'flutter');
   await mkdir(join(flutterSdk, 'bin'), { recursive: true });
-  await writeFile(executable, `#!/bin/sh\nif [ \"$1\" = --version ] && [ -n \"$GH_TOKEN$GITHUB_TOKEN$SSH_AUTH_SOCK$NPM_TOKEN$NODE_AUTH_TOKEN$npm_config_userconfig\" ]; then exit 19; fi\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\n`);
+  await writeFile(executable, `#!/bin/sh\nif [ \"$1\" = --version ] && [ \"$GH_TOKEN\" != fixture-inherited-by-sdk ]; then exit 19; fi\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\n`);
   await chmod(executable, 0o755);
   const setup = createProductionSetup({ orchestratorHome: join(root, 'home'), bootId: 'boot-fixture' });
   const credentialKeys = ['GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'npm_config_userconfig'];
   const saved = Object.fromEntries(credentialKeys.map((key) => [key, process.env[key]]));
   try {
-    for (const key of credentialKeys) process.env[key] = 'fixture-must-not-reach-sdk';
+    for (const key of credentialKeys) process.env[key] = 'fixture-inherited-by-sdk';
     assert.deepEqual(await setup.execute({ targetRoot, flutterSdk, operation: 'configure', dryRun: false }), { status: 'created' });
   } finally {
     for (const key of credentialKeys) {
