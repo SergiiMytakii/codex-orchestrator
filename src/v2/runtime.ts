@@ -954,7 +954,11 @@ export class ContainedImplementationAgent {
         return { kind: 'completed', attemptId, report: '', reportBytes: Buffer.alloc(0) };
       }
       if (['spawn-failed', 'transport-failed', 'timeout', 'idle-timeout', 'launch-gate-failed'].includes(result.kind)) {
-        return { kind: 'transport-failed', resumable: true };
+        return { kind: 'transport-failed', resumable: true,
+          ...(result.error === 'codex-model-capacity' ? { failure: {
+            kind: 'transport-failed' as const, exitCode: result.exitCode, signal: result.signal,
+            reportStatus: result.report.kind, detail: 'codex-model-capacity',
+          } } : {}) };
       }
       if (result.kind !== 'completed' || result.report.kind !== 'available') return { kind: 'internal-error' };
       return {

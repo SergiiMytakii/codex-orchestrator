@@ -12,6 +12,7 @@ const MAX_REPORT_BYTES = 1024 * 1024;
 const TERMINATE_GRACE_MS = 5_000;
 const QUIESCENCE_TIMEOUT_MS = 10_000;
 const MONITOR_POLL_MS = 50;
+const MODEL_CAPACITY_MESSAGE = 'Selected model is at capacity. Please try a different model.';
 
 export interface SpawnSpec {
   file: string;
@@ -130,11 +131,20 @@ export class CodexProcess {
     });
     let pendingLine = '';
     let discardingLine = false;
+    let modelCapacityFailure = false;
     const consumeLine = (line: string) => {
       if (sessionError) return;
       let event: unknown;
       try { event = JSON.parse(line); } catch { return; }
-      if (!event || typeof event !== 'object' || (event as { type?: unknown }).type !== 'thread.started') return;
+      if (!event || typeof event !== 'object') return;
+      if ((event as { type?: unknown }).type === 'turn.failed') {
+        const error = (event as { error?: { message?: unknown; codex_error_info?: unknown } | null }).error;
+        if (error?.message === MODEL_CAPACITY_MESSAGE || error?.codex_error_info === 'server_overloaded') {
+          modelCapacityFailure = true;
+        }
+        return;
+      }
+      if ((event as { type?: unknown }).type !== 'thread.started') return;
       const id = (event as { thread_id?: unknown }).thread_id;
       if (typeof id !== 'string' || !isSessionId(id)) {
         failSession(new Error('thread.started session identity must be a canonical UUID'));
@@ -261,6 +271,9 @@ export class CodexProcess {
     if (terminal.kind === 'cancelled') return finalizeResult('cancelled', child, settled, report);
     if (terminal.kind === 'timeout') return finalizeResult('timeout', child, settled, report);
     if (terminal.kind === 'idle-timeout') return finalizeResult('idle-timeout', child, settled, report);
+    if (modelCapacityFailure || (settled.exit.exitCode !== 0 && settled.streams.stderr.toString('utf8').includes(MODEL_CAPACITY_MESSAGE))) {
+      return finalizeResult('transport-failed', child, settled, report, 'codex-model-capacity');
+    }
     if (
       report.kind !== 'available'
       && settled.exit.exitCode !== 0
@@ -281,8 +294,7 @@ export class CodexProcess {
 
 function isConfirmedTransportFailure(stderr: Buffer): boolean {
   const diagnostic = stderr.toString('utf8');
-  return diagnostic.includes('stream disconnected before completion')
-    || diagnostic.includes('Selected model is at capacity. Please try a different model.');
+  return diagnostic.includes('stream disconnected before completion');
 }
 
 type TerminalObservation =

@@ -1936,6 +1936,33 @@ test('malformed report and clean transport failures retry full implementation wi
   assert.deepEqual(pick((await transport.store.read()).runs[0]!, ['cycle', 'transportRetries']), { cycle: 1, transportRetries: 0 });
 });
 
+test('model capacity evidence retains its cause and resumes the same run without consuming a cycle', async () => {
+  const failure = { kind: 'transport-failed' as const, exitCode: 1, signal: null,
+    reportStatus: 'available' as const, detail: 'codex-model-capacity' };
+  const fixture = await runFixture({ implementationResults: [
+    { kind: 'transport-failed', resumable: true, failure },
+  ] });
+  const writeEvidence = fixture.dependencies.writeEvidence;
+  let retainedFailure: unknown;
+  fixture.dependencies.writeEvidence = async entry => {
+    if (entry.code === 'codex-model-capacity') retainedFailure = entry.failure;
+    return writeEvidence(entry);
+  };
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const result = await fixture.runner.runIssue(input);
+  assert.deepEqual(pick(result, ['status', 'resumable']), { status: 'transport-failed', resumable: true });
+  assert.ok(fixture.evidence.some(entry => entry.code === 'codex-model-capacity'));
+  assert.deepEqual(retainedFailure, failure);
+  const before = (await fixture.store.read()).runs[0]!;
+  assert.equal(fixture.events.includes('git:push'), false);
+  assert.equal((await fixture.runner.runIssue(input)).status, 'review-ready');
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.worktreePath, before.worktreePath);
+  assert.deepEqual(after.codexSession, before.codexSession);
+  assert.equal(after.cycle, before.cycle);
+});
+
 test('incomplete cumulative changedFiles retries full implementation without consuming a cycle', async () => {
   const fixture = await runFixture({
     implementationResults: [

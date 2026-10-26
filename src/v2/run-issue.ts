@@ -157,7 +157,7 @@ interface ReviewValidationScope {
 
 export type ImplementationAgentResult =
   | { kind: 'completed'; report: unknown; reportBytes?: Buffer; attemptId?: string }
-  | { kind: 'transport-failed'; resumable: boolean }
+  | { kind: 'transport-failed'; resumable: boolean; failure?: ProofProcessFailure }
   | { kind: 'cancelled' }
   | { kind: 'internal-error' }
   | { kind: 'safe-halt' };
@@ -1541,7 +1541,9 @@ export class RunIssue {
         if (implementation.kind === 'transport-failed' && implementation.resumable) {
           active = await this.clearAttempt(active);
           active = await this.persist(active, { transportRetries: active.record.transportRetries + 1 });
-          return await this.invokedFailure(active, 'implementation-transport-retryable', 'The next invocation resumes the same Codex session after confirmed cleanup.');
+          const modelCapacity = implementation.failure?.detail === 'codex-model-capacity';
+          return await this.invokedFailure(active, modelCapacity ? 'codex-model-capacity' : 'implementation-transport-retryable',
+            `${modelCapacity ? 'The selected model is at capacity. ' : ''}The next invocation resumes the same Codex session after confirmed cleanup.`, implementation.failure);
         }
         if (implementation.kind !== 'completed') return await this.mapImplementationFailure(active, implementation);
         let report: ImplementationReportV1;

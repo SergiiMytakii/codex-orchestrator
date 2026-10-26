@@ -237,6 +237,11 @@ signal, report availability, and a bounded sanitized diagnostic in local
 evidence. An idle timeout is reported as `idle-timeout`, without claiming a
 service outage. A later ordinary invocation resumes the same native Codex session after confirmed process cleanup.
 
+Explicit model-capacity refusals in Codex `turn.failed` events or a failed
+process's stderr return resumable `transport-failed` with local evidence code
+`codex-model-capacity`. A leftover output report cannot turn that refusal into
+success. The Runner retains the same session and worktree without switching models.
+
 On an internal Acceptance Proof failure, the Runner also attempts to retain an
 `acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.
 It contains a bounded, filtered cause, candidate commit, package version, and

@@ -290,6 +290,27 @@ test('classifies model capacity refusal without a report as resumable transport 
     assert.equal(result.kind, 'transport-failed');
     assert.equal(result.report.kind, 'missing');
     assert.match(result.stderr.toString('utf8'), /Selected model is at capacity/u);
+    assert.equal(result.error, 'codex-model-capacity');
+  });
+});
+
+test('structured model capacity failure retains its cause and session despite an empty output report', async () => {
+  await withRunFixture(async (fixture) => {
+    const id = '019a1435-06c0-7860-8f62-b1faadb9662b';
+    const events = [
+      { type: 'thread.started', thread_id: id },
+      { type: 'turn.failed', error: { message: 'Selected model is at capacity. Please try a different model.' } },
+    ].map((event) => JSON.stringify(event)).join('\n');
+    const runner = new CodexProcess((spec) => spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+      args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '');
+        process.stdout.write(${JSON.stringify(events)}); process.exitCode = 1;`],
+    }));
+    const result = await runner.run(fixture.input(), new AbortController().signal);
+    assert.equal(result.kind, 'transport-failed');
+    assert.equal(result.error, 'codex-model-capacity');
+    assert.equal(result.sessionId, id);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stderr.length, 0);
   });
 });
 
@@ -306,9 +327,9 @@ test('classifies successful Codex exit without its output report as resumable tr
   });
 });
 
-test('capacity diagnostics do not mask an available report or an unrelated process failure', async () => {
+test('capacity diagnostics reject an available report without masking unrelated process failures', async () => {
   for (const entry of [
-    { writeReport: true, diagnostic: 'Selected model is at capacity. Please try a different model.', expected: 'exit-failed' },
+    { writeReport: true, diagnostic: 'Selected model is at capacity. Please try a different model.', expected: 'transport-failed' },
     { writeReport: false, diagnostic: 'ERROR: invalid model configuration', expected: 'report-failed' },
   ]) {
     await withRunFixture(async (fixture) => {
@@ -319,6 +340,25 @@ test('capacity diagnostics do not mask an available report or an unrelated proce
         streams: { stdout: Buffer.alloc(0), stderr: Buffer.from(entry.diagnostic), truncated: false },
       })).run(fixture.input(), new AbortController().signal);
       assert.equal(result.kind, entry.expected);
+    });
+  }
+});
+
+test('structured overload rejects a leftover report even on exit zero and ignores unrelated events', async () => {
+  for (const entry of [
+    { event: { type: 'turn.failed', error: { codex_error_info: 'server_overloaded', message: 'private provider detail' } }, expected: 'transport-failed' },
+    { event: { type: 'turn.failed', error: { message: 'invalid model configuration' } }, expected: 'completed' },
+    { event: { type: 'item.completed', item: { text: 'Selected model is at capacity. Please try a different model.' } }, expected: 'completed' },
+  ]) {
+    await withRunFixture(async (fixture) => {
+      const runner = new CodexProcess((spec) => spawnNodeSupervisedProcess({ ...spec, file: process.execPath,
+        args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(fixture.reportPath)}, '{"report":{}}');
+          process.stdout.write(${JSON.stringify(JSON.stringify(entry.event) + '\n')});`],
+      }));
+      const result = await runner.run(fixture.input(), new AbortController().signal);
+      assert.equal(result.kind, entry.expected);
+      assert.equal(result.error, entry.expected === 'transport-failed' ? 'codex-model-capacity' : undefined);
+      assert.equal(result.exitCode, 0);
     });
   }
 });
