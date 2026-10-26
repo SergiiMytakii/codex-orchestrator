@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Changed
+
+- Inherit the full Runner environment in agents, native shell commands and host
+  checks, including database settings and credentials, without additional flags.
+
+### Fixed
+
+- Continue resumable tool/service failures in the same session without manual
+  reauthorization; refresh blocked proof through existing durable candidate cleanup.
+- Clear report-only correction mode when accepting a recoverable blocker.
+- Preserve explicit model-capacity refusals as resumable transport failures,
+  including when a stale or empty output report exists.
+
 ## [2.0.37] - 2026-10-23
 
 ### Fixed
