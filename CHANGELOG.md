@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.38] - 2026-10-26
+
 ### Changed
 
 - Inherit the full Runner environment in agents, native shell commands and host
