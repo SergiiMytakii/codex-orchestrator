@@ -6,7 +6,11 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+## [2.0.39] - 2026-10-28
+
 ### Fixed
+
+- Execute configured checks on the host by default for new and existing configurations, preserving the contained agent and fresh Runner check receipts.
 
 - Synchronize packaged skills and shared agent instructions with current local sources, including the referenced codebase-design skill.
 
