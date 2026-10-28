@@ -173,7 +173,16 @@ export function containsCredentialEvidence(value: string): boolean {
 }
 
 export function containsHostIdentityEvidence(value: string): boolean {
-  return /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"']+|(?:^|[^A-Za-z0-9_./-])(?:\/(?!\/|[A-Za-z_][\w:.-]*>)[^/\s"'<>`]+(?:\/[^/\s"'<>`]+)*|[A-Za-z]:[\\/][^\s"'`]+)/imu.test(value);
+  // Web routes and POSIX paths share syntax. Only an explicitly labelled web
+  // entrypoint may omit path filtering; ordinary prose still rejects any root.
+  const withoutWebRoutes = value.replace(
+    /\b(?:entrypoint|route|pathname|url)\s*:\s*[`"']?(\/(?!\/)[A-Za-z0-9_.~%-]+(?:\/[A-Za-z0-9_.~%-]+)*\/?)/giu,
+    (match, route: string) => {
+      const hostRoot = /^\/(?:Users|home|root|var|private|tmp|etc|opt|usr|bin|sbin|lib|lib64|System|Library|Volumes|Applications|workspace|workspaces|mnt|media|run|proc|sys|dev|nix|srv|data)(?:\/|$)/iu;
+      return hostRoot.test(route) ? match : '<web-route>';
+    },
+  );
+  return /file:\/\/\/(?:[A-Za-z]:[\\/])?[^\s"']+|(?:^|[^A-Za-z0-9_./%-])(?:\/(?!\/|[A-Za-z_][\w:.-]*>)[^/\s"'<>`]+(?:\/[^/\s"'<>`]+)*|[A-Za-z]:[\\/][^\s"'`]+|~\/[^\s"'`]+)/imu.test(withoutWebRoutes);
 }
 
 function tomlString(value: string): string {

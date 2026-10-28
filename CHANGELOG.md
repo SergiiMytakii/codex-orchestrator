@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 ## [Unreleased]
 
+### Fixed
+
+- Admit explicitly labelled root-relative web routes and slash-separated numeric labels in proof summaries while retaining host-path and credential rejection.
+- Mark internal failures as blocked so ordinary daemon ticks cannot repeat the same failed implementation indefinitely; settle failed label delivery before accepting reauthorization.
+- Stop immediately with an explicit ownership diagnostic when process cleanup is unconfirmed before launch ownership was recorded, preserving the safety boundary.
+
 ## [2.0.38] - 2026-10-26
 
 ### Changed

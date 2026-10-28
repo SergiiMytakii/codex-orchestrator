@@ -209,7 +209,7 @@ The default labels are:
 | --- | --- |
 | `agent:auto` | The issue is authorized for orchestration. |
 | `agent:running` | A Runner has claimed the issue. |
-| `agent:blocked` | The run stopped on an authority, external, preservation, proof, or safety boundary. |
+| `agent:blocked` | The run stopped on an internal failure or an authority, external, preservation, proof, or safety boundary. |
 | `agent:review` | The branch and draft PR passed the delivery gates and are ready for human review. |
 
 Important command results:
@@ -250,6 +250,16 @@ the prerequisite or changes approach using retained session context. Recoverable
 proof-admission failures return to the same owner for fresh proof and Review,
 releasing the previous candidate through existing cleanup. Nonresumable failures, missing credential authority,
 scope boundaries and safety failures retain their existing blocking behavior.
+
+Internal failures set `agent:blocked` while retaining `agent:auto`. Ordinary daemon
+checks and restarts do not retry the unchanged failure. After resolving its cause,
+remove `agent:blocked` to resume the same Run and session. Failed label delivery
+must settle first. Transport and recoverable tool/service failures retain their
+ordinary resumable behavior.
+
+If process cleanup cannot be confirmed before launch ownership is recorded, the
+Runner blocks immediately with `implementation-launch-ownership-unconfirmed`.
+Confirm that the prior process has stopped before authorizing another launch.
 
 On an internal Acceptance Proof failure, the Runner also attempts to retain an
 `acceptance-proof-diagnostic` in `<runner.stateDir>/v2/evidence/<runId>.json`.

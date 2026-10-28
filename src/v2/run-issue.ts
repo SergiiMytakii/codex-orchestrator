@@ -1391,6 +1391,9 @@ export class RunIssue {
           let resumedSafeHalt = false;
           if (active.record.lifecycle === 'safe-halt') {
             const attempt = active.record.activeAttempt;
+            if (attempt?.stage === 'prepared') {
+              return await this.publicationDiverged(active, 'implementation-launch-ownership-unconfirmed');
+            }
             if (!attempt || (attempt.stage !== 'launched' && attempt.stage !== 'observed')) {
               return await this.publicationDiverged(active, 'safe-halt-attempt-missing');
             }
@@ -1532,6 +1535,10 @@ export class RunIssue {
         if (implementation.kind !== 'safe-halt') active = await this.observeReturnedAttempt(active,
           implementation.kind === 'completed' ? implementation.report : implementation);
         if (implementation.kind === 'safe-halt') {
+          if (active.record.activeAttempt?.stage === 'prepared') {
+            return await this.terminal(active, { status: 'blocked', kind: 'safety', resumable: true },
+              'implementation-launch-ownership-unconfirmed');
+          }
           active = await this.persist(active, { lifecycle: 'safe-halt' });
           return await this.invokedFailure(active, 'active-attempt-observation-deferred',
             'The Codex session process remains unresolved; the next tick observes its result and cleanup before continuing.');
@@ -3262,6 +3269,7 @@ function blockedDiagnostic(code: string, record: RunRecord): { summary: string; 
   };
   const summaries: Record<string, string> = {
     'authorization-revoked': 'The issue no longer authorizes this run. The Runner stopped before doing further work.',
+    'implementation-launch-ownership-unconfirmed': 'Process cleanup could not be confirmed and process ownership was not durably recorded. Confirm the prior process has stopped before authorizing this issue again.',
     'denied-path-modified': 'Implementation changed a protected path that this issue is not allowed to modify.',
     'implementation-head-drift': 'The implementation changed the worktree Git HEAD. The Runner cannot attribute those commits to its authorized candidate.',
     'candidate-pin-missing': 'The saved Git reference for the exact candidate is missing. Previous checks cannot establish the identity of the remaining files.',
@@ -3351,7 +3359,7 @@ function terminalLabelChanges(
   if (outcome === 'review-ready') return {
     add: [labels.review.name], remove: [labels.auto.name, labels.running.name, labels.blocked.name].sort(),
   };
-  if (outcome === 'blocked') return { add: [labels.blocked.name], remove: [labels.running.name, labels.review.name].sort() };
+  if (outcome === 'blocked' || outcome === 'internal-error') return { add: [labels.blocked.name], remove: [labels.running.name, labels.review.name].sort() };
   return {
     add: [],
     remove: [labels.running.name, labels.blocked.name, labels.review.name, ...(outcome === 'cancelled' ? [labels.auto.name] : [])].sort(),

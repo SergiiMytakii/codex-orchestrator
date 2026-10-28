@@ -358,6 +358,67 @@ test('removing blocked while keeping auto resumes the same Run and session witho
   assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls + 1);
 });
 
+test('internal proof failure stops daemon ticks and restart until blocked is explicitly removed', async () => {
+  const fixture = await runFixture({ fileBackedStore: true, proof: async () => ({
+    status: 'internal-error', receipt: { ...receipt(), summary: 'Proof artifact admission failed.' },
+  }) });
+  const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+  fixture.dependencies.outcomeEvidencePath = (runId, code, summarySha256) =>
+    `${config.runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`;
+  fixture.dependencies.issues.isReauthorized = (record, issue) => hasGitHubReauthorization({
+    targetRoot: fixture.targetRoot, config, record, issue,
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, 'internal-error');
+  const before = (await fixture.store.read()).runs[0]!;
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+  for (let tick = 0; tick < 2; tick++) {
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'internal-error');
+  }
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, before.cycle);
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  fixture.options.proof = undefined;
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'review-ready');
+  const after = (await fixture.store.read()).runs[0]!;
+  assert.equal(after.runId, before.runId);
+  assert.equal(after.codexSession?.id, before.codexSession?.id);
+  assert.equal(after.cycle, before.cycle + 1);
+});
+
+for (const prelaunch of [false, true]) {
+test(`failed ${prelaunch ? 'pre-launch safety' : 'internal-error'} label delivery cannot authorize another implementation after restart`, async () => {
+  const fixture = await runFixture({ fileBackedStore: true, permanentlyRejectEffect: 'labels',
+    ...(prelaunch ? { skipImplementationLaunchPersistence: true, implementationResult: { kind: 'safe-halt' as const } }
+      : { proof: async () => ({ status: 'internal-error' as const, receipt: receipt() }) }) });
+  const expectedStatus = prelaunch ? 'blocked' : 'internal-error';
+  const config = (await fixture.dependencies.readConfig(fixture.targetRoot)).config;
+  fixture.dependencies.outcomeEvidencePath = (runId, code, summarySha256) =>
+    `${config.runner.stateDir}/v2/evidence/${runId}/${sha256(code)}-${summarySha256}.json`;
+  fixture.dependencies.issues.isReauthorized = (record, issue) => hasGitHubReauthorization({
+    targetRoot: fixture.targetRoot, config, record, issue,
+  });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  assert.equal((await fixture.runner.runIssue(input)).status, expectedStatus);
+  const before = (await fixture.store.read()).runs[0]!;
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  // Simulate the stale auto-only label projection that previously reopened the outcome.
+  fixture.options.permanentlyRejectEffect = undefined;
+  await fixture.dependencies.issues.setLabels(42, ['agent:auto']);
+  fixture.options.permanentlyRejectEffect = 'labels';
+  for (let tick = 0; tick < 2; tick++) {
+    assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, expectedStatus);
+  }
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+  assert.equal((await fixture.store.read()).runs[0]!.cycle, before.cycle);
+  fixture.options.permanentlyRejectEffect = undefined;
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, expectedStatus);
+  assert.deepEqual((await fixture.dependencies.issues.read(42))?.labels, ['agent:auto', 'agent:blocked']);
+});
+
+}
+
 test('unknown candidate ownership reports reconciliation failure before claim and preserves the candidate', async () => {
   const fixture = await runFixture();
   const ref = 'refs/codex-orchestrator/candidates/retained/unknown-owner';
@@ -859,7 +920,7 @@ test('blocked, internal-error, and cancelled outcomes finalize before best-effor
       }, receipt: receipt() }) },
       status: 'blocked', labels: ['agent:auto', 'agent:blocked', 'manual:keep'],
     },
-    { name: 'internal-error', options: { agentWrites: false }, status: 'internal-error', labels: ['agent:auto', 'manual:keep'] },
+    { name: 'internal-error', options: { agentWrites: false }, status: 'internal-error', labels: ['agent:auto', 'agent:blocked', 'manual:keep'] },
     {
       name: 'cancelled', options: { implementationResult: { kind: 'cancelled' } },
       status: 'cancelled', labels: ['manual:keep'],
@@ -2294,6 +2355,22 @@ test('restart resumes interrupted implementation in the same native session and 
   assert.equal(after.workflowGeneration.generationHash, '1'.repeat(64));
   assert.equal(after.skillHashes['agent-auto'], 'a'.repeat(64));
   assert.equal(after.worktreePath, fixture.worktreePath);
+});
+
+test('unconfirmed pre-launch cleanup blocks immediately without claiming restart can observe an owned process', async () => {
+  const fixture = await runFixture({ skipImplementationLaunchPersistence: true,
+    implementationResult: { kind: 'safe-halt' } });
+  const input = { targetRoot: fixture.targetRoot, issueNumber: 42 };
+  const result = await fixture.runner.runIssue(input);
+  assert.equal(result.status, 'blocked');
+  assert.ok('evidencePath' in result);
+  assert.match(await readFile(resolve(fixture.targetRoot, result.evidencePath), 'utf8'), /implementation-launch-ownership-unconfirmed/u);
+  const before = (await fixture.store.read()).runs[0]!;
+  const calls = fixture.events.filter(event => event === 'agent:implementation').length;
+  assert.match(before.terminalNotifications!.report.summary, /process.*ownership.*not.*recorded/iu);
+  assert.equal((await new RunIssue(fixture.dependencies).runIssue(input)).status, 'blocked');
+  assert.equal(fixture.events.filter(event => event === 'agent:implementation').length, calls);
+  assert.equal(fixture.events.includes('git:push'), false);
 });
 
 test('safe-halt returns after one tick, preserves attempt identity, and retries without semantic spend', async () => {

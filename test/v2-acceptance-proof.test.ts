@@ -106,6 +106,25 @@ test('declared artifact hashes, capture times, bytes and publication classes are
   ]) assert.equal((await fixture.proof.admitReport(fixture.input(overrides))).status, 'internal-error');
 });
 
+test('proof summaries admit application routes and percentage ratios without admitting host paths', async () => {
+  const content = Buffer.from([
+    'Entrypoint: /dashboard/updated-home-analytics on an isolated local server.',
+    'Copy review: 25%/20%/N/A and 80%/N/A/N/A remain correct.',
+  ].join('\n'));
+  const fixture = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content }) });
+  assert.equal((await fixture.proof.admitReport(fixture.input())).status, 'passed');
+
+  for (const path of ['/Users/example/private/report.md', '/home/example/private/report.md',
+    '/var/lib/codex/private.log', '/workspace/project/output.txt', '/nix/store/private-output',
+    '/srv/private/customer-a/report.md', '/data/project/private/report.md', '/custom/project/private/report.md',
+    'file:///custom/private/report.md', String.raw`C:\Users\example\private\report.md`,
+    '~/private/report.md']) {
+    const unsafe = Buffer.from(`Entrypoint: /dashboard/updated-home-analytics; retained file ${path}`);
+    const rejected = proofFixture({ artifactContent: unsafe, report: passingReport({ artifactContent: unsafe }) });
+    assert.equal((await rejected.proof.admitReport(rejected.input())).status, 'internal-error', path);
+  }
+});
+
 test('host identity is allowed only in local diagnostic artifacts', async () => {
   const content = Buffer.from('Configured command: /Users/example/bin/node --version\n');
   const local = proofFixture({ artifactContent: content, report: passingReport({ artifactContent: content, artifactKind: 'static-inspection', publishable: false }) });

@@ -2012,6 +2012,9 @@ export async function hasGitHubReauthorization(input: {
     || !issue.labels.includes(config.github.labels.auto.name)
     || [config.github.labels.running.name, config.github.labels.blocked.name, config.github.labels.review.name]
       .some(label => issue.labels.includes(label))) return false;
+  // Pending failure labels must settle before their removal can authorize a retry.
+  if ((outcome.status === 'internal-error' || record.terminalNotifications)
+    && record.terminalNotifications?.labels.status !== 'delivered') return false;
   const evidenceRoot = resolve(input.targetRoot, config.runner.stateDir, 'v2/evidence');
   const path = resolve(input.targetRoot, outcome.evidencePath);
   if (!isPathWithin(evidenceRoot, path)) return false;
